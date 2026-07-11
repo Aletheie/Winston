@@ -1,0 +1,10 @@
+{
+  "id": "cz.example.library-report",
+  "name": "Library Report",
+  "version": "1.0.0",
+  "api": "1",
+  "entry": "index.js",
+  "permissions": ["library.read", "ui.toast"],
+  "description": "Counts books with missing metadata and reports via a toast.",
+  "author": "Winston example"
+}

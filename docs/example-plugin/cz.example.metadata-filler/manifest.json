@@ -1,0 +1,10 @@
+{
+  "id": "cz.example.metadata-filler",
+  "name": "Metadata Filler",
+  "version": "1.0.0",
+  "api": "1",
+  "entry": "index.js",
+  "permissions": ["library.read", "library.write", "ui.toast"],
+  "description": "Fills in missing publisher/description/tags from online metadata.",
+  "author": "Winston example"
+}
