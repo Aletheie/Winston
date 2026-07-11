@@ -1,0 +1,346 @@
+import SwiftUI
+import Charts
+
+nonisolated struct LibraryStats: Sendable {
+    struct MonthEntry: Identifiable, Sendable {
+        let month: Int
+        let label: String
+        let started: Int
+        let finished: Int
+        var id: Int { month }
+    }
+
+    struct Input: Sendable {
+        let title: String
+        let author: String?
+        let series: String?
+        let format: String
+        let rating: Int?
+        let status: ReadingStatus
+        let dateStarted: Date?
+        let dateFinished: Date?
+        let fileSizeBytes: Int64
+    }
+
+    @MainActor
+    static func snapshot(of books: [Book]) -> [Input] {
+        books.map {
+            Input(title: $0.displayTitle, author: $0.displayAuthor, series: $0.series,
+                  format: $0.format, rating: $0.rating, status: $0.readingStatus,
+                  dateStarted: $0.dateStarted, dateFinished: $0.dateFinished,
+                  fileSizeBytes: $0.fileSizeBytes)
+        }
+    }
+
+    var bookCount = 0
+    var totalSizeDisplay = ""
+    var finishedCount = 0
+    var readingCount = 0
+    var uniqueAuthors = 0
+    var uniqueSeries = 0
+    var finishedThisYear = 0
+    var monthly: [MonthEntry] = []
+    var formatData: [(label: String, count: Int)] = []
+    var ratingData: [(label: String, count: Int)] = []
+    var averageDaysToFinish: Int?
+    var largestFinished: (title: String, sizeDisplay: String)?
+
+    @MainActor
+    init(books: [Book], calendar: Calendar = .current, now: Date = .now) {
+        self.init(inputs: Self.snapshot(of: books), calendar: calendar, now: now)
+    }
+
+    init(inputs: [Input], calendar: Calendar = .current, now: Date = .now) {
+        let year = calendar.component(.year, from: now)
+
+        var startedByMonth = [Int](repeating: 0, count: 12)
+        var finishedByMonth = [Int](repeating: 0, count: 12)
+        var formats: [String: Int] = [:]
+        var ratings = [Int](repeating: 0, count: 6)
+        var authors = Set<String>()
+        var series = Set<String>()
+        var totalBytes: Int64 = 0
+        var finishDurations: [Double] = []
+        var largest: Input?
+
+        for book in inputs {
+            totalBytes += book.fileSizeBytes
+            formats[book.format.isEmpty ? "\u{2014}" : book.format, default: 0] += 1
+            if let rating = book.rating, (1...5).contains(rating) { ratings[rating] += 1 }
+            if let author = book.author { authors.insert(author) }
+            if let s = book.series, !s.isEmpty { series.insert(s) }
+
+            switch book.status {
+            case .finished: finishedCount += 1
+            case .reading:  readingCount += 1
+            case .unread:   break
+            }
+
+            if let started = book.dateStarted, calendar.component(.year, from: started) == year {
+                startedByMonth[calendar.component(.month, from: started) - 1] += 1
+            }
+            if let finished = book.dateFinished {
+                if calendar.component(.year, from: finished) == year {
+                    finishedThisYear += 1
+                    finishedByMonth[calendar.component(.month, from: finished) - 1] += 1
+                }
+                if let started = book.dateStarted, finished >= started {
+                    finishDurations.append(finished.timeIntervalSince(started) / 86_400)
+                }
+                if book.status == .finished,
+                   book.fileSizeBytes > (largest?.fileSizeBytes ?? 0) {
+                    largest = book
+                }
+            }
+        }
+
+        bookCount = inputs.count
+        totalSizeDisplay = ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
+        uniqueAuthors = authors.count
+        uniqueSeries = series.count
+
+        let symbols = calendar.shortMonthSymbols
+        monthly = (0..<12).map {
+            MonthEntry(month: $0 + 1, label: symbols[$0],
+                       started: startedByMonth[$0], finished: finishedByMonth[$0])
+        }
+        formatData = formats
+            .map { (label: $0.key, count: $0.value) }
+            .sorted { $0.count > $1.count }
+        ratingData = (1...5).reversed().compactMap { stars in
+            ratings[stars] > 0 ? (label: String(repeating: "\u{2605}", count: stars), count: ratings[stars]) : nil
+        }
+        if !finishDurations.isEmpty {
+            averageDaysToFinish = Int((finishDurations.reduce(0, +) / Double(finishDurations.count)).rounded())
+        }
+        if let largest {
+            largestFinished = (largest.title,
+                               ByteCountFormatter.string(fromByteCount: largest.fileSizeBytes, countStyle: .file))
+        }
+    }
+}
+
+struct StatisticsView: View {
+    let books: [Book]
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @State private var stats: LibraryStats?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(theme.usesTerminalCopy ? "// year_in_books" : "Year in Books")
+                    .font(theme.body(size: 15, weight: .bold))
+                Spacer()
+            }
+            .padding(16)
+            Divider()
+
+            if let stats {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        GoalRingSection(finishedThisYear: stats.finishedThisYear)
+                        StatsSummaryGrid(stats: stats)
+                        if stats.finishedThisYear > 0 || stats.monthly.contains(where: { $0.started > 0 }) {
+                            MonthlyChart(monthly: stats.monthly)
+                        }
+                        if !stats.formatData.isEmpty {
+                            DistributionChart(title: String(localized: "By format"), data: stats.formatData)
+                        }
+                        if !stats.ratingData.isEmpty {
+                            DistributionChart(title: String(localized: "By rating"), data: stats.ratingData)
+                        }
+                    }
+                    .padding(18)
+                }
+            } else {
+                ProgressView()
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            Divider()
+            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
+                .padding(12)
+        }
+        .frame(minWidth: 480, idealWidth: 620, maxWidth: 1000,
+               minHeight: 640, idealHeight: 780, maxHeight: .infinity)
+        .task {
+            let inputs = LibraryStats.snapshot(of: books)
+            stats = await Self.compute(inputs)
+        }
+    }
+
+    // Off-main — works on a Sendable snapshot; @Model rows must not be read here.
+    @concurrent
+    private static func compute(_ inputs: [LibraryStats.Input]) async -> LibraryStats {
+        LibraryStats(inputs: inputs)
+    }
+}
+
+// MARK: - Reading goal
+
+private struct GoalRingSection: View {
+    let finishedThisYear: Int
+
+    @Environment(\.theme) private var theme
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        let goal = max(settings.readingGoal, 1)
+        let progress = min(1, Double(finishedThisYear) / Double(goal))
+
+        HStack(spacing: 16) {
+            ZStack {
+                Circle().stroke(theme.surface, lineWidth: 8)
+                Circle()
+                    .trim(from: 0, to: progress)
+                    .stroke(theme.accent, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeOut(duration: 0.4), value: progress)
+                VStack(spacing: 0) {
+                    Text(verbatim: "\(finishedThisYear)")
+                        .font(theme.display(size: 20, weight: .bold))
+                        .foregroundStyle(theme.textPrimary)
+                    Text(verbatim: "/ \(settings.readingGoal)")
+                        .font(theme.label(size: 9, weight: .regular))
+                        .foregroundStyle(theme.textTertiary)
+                }
+            }
+            .frame(width: 76, height: 76)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Reading goal")
+                    .font(theme.label(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.textSecondary)
+                Text("Finished this year")
+                    .font(theme.label(size: 10, weight: .regular))
+                    .foregroundStyle(theme.textTertiary)
+                Stepper("Goal: \(settings.readingGoal)", value: $settings.readingGoal, in: 1...500)
+                    .font(theme.label(size: 10))
+                    .fixedSize()
+            }
+            Spacer()
+        }
+    }
+}
+
+// MARK: - Charts
+
+private struct MonthlyChart: View {
+    let monthly: [LibraryStats.MonthEntry]
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Started vs finished")
+                .font(theme.label(size: 11, weight: .semibold))
+                .foregroundStyle(theme.textSecondary)
+            Chart(monthly) { entry in
+                BarMark(
+                    x: .value("Month", entry.label),
+                    y: .value("Count", entry.started)
+                )
+                .foregroundStyle(by: .value("Kind", String(localized: "Started")))
+                .position(by: .value("Kind", String(localized: "Started")))
+                .cornerRadius(3)
+
+                BarMark(
+                    x: .value("Month", entry.label),
+                    y: .value("Count", entry.finished)
+                )
+                .foregroundStyle(by: .value("Kind", String(localized: "Finished")))
+                .position(by: .value("Kind", String(localized: "Finished")))
+                .cornerRadius(3)
+            }
+            .chartForegroundStyleScale([
+                String(localized: "Started"): theme.accentSecondary.opacity(0.75),
+                String(localized: "Finished"): theme.accent,
+            ])
+            .chartYAxis { AxisMarks(values: .automatic(desiredCount: 3)) }
+            .frame(height: 150)
+        }
+    }
+}
+
+private struct DistributionChart: View {
+    let title: String
+    let data: [(label: String, count: Int)]
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(verbatim: title)
+                .font(theme.label(size: 11, weight: .semibold))
+                .foregroundStyle(theme.textSecondary)
+            Chart(data, id: \.label) { item in
+                BarMark(
+                    x: .value("Count", item.count),
+                    y: .value("Name", item.label)
+                )
+                .foregroundStyle(theme.accent.opacity(0.85))
+                .cornerRadius(3)
+                .annotation(position: .trailing) {
+                    Text(verbatim: "\(item.count)")
+                        .font(theme.label(size: 9, weight: .semibold))
+                        .foregroundStyle(theme.textTertiary)
+                }
+            }
+            .chartXAxis(.hidden)
+            .frame(height: CGFloat(data.count) * 28 + 12)
+        }
+    }
+}
+
+// MARK: - Summary
+
+private struct StatsSummaryGrid: View {
+    let stats: LibraryStats
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+            StatTile(label: String(localized: "Books"), value: "\(stats.bookCount)")
+            StatTile(label: String(localized: "Total size"), value: stats.totalSizeDisplay)
+            StatTile(label: String(localized: "Finished"), value: "\(stats.finishedCount)")
+            StatTile(label: String(localized: "Reading"), value: "\(stats.readingCount)")
+            StatTile(label: String(localized: "Authors"), value: "\(stats.uniqueAuthors)")
+            StatTile(label: String(localized: "Series"), value: "\(stats.uniqueSeries)")
+            if let days = stats.averageDaysToFinish {
+                StatTile(label: String(localized: "Avg. days to finish"), value: "\(days)")
+            }
+            if let largest = stats.largestFinished {
+                StatTile(label: String(localized: "Largest: \(largest.title)"), value: largest.sizeDisplay)
+            }
+        }
+    }
+}
+
+private struct StatTile: View {
+    let label: String
+    let value: String
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(verbatim: value)
+                .font(theme.display(size: 22, weight: .bold))
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+            Text(verbatim: label)
+                .font(theme.label(size: 10))
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous).fill(theme.surface.opacity(0.5)))
+        .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
+    }
+}
