@@ -1,0 +1,5 @@
+module CLibMTP [system] {
+    header "/opt/homebrew/opt/libmtp/include/libmtp.h"
+    link "mtp"
+    export *
+}
