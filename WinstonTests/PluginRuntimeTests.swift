@@ -1,0 +1,202 @@
+import Testing
+import Foundation
+@testable import Winston
+
+@MainActor
+struct PluginRuntimeTests {
+    @MainActor
+    private final class HostRecorder {
+        private(set) var calls: [PluginAPICall] = []
+        var result: Result<Data?, PluginError> = .success(nil)
+
+        func handler() -> PluginHostHandler {
+            { call in
+                self.calls.append(call)
+                return self.result
+            }
+        }
+    }
+
+    private final class FaultRecorder: Sendable {
+        let buffer = PluginLogBuffer()
+        var count: Int { buffer.snapshot.count }
+        var callback: @Sendable (String) -> Void {
+            { [buffer] message in buffer.append(.error, message) }
+        }
+    }
+
+    private func makeRuntime(
+        source: String,
+        permissions: Set<PluginPermission> = [],
+        faults: FaultRecorder = FaultRecorder()
+    ) throws -> PluginRuntime {
+        let folder = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonRuntimeTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+            .appending(path: "cz.test.plugin", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(source.utf8).write(to: folder.appending(path: "index.js"))
+        let manifest = PluginManifest(id: "cz.test.plugin", name: "Test", version: "1.0.0",
+                                      api: "1", entry: "index.js", permissions: permissions,
+                                      description: nil, author: nil)
+        return PluginRuntime(manifest: manifest, folderURL: folder, onFault: faults.callback)
+    }
+
+    private func logged(_ needle: String, in runtime: PluginRuntime,
+                        timeout: TimeInterval = 3) async -> Bool {
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeout {
+            if runtime.logBuffer.snapshot.contains(where: { $0.message.contains(needle) }) { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return runtime.logBuffer.snapshot.contains { $0.message.contains(needle) }
+    }
+
+    // MARK: - Console & exceptions
+
+    @Test func consoleRoutesToTheBufferWithLevels() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            console.log("hello", 42);
+            console.warn("careful");
+            console.error("bad");
+            """)
+        try await runtime.load(granted: [], handler: recorder.handler())
+
+        let entries = runtime.logBuffer.snapshot
+        #expect(entries.contains { $0.message == "hello 42" && $0.level == .info })
+        #expect(entries.contains { $0.message == "careful" && $0.level == .warning })
+        #expect(entries.contains { $0.message == "bad" && $0.level == .error })
+    }
+
+    @Test func topLevelExceptionFailsTheLoadAndReportsAFault() async throws {
+        let faults = FaultRecorder()
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: #"throw new Error("boom");"#, faults: faults)
+
+        do {
+            try await runtime.load(granted: [], handler: recorder.handler())
+            Issue.record("load should have thrown")
+        } catch let error as PluginError {
+            #expect(error.message.contains("boom"))
+        }
+        #expect(faults.count == 1)
+    }
+
+    @Test func activateExceptionFailsTheLoad() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            exports.activate = () => { throw new Error("bad activate"); };
+            """)
+        do {
+            try await runtime.load(granted: [], handler: recorder.handler())
+            Issue.record("load should have thrown")
+        } catch let error as PluginError {
+            #expect(error.message.contains("bad activate"))
+        }
+    }
+
+    // MARK: - The Promise bridge
+
+    @Test func asyncCallRoundTripsThroughTheHostHandler() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            exports.activate = async () => {
+                await Winston.ui.toast("hi");
+                console.log("resolved");
+            };
+            """, permissions: [.uiToast])
+        try await runtime.load(granted: [.uiToast], handler: recorder.handler())
+
+        #expect(await logged("resolved", in: runtime))
+        #expect(recorder.calls == [.toast(message: "hi", style: .info)])
+    }
+
+    @Test func hostFailureRejectsWithACodedError() async throws {
+        let recorder = HostRecorder()
+        recorder.result = .failure(.unavailable("nope"))
+        let runtime = try makeRuntime(source: """
+            exports.activate = async () => {
+                try { await Winston.ui.toast("x"); }
+                catch (e) { console.log("code:" + e.code + " msg:" + e.message); }
+            };
+            """, permissions: [.uiToast])
+        try await runtime.load(granted: [.uiToast], handler: recorder.handler())
+
+        #expect(await logged("code:unavailable msg:nope", in: runtime))
+    }
+
+    @Test func badArgumentsRejectWithoutReachingTheHost() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            exports.activate = async () => {
+                try { await Winston.ui.toast(); }
+                catch (e) { console.log("code:" + e.code); }
+            };
+            """, permissions: [.uiToast])
+        try await runtime.load(granted: [.uiToast], handler: recorder.handler())
+
+        #expect(await logged("code:invalid-argument", in: runtime))
+        #expect(recorder.calls.isEmpty)
+    }
+
+    // MARK: - Permission gating
+
+    @Test func ungrantedNamespacesDoNotExist() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            console.log(typeof Winston.library, typeof Winston.ui, typeof Winston.metadata,
+                        Winston.capabilities.has("storage"), Winston.capabilities.has("library.list"));
+            """)
+        try await runtime.load(granted: [], handler: recorder.handler())
+
+        #expect(runtime.logBuffer.snapshot.contains {
+            $0.message == "undefined undefined undefined true false"
+        })
+    }
+
+    @Test func grantedLibraryNamespaceExists() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            console.log(typeof Winston.library, typeof Winston.library.list,
+                        typeof Winston.metadata, typeof Winston.ui);
+            """, permissions: [.libraryRead])
+        try await runtime.load(granted: [.libraryRead], handler: recorder.handler())
+        #expect(runtime.logBuffer.snapshot.contains { $0.message == "object function object undefined" })
+    }
+
+    @Test func optionsObjectsAreOptional() async throws {
+        let recorder = HostRecorder()
+        recorder.result = .success(Data("[]".utf8))
+        let runtime = try makeRuntime(source: """
+            exports.activate = async () => {
+                const books = await Winston.library.list();
+                console.log("count:" + books.length);
+            };
+            """, permissions: [.libraryRead])
+        try await runtime.load(granted: [.libraryRead], handler: recorder.handler())
+
+        #expect(await logged("count:0", in: runtime))
+        #expect(recorder.calls == [.libraryList(searchText: nil)])
+    }
+
+    @Test func hostInfoIsExposed() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            console.log("api:" + Winston.host.apiVersion);
+            """)
+        try await runtime.load(granted: [], handler: recorder.handler())
+        #expect(runtime.logBuffer.snapshot.contains { $0.message == "api:\(PluginManifest.hostAPIVersion)" })
+    }
+
+    // MARK: - Lifecycle
+
+    @Test func shutdownCallsDeactivate() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            exports.deactivate = () => { console.log("deactivated"); };
+            """)
+        try await runtime.load(granted: [], handler: recorder.handler())
+        await runtime.shutdown()
+        #expect(runtime.logBuffer.snapshot.contains { $0.message == "deactivated" })
+    }
+}
