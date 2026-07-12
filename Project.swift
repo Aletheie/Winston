@@ -75,7 +75,12 @@ let project = Project(
         .remote(url: "https://github.com/sparkle-project/Sparkle",
                 requirement: .upToNextMajor(from: "2.6.0")),
     ],
-    settings: .settings(base: ["MACOSX_DEPLOYMENT_TARGET": "26.4"]),
+    // Homebrew's libmtp/libusb ship arm64 only, so a universal Release build can never
+    // link — Apple Silicon is the only architecture this app can be built for.
+    settings: .settings(base: [
+        "MACOSX_DEPLOYMENT_TARGET": "26.4",
+        "ARCHS": "arm64",
+    ]),
     targets: [
         .target(
             name: "Winston",
@@ -99,6 +104,9 @@ let project = Project(
             sources: ["Winston/**/*.swift"],
             resources: [
                 "Winston/Assets.xcassets",
+                // Icon Composer icon. A legacy .appiconset is drawn "legacy": macOS 26 insets
+                // it into its own glass tile, so the artwork never fills the Dock tile.
+                "Winston/AppIcon.icon",
                 "Winston/Resources/Localizable.xcstrings",
                 .folderReference(path: "Winston/Help/WinstonHelp.help"),
             ],

@@ -6,6 +6,9 @@ Derived/
 .tuist/
 Tuist/.build/
 
+# Scripts/install-app.sh builds the Release app here
+build/
+
 # Local notes and assistant config — keep out of the repo
 CLAUDE.md
 .claude/
