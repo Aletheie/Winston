@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Sending books to a Kindle</title>
+    <link rel="stylesheet" href="sty/winston.css">
+</head>
+<body>
+    <p class="nav"><a href="index.html">&larr; Winston Help</a></p>
+    <h1>Sending books to a Kindle</h1>
+
+    <h2>Connecting</h2>
+    <ul>
+        <li>Connect your Kindle with a USB cable. Winston detects modern Kindles over MTP and older ones that mount as a USB drive.</li>
+        <li>When connected, a green device entry appears in the sidebar under “Device”. Click it to see what's on the Kindle.</li>
+    </ul>
+
+    <h2>Sending &amp; importing</h2>
+    <ul>
+        <li>Send specific books: select them in your library and click <span class="badge">Send to Device</span> in the toolbar.</li>
+        <li>Or use the two buttons in the device view's header — they spell out the direction:
+            <ul>
+                <li><b>⬆ Send N to Kindle</b> copies the books in your library that aren't on the Kindle yet. Your library is unchanged.</li>
+                <li><b>⬇ Import N to Library</b> copies books that are on the Kindle but not yet in your library into your library.</li>
+            </ul>
+        </li>
+        <li>Transfers run one at a time. Progress (including conversion) shows in a status toast in the bottom‑right corner, with a <b>Cancel</b> button to stop the queue.</li>
+        <li>Books already on the device are marked with a badge in your library.</li>
+    </ul>
+
+    <h2>Managing what's on the Kindle</h2>
+    <ul>
+        <li>The device view lists what's on the Kindle, with each book's author (matched from your library).</li>
+        <li>Right‑click to <b>Copy to Library</b> or <b>Remove from Device</b> — singly or for a multi‑selection.</li>
+        <li>To clear out an author, right‑click a book by them and choose <b>Remove all by ⟨author⟩</b>.</li>
+    </ul>
+
+    <h2 id="highlights">Highlights &amp; notes</h2>
+    <ul>
+        <li>Click the 💬 button in the device header to import the highlights and notes from the Kindle's clippings file.</li>
+        <li>They're matched to the matching books in your library; browse and export them later from <b>Library → Highlights…</b> (see <a href="library.html#highlights">Highlights</a>).</li>
+    </ul>
+
+    <h2>Converting for Kindle</h2>
+    <ul>
+        <li>Kindles can't read sideloaded EPUBs, so Winston converts EPUB to <b>AZW3</b> automatically when sending.</li>
+        <li>You can also convert ahead of time: select books and choose <b>Convert to AZW3</b> (right‑click, the Book menu, or the inspector). Conversion replaces the book's file in place and keeps its cover.</li>
+        <li>Conversion requires <a href="https://calibre-ebook.com">calibre</a> to be installed (Winston uses its <code>ebook-convert</code> tool). If calibre isn't installed, the Convert action is disabled.</li>
+        <li>Winston also pushes a cover thumbnail to the Kindle so sideloaded books show their artwork (best effort; depends on the device firmware).</li>
+    </ul>
+
+    <h2 id="themes">Themes &amp; settings</h2>
+    <ul>
+        <li>Press <kbd>⌘⇧T</kbd> to cycle themes, or choose one in Settings → Appearance: <b>Purple</b> (retro), <b>White</b>, and <b>Black</b> (classic dark).</li>
+        <li>All themes share the same native macOS layout — only colors, fonts, and wording change.</li>
+        <li>Switch the app <b>language</b> (English / Czech) in Settings → Language; it applies after a relaunch.</li>
+        <li>Other preferences live in <b>Settings</b> (<kbd>⌘,</kbd>): online metadata, a Hardcover token for community ratings, a watch folder for auto‑import, and automatic backup.</li>
+    </ul>
+
+    <p class="nav"><a href="index.html">&larr; Winston Help</a> · <a href="library.html">Building your library &rarr;</a></p>
+</body>
+</html>

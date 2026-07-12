@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Building your library</title>
+    <link rel="stylesheet" href="sty/winston.css">
+</head>
+<body>
+    <p class="nav"><a href="index.html">&larr; Winston Help</a></p>
+    <h1>Building your library</h1>
+
+    <h2>Importing books</h2>
+    <ul>
+        <li>Drag files onto the window, use the <span class="badge">Add Files</span> toolbar button, or press <kbd>⌘O</kbd>.</li>
+        <li>Supported formats: EPUB, MOBI, AZW3, PDF, TXT.</li>
+        <li>Imported files are <b>copied</b> into Winston's library folder, so moving or deleting the originals won't affect your library.</li>
+        <li>To import automatically, turn on a <b>watch folder</b> in Settings → Auto‑Import. New books dropped there are added for you (duplicates are skipped).</li>
+    </ul>
+
+    <h2>Importing from calibre</h2>
+    <ul>
+        <li>Choose <b>File → Import from Calibre Library…</b> (<kbd>⌘⇧O</kbd>) and pick your calibre library folder (the one containing <code>metadata.db</code>).</li>
+        <li>Winston reads calibre's database directly — calibre does <i>not</i> need to be running or even installed — and brings each book in with its cover, author, series, tags, rating, publisher, year and description.</li>
+        <li>When a book has several formats, the Kindle‑friendly one is chosen (AZW3, then MOBI, AZW, EPUB, PDF, TXT).</li>
+        <li>The batch is grouped into a dated <b>“Calibre Import”</b> collection so you can review it, and books already in your library are skipped.</li>
+    </ul>
+
+    <h2 id="search">Views, search &amp; sorting</h2>
+    <ul>
+        <li>Toggle between the <b>grid</b> and the <b>list</b> with the segmented control in the toolbar.</li>
+        <li>Sort by Title, Author, Date Added, or Rating from the sort menu; in the list, click a column header.</li>
+        <li>Search with the toolbar search field (<kbd>⌘F</kbd>). Plain text matches title, author, tags and series.</li>
+        <li><b>Field search:</b> narrow with <code>author:</code>, <code>tag:</code>, <code>series:</code>, <code>title:</code>, <code>format:</code> and <code>year:</code> — for example <code>author:tolkien tag:"science fiction" year:&gt;2000</code>. Use quotes for values with spaces and <code>&gt;</code>/<code>&lt;</code>/<code>=</code> with years.</li>
+        <li>The sidebar filters by format, author, series, tag, recently added, and rating.</li>
+        <li><b>Smart collections:</b> with a search active, choose <b>Library → Save Search as Collection…</b>. It appears in the sidebar with a ✦ icon and always shows the books currently matching that search.</li>
+    </ul>
+
+    <h2 id="collections">Collections &amp; reading status</h2>
+    <ul>
+        <li>Create a <b>collection</b> from the <span class="badge">+</span> next to “Collections” in the sidebar; rename or delete via its right‑click menu.</li>
+        <li>Add books to a collection with the book's right‑click menu → <b>Add to Collection</b>.</li>
+        <li>Books saved from <b>Discover</b> appear in the built-in <b>Wishlist</b> smart collection. Importing the same title and author removes it from the wishlist and confirms that it is now in your library.</li>
+        <li>Set <b>reading status</b> (Unread / Reading / Finished) from the inspector or the right‑click menu. The sidebar can filter by Reading and Finished.</li>
+    </ul>
+
+    <h2>Editing metadata &amp; covers</h2>
+    <ul>
+        <li>Edit one book from the inspector's <b>Edit</b> button, or many at once by selecting them and choosing <b>Edit Metadata for N…</b>.</li>
+        <li>Rename an author, series, or tag across the whole library from its right‑click menu in the sidebar.</li>
+        <li>If an author was imported reversed (e.g. “Tolkien, J.R.R.”), a tip at the bottom of the sidebar offers to fix it to “J.R.R. Tolkien” in one click.</li>
+        <li>Change a cover by dropping an image onto it in the inspector, or right‑click the cover → <b>Choose Cover…</b> / <b>Reset Cover</b>.</li>
+        <li>Find and clean up copies with <b>Library → Find Duplicates…</b> — copies are matched by title and author (regardless of name order), and each group has a <b>Keep</b> action that removes the others.</li>
+    </ul>
+
+    <h2 id="highlights">Highlights</h2>
+    <ul>
+        <li>Winston collects the highlights and notes you make on a Kindle. Import them from the device view (see <a href="kindle.html#highlights">Sending &amp; syncing</a>); a book with highlights shows a 💬 badge.</li>
+        <li>Open <b>Library → Highlights…</b> to browse every highlight across your library, grouped by book, and search their text.</li>
+        <li>Click <b>Export…</b> to save them as <b>Markdown</b> — one “Author - Title.md” file per book — ready for Obsidian, notes apps, or backup.</li>
+    </ul>
+
+    <h2 id="online">Fetching metadata &amp; community ratings online</h2>
+    <ul>
+        <li>Turn on <b>Settings → Metadata → Fetch metadata online</b>. Winston then looks up covers and details from free catalogs (Open Library, Google Books) for imported books.</li>
+        <li>Only missing fields are filled — your existing or edited data is never overwritten — and if nothing is found, the book keeps its embedded metadata.</li>
+        <li>You can also fetch on demand: select books and choose <b>Book → Fetch Metadata Online</b>.</li>
+        <li><b>Community ratings</b> (how other readers scored a book, shown beneath your own rating) come from Hardcover when you add a free token in <b>Settings → Community Ratings</b>, otherwise from Google Books / Open Library. Each book is looked up once; adding a token later? Re‑fetch with <b>Fetch Metadata Online</b>.</li>
+        <li>Open <b>Library → Series…</b> with a Hardcover token configured to compare each local series with its main catalog: Winston shows how many volumes you own, names the missing books, and links directly to each title on Hardcover.</li>
+        <li>When the setting is off, Winston makes no network calls and works fully offline.</li>
+    </ul>
+
+    <h2 id="backup">Backup &amp; library health</h2>
+    <ul>
+        <li>Turn on <b>Settings → Backup</b> and choose a folder. Winston then copies your catalog and covers there about once a day, keeping the most recent few backups.</li>
+        <li>This is a safety net for your organization (ratings, collections, reading status, highlights). To move the actual book files somewhere portable, use <b>Library → Export Library…</b>, which writes readable “Author - Title” files plus a metadata CSV/JSON.</li>
+        <li>If a book's file is moved or deleted outside Winston, the book is flagged with a ⚠️ badge; right‑click it and choose <b>Replace File…</b> to point it at the file again.</li>
+    </ul>
+
+    <p class="nav"><a href="index.html">&larr; Winston Help</a> · <a href="kindle.html">Sending to a Kindle &rarr;</a></p>
+</body>
+</html>

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Plugins</title>
+    <link rel="stylesheet" href="sty/winston.css">
+</head>
+<body>
+    <p class="nav"><a href="index.html">&larr; Winston Help</a></p>
+    <h1>Plugins</h1>
+    <p class="subtitle">Optional community add-ons that extend Winston.</p>
+
+    <p>Plugins are small add-ons — written in JavaScript — that can do things like
+    fill in missing book details or generate reports. They are <b>off by default</b>:
+    nothing runs until you install a plugin and switch it on, and each one can only
+    do what you explicitly allow.</p>
+
+    <h2>Are plugins safe?</h2>
+    <ul>
+        <li>A plugin runs in a <b>sandbox</b> with no direct access to your files, the
+        network, or other apps. It can only use the specific abilities Winston offers.</li>
+        <li>Before a plugin runs for the first time, Winston shows you exactly what it
+        wants to do (for example, “Read library metadata”) and <b>asks you to confirm</b>.</li>
+        <li>It can never overwrite metadata you've entered or edited — it may only
+        <i>fill in blanks</i>.</li>
+        <li>Online look-ups still obey your <b>Settings → Metadata</b> switch, so a
+        plugin makes no network calls while online metadata is off.</li>
+        <li>If a plugin misbehaves — errors repeatedly or hangs — Winston disables it
+        automatically (“quarantines” it) without affecting the rest of the app.</li>
+    </ul>
+
+    <h2 id="install">Installing a plugin</h2>
+    <ul>
+        <li>Open <b>Settings → Plugins</b> and click <span class="badge">Open Plugins Folder</span>.
+        (It lives at <code>~/Library/Application&nbsp;Support/Winston/Plugins/</code>.)</li>
+        <li>Put the plugin's folder inside — each plugin is one folder containing a
+        <code>manifest.json</code> file and a script.</li>
+        <li>Back in Settings → Plugins, click <span class="badge">Refresh</span>. The plugin
+        appears in the list, <b>Disabled</b>.</li>
+    </ul>
+
+    <h2 id="enable">Enabling &amp; permissions</h2>
+    <ul>
+        <li>Flip the plugin's switch to turn it on.</li>
+        <li>Winston shows an <b>Enable “…”?</b> sheet listing the permissions it requests.
+        Read them, then click <span class="badge">Enable</span> (or Cancel).</li>
+        <li>Common permissions are <b>Read library metadata</b>, <b>Fill in missing book
+        metadata</b>, and <b>Show notifications</b>.</li>
+        <li>If a later version of a plugin asks for more, Winston asks you to confirm
+        again — an update can't quietly gain new access.</li>
+    </ul>
+
+    <h2 id="manage">Managing plugins</h2>
+    <ul>
+        <li>Each plugin shows a <b>status</b>: <i>Active</i>, <i>Disabled</i>,
+        <i>Invalid</i> (the folder isn't a usable plugin), <i>Failed</i> (it couldn't
+        start — the reason is shown), or <i>Quarantined</i> (disabled after repeated
+        errors).</li>
+        <li>Expand <b>Log</b> to see the plugin's recent messages — handy for seeing what
+        it did or why it failed.</li>
+        <li><b>Show in Finder</b> reveals the plugin's folder.</li>
+        <li>Turn the switch off any time to disable a plugin; a quarantined one can be
+        re-enabled to try again.</li>
+    </ul>
+
+    <h2 id="troubleshoot">Troubleshooting</h2>
+    <ul>
+        <li><b>The plugin doesn't appear after I add it.</b> Its folder name must match the
+        <code>id</code> inside its <code>manifest.json</code>, and it needs a
+        <code>manifest.json</code> plus the script. Click <span class="badge">Refresh</span>.</li>
+        <li><b>It says “Invalid”.</b> The manifest is missing or malformed — the reason is
+        shown next to the status.</li>
+        <li><b>It says “Failed”.</b> The plugin's script hit an error on start-up; check the
+        <b>Log</b> for details.</li>
+        <li><b>It says “Quarantined”.</b> It errored too many times or took too long. The rest
+        of Winston is unaffected; re-enable it to retry once its author fixes it.</li>
+    </ul>
+
+    <h2 id="write">Writing your own</h2>
+    <ul>
+        <li>Plugins are plain JavaScript that call a small <code>Winston</code> API — read the
+        library, look up metadata, save a little state, and show notifications.</li>
+        <li>A ready-to-copy example and a step-by-step beginner tutorial (“Your First
+        Metadata Fetcher”) ship with the Winston project under
+        <code>docs/example-plugin/</code> and <code>docs/WritingPlugins.md</code>; the complete
+        API reference is <code>docs/PluginAPI.md</code>.</li>
+    </ul>
+
+    <p class="nav"><a href="index.html">&larr; Winston Help</a></p>
+</body>
+</html>
