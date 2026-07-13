@@ -81,7 +81,8 @@ nonisolated enum EPUBReader {
         let coverHref = CoverExtractor.coverCandidates(from: doc, opfDir: opfDir, archive: archive)
             .first { archive.entry($0) != nil }
 
-        let metadata = MetadataExtractor.parseOPFMetadata(doc)
+        var metadata = MetadataExtractor.parseOPFMetadata(doc)
+        metadata.pageCount = PageCountEstimator.epubPageCount(archive: archive, opfPath: opfPath, opf: doc)
 
         return ParsedEPUB(
             zipURL: url,

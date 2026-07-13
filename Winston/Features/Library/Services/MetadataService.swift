@@ -54,6 +54,24 @@ final class MetadataService {
         modelContext.saveQuietly()
     }
 
+    // MARK: - Page count
+
+    /// Books imported before page counts existed get theirs the first time the panel shows them.
+    func backfillPageCount(for book: Book) async {
+        guard book.pageCount == nil, book.modelContext != nil else { return }
+        let url = book.fileURL
+        let format = book.format
+        guard let pages = await PageCountEstimator.pageCount(at: url, format: format) else { return }
+        guard book.modelContext != nil, book.pageCount == nil else { return }
+        book.pageCount = pages
+        modelContext.saveQuietly()
+    }
+
+    func markNotSample(_ book: Book) {
+        book.sampleNoticeDismissed = true
+        modelContext.saveQuietly()
+    }
+
     func bulkUpdate(_ books: [Book], _ edit: BulkEdit) {
         for book in books {
             if let author = edit.author       { book.author = author.isEmpty ? nil : author }

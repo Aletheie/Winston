@@ -2038,6 +2038,16 @@
         }
       }
     },
+    "Full book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Celá kniha"
+          }
+        }
+      }
+    },
     "General" : {
       "localizations" : {
         "cs" : {
@@ -4095,6 +4105,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Tato kniha už je ve vaší knihovně."
+          }
+        }
+      }
+    },
+    "This might be a sample, not the full book." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tohle bude nejspíš jen ukázka, ne celá kniha."
           }
         }
       }

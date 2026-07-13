@@ -12,6 +12,7 @@ nonisolated struct BookMetadata: Codable, Sendable, Hashable {
     var seriesIndex: String?
     var tags: [String] = []
     var description: String?
+    var pageCount: Int?
 }
 
 @Model
@@ -49,6 +50,8 @@ final class Book {
     var drmProtected: Bool?
     var fileSizeBytes: Int64 = 0
     var coverVersion: Int = 0
+    var pageCount: Int?
+    var sampleNoticeDismissed: Bool?
 
     init(uuid: UUID = UUID(), fileName: String, originalFileName: String, dateAdded: Date = Date()) {
         self.uuid = uuid
@@ -135,6 +138,14 @@ final class Book {
         seriesIndex = fill(seriesIndex, metadata.seriesIndex)
         if tags.isEmpty, !metadata.tags.isEmpty { tags = metadata.tags }
         bookDescription = fill(bookDescription, metadata.description)
+        if pageCount == nil, let pages = metadata.pageCount, pages > 0 { pageCount = pages }
+    }
+
+    static let sampleMaxPages = 30
+
+    var probablySample: Bool {
+        guard sampleNoticeDismissed != true, let pageCount else { return false }
+        return pageCount <= Self.sampleMaxPages
     }
 
     func applyOnline(_ fetched: FetchedMetadata) {

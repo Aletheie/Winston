@@ -71,6 +71,9 @@ struct DetailSingleBook: View {
                 DetailCover(book: book, actions: actions)
                 VStack(alignment: .leading, spacing: 8) {
                     DetailIdentity(title: book.displayTitle, author: book.displayAuthor)
+                    if book.probablySample {
+                        DetailSampleNotice(book: book, viewModel: viewModel)
+                    }
                     DetailStatusRow(book: book, actions: actions)
                     DetailActions(book: book, actions: actions, isConverting: viewModel.isConverting(book))
                     Divider().opacity(WinstonLayout.dividerOpacity)
@@ -98,6 +101,38 @@ struct DetailSingleBook: View {
             }
         }
         .scrollContentBackground(.hidden)
+        .task(id: book.uuid) { await viewModel.backfillPageCount(for: book) }
+    }
+}
+
+struct DetailSampleNotice: View {
+    let book: Book
+    let viewModel: LibraryViewModel
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 10))
+                .foregroundStyle(theme.highlight)
+            theme.styledText(terminal: "LOW PAGE COUNT - SAMPLE?",
+                             native: "This might be a sample, not the full book.")
+                .font(theme.label(size: 10, weight: .regular))
+                .foregroundStyle(theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button {
+                viewModel.markNotSample(book)
+            } label: {
+                theme.styledText(terminal: "[FULL BOOK]", native: "Full book")
+                    .font(theme.label(size: 9, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(theme.accent)
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(theme.highlight.opacity(0.08)))
     }
 }
 
@@ -278,6 +313,9 @@ struct DetailMetadataList: View {
         VStack(alignment: .leading, spacing: 4) {
             DetailMetaRow(key: "FORMAT", value: book.format.isEmpty ? "\u{2014}" : book.format)
             DetailMetaRow(key: "SIZE", value: book.fileSizeDisplay)
+            if let pages = book.pageCount {
+                DetailMetaRow(key: "PAGES", value: book.format == "PDF" ? "\(pages)" : "~\(pages)")
+            }
             if let publisher = book.publisher, !publisher.isEmpty { DetailMetaRow(key: "PUB", value: publisher) }
             if let year = book.year, !year.isEmpty { DetailMetaRow(key: "YEAR", value: year) }
             if let language = book.language, !language.isEmpty { DetailMetaRow(key: "LANG", value: language) }

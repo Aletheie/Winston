@@ -64,6 +64,7 @@ Winston provides Finder Quick Look previews for MOBI and AZW3, standard menus an
 - Calibre libraries import with their metadata, and a watched folder can pick up new books automatically.
 - Smart collections update from saved searches. Rescans and online lookups do not overwrite fields you edited by hand.
 - **Surprise Me** picks a random unread book; Cmd plus and Cmd minus resize the cover grid.
+- The book panel shows page counts, real for PDFs and estimated for the other formats. A suspiciously short book is flagged as a probable store sample until you say otherwise.
 - Statistics includes a yearly reading goal, while wishlist entries can link directly to your preferred bookstore or library catalog.
 - The catalog and covers are backed up automatically. The catalog exports as CSV and highlights as plain text.
 

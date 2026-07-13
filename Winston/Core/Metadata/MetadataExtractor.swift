@@ -12,6 +12,7 @@ enum MetadataExtractor {
         case "mobi", "azw", "azw3": return extractMOBI(from: url)
         case "pdf":             return extractPDF(from: url)
         case "html", "htm":     return extractHTML(from: url)
+        case "txt":             return extractTXT(from: url)
         default:                return BookMetadata()
         }
     }
@@ -26,7 +27,9 @@ enum MetadataExtractor {
               let doc = try? XMLDocument(data: opfData, options: []) else {
             return BookMetadata()
         }
-        return parseOPFMetadata(doc)
+        var meta = parseOPFMetadata(doc)
+        meta.pageCount = PageCountEstimator.epubPageCount(archive: archive, opfPath: opfPath, opf: doc)
+        return meta
     }
 
     nonisolated static func parseOPFMetadata(_ doc: XMLDocument) -> BookMetadata {
@@ -123,6 +126,7 @@ enum MetadataExtractor {
             }
         }
 
+        meta.pageCount = PageCountEstimator.mobiPageCount(in: data)
         return meta
     }
 
@@ -137,6 +141,7 @@ enum MetadataExtractor {
         if let subject = attrs[PDFDocumentAttribute.subjectAttribute] as? String, !subject.isEmpty {
             meta.tags = [subject]
         }
+        meta.pageCount = doc.pageCount > 0 ? doc.pageCount : nil
         return meta
     }
 
@@ -149,16 +154,25 @@ enum MetadataExtractor {
             return BookMetadata()
         }
         let html = raw.removingHTMLNonContent
+        var meta = BookMetadata()
+        meta.pageCount = PageCountEstimator.pages(forCharacters: html.strippedHTML.count)
         guard let range = html.range(of: "<title[^>]*>([\\s\\S]*?)</title>",
                                      options: [.regularExpression, .caseInsensitive]) else {
-            return BookMetadata()
+            return meta
         }
-        var meta = BookMetadata()
         let text = String(html[range])
             .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
             .decodingHTMLEntities()
             .trimmingCharacters(in: .whitespacesAndNewlines)
         meta.title = text.nonEmpty
+        return meta
+    }
+
+    // MARK: - TXT
+
+    nonisolated private static func extractTXT(from url: URL) -> BookMetadata {
+        var meta = BookMetadata()
+        meta.pageCount = PageCountEstimator.pageCountSync(at: url, format: "txt")
         return meta
     }
 

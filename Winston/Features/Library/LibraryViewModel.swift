@@ -120,6 +120,8 @@ final class LibraryViewModel {
     func deleteTag(_ tag: String) { metadata.deleteTag(tag) }
     func renameSeries(_ old: String, to new: String) { metadata.renameSeries(old, to: new) }
     func renameAuthor(_ old: String, to new: String) { metadata.renameAuthor(old, to: new) }
+    func backfillPageCount(for book: Book) async { await metadata.backfillPageCount(for: book) }
+    func markNotSample(_ book: Book) { metadata.markNotSample(book) }
     func fetchOnlineMetadata(for book: Book) { metadata.fetchOnlineMetadata(for: book) }
     func fetchOnlineMetadata(for books: [Book]) { metadata.fetchOnlineMetadata(for: books) }
     func backfillOnlineMetadata() { metadata.backfillMissingOnlineMetadata() }
