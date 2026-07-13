@@ -6,7 +6,7 @@
 
 ### *Two plus two still make four.* <sup>[?](https://en.wikipedia.org/wiki/2_%2B_2_%3D_5 "Freedom is the freedom to say that two plus two make four. (Winston Smith, Nineteen Eighty-Four)")</sup>
 
-**Your books, on your Mac, on your Kindle. Nobody else in the room.**
+**Your books, on your Mac, on your Kindle.**
 
 <sub>7 MB download · zero dependencies · zero network calls · one cable</sub>
 
@@ -24,57 +24,52 @@ https://github.com/user-attachments/assets/488cb698-cd61-4d0a-9fb2-f569d8ae6b86
 </div>
 
 > [!IMPORTANT]
-> Winston is **early access**. It runs my whole library every day, but it is a 0.x for a reason: things still move, and the best parts are still being built. If something breaks, [tell me](https://github.com/Aletheie/Winston/issues).
+> Winston is **early access**. I use it for my own library, but it is still 0.x: parts will change and several planned features are not finished yet. If something breaks, [tell me](https://github.com/Aletheie/Winston/issues).
 
 ## Not another Calibre
 
-Calibre is a warehouse with every tool ever made in it. Winston is a Mac app with one opinion: the painful parts of owning ebooks should just work. So it ships its own conversion engine instead of wrapping somebody else's, treats the Kindle as a device instead of a folder, and makes zero network calls until you say otherwise.
+Calibre is a broad toolbox. Winston is deliberately narrower: a Mac app for keeping an ebook library and using it with a Kindle. It includes its own conversion engine, treats the Kindle as a device rather than a folder, and stays offline unless you enable an online feature.
 
-The longer bet: a library that understands **books, not files**. Two translations of Dune are not duplicates. A fixed EPUB is not a new book. That model is where Winston is headed, one release at a time.
+The longer-term goal is a library that understands **books, not files**. Two translations of Dune are not duplicates, and a corrected EPUB is not a new book. Winston is moving toward that model one release at a time.
 
 ## What it does
 
-The short version: everything that has to happen between a folder full of EPUBs and a book open in your hands.
+Winston covers the path from importing an EPUB to opening it on a Kindle.
 
-## Ships its own conversion engine
+### Ships its own conversion engine
 
-The 7 MB download contains a complete EPUB to MOBI converter, written from scratch for this app. Not a Calibre wrapper, not a bundled binary. It splits Czech and other accented text on proper character boundaries so nothing gets garbled, embeds the same cover your library shows, and writes the trailer records without which a Kindle silently ignores the file. The output is not tested against a spec, it is pinned byte by byte against what a real Kindle indexed. Conversion runs off the main thread, so the app never freezes with a spinner while it works. TXT, HTML and PDF convert natively too. Calibre remains an optional fallback for the exotic stuff.
+The app includes an EPUB-to-MOBI converter written specifically for Winston, rather than wrapping Calibre or bundling another converter. It preserves accented text, embeds the selected cover and writes the trailer records a Kindle needs to index the file. The output is covered by byte-level tests, and conversion runs off the main thread. TXT, HTML and PDF are handled natively too; Calibre remains an optional fallback for other formats.
 
-## Treats the Kindle like it matters
+### Treats the Kindle like it matters
 
-Plug in a cable and Winston detects the device, whether it is a modern Kindle speaking MTP or an older one that mounts as a drive. Then it does the whole ritual for you: converts what the Kindle cannot read, sends it, pushes the home screen thumbnail so it matches your library cover, deletes the invisible macOS junk files that confuse the Kindle indexer, and ejects so the device reindexes. The book just appears, with the right cover, ready to open.
+Connect a Kindle and Winston detects older models that mount as a drive; it also includes an MTP path for newer models. During transfer it converts unsupported formats, copies the book and its cover thumbnail, removes macOS metadata files and ejects the device so it can reindex.
 
-It also works backwards. Books that live only on the device can be pulled into the library, and your highlights come in from `My Clippings.txt` as structured, exportable notes attached to the right books.
+Books can also be copied back into the library. Highlights from `My Clippings.txt` are imported as structured, exportable notes and matched to their books.
 
-## Knows which books you are missing
+### Knows which books you are missing
 
-Flip the online switch and Winston looks up the series you own on [Hardcover](https://hardcover.app): which volumes you have, which are missing, where to find them. The **Discover** tab in the sidebar browses new books by genre or search, and anything you find goes on a wishlist that lives right in your library, next to the books you already own.
+Online features are opt-in. When enabled, Winston uses [Hardcover](https://hardcover.app) to show which volumes of a series you own and which are missing. The **Discover** tab browses books by genre or search, and anything you find can be saved to a wishlist alongside your library.
 
-## Extends without asking for blind trust
+### Extends without asking for blind trust
 
-Winston has a real plugin system: small JavaScript addons you can install or write yourself. Installing one is dropping its folder into the Plugins folder, and there is a [working example](docs/example-plugin) to start from. Each plugin must ask for what it wants to touch. No grant, no access. They are off by default, a misbehaving one gets quarantined instead of taking the app down, and its logs are right there in Settings. The AI translation feature on the roadmap will ship as one of these. [API docs](docs/PluginAPI.md), [writing guide](docs/WritingPlugins.md).
+Winston supports small JavaScript add-ons that you can install or write yourself by copying a folder into Plugins. Each plugin declares what it needs access to, starts disabled and is quarantined if it repeatedly fails. Logs are available in Settings. The planned AI translation feature will use the same system. See the [working examples](docs/example-plugin), [API docs](docs/PluginAPI.md) and [writing guide](docs/WritingPlugins.md).
 
-## Behaves like it belongs on your Mac
+### Behaves like it belongs on your Mac
 
-Quick Look previews for MOBI and AZW3, right in Finder, system wide. Proper menus with keyboard shortcuts. Three themes, including a full retro terminal mode, and an app wide font choice if the system one bores you. English and Czech, localized down to the last plural. A real Help book in the Help menu, with chapters on the library, the Kindle flow and plugins, the kind almost nobody ships anymore. And if the library store ever gets corrupted, Winston moves it aside and recovers instead of crash looping.
+Winston provides Finder Quick Look previews for MOBI and AZW3, standard menus and keyboard shortcuts, three themes and an app-wide font choice. It is localized in English and Czech and includes a Help book for the library, Kindle transfers and plugins. If the library store becomes corrupted, Winston moves it aside and recovers instead of getting stuck in a crash loop.
 
-## Sweats the small stuff
+### Sweats the small stuff
 
-- Sees an author stored as "Tolkien, J. R. R." and offers to flip it to "J. R. R. Tolkien". One click, fixed across the whole library.
-- Rename an author, a series or a tag once, in the sidebar, and every book follows.
-- Point it at your Calibre library once and the whole thing comes over, metadata and all.
-- A watched folder: drop a book in, it is in the library before you switch windows.
-- **Surprise Me** in the Library menu picks a random unread book for tonight.
-- Grid tiles resize with Cmd plus and Cmd minus, the way they should.
-- A yearly reading goal, tracked quietly in Statistics.
-- Tell it your favorite bookstore or library website once, and wishlist books get a search link straight to it.
-- Smart collections: save a search and it keeps filling itself.
-- A re-scan or an online lookup never overwrites a field you edited by hand.
-- Automatic backups of the catalog and covers, and everything exports to plain files: the catalog as CSV, highlights as text you can use anywhere.
+- Author names such as "Tolkien, J. R. R." can be normalized across the library. Renaming an author, series or tag in the sidebar updates every matching book.
+- Calibre libraries import with their metadata, and a watched folder can pick up new books automatically.
+- Smart collections update from saved searches. Rescans and online lookups do not overwrite fields you edited by hand.
+- **Surprise Me** picks a random unread book; Cmd plus and Cmd minus resize the cover grid.
+- Statistics includes a yearly reading goal, while wishlist entries can link directly to your preferred bookstore or library catalog.
+- The catalog and covers are backed up automatically. The catalog exports as CSV and highlights as plain text.
 
-## And yes, it manages books
+### And yes, it manages books
 
-Grid and table views, search, filters, collections, reading statuses, a duplicate finder, statistics, bulk edit. The table stakes of a book manager, all there, so the interesting parts above have something to stand on.
+Grid and table views, search, filters, collections, reading statuses, duplicate detection, statistics and bulk editing are all included.
 
 ## Screenshots
 
@@ -107,7 +102,7 @@ Grid and table views, search, filters, collections, reading statuses, a duplicat
 
 ## Where it's going
 
-Near term, the practical stuff:
+Near term:
 
 - [ ] Notarized releases, so the app opens with a plain double click
 - [ ] Auto updates through Sparkle
@@ -115,20 +110,20 @@ Near term, the practical stuff:
 - [ ] The MTP path verified on a current Kindle
 - [ ] A layered app icon with the full glass treatment
 
-The bigger plan, the features that made me start this instead of writing another Calibre plugin:
+Longer term:
 
-- [ ] **Series watch.** Winston already shows the gaps in your series. Next it will tell you the day a new volume comes out.
-- [ ] **Translation plugin.** AI translation of a book from English into Czech or another language, as a plugin.
-- [ ] **Editions, not duplicates.** Two translations or editions of the same work live under one book instead of fighting the duplicate finder.
-- [ ] **Import inbox.** Every import reviewed like a pull request: what was found, what will change, one click to undo.
-- [ ] **Metadata you can trust.** Every field remembers where its value came from, and fields you fix by hand can be locked.
-- [ ] **Highlights that survive.** Replace a broken EPUB with a clean one and your highlights find their places in the new file.
+- [ ] **Series watch.** Notify you when a new volume in one of your series is released.
+- [ ] **Translation plugin.** Optional AI-assisted book translation, starting with English and Czech.
+- [ ] **Editions, not duplicates.** Group translations and editions of the same work under one book.
+- [ ] **Import inbox.** Review what an import found and what it will change, with one-click undo.
+- [ ] **Metadata you can trust.** Track where each value came from and allow hand-edited fields to be locked.
+- [ ] **Highlights that survive.** Carry highlights across when a broken EPUB is replaced with a clean copy.
 
 ## Install
 
-Grab the zip from [Releases](https://github.com/Aletheie/Winston/releases), unzip, drop `Winston.app` into Applications.
+Download the zip from [Releases](https://github.com/Aletheie/Winston/releases), unzip it and move `Winston.app` to Applications.
 
-The app is signed but **not notarized yet**. On first launch, right click the app and pick **Open**, then confirm. Once, never again.
+The app is signed but **not notarized yet**. On first launch, right-click the app, choose **Open** and confirm. This is only required once.
 
 **Needs:** macOS 26.4 or newer, Apple Silicon. Calibre only if you want the exotic conversions.
 
@@ -160,11 +155,11 @@ xcodebuild test -workspace Winston.xcworkspace -scheme Winston -only-testing:Win
 
 ## The Kindle part, explained
 
-Most sideloading pain comes from three facts nobody tells you:
+Three details matter when sideloading:
 
-- A Kindle will not read a raw EPUB. Winston never sends one. It converts first, to MOBI natively or to AZW3 through Calibre.
-- A sideloaded book only shows up after the device reindexes, which happens on eject. Winston ejects for you. Pull the cable yourself and the book is on the device but the Kindle has not noticed yet.
-- The home screen cover comes from the cover embedded in the file. Winston embeds the same cover your library shows, so they always match.
+- A Kindle does not read a raw EPUB. Winston converts it to MOBI natively or to AZW3 through Calibre before transfer.
+- A sideloaded book appears after the device reindexes on eject. Winston ejects it after the transfer.
+- The home screen cover comes from the file itself. Winston embeds the cover selected in the library.
 
 If a stubborn Kindle still refuses a converted MOBI: `defaults write cz.annajung.Winston preferKindleAZW3 -bool YES` switches every transfer to AZW3. Needs Calibre.
 
@@ -172,7 +167,7 @@ Verified on a Paperwhite 11th generation.
 
 ## Known limits
 
-- **MTP is untested on real hardware.** Newer Kindles use it. Older ones mount as a USB drive, and that path is proven.
+- **MTP still needs real-hardware verification.** The path for newer Kindles is implemented; the USB-drive path used by older models is proven.
 - **No App Store, no iCloud sync.** Raw USB access means the sandbox is off, which rules out both. Your backups are plain files you can copy.
 - **Not notarized yet**, hence the right click on first launch.
 - **No Intel Macs.** The libmtp build Winston links against is Apple Silicon only.
