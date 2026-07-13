@@ -37,8 +37,6 @@ private let appSettings: SettingsDictionary = [
     "LD_RUNPATH_SEARCH_PATHS": "$(inherited) @executable_path/../Frameworks",
     "CODE_SIGN_STYLE": "Automatic",
     "DEVELOPMENT_TEAM": "4F4YMTN4C5",
-    "MARKETING_VERSION": "1.0",
-    "CURRENT_PROJECT_VERSION": "1",
     "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
     "ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME": "AccentColor",
     "ENABLE_PREVIEWS": "YES",
@@ -80,6 +78,9 @@ let project = Project(
     settings: .settings(base: [
         "MACOSX_DEPLOYMENT_TARGET": "26.4",
         "ARCHS": "arm64",
+        // single source of truth for the app + QuickLook extension versions
+        "MARKETING_VERSION": "0.1",
+        "CURRENT_PROJECT_VERSION": "1",
     ]),
     targets: [
         .target(
@@ -89,6 +90,9 @@ let project = Project(
             bundleId: "cz.annajung.Winston",
             deploymentTargets: .macOS("26.4"),
             infoPlist: .extendingDefault(with: [
+                // Tuist's default plist hardcodes 1.0; route it through the build settings
+                "CFBundleShortVersionString": "$(MARKETING_VERSION)",
+                "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
                 "NSHumanReadableCopyright": "",
                 "CFBundleHelpBookFolder": "WinstonHelp.help",
                 "CFBundleHelpBookName": "Winston Help",
@@ -131,6 +135,8 @@ let project = Project(
             bundleId: "cz.annajung.Winston.QuickLook",
             deploymentTargets: .macOS("26.4"),
             infoPlist: .extendingDefault(with: [
+                "CFBundleShortVersionString": "$(MARKETING_VERSION)",
+                "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
                 "CFBundleDisplayName": "Winston Quick Look",
                 "CFBundleDevelopmentRegion": "en",
                 "UTImportedTypeDeclarations": kindleTypeDeclarations,
