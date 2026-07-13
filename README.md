@@ -20,7 +20,7 @@
 <img alt="249 tests" src="https://img.shields.io/badge/tests-249-4c9a2a?style=flat-square">
 </p>
 
-<img src="docs/screenshots/library-grid.png" alt="Winston library" width="900">
+https://github.com/user-attachments/assets/488cb698-cd61-4d0a-9fb2-f569d8ae6b86
 </div>
 
 > [!IMPORTANT]
