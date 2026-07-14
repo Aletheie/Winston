@@ -5,6 +5,7 @@ enum MainDestination: Hashable {
     case library
     case device
     case discover
+    case updates
 }
 
 struct ContentView: View {
@@ -28,6 +29,7 @@ struct ContentView: View {
         switch sidebarSelection {
         case .device:   .device
         case .discover: .discover
+        case .updates:  .updates
         default:        .library
         }
     }
@@ -69,6 +71,12 @@ struct ContentView: View {
                 DeviceView(books: books, viewModel: viewModel)
             case .discover:
                 DiscoveryView(wishlist: viewModel.wishlist)
+            case .updates:
+                NoticesView(
+                    notices: viewModel.notices,
+                    viewModel: viewModel,
+                    onOpenSeries: { sidebarSelection = .series($0) }
+                )
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -84,12 +92,14 @@ struct ContentView: View {
             await viewModel.editions.scanLibrary()
             restartWatcher()
             await checkIntegrityAndBackup()
+            await viewModel.notices.checkForNewReleasesIfDue()
         }
         .task(id: metadataBackfillConfiguration) {
             guard settings.onlineMetadataEnabled else { return }
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
             viewModel.backfillOnlineMetadata()
+            await viewModel.notices.checkForNewReleasesIfDue()
         }
         .onChange(of: deviceMonitor.isConnected) { _, connected in
             if !connected, sidebarSelection == .device { sidebarSelection = .all }
@@ -102,7 +112,7 @@ struct ContentView: View {
     }
 
     private var metadataBackfillConfiguration: String {
-        "\(settings.onlineMetadataEnabled)|\(settings.hardcoverToken)"
+        "\(settings.onlineMetadataEnabled)|\(settings.hardcoverToken)|\(settings.releaseCheckEnabled)"
     }
 
     private func openEditionReview() {

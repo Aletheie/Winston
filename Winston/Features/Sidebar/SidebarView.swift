@@ -13,10 +13,11 @@ enum SidebarItem: Hashable {
     case tag(String)
     case device
     case discover
+    case updates
 
     var libraryFilter: LibraryFilter {
         switch self {
-        case .all, .device, .discover:    .all
+        case .all, .device, .discover, .updates: .all
         case .recentlyAdded:   .recentlyAdded
         case .status(let s):   .status(s)
         case .collection(let id): .collection(id)
@@ -81,6 +82,12 @@ struct SidebarView: View {
                 .font(theme.label(size: 12))
                 .lineLimit(1)
                 .tag(SidebarItem.discover)
+                SidebarRow(
+                    title: theme.styledText(terminal: "UPDATES", native: "Updates"),
+                    systemImage: "bell",
+                    count: viewModel.notices.unreadCount
+                )
+                .tag(SidebarItem.updates)
                 if facets.recent > 0 {
                     SidebarRow(title: theme.styledText(terminal: "RECENTLY ADDED", native: "Recently Added"),
                                systemImage: "clock", count: facets.recent)
