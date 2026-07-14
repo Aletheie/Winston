@@ -3,7 +3,7 @@ import SwiftData
 
 @main
 struct WinstonApp: App {
-    private let container = PersistenceController.shared
+    private let container: ModelContainer
     @State private var themeManager = ThemeManager()
     @State private var settings: AppSettings
     @State private var toastCenter: ToastCenter
@@ -13,11 +13,21 @@ struct WinstonApp: App {
     @State private var updater: SoftwareUpdater
     @State private var pluginService: PluginService
     @State private var discoveryViewModel: DiscoveryViewModel
-    @State private var showStoreRecoveryNotice = PersistenceController.lastRecovery != nil
+    @State private var showStoreRecoveryNotice: Bool
 
     init() {
-        let context = PersistenceController.shared.mainContext
-        LegacyLibraryMigrator.migrateIfNeeded(context: context)
+        let isRunningUnitTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let container = isRunningUnitTests ? PersistenceController.inMemory() : PersistenceController.shared
+        self.container = container
+        _showStoreRecoveryNotice = State(
+            initialValue: !isRunningUnitTests && PersistenceController.lastRecovery != nil
+        )
+        let context = container.mainContext
+        if !isRunningUnitTests {
+            LegacyLibraryMigrator.migrateIfNeeded(context: context)
+            EditionsBackfill.run(context: context)
+            EditionsBackfill.pruneOrphanWorks(context: context)
+        }
         let settings = AppSettings()
         let toastCenter = ToastCenter()
         _settings = State(initialValue: settings)
