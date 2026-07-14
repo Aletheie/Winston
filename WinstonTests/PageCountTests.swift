@@ -27,6 +27,13 @@ struct PageCountTests {
         #expect(meta.pageCount == 1)
     }
 
+    @Test func epubExtractsTranslatorRole() throws {
+        let url = try EPUBFixture.make(title: "Dune", author: "Frank Herbert", translator: "Jan Novák")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        #expect(MetadataExtractor.extractMetadata(from: url).translator == "Jan Novák")
+    }
+
     // MARK: - PDF
 
     @Test func pdfReportsItsRealPageCount() throws {

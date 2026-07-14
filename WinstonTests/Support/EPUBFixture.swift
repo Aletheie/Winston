@@ -6,6 +6,7 @@ enum EPUBFixture {
 
     static func make(
         title: String, author: String,
+        translator: String? = nil,
         bodyText: String = "Hello from Winston's native conversion. The quick brown fox jumps over the lazy dog."
     ) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
@@ -23,7 +24,7 @@ enum EPUBFixture {
 
         try add("mimetype", Data("application/epub+zip".utf8))
         try add("META-INF/container.xml", Data(container.utf8))
-        try add("OEBPS/content.opf", Data(opf(title: title, author: author).utf8))
+        try add("OEBPS/content.opf", Data(opf(title: title, author: author, translator: translator).utf8))
         try add("OEBPS/chap1.xhtml", Data(chapter(bodyText: bodyText).utf8))
         try add("OEBPS/cover.jpg", jpegData())
         return url
@@ -104,13 +105,15 @@ enum EPUBFixture {
     </container>
     """
 
-    private static func opf(title: String, author: String) -> String {
-        """
+    private static func opf(title: String, author: String, translator: String?) -> String {
+        let contributor = translator.map { "<dc:contributor opf:role=\"trl\">\($0)</dc:contributor>" } ?? ""
+        return """
         <?xml version="1.0" encoding="UTF-8"?>
-        <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
+        <package xmlns="http://www.idpf.org/2007/opf" xmlns:opf="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
           <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
             <dc:title>\(title)</dc:title>
             <dc:creator>\(author)</dc:creator>
+            \(contributor)
             <dc:language>en</dc:language>
             <dc:identifier id="bookid">urn:uuid:00000000-0000-0000-0000-000000000001</dc:identifier>
             <meta name="cover" content="cover-img"/>
