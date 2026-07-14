@@ -32,7 +32,7 @@ enum LibraryExternalActions {
         guard let url = await FilePanel.chooseFile(
             message: String(localized: "Choose the file to link to this book.")
         ) else { return }
-        viewModel.relink(book, from: url)
+        await viewModel.relink(book, from: url)
     }
 
     static func importFromCalibre(via viewModel: LibraryViewModel) async {

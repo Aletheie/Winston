@@ -8,7 +8,12 @@ final class ConversionService {
         let book: Book
         let uuid: UUID
         let sourceURL: URL
-        let oldFileName: String
+        let sourceFileName: String
+        let sourceAssetUUID: UUID?
+        let sourceAssetDateAdded: Date?
+        let sourceContentHash: String?
+        let assetUUID: UUID
+        let existingAssetUUID: UUID?
         let title: String
         let format: EbookConverter.OutputFormat
     }
@@ -92,11 +97,20 @@ final class ConversionService {
     }
 
     private func makeRequest(for book: Book, to format: EbookConverter.OutputFormat) -> Request {
-        Request(
+        let sourceAsset = book.assets.first { $0.fileName == book.fileName }
+        let existing = book.assets.first {
+            $0.origin == .generated && $0.format.lowercased() == format.ext
+        }
+        return Request(
             book: book,
             uuid: book.uuid,
             sourceURL: book.fileURL,
-            oldFileName: book.fileName,
+            sourceFileName: book.fileName,
+            sourceAssetUUID: sourceAsset?.uuid,
+            sourceAssetDateAdded: sourceAsset?.dateAdded,
+            sourceContentHash: sourceAsset?.contentHash,
+            assetUUID: existing?.uuid ?? UUID(),
+            existingAssetUUID: existing?.uuid,
             title: book.displayTitle,
             format: format
         )
@@ -107,24 +121,45 @@ final class ConversionService {
         let uuid = request.uuid
         let sourceURL = request.sourceURL
         defer { convertingUUIDs.remove(uuid) }
-        guard book.modelContext != nil else { return }
+        guard sourceSnapshotIsCurrent(request) else { return }
 
-        await Task.detached(priority: .utility) {
+        let resolvedSourceHash: String?
+        if let sourceContentHash = request.sourceContentHash {
+            resolvedSourceHash = sourceContentHash
+        } else {
+            resolvedSourceHash = await Task.detached(priority: .utility) {
+                try? ContentHasher.sha256(of: sourceURL)
+            }.value
+        }
+        guard let sourceHash = resolvedSourceHash else {
+            toasts.error(String(localized: "Couldn’t convert “\(request.title)”."))
+            return
+        }
+        guard sourceSnapshotIsCurrent(request) else { return }
+        if let sourceAssetUUID = request.sourceAssetUUID,
+           let sourceAsset = book.assets.first(where: { $0.uuid == sourceAssetUUID }),
+           sourceAsset.contentHash == nil {
+            sourceAsset.contentHash = sourceHash
+        }
+
+        let installedCover = await Task.detached(priority: .utility) {
             if !CoverStore.exists(for: uuid),
                let cover = CoverExtractor.extractCover(from: sourceURL) {
                 CoverStore.save(cover, for: uuid)
+                return true
             }
+            return false
         }.value
 
-        guard book.modelContext != nil else {
-            CoverStore.delete(for: uuid)
+        guard sourceSnapshotIsCurrent(request) else {
+            if installedCover { CoverStore.delete(for: uuid) }
             return
         }
 
         let converted: URL? = try? await EbookConverter.convert(sourceURL, to: request.format)
-        guard book.modelContext != nil else {
+        guard sourceSnapshotIsCurrent(request) else {
             if let converted { try? FileManager.default.removeItem(at: converted) }
-            CoverStore.delete(for: uuid)
+            if installedCover { CoverStore.delete(for: uuid) }
             return
         }
         guard let converted else {
@@ -133,15 +168,54 @@ final class ConversionService {
         }
         defer { try? FileManager.default.removeItem(at: converted) }
 
-        guard let newFileName = try? BookFileStore.importCopy(of: converted, uuid: uuid) else {
+        let contentHash = await Task.detached(priority: .utility) {
+            try? ContentHasher.sha256(of: converted)
+        }.value
+        guard sourceSnapshotIsCurrent(request) else {
+            if installedCover { CoverStore.delete(for: uuid) }
+            return
+        }
+
+        guard let newFileName = try? BookFileStore.importCopy(of: converted, uuid: request.assetUUID) else {
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
-        if newFileName != request.oldFileName {
-            BookFileStore.delete(fileName: request.oldFileName)
+        let size = BookFileStore.size(of: newFileName)
+        if let existingAssetUUID = request.existingAssetUUID,
+           let asset = book.assets.first(where: { $0.uuid == existingAssetUUID }) {
+            asset.fileName = newFileName
+            asset.sizeBytes = size
+            asset.contentHash = contentHash
+            asset.generatedFromContentHash = sourceHash
+            asset.validationStatus = .ok
+            asset.dateAdded = Date()
+        } else {
+            let asset = BookAsset(
+                uuid: request.assetUUID,
+                fileName: newFileName,
+                origin: .generated,
+                contentHash: contentHash,
+                generatedFromContentHash: sourceHash,
+                sizeBytes: size,
+                validationStatus: .ok,
+                book: book
+            )
+            modelContext.insert(asset)
         }
-        book.fileName = newFileName
-        book.fileSizeBytes = BookFileStore.size(of: newFileName)
         modelContext.saveQuietly()
+        toasts.success(String(localized: "Created \(request.format.label) copy."))
+    }
+
+    private func sourceSnapshotIsCurrent(_ request: Request) -> Bool {
+        guard request.book.modelContext != nil,
+              request.book.fileName == request.sourceFileName else { return false }
+        guard let sourceAssetUUID = request.sourceAssetUUID else { return true }
+        guard let sourceAsset = request.book.assets.first(where: { $0.uuid == sourceAssetUUID }),
+              sourceAsset.fileName == request.sourceFileName,
+              sourceAsset.dateAdded == request.sourceAssetDateAdded else { return false }
+        if let expected = request.sourceContentHash,
+           let current = sourceAsset.contentHash,
+           current != expected { return false }
+        return true
     }
 }

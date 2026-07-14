@@ -17,6 +17,7 @@ final class LibraryViewModel {
     let exporter: ExportService
     let covers: CoverService
     let health: LibraryHealthService
+    let editions: EditionService
     let wishlist: WishlistService
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
@@ -28,19 +29,23 @@ final class LibraryViewModel {
         let metadata = MetadataService(modelContext: modelContext, settings: settings, online: online)
         self.wishlist = wishlist
         self.metadata = metadata
+        let editions = EditionService(modelContext: modelContext)
+        self.editions = editions
         self.importer = ImportService(
             modelContext: modelContext,
             settings: settings,
             metadata: metadata,
             wishlist: wishlist,
-            toasts: toasts
+            toasts: toasts,
+            editions: editions
         )
         self.calibreImporter = CalibreImportService(
             modelContext: modelContext,
             settings: settings,
             metadata: metadata,
             wishlist: wishlist,
-            toasts: toasts
+            toasts: toasts,
+            editions: editions
         )
         self.conversion = ConversionService(modelContext: modelContext, toasts: toasts)
         self.highlights = HighlightsService(modelContext: modelContext)
@@ -72,6 +77,7 @@ final class LibraryViewModel {
     // MARK: - Add / Remove
 
     func addBooks(from urls: [URL]) { importer.addBooks(from: urls) }
+    func addEditions(from urls: [URL], to work: Work) { importer.addBooks(from: urls, assigningTo: work) }
     func importCalibreLibrary(at root: URL) { calibreImporter.importLibrary(at: root) }
 
     // MARK: - Integrity (forwarded)
@@ -80,23 +86,30 @@ final class LibraryViewModel {
     func isMissing(_ book: Book) -> Bool { health.isMissing(book) }
     @discardableResult
     func scanForMissingFiles() async -> Int { await health.scanForMissingFiles() }
-    func relink(_ book: Book, from url: URL) { health.relink(book, from: url) }
+    func relink(_ book: Book, from url: URL) async { await health.relink(book, from: url) }
 
     func remove(_ book: Book) {
         forget(book)
         modelContext.saveQuietly()
+        editions.refreshEditionCounts()
     }
 
     func removeBooks(_ books: [Book]) {
         for book in books { forget(book) }
         modelContext.saveQuietly()
+        editions.refreshEditionCounts()
     }
 
     private func forget(_ book: Book) {
-        BookFileStore.delete(fileName: book.fileName)
+        let work = book.work
+        let assetNames = book.assets.isEmpty ? [book.fileName] : book.assets.map(\.fileName)
+        for fileName in Set(assetNames) { BookFileStore.delete(fileName: fileName) }
         CoverStore.delete(for: book.uuid)
         importer.cancelPending(book.uuid)
+        editions.removeProposals(referencing: book.uuid)
+        book.work = nil
         modelContext.delete(book)
+        WorkService.pruneIfOrphaned(work, context: modelContext, save: false)
     }
 
     // MARK: - Metadata (forwarded)
@@ -104,12 +117,12 @@ final class LibraryViewModel {
     func updateMetadata(
         for book: Book,
         title: String?, author: String?, publisher: String?, year: String?,
-        series: String?, seriesIndex: String?, language: String?, isbn: String?,
+        series: String?, seriesIndex: String?, language: String?, translator: String?, isbn: String?,
         description: String?, tags: [String]
     ) {
         metadata.updateMetadata(
             for: book, title: title, author: author, publisher: publisher, year: year,
-            series: series, seriesIndex: seriesIndex, language: language, isbn: isbn,
+            series: series, seriesIndex: seriesIndex, language: language, translator: translator, isbn: isbn,
             description: description, tags: tags
         )
     }
@@ -146,6 +159,198 @@ final class LibraryViewModel {
     func backfillMissingSizes() { importer.backfillMissingSizes() }
     func rescanMissingMetadata() { importer.rescanMissingMetadata() }
     func detectMissingDRM() { importer.detectMissingDRM() }
+    func backfillMissingAssetHashes() async {
+        await BookAssetMaintenance.backfillMissingHashes(context: modelContext)
+    }
+
+    func adoptConversionArtifact(for bookUUID: UUID, from url: URL) async {
+        let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == bookUUID })
+        guard let book = try? modelContext.fetch(descriptor).first else { return }
+        let format = url.pathExtension.lowercased()
+        let primary = book.assets.first { $0.fileName == book.fileName }
+        let primaryFileName = book.fileName
+        let primaryDateAdded = primary?.dateAdded
+        let primaryURL = book.fileURL
+        let sourceHash: String?
+        if let contentHash = primary?.contentHash {
+            sourceHash = contentHash
+        } else {
+            sourceHash = await Task.detached(priority: .utility) {
+                try? ContentHasher.sha256(of: primaryURL)
+            }.value
+        }
+        guard book.modelContext != nil, book.fileName == primaryFileName,
+              primary?.dateAdded == primaryDateAdded else { return }
+        let artifactHash = await Task.detached(priority: .utility) {
+            try? ContentHasher.sha256(of: url)
+        }.value
+        guard book.modelContext != nil, book.fileName == primaryFileName,
+              primary?.dateAdded == primaryDateAdded else { return }
+        let existing = book.assets.first {
+            $0.origin == .generated && $0.format.lowercased() == format
+        }
+        let assetUUID = existing?.uuid ?? UUID()
+        guard let fileName = try? BookFileStore.importCopy(of: url, uuid: assetUUID) else { return }
+        let size = BookFileStore.size(of: fileName)
+        if primary?.contentHash == nil { primary?.contentHash = sourceHash }
+        if let existing {
+            existing.fileName = fileName
+            existing.sizeBytes = size
+            existing.contentHash = artifactHash
+            existing.generatedFromContentHash = sourceHash
+            existing.validationStatus = .ok
+            existing.dateAdded = Date()
+        } else {
+            let asset = BookAsset(
+                uuid: assetUUID,
+                fileName: fileName,
+                origin: .generated,
+                contentHash: artifactHash,
+                generatedFromContentHash: sourceHash,
+                sizeBytes: size,
+                validationStatus: .ok,
+                book: book
+            )
+            modelContext.insert(asset)
+        }
+        modelContext.saveQuietly()
+    }
+
+    @discardableResult
+    func addFile(to book: Book, from url: URL, origin: AssetOrigin = .imported) async -> BookAsset? {
+        let uuid = UUID()
+        guard let fileName = try? BookFileStore.importCopy(of: url, uuid: uuid) else { return nil }
+        let managedURL = BookFileStore.url(for: fileName)
+        let contentHash = await Task.detached(priority: .utility) {
+            try? ContentHasher.sha256(of: managedURL)
+        }.value
+        guard book.modelContext != nil else {
+            BookFileStore.delete(fileName: fileName)
+            return nil
+        }
+        if let contentHash,
+           let existing = book.assets.first(where: { $0.contentHash == contentHash }) {
+            BookFileStore.delete(fileName: fileName)
+            return existing
+        }
+        let asset = BookAsset(
+            uuid: uuid,
+            fileName: fileName,
+            origin: origin,
+            contentHash: contentHash,
+            sizeBytes: BookFileStore.size(of: fileName),
+            validationStatus: .ok,
+            book: book
+        )
+        modelContext.insert(asset)
+        do {
+            try modelContext.save()
+            LibraryMutationLog.shared.bump()
+            return asset
+        } catch {
+            modelContext.rollback()
+            BookFileStore.delete(fileName: fileName)
+            return nil
+        }
+    }
+
+    func replace(_ asset: BookAsset, in book: Book, from url: URL) async {
+        guard asset.modelContext != nil, book.modelContext != nil,
+              asset.book?.uuid == book.uuid else { return }
+        let oldName = asset.fileName
+        let wasPrimary = book.fileName == oldName
+        guard let fileName = try? BookFileStore.importCopy(of: url, uuid: asset.uuid) else { return }
+        let replacementDate = Date()
+        if fileName != oldName { BookFileStore.delete(fileName: oldName) }
+        asset.fileName = fileName
+        asset.sizeBytes = BookFileStore.size(of: fileName)
+        asset.contentHash = nil
+        asset.generatedFromContentHash = nil
+        asset.origin = .imported
+        asset.validationStatus = .ok
+        asset.dateAdded = replacementDate
+        if wasPrimary {
+            book.fileName = fileName
+            book.fileSizeBytes = asset.sizeBytes
+            book.drmProtected = nil
+            book.coverVersion += 1
+        }
+        modelContext.saveQuietly()
+
+        let managedURL = BookFileStore.url(for: fileName)
+        let analysis = await Task.detached(priority: .utility) {
+            (
+                try? ContentHasher.sha256(of: managedURL),
+                DRMDetector.isProtected(url: managedURL)
+            )
+        }.value
+        guard asset.modelContext != nil, book.modelContext != nil,
+              asset.book?.uuid == book.uuid,
+              asset.fileName == fileName,
+              asset.dateAdded == replacementDate else { return }
+        asset.contentHash = analysis.0
+        if wasPrimary, book.fileName == fileName {
+            book.drmProtected = analysis.1
+        }
+        modelContext.saveQuietly()
+    }
+
+    func makePrimary(_ asset: BookAsset, for book: Book) async {
+        guard asset.book?.uuid == book.uuid,
+              asset.validationStatus != .missing,
+              asset.validationStatus != .corrupt else { return }
+        let assetURL = asset.fileURL
+        let assetFileName = asset.fileName
+        let assetDateAdded = asset.dateAdded
+        let analysis = await Task.detached(priority: .utility) {
+            (
+                DRMDetector.isProtected(url: assetURL),
+                BookFileStore.size(of: assetFileName)
+            )
+        }.value
+        guard asset.modelContext != nil, book.modelContext != nil,
+              asset.book?.uuid == book.uuid,
+              asset.fileName == assetFileName,
+              asset.dateAdded == assetDateAdded,
+              asset.validationStatus != .missing,
+              asset.validationStatus != .corrupt else { return }
+        if asset.sizeBytes == 0, analysis.1 > 0 { asset.sizeBytes = analysis.1 }
+        book.fileName = assetFileName
+        book.fileSizeBytes = asset.sizeBytes
+        book.drmProtected = analysis.0
+        book.coverVersion += 1
+        modelContext.saveQuietly()
+    }
+
+    @discardableResult
+    func removeFile(_ asset: BookAsset, from book: Book) -> Bool {
+        guard asset.book?.uuid == book.uuid, book.assets.count > 1, asset.fileName != book.fileName else { return false }
+        let fileName = asset.fileName
+        modelContext.delete(asset)
+        do {
+            try modelContext.save()
+            LibraryMutationLog.shared.bump()
+            BookFileStore.delete(fileName: fileName)
+            return true
+        } catch {
+            modelContext.rollback()
+            return false
+        }
+    }
+
+    func validate(_ asset: BookAsset) async {
+        let url = asset.fileURL
+        let fileName = asset.fileName
+        let dateAdded = asset.dateAdded
+        let status = await Task.detached(priority: .utility) {
+            BookAssetValidator.validate(url: url)
+        }.value
+        guard asset.modelContext != nil,
+              asset.fileName == fileName,
+              asset.dateAdded == dateAdded else { return }
+        asset.validationStatus = status
+        modelContext.saveQuietly()
+    }
 
     // MARK: - Reading status
 

@@ -1,0 +1,306 @@
+import Foundation
+import SwiftData
+import Testing
+@testable import Winston
+
+@Suite("Multi-file backend", .serialized)
+@MainActor
+struct MultiFileBackendTests {
+    private func waitForConversion(_ service: ConversionService, book: Book) async {
+        let deadline = Date.now.addingTimeInterval(4)
+        while service.convertingUUIDs.contains(book.uuid), Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    @Test func nativeConversionCreatesAndReusesGeneratedSibling() async throws {
+        let library = try await TestLibrary()
+        let source = try EPUBFixture.make(title: "Sibling", author: "A")
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        let uuid = UUID()
+        let fileName = try BookFileStore.importCopy(of: source, uuid: uuid)
+        let originalBytes = try Data(contentsOf: BookFileStore.url(for: fileName))
+        let book = Book(uuid: uuid, fileName: fileName, originalFileName: "Sibling.epub")
+        let work = Work(title: "Sibling", author: "A")
+        let primary = BookAsset(uuid: uuid, fileName: fileName, sizeBytes: Int64(originalBytes.count), book: book)
+        library.context.insert(work)
+        library.context.insert(book)
+        library.context.insert(primary)
+        book.work = work
+        try library.context.save()
+
+        let service = ConversionService(modelContext: library.context, toasts: ToastCenter())
+        service.convert(book, to: .mobi)
+        await waitForConversion(service, book: book)
+
+        let generated = try #require(book.assets.first(where: { $0.origin == .generated }))
+        #expect(generated.format == "MOBI")
+        #expect(FileManager.default.fileExists(atPath: generated.fileURL.path(percentEncoded: false)))
+        #expect(try Data(contentsOf: book.fileURL) == originalBytes)
+        #expect(book.fileName == fileName)
+        #expect(primary.contentHash != nil)
+        #expect(generated.generatedFromContentHash == primary.contentHash)
+
+        let generatedUUID = generated.uuid
+        service.convert(book, to: .mobi)
+        await waitForConversion(service, book: book)
+        #expect(book.assets.filter { $0.origin == .generated && $0.format == "MOBI" }.count == 1)
+        #expect(book.assets.first(where: { $0.origin == .generated })?.uuid == generatedUUID)
+    }
+
+    @Test func missingFileScanUpdatesEveryAssetStatus() async throws {
+        let library = try await TestLibrary()
+        let existingSource = library.root.appending(path: "existing.epub")
+        try Data("book".utf8).write(to: existingSource)
+        let book = Book(fileName: "primary.epub", originalFileName: "Primary.epub")
+        try library.installBookFile(from: existingSource, fileName: book.fileName)
+        let primary = BookAsset(uuid: book.uuid, fileName: book.fileName, book: book)
+        let missing = BookAsset(fileName: "missing.mobi", origin: .generated, book: book)
+        library.context.insert(book)
+        library.context.insert(primary)
+        library.context.insert(missing)
+        try library.context.save()
+
+        let health = LibraryHealthService(modelContext: library.context)
+        #expect(await health.scanForMissingFiles() == 0)
+        #expect(primary.validationStatus == .ok)
+        #expect(missing.validationStatus == .missing)
+    }
+
+    @Test func missingFileScanPreservesCorruptVerdict() async throws {
+        let library = try await TestLibrary()
+        let existingSource = library.root.appending(path: "existing.epub")
+        try Data("book".utf8).write(to: existingSource)
+        let book = Book(fileName: "primary.epub", originalFileName: "Primary.epub")
+        try library.installBookFile(from: existingSource, fileName: book.fileName)
+        let corrupt = BookAsset(uuid: book.uuid, fileName: book.fileName, validationStatus: .corrupt, book: book)
+        library.context.insert(book)
+        library.context.insert(corrupt)
+        try library.context.save()
+
+        let health = LibraryHealthService(modelContext: library.context)
+        _ = await health.scanForMissingFiles()
+        #expect(corrupt.validationStatus == .corrupt)
+    }
+
+    @Test func relinkAfterMakePrimaryUpdatesTheCurrentPrimaryAsset() async throws {
+        let library = try await TestLibrary()
+        let epubSource = library.root.appending(path: "a.epub")
+        let mobiSource = library.root.appending(path: "a.mobi")
+        let replacement = library.root.appending(path: "replacement.azw3")
+        try Data("epub-bytes".utf8).write(to: epubSource)
+        try Data("mobi-bytes".utf8).write(to: mobiSource)
+        try Data("azw3-bytes".utf8).write(to: replacement)
+
+        let bookUUID = UUID()
+        let mobiUUID = UUID()
+        let epubName = try BookFileStore.importCopy(of: epubSource, uuid: bookUUID)
+        let mobiName = try BookFileStore.importCopy(of: mobiSource, uuid: mobiUUID)
+        let book = Book(uuid: bookUUID, fileName: epubName, originalFileName: "A.epub")
+        let epubAsset = BookAsset(uuid: bookUUID, fileName: epubName, book: book)
+        let mobiAsset = BookAsset(uuid: mobiUUID, fileName: mobiName, origin: .imported, book: book)
+        library.context.insert(book)
+        library.context.insert(epubAsset)
+        library.context.insert(mobiAsset)
+        book.fileName = mobiName
+        try library.context.save()
+
+        let health = LibraryHealthService(modelContext: library.context)
+        await health.relink(book, from: replacement)
+
+        #expect(mobiAsset.fileName == "\(mobiUUID.uuidString).azw3")
+        #expect(book.fileName == mobiAsset.fileName)
+        #expect(epubAsset.fileName == epubName)
+        #expect(FileManager.default.fileExists(atPath: BookFileStore.url(for: epubName).path(percentEncoded: false)))
+        #expect(!FileManager.default.fileExists(atPath: BookFileStore.url(for: mobiName).path(percentEncoded: false)))
+    }
+
+    @Test func sameBytesWithDifferentNamesCreatesDuplicateProposal() async throws {
+        let library = try await TestLibrary()
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let source = try EPUBFixture.make(title: "Duplicate", author: "A")
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        let second = source.deletingLastPathComponent().appending(path: "same-content.epub")
+        try Data(contentsOf: source).write(to: second)
+        let metadata = MetadataService(modelContext: library.context, settings: settings)
+        let wishlist = WishlistService(modelContext: library.context, toasts: ToastCenter())
+        let editions = EditionService(modelContext: library.context)
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: metadata,
+            wishlist: wishlist,
+            toasts: ToastCenter(),
+            editions: editions
+        )
+
+        importer.addBooks(from: [source, second])
+        let deadline = Date.now.addingTimeInterval(4)
+        while (library.context.allBooks().count < 2 || importer.isExtracting), Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(library.context.allBooks().count == 2)
+        let hasDuplicate = editions.pendingProposals.contains(where: {
+            $0.verdict == .duplicateFile && $0.confidence == .high
+        })
+        #expect(hasDuplicate)
+    }
+
+    @Test func validatorDistinguishesMissingCorruptAndValidAssets() async throws {
+        let library = try await TestLibrary()
+        let invalidEPUB = library.root.appending(path: "invalid.epub")
+        let invalidMOBI = library.root.appending(path: "invalid.mobi")
+        let validEPUB = try EPUBFixture.make(title: "Valid", author: "A")
+        defer { try? FileManager.default.removeItem(at: validEPUB.deletingLastPathComponent()) }
+        try Data("not an archive".utf8).write(to: invalidEPUB)
+        try Data(repeating: 0, count: 80).write(to: invalidMOBI)
+
+        #expect(BookAssetValidator.validate(url: library.root.appending(path: "missing.epub")) == .missing)
+        #expect(BookAssetValidator.validate(url: invalidEPUB) == .corrupt)
+        #expect(BookAssetValidator.validate(url: invalidMOBI) == .corrupt)
+        #expect(BookAssetValidator.validate(url: validEPUB) == .ok)
+    }
+
+    @Test func awaitedHashBackfillFeedsTheFirstEditionScan() async throws {
+        let library = try await TestLibrary()
+        let bytes = Data("same bytes, unrelated metadata".utf8)
+        let source = library.root.appending(path: "shared.epub")
+        try bytes.write(to: source)
+        var books: [Book] = []
+        for (index, title) in ["Alpha", "Beta"].enumerated() {
+            let book = Book(fileName: "hash-\(index).epub", originalFileName: "\(title).epub")
+            book.title = title
+            book.author = "Author \(index)"
+            let work = Work(title: title, author: book.author)
+            let asset = BookAsset(uuid: book.uuid, fileName: book.fileName, book: book)
+            try library.installBookFile(from: source, fileName: book.fileName)
+            library.context.insert(work)
+            library.context.insert(book)
+            library.context.insert(asset)
+            book.work = work
+            books.append(book)
+        }
+        try library.context.save()
+        let editions = EditionService(modelContext: library.context)
+
+        await editions.scanLibrary()
+        #expect(editions.pendingProposals.isEmpty)
+        #expect(await BookAssetMaintenance.backfillMissingHashes(context: library.context) == 2)
+        await editions.scanLibrary()
+
+        #expect(editions.pendingProposals.contains(where: { $0.verdict == .duplicateFile }))
+        #expect(books.allSatisfy { $0.assets.first?.contentHash != nil })
+    }
+
+    @Test func targetedImportAllowsSameBasenameButSkipsIdenticalContent() async throws {
+        let library = try await TestLibrary()
+        let first = try EPUBFixture.make(title: "First Edition", author: "A")
+        let second = try EPUBFixture.make(title: "Second Edition", author: "B")
+        defer {
+            try? FileManager.default.removeItem(at: first.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: second.deletingLastPathComponent())
+        }
+        #expect(first.lastPathComponent == second.lastPathComponent)
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let metadata = MetadataService(modelContext: library.context, settings: settings)
+        let wishlist = WishlistService(modelContext: library.context, toasts: ToastCenter())
+        let editions = EditionService(modelContext: library.context)
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: metadata,
+            wishlist: wishlist,
+            toasts: ToastCenter(),
+            editions: editions
+        )
+        let work = Work(title: "Collected Work")
+        library.context.insert(work)
+        try library.context.save()
+
+        importer.addBooks(from: [first, second, first], assigningTo: work)
+        let deadline = Date.now.addingTimeInterval(4)
+        while (work.editions.count < 2 || importer.isExtracting), Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(work.editions.count == 2)
+        #expect(Set(work.editions.map(\.originalFileName)) == ["book.epub"])
+        #expect(Set(work.editions.map { $0.assets.first?.contentHash }).count == 2)
+    }
+
+    @Test func switchingPrimaryRefreshesBookDRMState() async throws {
+        let library = try await TestLibrary()
+        let lockedName = "locked.epub"
+        let plainName = "plain.mobi"
+        let plainSource = library.root.appending(path: plainName)
+        try Data("plain sibling".utf8).write(to: plainSource)
+        let book = Book(fileName: lockedName, originalFileName: "Book.epub")
+        book.drmProtected = true
+        let primary = BookAsset(uuid: book.uuid, fileName: lockedName, book: book)
+        let sibling = BookAsset(fileName: plainName, origin: .imported, sizeBytes: 13, book: book)
+        try library.installBookFile(from: plainSource, fileName: plainName)
+        library.context.insert(book)
+        library.context.insert(primary)
+        library.context.insert(sibling)
+        try library.context.save()
+        let viewModel = LibraryViewModel(
+            modelContext: library.context, settings: AppSettings(), toasts: ToastCenter()
+        )
+
+        await viewModel.makePrimary(sibling, for: book)
+
+        #expect(book.fileName == plainName)
+        #expect(book.drmProtected == false)
+    }
+
+    @Test func hashBackfillDiscardsAResultForAReplacedAsset() async throws {
+        let library = try await TestLibrary()
+        let book = Book(fileName: "race.epub", originalFileName: "Race.epub")
+        let asset = BookAsset(uuid: book.uuid, fileName: book.fileName, book: book)
+        library.context.insert(book)
+        library.context.insert(asset)
+        try library.context.save()
+        let gate = AssetHashGate()
+        let task = Task { @MainActor in
+            await BookAssetMaintenance.backfillMissingHashes(
+                context: library.context,
+                hashFile: { url in await gate.hash(url) }
+            )
+        }
+        await gate.waitUntilStarted()
+
+        asset.dateAdded = asset.dateAdded.addingTimeInterval(1)
+        await gate.resume()
+
+        #expect(await task.value == 0)
+        #expect(asset.contentHash == nil)
+    }
+}
+
+private actor AssetHashGate {
+    private var continuation: CheckedContinuation<String?, Never>?
+    private var started = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func hash(_ url: URL) async -> String? {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            started = true
+            waiters.forEach { $0.resume() }
+            waiters.removeAll()
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func resume() {
+        continuation?.resume(returning: "hash-from-old-file")
+        continuation = nil
+    }
+}

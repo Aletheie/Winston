@@ -47,28 +47,93 @@ final class LibraryHealthService {
 
     @discardableResult
     func scanForMissingFiles() async -> Int {
-        let entries: [(uuid: UUID, fileName: String)] = modelContext.allBooks().map { ($0.uuid, $0.fileName) }
-        let missing = await Task.detached(priority: .utility) {
-            var found: Set<UUID> = []
-            for entry in entries {
+        let books = modelContext.allBooks()
+        let primaryEntries = books.map { (uuid: $0.uuid, fileName: $0.fileName) }
+        let assets = books.flatMap(\.assets)
+        let assetEntries = assets.map { (uuid: $0.uuid, fileName: $0.fileName) }
+        let result = await Task.detached(priority: .utility) {
+            var missingBooks: Set<UUID> = []
+            var assetStatus: [UUID: AssetValidation] = [:]
+            for entry in primaryEntries {
                 let path = BookFileStore.url(for: entry.fileName).path(percentEncoded: false)
-                if !FileManager.default.fileExists(atPath: path) { found.insert(entry.uuid) }
+                if !FileManager.default.fileExists(atPath: path) { missingBooks.insert(entry.uuid) }
             }
-            return found
+            for entry in assetEntries {
+                let path = BookFileStore.url(for: entry.fileName).path(percentEncoded: false)
+                assetStatus[entry.uuid] = FileManager.default.fileExists(atPath: path) ? .ok : .missing
+            }
+            return (missingBooks, assetStatus)
         }.value
-        missingFileUUIDs = missing
-        return missing.count
+        missingFileUUIDs = result.0
+        var changed = false
+        for asset in assets {
+            guard let status = result.1[asset.uuid] else { continue }
+            if status == .missing {
+                if asset.validationStatus != .missing {
+                    asset.validationStatus = .missing
+                    changed = true
+                }
+            } else if asset.validationStatus == nil || asset.validationStatus == .missing {
+                asset.validationStatus = .ok
+                changed = true
+            }
+        }
+        if changed { modelContext.saveQuietly() }
+        return result.0.count
     }
 
-    func relink(_ book: Book, from url: URL) {
-        guard let fileName = try? BookFileStore.importCopy(of: url, uuid: book.uuid) else { return }
-        if fileName != book.fileName {
-            BookFileStore.delete(fileName: book.fileName)
-            book.fileName = fileName
-        }
+    func relink(_ book: Book, from url: URL) async {
+        guard book.modelContext != nil else { return }
+        let oldFileName = book.fileName
+        let asset = book.assets.first { $0.fileName == oldFileName }
+            ?? book.assets.first { $0.uuid == book.uuid }
+        guard let fileName = try? BookFileStore.importCopy(of: url, uuid: asset?.uuid ?? book.uuid) else { return }
+        let replacementDate = Date()
+        if fileName != oldFileName { BookFileStore.delete(fileName: oldFileName) }
+        book.fileName = fileName
         book.fileSizeBytes = BookFileStore.size(of: fileName)
+        book.drmProtected = nil
         book.coverVersion += 1
         missingFileUUIDs.remove(book.uuid)
+
+        let updatedAsset: BookAsset
+        if let asset {
+            asset.fileName = fileName
+            asset.sizeBytes = book.fileSizeBytes
+            asset.contentHash = nil
+            asset.generatedFromContentHash = nil
+            asset.origin = .imported
+            asset.validationStatus = .ok
+            asset.dateAdded = replacementDate
+            updatedAsset = asset
+        } else {
+            let asset = BookAsset(
+                uuid: book.uuid,
+                fileName: fileName,
+                origin: .original,
+                sizeBytes: book.fileSizeBytes,
+                dateAdded: replacementDate,
+                validationStatus: .ok,
+                book: book
+            )
+            modelContext.insert(asset)
+            updatedAsset = asset
+        }
+        modelContext.saveQuietly()
+
+        let managedURL = BookFileStore.url(for: fileName)
+        let analysis = await Task.detached(priority: .utility) {
+            (
+                try? ContentHasher.sha256(of: managedURL),
+                DRMDetector.isProtected(url: managedURL)
+            )
+        }.value
+        guard book.modelContext != nil,
+              updatedAsset.modelContext != nil,
+              updatedAsset.fileName == fileName,
+              updatedAsset.dateAdded == replacementDate else { return }
+        updatedAsset.contentHash = analysis.0
+        if book.fileName == fileName { book.drmProtected = analysis.1 }
         modelContext.saveQuietly()
     }
 
@@ -101,22 +166,39 @@ final class LibraryHealthService {
 
     func duplicateGroups() async -> [DuplicateGroup] {
         let books = modelContext.allBooks()
-        let candidates = books.map {
+        let candidates = books.map { book in
+            let retainedAssets = book.assets.filter {
+                $0.validationStatus != .missing && $0.validationStatus != .corrupt
+            }
+            let bestRetainedFormat = retainedAssets
+                .map { $0.format.lowercased() }
+                .max { Self.kindleFormatScore($0) < Self.kindleFormatScore($1) }
+            let retainedBytes: Int64
+            if book.assets.isEmpty {
+                retainedBytes = book.fileSizeBytes
+            } else {
+                retainedBytes = retainedAssets.reduce(0) { total, asset in
+                    if asset.sizeBytes > 0 { return total + asset.sizeBytes }
+                    return total + (asset.fileName == book.fileName ? book.fileSizeBytes : 0)
+                }
+            }
             let quality = DuplicateQualityCandidate(
-                uuid: $0.uuid,
-                format: $0.format.lowercased(),
-                fileSizeBytes: $0.fileSizeBytes,
-                metadataRichness: Self.metadataRichness(of: $0),
-                drmProtected: $0.drmProtected == true,
-                isMissing: missingFileUUIDs.contains($0.uuid),
-                dateAdded: $0.dateAdded
+                uuid: book.uuid,
+                format: bestRetainedFormat ?? book.format.lowercased(),
+                fileSizeBytes: retainedBytes,
+                metadataRichness: Self.metadataRichness(of: book),
+                drmProtected: book.drmProtected == true,
+                isMissing: book.assets.isEmpty
+                    ? missingFileUUIDs.contains(book.uuid)
+                    : retainedAssets.isEmpty,
+                dateAdded: book.dateAdded
             )
             return DupeCandidate(
-                uuid: $0.uuid,
-                storedTitle: $0.title,
-                originalFileName: $0.originalFileName,
-                author: $0.displayAuthor,
-                fileSizeBytes: $0.fileSizeBytes,
+                uuid: book.uuid,
+                storedTitle: book.title,
+                originalFileName: book.originalFileName,
+                author: book.displayAuthor,
+                fileSizeBytes: book.fileSizeBytes,
                 quality: quality
             )
         }

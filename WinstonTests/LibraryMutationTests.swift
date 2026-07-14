@@ -60,6 +60,36 @@ struct LibraryMutationTests {
         #expect(Set(groups.first?.books.map(\.uuid) ?? []) == [a.uuid, b.uuid])
     }
 
+    @Test func removingEditionDeletesEveryAssetAndPrunesItsWork() async throws {
+        let lib = try await TestLibrary()
+        let source = lib.root.appending(path: "source.epub")
+        try Data("edition".utf8).write(to: source)
+        let book = Book(fileName: "primary.epub", originalFileName: "Edition.epub")
+        let work = Work(title: "Work")
+        let primary = BookAsset(uuid: book.uuid, fileName: book.fileName, book: book)
+        let sibling = BookAsset(fileName: "sibling.mobi", origin: .generated, book: book)
+        try lib.installBookFile(from: source, fileName: primary.fileName)
+        try lib.installBookFile(from: source, fileName: sibling.fileName)
+        lib.context.insert(work)
+        lib.context.insert(book)
+        lib.context.insert(primary)
+        lib.context.insert(sibling)
+        book.work = work
+        try lib.context.save()
+
+        let viewModel = LibraryViewModel(
+            modelContext: lib.context,
+            settings: AppSettings(),
+            toasts: ToastCenter()
+        )
+        viewModel.remove(book)
+
+        #expect(!FileManager.default.fileExists(atPath: primary.fileURL.path(percentEncoded: false)))
+        #expect(!FileManager.default.fileExists(atPath: sibling.fileURL.path(percentEncoded: false)))
+        #expect(try lib.context.fetch(FetchDescriptor<Book>()).isEmpty)
+        #expect(try lib.context.fetch(FetchDescriptor<Work>()).isEmpty)
+    }
+
     @Test func duplicateRecommendationBalancesFormatMetadataAndSize() throws {
         let date = Date(timeIntervalSince1970: 1_000)
         func candidate(_ format: String, metadata: Int, size: Int64) -> LibraryHealthService.DuplicateQualityCandidate {
@@ -108,5 +138,37 @@ struct LibraryMutationTests {
         #expect(result.bookUUID == safe.uuid)
         #expect(result.reasons.contains(.availableFile))
         #expect(result.reasons.contains(.drmFree))
+    }
+
+    @Test func duplicateRecommendationRanksAllRetainedSiblingAssets() async throws {
+        let lib = try await TestLibrary()
+        let richer = Book(fileName: "rich.epub", originalFileName: "Dune.epub")
+        richer.title = "Dune"
+        richer.author = "Frank Herbert"
+        richer.fileSizeBytes = 100
+        let richPrimary = BookAsset(
+            uuid: richer.uuid, fileName: richer.fileName, sizeBytes: 100,
+            validationStatus: .ok, book: richer
+        )
+        let azw3 = BookAsset(
+            fileName: "rich.azw3", origin: .imported, sizeBytes: 200,
+            validationStatus: .ok, book: richer
+        )
+        let mobiOnly = Book(fileName: "plain.mobi", originalFileName: "Dune.mobi")
+        mobiOnly.title = "Dune"
+        mobiOnly.author = "Frank Herbert"
+        mobiOnly.fileSizeBytes = 100
+        let mobi = BookAsset(
+            uuid: mobiOnly.uuid, fileName: mobiOnly.fileName, sizeBytes: 100,
+            validationStatus: .ok, book: mobiOnly
+        )
+        for model in [richer, mobiOnly] { lib.context.insert(model) }
+        for asset in [richPrimary, azw3, mobi] { lib.context.insert(asset) }
+        try lib.context.save()
+
+        let groups = await LibraryHealthService(modelContext: lib.context).duplicateGroups()
+
+        #expect(groups.first?.recommendation.bookUUID == richer.uuid)
+        #expect(groups.first?.recommendation.reasons.contains(.preferredKindleFormat("AZW3")) == true)
     }
 }
