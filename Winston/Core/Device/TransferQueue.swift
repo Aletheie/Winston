@@ -14,6 +14,15 @@ final class TransferQueue {
         let drmProtected: Bool
     }
 
+    private struct AssetOption {
+        let fileName: String
+        let format: String
+        let validation: AssetValidation?
+        let origin: AssetOrigin
+        let generatedFromContentHash: String?
+        let contentHash: String?
+    }
+
     enum Direction: Sendable, Equatable {
         case toDevice
         case fromDevice
@@ -41,11 +50,16 @@ final class TransferQueue {
     private(set) var lastError: String?
 
     private let toasts: ToastCenter
+    private let onConversionArtifact: (@MainActor @Sendable (UUID, URL) async -> Void)?
     private var sendTask: Task<Void, Never>?
     private var clearTask: Task<Void, Never>?
 
-    init(toasts: ToastCenter) {
+    init(
+        toasts: ToastCenter,
+        onConversionArtifact: (@MainActor @Sendable (UUID, URL) async -> Void)? = nil
+    ) {
         self.toasts = toasts
+        self.onConversionArtifact = onConversionArtifact
     }
 
     func beginSend(books: [Book], via monitor: DeviceMonitor) {
@@ -57,6 +71,11 @@ final class TransferQueue {
         sendTask = Task { [weak self] in
             await self?.performSend(requests: requests, via: monitor)
         }
+    }
+
+    func beginSend(asset: BookAsset, for book: Book, via monitor: DeviceMonitor) {
+        guard !isTransferring else { return }
+        beginSend(requests: [Self.makeRequest(for: asset, book: book)], via: monitor)
     }
 
     func cancel() {
@@ -89,6 +108,15 @@ final class TransferQueue {
         clearTask = nil
         isTransferring = true
         await performSend(requests: requests, via: monitor)
+    }
+
+    func send(asset: BookAsset, for book: Book, via monitor: DeviceMonitor) async {
+        guard !isTransferring else { return }
+        let request = Self.makeRequest(for: asset, book: book)
+        clearTask?.cancel()
+        clearTask = nil
+        isTransferring = true
+        await performSend(requests: [request], via: monitor)
     }
 
     private func performSend(requests: [SendRequest], via monitor: DeviceMonitor) async {
@@ -163,6 +191,7 @@ final class TransferQueue {
             do {
                 sourceURL = try await EbookConverter.convertForKindle(sourceURL)
                 temporaryConversion = sourceURL
+                await onConversionArtifact?(request.uuid, sourceURL)
             } catch {
                 Log.device.error("Convert-for-Kindle failed for \(request.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 lastError = error.localizedDescription
@@ -212,14 +241,104 @@ final class TransferQueue {
     }
 
     private static func makeRequest(for book: Book) -> SendRequest {
-        SendRequest(
+        let options: [AssetOption]
+        if book.assets.isEmpty {
+            options = [AssetOption(
+                fileName: book.fileName,
+                format: book.format,
+                validation: nil,
+                origin: .original,
+                generatedFromContentHash: nil,
+                contentHash: nil
+            )]
+        } else {
+            options = book.assets.map {
+                AssetOption(
+                    fileName: $0.fileName,
+                    format: $0.format,
+                    validation: $0.validationStatus,
+                    origin: $0.origin,
+                    generatedFromContentHash: $0.generatedFromContentHash,
+                    contentHash: $0.contentHash
+                )
+            }
+        }
+        let primarySourceHash = options.first(where: { $0.fileName == book.fileName })?.contentHash
+        let usable = options.filter {
+            guard $0.validation != .missing, $0.validation != .corrupt else { return false }
+            guard $0.fileName != book.fileName, $0.origin == .generated else { return true }
+            guard let primarySourceHash else { return false }
+            return $0.generatedFromContentHash == primarySourceHash
+        }
+        let primary = usable.first(where: { $0.fileName == book.fileName })
+        let chosen: AssetOption
+        if let primary, !EbookConverter.needsConversion(format: primary.format) {
+            chosen = primary
+        } else if let ready = usable.filter({ !EbookConverter.needsConversion(format: $0.format) })
+            .sorted(by: assetPrecedes).first {
+            chosen = ready
+        } else {
+            chosen = primary ?? usable.first ?? AssetOption(
+                fileName: book.fileName,
+                format: book.format,
+                validation: nil,
+                origin: .original,
+                generatedFromContentHash: nil,
+                contentHash: primarySourceHash
+            )
+        }
+        return SendRequest(
             uuid: book.uuid,
             displayName: book.displayTitle,
-            sourceURL: book.fileURL,
+            sourceURL: BookFileStore.url(for: chosen.fileName),
             originalFileName: book.originalFileName,
-            format: book.format,
+            format: chosen.format,
             drmProtected: book.drmProtected == true
         )
+    }
+
+    private static func makeRequest(for asset: BookAsset, book: Book) -> SendRequest {
+        if asset.validationStatus == .missing || asset.validationStatus == .corrupt {
+            return makeRequest(for: book)
+        }
+        if asset.fileName != book.fileName, asset.origin == .generated {
+            let primaryHash = book.assets.first(where: { $0.fileName == book.fileName })?.contentHash
+            guard let primaryHash, asset.generatedFromContentHash == primaryHash else {
+                return makeRequest(for: book)
+            }
+        }
+        return SendRequest(
+            uuid: book.uuid,
+            displayName: book.displayTitle,
+            sourceURL: asset.fileURL,
+            originalFileName: book.originalFileName,
+            format: asset.format,
+            drmProtected: book.drmProtected == true
+        )
+    }
+
+    private static func assetPreference(_ format: String) -> Int {
+        let preference = EbookConverter.prefersAZW3ForKindle
+            ? ["azw3", "mobi", "azw", "pdf", "txt"]
+            : ["mobi", "azw", "azw3", "pdf", "txt"]
+        guard let index = preference.firstIndex(of: format.lowercased()) else { return 0 }
+        return preference.count - index
+    }
+
+    private static func assetPrecedes(_ lhs: AssetOption, _ rhs: AssetOption) -> Bool {
+        let leftScore = assetPreference(lhs.format)
+        let rightScore = assetPreference(rhs.format)
+        if leftScore != rightScore { return leftScore > rightScore }
+        return lhs.fileName < rhs.fileName
+    }
+
+    private func beginSend(requests: [SendRequest], via monitor: DeviceMonitor) {
+        clearTask?.cancel()
+        clearTask = nil
+        isTransferring = true
+        sendTask = Task { [weak self] in
+            await self?.performSend(requests: requests, via: monitor)
+        }
     }
 
     func copyToLibrary(_ book: DeviceBook, via monitor: DeviceMonitor) async -> URL? {

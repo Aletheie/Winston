@@ -32,8 +32,14 @@ struct WinstonApp: App {
         let toastCenter = ToastCenter()
         _settings = State(initialValue: settings)
         _toastCenter = State(initialValue: toastCenter)
-        _viewModel = State(initialValue: LibraryViewModel(modelContext: context, settings: settings, toasts: toastCenter))
-        _transferQueue = State(initialValue: TransferQueue(toasts: toastCenter))
+        let viewModel = LibraryViewModel(modelContext: context, settings: settings, toasts: toastCenter)
+        _viewModel = State(initialValue: viewModel)
+        _transferQueue = State(initialValue: TransferQueue(
+            toasts: toastCenter,
+            onConversionArtifact: { bookUUID, url in
+                await viewModel.adoptConversionArtifact(for: bookUUID, from: url)
+            }
+        ))
         _updater = State(initialValue: SoftwareUpdater())
         _pluginService = State(initialValue: PluginService(modelContext: context, settings: settings, toasts: toastCenter))
         _discoveryViewModel = State(initialValue: DiscoveryViewModel(settings: settings))
