@@ -20,15 +20,27 @@ nonisolated struct LibraryStats: Sendable {
         let dateStarted: Date?
         let dateFinished: Date?
         let fileSizeBytes: Int64
+        let workUUID: UUID
     }
 
     @MainActor
     static func snapshot(of books: [Book]) -> [Input] {
-        books.map {
-            Input(title: $0.displayTitle, author: $0.displayAuthor, series: $0.series,
-                  format: $0.format, rating: $0.rating, status: $0.readingStatus,
-                  dateStarted: $0.dateStarted, dateFinished: $0.dateFinished,
-                  fileSizeBytes: $0.fileSizeBytes)
+        books.map { book in
+            let retainedBytes: Int64
+            if book.assets.isEmpty {
+                retainedBytes = book.fileSizeBytes
+            } else {
+                retainedBytes = book.assets
+                    .filter { $0.validationStatus != .missing }
+                    .reduce(0) { total, asset in
+                        if asset.sizeBytes > 0 { return total + asset.sizeBytes }
+                        return total + (asset.fileName == book.fileName ? book.fileSizeBytes : 0)
+                    }
+            }
+            return Input(title: book.displayTitle, author: book.displayAuthor, series: book.series,
+                         format: book.format, rating: book.rating, status: book.readingStatus,
+                         dateStarted: book.dateStarted, dateFinished: book.dateFinished,
+                         fileSizeBytes: retainedBytes, workUUID: book.work?.uuid ?? book.uuid)
         }
     }
 
@@ -38,6 +50,7 @@ nonisolated struct LibraryStats: Sendable {
     var readingCount = 0
     var uniqueAuthors = 0
     var uniqueSeries = 0
+    var uniqueWorks = 0
     var finishedThisYear = 0
     var monthly: [MonthEntry] = []
     var formatData: [(label: String, count: Int)] = []
@@ -59,6 +72,7 @@ nonisolated struct LibraryStats: Sendable {
         var ratings = [Int](repeating: 0, count: 6)
         var authors = Set<String>()
         var series = Set<String>()
+        var works = Set<UUID>()
         var totalBytes: Int64 = 0
         var finishDurations: [Double] = []
         var largest: Input?
@@ -69,6 +83,7 @@ nonisolated struct LibraryStats: Sendable {
             if let rating = book.rating, (1...5).contains(rating) { ratings[rating] += 1 }
             if let author = book.author { authors.insert(author) }
             if let s = book.series, !s.isEmpty { series.insert(s) }
+            works.insert(book.workUUID)
 
             switch book.status {
             case .finished: finishedCount += 1
@@ -98,6 +113,7 @@ nonisolated struct LibraryStats: Sendable {
         totalSizeDisplay = ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
         uniqueAuthors = authors.count
         uniqueSeries = series.count
+        uniqueWorks = works.count
 
         let symbols = calendar.shortMonthSymbols
         monthly = (0..<12).map {
@@ -306,6 +322,7 @@ private struct StatsSummaryGrid: View {
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
             StatTile(label: String(localized: "Books"), value: "\(stats.bookCount)")
+            StatTile(label: String(localized: "Works"), value: stats.uniqueWorks.formatted())
             StatTile(label: String(localized: "Total size"), value: stats.totalSizeDisplay)
             StatTile(label: String(localized: "Finished"), value: "\(stats.finishedCount)")
             StatTile(label: String(localized: "Reading"), value: "\(stats.readingCount)")

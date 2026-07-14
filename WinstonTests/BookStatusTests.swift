@@ -118,6 +118,30 @@ struct DuplicateKeyTests {
 
 @MainActor
 struct LibraryStatsTests {
+    @Test @MainActor func editionsInTheSameWorkCountOnce() {
+        let work = Work(title: "Dune")
+        let english = Book(fileName: "dune-en.epub", originalFileName: "Dune.epub")
+        let czech = Book(fileName: "dune-cs.epub", originalFileName: "Duna.epub")
+        english.work = work
+        czech.work = work
+
+        let stats = LibraryStats(books: [english, czech])
+
+        #expect(stats.bookCount == 2)
+        #expect(stats.uniqueWorks == 1)
+    }
+
+    @Test @MainActor func totalSizeIncludesEveryRetainedAsset() {
+        let book = Book(fileName: "primary.epub", originalFileName: "Book.epub")
+        book.fileSizeBytes = 100
+        let primary = BookAsset(uuid: book.uuid, fileName: book.fileName, sizeBytes: 100, book: book)
+        _ = BookAsset(fileName: "sibling.mobi", origin: .generated, sizeBytes: 250, book: book)
+
+        let input = LibraryStats.snapshot(of: [book])
+
+        #expect(input.first?.fileSizeBytes == 350)
+        #expect(primary.sizeBytes == 100)
+    }
 
     private func date(_ year: Int, _ month: Int, _ day: Int) -> Date {
         Calendar.current.date(from: DateComponents(year: year, month: month, day: day))!
@@ -145,6 +169,7 @@ struct LibraryStatsTests {
 
         #expect(stats.bookCount == 2)
         #expect(stats.readingCount == 1)
+        #expect(stats.uniqueWorks == 2)
         #expect(stats.finishedCount == 1)
         #expect(stats.finishedThisYear == 1)
         #expect(stats.uniqueAuthors == 2)
