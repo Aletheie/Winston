@@ -53,6 +53,31 @@ struct MetadataServiceTests {
         #expect(book.onlineLookupConfiguration != nil)
     }
 
+    @Test func enrichFillsWorkCatalogIdentifiersWithoutOverwriting() async throws {
+        let lib = try await TestLibrary()
+        let book = Book(fileName: "a.epub", originalFileName: "Book.epub")
+        let work = Work(title: "Book")
+        lib.context.insert(book)
+        lib.context.insert(work)
+        book.work = work
+        try lib.context.save()
+        var fetched = FetchedMetadata()
+        fetched.title = "Book"
+        fetched.openLibraryWorkKey = "/works/OL1W"
+        fetched.hardcoverBookID = "12345"
+        let service = makeService(in: lib, online: FakeOnlineClient(result: fetched))
+
+        #expect(await service.performEnrich(book, replaceCover: false))
+        #expect(work.openLibraryWorkKey == "/works/OL1W")
+        #expect(work.hardcoverBookID == "12345")
+
+        work.openLibraryWorkKey = "/works/KEEP"
+        fetched.openLibraryWorkKey = "/works/REPLACE"
+        _ = await makeService(in: lib, online: FakeOnlineClient(result: fetched))
+            .performEnrich(book, replaceCover: false)
+        #expect(work.openLibraryWorkKey == "/works/KEEP")
+    }
+
     @Test func offlineLookupLeavesBookUnmarkedForRetry() async throws {
         let lib = try await TestLibrary()
         let book = Book(fileName: "a.epub", originalFileName: "Obscure.epub")

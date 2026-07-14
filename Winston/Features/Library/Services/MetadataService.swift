@@ -231,6 +231,18 @@ final class MetadataService {
         }
 
         book.applyOnline(fetched)
+        if let work = book.work {
+            if work.openLibraryWorkKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+               let key = fetched.openLibraryWorkKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !key.isEmpty {
+                work.openLibraryWorkKey = key
+            }
+            if work.hardcoverBookID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+               let id = fetched.hardcoverBookID?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !id.isEmpty {
+                work.hardcoverBookID = id
+            }
+        }
         book.onlineLookupAt = .now
         book.onlineLookupConfiguration = configuration
         if downloadedCover != nil { book.coverVersion += 1 }

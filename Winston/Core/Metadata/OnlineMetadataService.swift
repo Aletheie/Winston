@@ -11,6 +11,8 @@ nonisolated struct FetchedMetadata: Sendable, Equatable {
     var ratingsAverage: Double?
     var ratingsCount: Int?
     var ratingsSource: String?
+    var openLibraryWorkKey: String?
+    var hardcoverBookID: String?
 }
 
 nonisolated enum MetadataLanguage: String, Sendable, Hashable { case english, czech }
@@ -34,6 +36,7 @@ private nonisolated struct NetworkResult<Value: Sendable>: Sendable {
 private nonisolated struct HardcoverRating: Sendable {
     var average: Double
     var count: Int?
+    var bookID: String?
 }
 
 actor OnlineMetadataService: OnlineMetadataFetching {
@@ -95,6 +98,7 @@ actor OnlineMetadataService: OnlineMetadataFetching {
                 result.ratingsAverage = rating.average
                 result.ratingsCount = rating.count
                 result.ratingsSource = "Hardcover"
+                result.hardcoverBookID = rating.bookID
             }
         }
 
@@ -175,7 +179,7 @@ actor OnlineMetadataService: OnlineMetadataFetching {
     private func openLibrary(isbn: String?, title: String, author: String?) async -> NetworkResult<FetchedMetadata> {
         var components = URLComponents(string: "https://openlibrary.org/search.json")!
         var items = [URLQueryItem(name: "limit", value: "5"),
-                     URLQueryItem(name: "fields", value: "title,author_name,first_publish_year,publisher,cover_i,subject,ratings_average,ratings_count")]
+                     URLQueryItem(name: "fields", value: "key,title,author_name,first_publish_year,publisher,cover_i,subject,ratings_average,ratings_count")]
         if let isbn, !isbn.isEmpty {
             items.append(URLQueryItem(name: "isbn", value: isbn))
         } else {
@@ -198,6 +202,7 @@ actor OnlineMetadataService: OnlineMetadataFetching {
         meta.publisher = doc.publisher?.first
         meta.year = doc.first_publish_year.map(String.init)
         meta.subjects = Array((doc.subject ?? []).prefix(8))
+        meta.openLibraryWorkKey = doc.key
         if let average = doc.ratings_average {
             meta.ratingsAverage = average
             meta.ratingsCount = doc.ratings_count
@@ -307,7 +312,7 @@ actor OnlineMetadataService: OnlineMetadataFetching {
             return NetworkResult(value: nil, reachedNetwork: true)
         }
         return NetworkResult(
-            value: HardcoverRating(average: rating, count: doc.ratings_count),
+            value: HardcoverRating(average: rating, count: doc.ratings_count, bookID: doc.id),
             reachedNetwork: true
         )
     }
@@ -319,6 +324,7 @@ actor OnlineMetadataService: OnlineMetadataFetching {
 private nonisolated struct OpenLibrarySearch: Decodable, Sendable {
     let docs: [Doc]
     struct Doc: Decodable, Sendable {
+        let key: String?
         let title: String?
         let author_name: [String]?
         let first_publish_year: Int?
@@ -354,6 +360,7 @@ private nonisolated struct HardcoverResponse: Decodable, Sendable {
     struct Results: Decodable, Sendable { let hits: [Hit]? }
     struct Hit: Decodable, Sendable { let document: Document? }
     struct Document: Decodable, Sendable {
+        let id: String?
         let title: String?
         let rating: Double?
         let ratings_count: Int?
