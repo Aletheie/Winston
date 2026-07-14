@@ -3,6 +3,7 @@ import Foundation
 nonisolated struct ExportRow: Sendable {
     var title: String
     var author: String
+    var translator: String
     var series: String
     var seriesIndex: String
     var year: String
@@ -13,6 +14,10 @@ nonisolated struct ExportRow: Sendable {
     var status: String
     var sourcePath: String
     var readableName: String
+    var workUUID: String
+    var workTitle: String
+    var editionUUID: String
+    var editionStatement: String
 }
 
 nonisolated enum LibraryExporter {
@@ -46,11 +51,13 @@ nonisolated enum LibraryExporter {
 
     private static func writeCSV(_ rows: [ExportRow], to url: URL) {
         let header = ["Title", "Author", "Series", "Series Index", "Year", "Publisher",
-                      "Format", "Tags", "Rating", "Status", "File"]
+                      "Format", "Tags", "Rating", "Status", "File", "Translator",
+                      "Work UUID", "Work Title", "Edition UUID", "Edition Statement"]
         var lines = [header.map(csvEscape).joined(separator: ",")]
         for r in rows {
             let cells = [r.title, r.author, r.series, r.seriesIndex, r.year, r.publisher,
-                         r.format, r.tags, String(r.rating), r.status, r.readableName]
+                         r.format, r.tags, String(r.rating), r.status, r.readableName,
+                         r.translator, r.workUUID, r.workTitle, r.editionUUID, r.editionStatement]
             lines.append(cells.map(csvEscape).joined(separator: ","))
         }
         try? lines.joined(separator: "\n").data(using: .utf8)?.write(to: url, options: .atomic)
@@ -63,6 +70,9 @@ nonisolated enum LibraryExporter {
                 "seriesIndex": $0.seriesIndex, "year": $0.year, "publisher": $0.publisher,
                 "format": $0.format, "tags": $0.tags, "rating": $0.rating,
                 "status": $0.status, "file": $0.readableName,
+                "translator": $0.translator, "workUUID": $0.workUUID,
+                "workTitle": $0.workTitle, "editionUUID": $0.editionUUID,
+                "editionStatement": $0.editionStatement,
             ]
         }
         if let data = try? JSONSerialization.data(withJSONObject: objects, options: [.prettyPrinted, .sortedKeys]) {

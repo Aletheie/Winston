@@ -62,10 +62,11 @@ struct UniqueNameTests {
 
         func row(title: String, source: URL) -> ExportRow {
             ExportRow(
-                title: title, author: "Author", series: "", seriesIndex: "",
+                title: title, author: "Author", translator: "", series: "", seriesIndex: "",
                 year: "", publisher: "", format: "EPUB", tags: "", rating: 0,
                 status: "Unread", sourcePath: source.path(percentEncoded: false),
-                readableName: "Author - Shared.epub"
+                readableName: "Author - Shared.epub", workUUID: "", workTitle: "",
+                editionUUID: "", editionStatement: ""
             )
         }
 
@@ -82,5 +83,27 @@ struct UniqueNameTests {
         ])
         #expect(fm.fileExists(atPath: output.appending(path: "Author - Shared.epub").path(percentEncoded: false)))
         #expect(fm.fileExists(atPath: output.appending(path: "Author - Shared (2).epub").path(percentEncoded: false)))
+    }
+}
+
+@MainActor
+struct EditionExportRowTests {
+    @Test func emitsOneRowPerAssetWithWorkAndEditionFields() {
+        let work = Work(title: "Dune", author: "Frank Herbert")
+        let book = Book(fileName: "primary.epub", originalFileName: "Dune.epub")
+        book.translator = "Jan Novák"
+        book.editionStatement = "First Czech edition"
+        book.work = work
+        book.assets = [
+            BookAsset(fileName: "primary.epub", book: book),
+            BookAsset(fileName: "sibling.mobi", origin: .generated, book: book),
+        ]
+
+        let rows = ExportService.rows(for: [book])
+
+        #expect(rows.map(\.format).sorted() == ["EPUB", "MOBI"])
+        #expect(rows.allSatisfy { $0.workUUID == work.uuid.uuidString })
+        #expect(rows.allSatisfy { $0.editionUUID == book.uuid.uuidString })
+        #expect(rows.allSatisfy { $0.translator == "Jan Novák" })
     }
 }
