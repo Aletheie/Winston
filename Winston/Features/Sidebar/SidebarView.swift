@@ -34,6 +34,7 @@ struct SidebarView: View {
     var collections: [BookCollection]
     var viewModel: LibraryViewModel
     @Binding var selection: SidebarItem?
+    let onReviewEditions: () -> Void
 
     @Environment(\.theme) private var theme
     @Environment(DeviceMonitor.self) private var deviceMonitor
@@ -89,6 +90,16 @@ struct SidebarView: View {
                     SidebarRow(title: theme.styledText(terminal: "RATED", native: "Rated"),
                                systemImage: "star", count: facets.rated)
                         .tag(SidebarItem.rated)
+                }
+                if viewModel.editions.pendingCount > 0 {
+                    Button(action: onReviewEditions) {
+                        SidebarRow(
+                            title: theme.styledText(terminal: "NAVRHY", native: "Suggestions"),
+                            systemImage: "rectangle.stack.badge.plus",
+                            count: viewModel.editions.pendingCount
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
             } header: {
                 header(terminal: "LIBRARY", native: "Library")
@@ -294,7 +305,8 @@ struct SidebarView: View {
         books: [],
         collections: [],
         viewModel: LibraryViewModel(modelContext: container.mainContext, settings: AppSettings(), toasts: ToastCenter()),
-        selection: .constant(.all)
+        selection: .constant(.all),
+        onReviewEditions: {}
     )
     .modelContainer(container)
     .environment(DeviceMonitor())

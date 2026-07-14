@@ -2,6 +2,7 @@ import SwiftUI
 
 struct LibraryStatusToasts: View {
     let viewModel: LibraryViewModel
+    let onReviewEditions: () -> Void
 
     @Environment(\.theme) private var theme
     @Environment(ToastCenter.self) private var toastCenter
@@ -17,11 +18,10 @@ struct LibraryStatusToasts: View {
             }
             VStack(alignment: .trailing, spacing: 8) {
                 ForEach(activeToasts) { toast in
-                    ToastCard(toast: toast)
+                    ToastCard(toast: toast, onAction: { handleAction(toast) })
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
-            .allowsHitTesting(false)
         }
         .padding(16)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: activeToasts)
@@ -75,10 +75,27 @@ struct LibraryStatusToasts: View {
             case .success: style = .success
             case .error:   style = .error
             }
-            toasts.append(Toast(id: message.id.uuidString, style: style, message: message.text))
+            toasts.append(Toast(
+                id: message.id.uuidString,
+                style: style,
+                message: message.text,
+                action: message.action,
+                messageID: message.id
+            ))
         }
 
         return toasts
+    }
+
+    private func handleAction(_ toast: Toast) {
+        guard let action = toast.action else { return }
+        switch action {
+        case .undoEditionAssignment(let undo):
+            viewModel.editions.undo(undo)
+        case .reviewEditionProposals:
+            onReviewEditions()
+        }
+        if let id = toast.messageID { toastCenter.dismiss(id) }
     }
 }
 
@@ -91,12 +108,31 @@ private struct Toast: Identifiable, Equatable {
     var style: Style
     var message: String
     var progress: Double?
+    var action: ToastCenter.Message.Action?
+    var messageID: UUID?
+
+    init(
+        id: String,
+        style: Style,
+        message: String,
+        progress: Double? = nil,
+        action: ToastCenter.Message.Action? = nil,
+        messageID: UUID? = nil
+    ) {
+        self.id = id
+        self.style = style
+        self.message = message
+        self.progress = progress
+        self.action = action
+        self.messageID = messageID
+    }
 }
 
 // MARK: - Card
 
 private struct ToastCard: View {
     let toast: Toast
+    let onAction: () -> Void
 
     @Environment(\.theme) private var theme
 
@@ -112,6 +148,11 @@ private struct ToastCard: View {
                 if let progress = toast.progress {
                     ToastProgressBar(fraction: progress)
                 }
+                if toast.action != nil {
+                    Button(actionTitle, action: onAction)
+                        .buttonStyle(.link)
+                        .font(theme.label(size: 10, weight: .semibold))
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -123,6 +164,14 @@ private struct ToastCard: View {
                 .stroke(theme.borderSubtle, lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+    }
+
+    private var actionTitle: LocalizedStringResource {
+        switch toast.action {
+        case .undoEditionAssignment: "Undo"
+        case .reviewEditionProposals: "Review"
+        case nil: "Open"
+        }
     }
 
     @ViewBuilder

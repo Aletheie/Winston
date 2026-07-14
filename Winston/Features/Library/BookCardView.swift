@@ -7,6 +7,7 @@ struct BookCardView: View {
     var isOnDevice = false
     var isConverting = false
     var isMissing = false
+    var editionCount = 1
     let onDelete: () -> Void
 
     @Environment(\.theme) private var theme
@@ -41,6 +42,18 @@ struct BookCardView: View {
 
             if isConverting {
                 convertingOverlay
+            }
+
+            if editionCount > 1, !isConverting {
+                Text("×\(editionCount)")
+                    .font(theme.label(size: 9, weight: .bold))
+                    .foregroundStyle(theme.textPrimary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .accessibilityLabel(Text("\(editionCount) editions"))
             }
         }
         .padding(4)

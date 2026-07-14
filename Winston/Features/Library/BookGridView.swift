@@ -8,6 +8,7 @@ struct BookGridView: View {
     var deviceFileNames: Set<String> = []
     let conversion: ConversionService
     let health: LibraryHealthService
+    let editions: EditionService
     var collections: [BookCollection] = []
     let actions: BookActions
     let onClick: (Book) -> Void
@@ -49,6 +50,7 @@ struct BookGridView: View {
                         isOnDevice: deviceFileNames.contains(book.deviceMatchKey),
                         isConverting: convertingUUIDs.contains(book.uuid),
                         isMissing: missingUUIDs.contains(book.uuid),
+                        editionCount: editions.editionCounts[book.uuid] ?? 1,
                         onDelete: { actions.delete(book) }
                     )
                     .onTapGesture { onClick(book) }

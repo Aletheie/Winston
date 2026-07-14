@@ -7,6 +7,25 @@ import SwiftData
 @Suite(.serialized)
 struct LibraryMutationTests {
 
+    @Test func commandContextPublishesStableAvailabilityAndRepeatedCommands() {
+        let context = LibraryCommandContext()
+        let availability = LibraryCommandAvailability(
+            hasSelection: true,
+            canConvert: true,
+            canFetchMetadata: false,
+            canSaveSearch: true
+        )
+
+        context.updateAvailability(availability)
+        context.perform(.reviewEditions)
+        let firstGeneration = context.requestGeneration
+        context.perform(.reviewEditions)
+
+        #expect(context.availability == availability)
+        #expect(context.request == .reviewEditions)
+        #expect(context.requestGeneration == firstGeneration + 1)
+    }
+
     @Test func saveQuietlyBumpsTheRevision() async throws {
         let lib = try await TestLibrary()
         let before = LibraryMutationLog.shared.revision

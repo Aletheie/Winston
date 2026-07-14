@@ -2,6 +2,8 @@ import SwiftUI
 
 struct BookActions {
     var open: (Book) -> Void
+    var openWork: (Work) -> Void
+    var openSeries: (String) -> Void
     var quickLook: (Book) -> Void
     var showInFinder: (Book) -> Void
     var edit: (Book) -> Void
@@ -42,6 +44,11 @@ struct BookContextMenu: View {
     var body: some View {
         Button { actions.open(book) } label: {
             Label("Open in Books", systemImage: "book")
+        }
+        if let work = book.work {
+            Button { actions.openWork(work) } label: {
+                Label("Open Work", systemImage: "books.vertical")
+            }
         }
         Button { actions.quickLook(book) } label: {
             Label("Quick Look", systemImage: "eye")

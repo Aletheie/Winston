@@ -6,22 +6,30 @@ struct BookTableView: View {
     @Bindable var selection: BookSelectionModel
     var deviceFileNames: Set<String>
     let conversion: ConversionService
+    let editions: EditionService
     var collections: [BookCollection] = []
     let actions: BookActions
     @Binding var sortOrder: [KeyPathComparator<Book>]
 
     @Environment(\.theme) private var theme
+    @AppStorage("bookTableColumnCustomization") private var columnCustomization = TableColumnCustomization<Book>()
 
     private var convertingUUIDs: Set<UUID> { conversion.convertingUUIDs }
 
     var body: some View {
-        Table(books, selection: $selection.selectedBookIDs, sortOrder: $sortOrder) {
+        Table(
+            books,
+            selection: $selection.selectedBookIDs,
+            sortOrder: $sortOrder,
+            columnCustomization: $columnCustomization
+        ) {
             TableColumn("") { book in
                 BookCoverImageView(book: book, tier: .thumb)
                     .frame(width: 26, height: 38)
                     .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
             }
             .width(34)
+            .customizationID("cover")
 
             TableColumn(columnTitle("Title", terminal: "title"), value: \.displayTitle) { book in
                 HStack(spacing: 6) {
@@ -41,6 +49,7 @@ struct BookTableView: View {
                 }
             }
             .width(min: 200, ideal: 420, max: 720)
+            .customizationID("title")
 
             TableColumn(columnTitle("Author", terminal: "author"), value: \.sortAuthor) { book in
                 Text(book.displayAuthor ?? "\u{2014}")
@@ -49,6 +58,7 @@ struct BookTableView: View {
                     .lineLimit(1)
             }
             .width(min: 120, ideal: 220, max: 360)
+            .customizationID("author")
 
             TableColumn(columnTitle("Format", terminal: "fmt"), value: \.format) { book in
                 Text(book.format.isEmpty ? "\u{2014}" : book.format)
@@ -56,6 +66,26 @@ struct BookTableView: View {
                     .foregroundStyle(theme.accentSecondary)
             }
             .width(70)
+            .customizationID("format")
+
+            TableColumn(columnTitle("Editions", terminal: "editions")) { book in
+                Text((editions.editionCounts[book.uuid] ?? 1).formatted())
+                    .font(theme.label(size: 10, weight: .regular))
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .width(70)
+            .defaultVisibility(.hidden)
+            .customizationID("editions")
+
+            TableColumn(columnTitle("Translator", terminal: "translator")) { book in
+                Text(book.translator ?? "\u{2014}")
+                    .font(theme.label(size: 10, weight: .regular))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+            }
+            .width(min: 110, ideal: 170, max: 280)
+            .defaultVisibility(.hidden)
+            .customizationID("translator")
 
             TableColumn(columnTitle("Size", terminal: "size")) { book in
                 Text(book.fileSizeDisplay)
@@ -64,6 +94,7 @@ struct BookTableView: View {
                     .monospacedDigit()
             }
             .width(80)
+            .customizationID("size")
 
             TableColumn(columnTitle("Added", terminal: "added"), value: \.dateAdded) { book in
                 Text(book.dateAdded, format: .dateTime.day().month().year())
@@ -72,6 +103,7 @@ struct BookTableView: View {
                     .monospacedDigit()
             }
             .width(min: 90, ideal: 110, max: 140)
+            .customizationID("added")
         }
         .scrollContentBackground(.hidden)
         .contextMenu(forSelectionType: Book.ID.self) { ids in

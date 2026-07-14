@@ -3,6 +3,7 @@ import SwiftData
 
 struct DuplicatesSheet: View {
     let viewModel: LibraryViewModel
+    let onReviewEditions: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
@@ -59,6 +60,12 @@ struct DuplicatesSheet: View {
 
             Divider()
             HStack {
+                if viewModel.editions.pendingCount > 0 {
+                    Button("Review Edition Suggestions (\(viewModel.editions.pendingCount))") {
+                        dismiss()
+                        onReviewEditions()
+                    }
+                }
                 Spacer()
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)

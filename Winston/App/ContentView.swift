@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var folderWatcher = FolderWatcher()
     @State private var watchStability = WatchFolderStabilityTracker()
     @State private var watchScanTask: Task<Void, Never>?
+    @State private var activeLibrarySheet: LibrarySheet?
 
     private var destination: MainDestination {
         switch sidebarSelection {
@@ -37,7 +38,13 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(books: books, collections: collections, viewModel: viewModel, selection: $sidebarSelection)
+            SidebarView(
+                books: books,
+                collections: collections,
+                viewModel: viewModel,
+                selection: $sidebarSelection,
+                onReviewEditions: openEditionReview
+            )
                 .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
         } detail: {
             switch destination {
@@ -54,7 +61,8 @@ struct ContentView: View {
                         viewModel: viewModel,
                         filter: filter,
                         onShowAll: { sidebarSelection = .all },
-                        columnVisibility: $columnVisibility
+                        columnVisibility: $columnVisibility,
+                        activeSheet: $activeLibrarySheet
                     )
                 }
             case .device:
@@ -64,7 +72,7 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            LibraryStatusToasts(viewModel: viewModel)
+            LibraryStatusToasts(viewModel: viewModel, onReviewEditions: openEditionReview)
         }
         .tint(theme.accent)
         .task {
@@ -72,6 +80,8 @@ struct ContentView: View {
             viewModel.backfillMissingSizes()
             viewModel.rescanMissingMetadata()
             viewModel.detectMissingDRM()
+            await viewModel.backfillMissingAssetHashes()
+            await viewModel.editions.scanLibrary()
             restartWatcher()
             await checkIntegrityAndBackup()
         }
@@ -93,6 +103,14 @@ struct ContentView: View {
 
     private var metadataBackfillConfiguration: String {
         "\(settings.onlineMetadataEnabled)|\(settings.hardcoverToken)"
+    }
+
+    private func openEditionReview() {
+        sidebarSelection = .all
+        Task { @MainActor in
+            await Task.yield()
+            activeLibrarySheet = .editionReview
+        }
     }
 
     private var isWishlistSelected: Bool {

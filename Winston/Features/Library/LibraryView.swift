@@ -9,7 +9,9 @@ enum LibrarySheet: Identifiable {
     case duplicates
     case statistics
     case highlights
-    case series
+    case series(name: String?)
+    case work(Work)
+    case editionReview
 
     var id: String {
         switch self {
@@ -18,7 +20,9 @@ enum LibrarySheet: Identifiable {
         case .duplicates:     "duplicates"
         case .statistics:     "statistics"
         case .highlights:     "highlights"
-        case .series:         "series"
+        case .series(let name): "series-\(name ?? "all")"
+        case .work(let work): "work-\(work.uuid.uuidString)"
+        case .editionReview:  "editionReview"
         }
     }
 }
@@ -30,6 +34,7 @@ struct LibraryView: View {
     let filter: LibraryFilter
     let onShowAll: () -> Void
     @Binding var columnVisibility: NavigationSplitViewVisibility
+    @Binding var activeSheet: LibrarySheet?
 
     @Environment(\.theme) private var theme
     @Environment(DeviceMonitor.self) private var deviceMonitor
@@ -46,7 +51,6 @@ struct LibraryView: View {
     @State private var debouncedSearch = ""
     @State private var displayed: [Book] = []
     @State private var sortOrder: [KeyPathComparator<Book>] = [BookSort.dateAdded.comparator(ascending: false)]
-    @State private var activeSheet: LibrarySheet?
     @State private var showDeleteConfirm = false
     @State private var quickLookURL: URL?
     @State private var showNewCollectionAlert = false
@@ -55,6 +59,7 @@ struct LibraryView: View {
     @State private var showSaveSearchAlert = false
     @State private var saveSearchName = ""
     @State private var scrollTarget: Book.ID?
+    @State private var commandContext = LibraryCommandContext()
 
     // MARK: - Derived state
 
@@ -75,6 +80,8 @@ struct LibraryView: View {
     private var bookActions: BookActions {
         BookActions(
             open: { LibraryExternalActions.openInReader($0) },
+            openWork: { activeSheet = .work($0) },
+            openSeries: { activeSheet = .series(name: $0) },
             quickLook: { quickLookURL = $0.fileURL },
             showInFinder: { LibraryExternalActions.showInFinder($0) },
             edit: { activeSheet = .edit($0) },
@@ -163,13 +170,21 @@ struct LibraryView: View {
                         viewModel.bulkUpdate(selectedBooks, edit)
                     }
                 case .duplicates:
-                    DuplicatesSheet(viewModel: viewModel)
+                    DuplicatesSheet(viewModel: viewModel, onReviewEditions: { activeSheet = .editionReview })
                 case .statistics:
                     StatisticsView(books: books)
                 case .highlights:
                     HighlightsView(books: books)
-                case .series:
-                    SeriesView(books: books, onOpen: { LibraryExternalActions.openInReader($0) })
+                case .series(let name):
+                    SeriesView(
+                        books: books,
+                        onOpen: { LibraryExternalActions.openInReader($0) },
+                        seriesName: name
+                    )
+                case .work(let work):
+                    WorkDetailSheet(work: work, viewModel: viewModel, onShowInLibrary: showInLibrary)
+                case .editionReview:
+                    EditionReviewSheet(books: books, service: viewModel.editions)
                 }
             }
             .alert("Delete \(selection.count) books?",
@@ -196,7 +211,13 @@ struct LibraryView: View {
                 }
                 Button("Cancel", role: .cancel) { }
             }
-            .focusedSceneValue(\.libraryActions, libraryActions)
+            .focusedSceneValue(\.libraryCommandContext, commandContext)
+            .onChange(of: commandContext.requestGeneration) {
+                performCommand(commandContext.request)
+            }
+            .onChange(of: commandAvailability, initial: true) { _, availability in
+                commandContext.updateAvailability(availability)
+            }
             .task(id: searchText) {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled else { return }
@@ -206,6 +227,20 @@ struct LibraryView: View {
             .onChange(of: filter) { recomputeDisplayed() }
             .onChange(of: debouncedSearch) { recomputeDisplayed() }
             .onChange(of: sortOrder) { recomputeDisplayed() }
+    }
+
+    private func showInLibrary(_ book: Book) {
+        activeSheet = nil
+        onShowAll()
+        searchText = ""
+        debouncedSearch = ""
+        displayed = LibraryQuery.apply(to: books, filter: .all, searchText: "", sort: sortOrder)
+        selection.selectedBookIDs = [book.id]
+        selection.lastClickedBookID = book.id
+        Task { @MainActor in
+            await Task.yield()
+            scrollTarget = book.id
+        }
     }
 
     // MARK: - Top bar (drop zone + transfer status)
@@ -237,6 +272,7 @@ struct LibraryView: View {
                 deviceFileNames: deviceMonitor.deviceFileNames,
                 conversion: viewModel.conversion,
                 health: viewModel.health,
+                editions: viewModel.editions,
                 collections: collections,
                 actions: bookActions,
                 onClick: handleBookClick,
@@ -248,6 +284,7 @@ struct LibraryView: View {
                 selection: selection,
                 deviceFileNames: deviceMonitor.deviceFileNames,
                 conversion: viewModel.conversion,
+                editions: viewModel.editions,
                 collections: collections,
                 actions: bookActions,
                 sortOrder: $sortOrder
@@ -268,41 +305,73 @@ struct LibraryView: View {
 
     // MARK: - Menu actions
 
-    private var libraryActions: LibraryActions {
-        LibraryActions(
-            importBooks: { isImporting = true },
-            importCalibre: { Task { await LibraryExternalActions.importFromCalibre(via: viewModel) } },
-            openInReader: { if let b = primarySelectedBook { LibraryExternalActions.openInReader(b) } },
-            quickLook: { if let b = primarySelectedBook { quickLookURL = b.fileURL } },
-            showInFinder: { if let b = primarySelectedBook { LibraryExternalActions.showInFinder(b) } },
-            editMetadata: {
-                if selection.count > 1 { activeSheet = .bulkEdit }
-                else if let b = primarySelectedBook { activeSheet = .edit(b) }
-            },
-            deleteSelected: { if selection.hasSelection { showDeleteConfirm = true } },
-            selectAll: { selection.selectAll(displayed) },
-            toggleSidebar: { withAnimation { columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly } },
-            toggleInspector: { showInspector.toggle() },
-            setGridView: { viewMode = .grid },
-            setListView: { viewMode = .table },
-            focusSearch: { searchFocused = true },
-            convertSelected: convertSelectedBooks,
-            fetchMetadata: { viewModel.fetchOnlineMetadata(for: selectedBooks) },
-            findDuplicates: { activeSheet = .duplicates },
-            showStatistics: { activeSheet = .statistics },
-            showHighlights: { activeSheet = .highlights },
-            showSeries: { activeSheet = .series },
-            exportLibrary: { Task { await LibraryExternalActions.exportLibrary(via: viewModel) } },
-            saveSearchAsCollection: { saveSearchName = ""; showSaveSearchAlert = true },
-            surpriseMe: surpriseMe,
-            markSelection: { status in viewModel.setReadingStatus(status, for: selectedBooks) },
-            replaceSelected: { if let book = primarySelectedBook { Task { await LibraryExternalActions.relink(book, via: viewModel) } } },
+    private var commandAvailability: LibraryCommandAvailability {
+        LibraryCommandAvailability(
             hasSelection: selection.hasSelection,
             canConvert: convertibleSelectionCount > 0,
             canFetchMetadata: viewModel.onlineMetadataEnabled && selection.hasSelection,
-            canSaveSearch: !searchText.trimmingCharacters(in: .whitespaces).isEmpty,
-            selectedCount: selection.count
+            canSaveSearch: !searchText.trimmingCharacters(in: .whitespaces).isEmpty
         )
+    }
+
+    private func performCommand(_ command: LibraryCommand?) {
+        guard let command else { return }
+        switch command {
+        case .importBooks:
+            isImporting = true
+        case .importCalibre:
+            Task { await LibraryExternalActions.importFromCalibre(via: viewModel) }
+        case .openInReader:
+            if let book = primarySelectedBook { LibraryExternalActions.openInReader(book) }
+        case .quickLook:
+            if let book = primarySelectedBook { quickLookURL = book.fileURL }
+        case .showInFinder:
+            if let book = primarySelectedBook { LibraryExternalActions.showInFinder(book) }
+        case .editMetadata:
+            if selection.count > 1 { activeSheet = .bulkEdit }
+            else if let book = primarySelectedBook { activeSheet = .edit(book) }
+        case .deleteSelected:
+            if selection.hasSelection { showDeleteConfirm = true }
+        case .selectAll:
+            selection.selectAll(displayed)
+        case .toggleSidebar:
+            withAnimation { columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly }
+        case .toggleInspector:
+            showInspector.toggle()
+        case .setGridView:
+            viewMode = .grid
+        case .setListView:
+            viewMode = .table
+        case .focusSearch:
+            searchFocused = true
+        case .convertSelected:
+            convertSelectedBooks()
+        case .fetchMetadata:
+            viewModel.fetchOnlineMetadata(for: selectedBooks)
+        case .findDuplicates:
+            activeSheet = .duplicates
+        case .reviewEditions:
+            activeSheet = .editionReview
+        case .showStatistics:
+            activeSheet = .statistics
+        case .showHighlights:
+            activeSheet = .highlights
+        case .showSeries:
+            activeSheet = .series(name: nil)
+        case .exportLibrary:
+            Task { await LibraryExternalActions.exportLibrary(via: viewModel) }
+        case .saveSearchAsCollection:
+            saveSearchName = ""
+            showSaveSearchAlert = true
+        case .surpriseMe:
+            surpriseMe()
+        case .markSelection(let status):
+            viewModel.setReadingStatus(status, for: selectedBooks)
+        case .replaceSelected:
+            if let book = primarySelectedBook {
+                Task { await LibraryExternalActions.relink(book, via: viewModel) }
+            }
+        }
     }
 
     private func convertSelectedBooks() {
@@ -363,7 +432,8 @@ struct LibraryView: View {
             viewModel: LibraryViewModel(modelContext: container.mainContext, settings: AppSettings(), toasts: ToastCenter()),
             filter: .all,
             onShowAll: {},
-            columnVisibility: .constant(.all)
+            columnVisibility: .constant(.all),
+            activeSheet: .constant(nil)
         )
     }
     .modelContainer(container)
