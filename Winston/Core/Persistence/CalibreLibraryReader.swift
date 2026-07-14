@@ -15,6 +15,7 @@ nonisolated struct CalibreBook: Sendable, Equatable {
     var rating: Int?
     var dateAdded: Date?
     var fileURL: URL
+    var additionalFileURLs: [URL]
     var coverURL: URL?
 }
 
@@ -61,6 +62,13 @@ nonisolated enum CalibreLibraryReader {
             let bookDir = libraryRoot.appending(path: path, directoryHint: .isDirectory)
             let fileURL = bookDir.appending(path: "\(chosen.name).\(chosen.format.lowercased())")
             guard FileManager.default.fileExists(atPath: fileURL.path(percentEncoded: false)) else { return }
+            let additionalFileURLs = formatsForBook.compactMap { item -> URL? in
+                guard item.format.caseInsensitiveCompare(chosen.format) != .orderedSame,
+                      formatPreference.contains(where: { $0.caseInsensitiveCompare(item.format) == .orderedSame })
+                else { return nil }
+                let url = bookDir.appending(path: "\(item.name).\(item.format.lowercased())")
+                return FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) ? url : nil
+            }
 
             let coverURL = bookDir.appending(path: "cover.jpg")
             let hasCover = FileManager.default.fileExists(atPath: coverURL.path(percentEncoded: false))
@@ -80,6 +88,7 @@ nonisolated enum CalibreLibraryReader {
                 rating: ratings[id].flatMap(winstonRating),
                 dateAdded: date(from: columnText(stmt, 5)),
                 fileURL: fileURL,
+                additionalFileURLs: additionalFileURLs,
                 coverURL: hasCover ? coverURL : nil
             ))
         }

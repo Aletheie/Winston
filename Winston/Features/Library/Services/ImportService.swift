@@ -16,7 +16,7 @@ final class ImportService {
     }
 
     nonisolated private enum CopyResult: Sendable {
-        case copied(uuid: UUID, originalName: String, fileName: String, size: Int64)
+        case copied(uuid: UUID, originalName: String, fileName: String, size: Int64, contentHash: String?)
         case failed(originalName: String)
     }
 
@@ -25,6 +25,7 @@ final class ImportService {
     private let metadata: MetadataService
     private let wishlist: WishlistService
     private let toasts: ToastCenter
+    private let editions: EditionService?
     private let analyzeBook: @Sendable (URL) async -> ImportBookAnalysis
 
     private(set) var pendingMetadataUUIDs: Set<UUID> = []
@@ -36,6 +37,7 @@ final class ImportService {
         metadata: MetadataService,
         wishlist: WishlistService,
         toasts: ToastCenter,
+        editions: EditionService? = nil,
         analyzeBook: @escaping @Sendable (URL) async -> ImportBookAnalysis = ImportService.defaultAnalysis
     ) {
         self.modelContext = modelContext
@@ -43,6 +45,7 @@ final class ImportService {
         self.metadata = metadata
         self.wishlist = wishlist
         self.toasts = toasts
+        self.editions = editions
         self.analyzeBook = analyzeBook
     }
 
@@ -50,15 +53,21 @@ final class ImportService {
     var pendingMetadataCount: Int { pendingMetadataUUIDs.count }
 
     func addBooks(from urls: [URL]) {
+        addBooks(from: urls, assigningTo: nil)
+    }
+
+    func addBooks(from urls: [URL], assigningTo targetWork: Work?) {
         var requests: [CopyRequest] = []
         var failed = 0
         for url in urls {
             guard libraryEbookExtensions.contains(url.pathExtension.lowercased()) else { failed += 1; continue }
 
             let originalName = url.lastPathComponent
-            guard !pendingOriginalFileNames.contains(originalName),
-                  !isDuplicate(originalFileName: originalName) else { continue }
-            pendingOriginalFileNames.insert(originalName)
+            if targetWork == nil {
+                guard !pendingOriginalFileNames.contains(originalName),
+                      !isDuplicate(originalFileName: originalName) else { continue }
+                pendingOriginalFileNames.insert(originalName)
+            }
             requests.append(CopyRequest(source: url, uuid: UUID(), originalName: originalName))
         }
 
@@ -73,26 +82,61 @@ final class ImportService {
             let results = await Task.detached(priority: .userInitiated) {
                 requests.map(Self.copyToManagedStore)
             }.value
+            if let targetWork, targetWork.modelContext == nil {
+                for result in results {
+                    if case .copied(_, _, let fileName, _, _) = result {
+                        BookFileStore.delete(fileName: fileName)
+                    }
+                }
+                return
+            }
 
             var imported: [Book] = []
             var failureCount = validationFailures
+            var knownHashes = Set(
+                ((try? modelContext.fetch(FetchDescriptor<BookAsset>())) ?? [])
+                    .compactMap(\.contentHash)
+            )
             for result in results {
                 switch result {
-                case .copied(let uuid, let originalName, let fileName, let size):
-                    pendingOriginalFileNames.remove(originalName)
+                case .copied(let uuid, let originalName, let fileName, let size, let contentHash):
+                    if targetWork == nil { pendingOriginalFileNames.remove(originalName) }
+                    if targetWork != nil,
+                       let contentHash,
+                       knownHashes.contains(contentHash) {
+                        BookFileStore.delete(fileName: fileName)
+                        continue
+                    }
                     let book = Book(uuid: uuid, fileName: fileName, originalFileName: originalName)
                     book.fileSizeBytes = size
+                    let work = targetWork ?? Work(dateCreated: book.dateAdded)
+                    let asset = BookAsset(
+                        uuid: uuid,
+                        fileName: fileName,
+                        origin: .original,
+                        contentHash: contentHash,
+                        sizeBytes: size,
+                        dateAdded: book.dateAdded,
+                        validationStatus: .ok,
+                        book: book
+                    )
+                    if targetWork == nil { modelContext.insert(work) }
                     modelContext.insert(book)
+                    modelContext.insert(asset)
+                    book.work = work
+                    if work.preferredEditionUUID == nil { work.preferredEditionUUID = book.uuid }
                     imported.append(book)
+                    if let contentHash { knownHashes.insert(contentHash) }
                 case .failed(let originalName):
-                    pendingOriginalFileNames.remove(originalName)
+                    if targetWork == nil { pendingOriginalFileNames.remove(originalName) }
                     failureCount += 1
                 }
             }
 
             if !imported.isEmpty {
                 modelContext.saveQuietly()
-                for book in imported { extractMetadata(for: book) }
+                if targetWork != nil { editions?.refreshEditionCounts() }
+                for book in imported { extractMetadata(for: book, evaluateMatch: targetWork == nil) }
             }
             reportImportFailures(failureCount)
         }
@@ -113,7 +157,10 @@ final class ImportService {
                     BookFileStore.size(of: fileName)
                 }.value
                 guard candidate.book.modelContext != nil else { continue }
-                if size > 0 { candidate.book.fileSizeBytes = size }
+                if size > 0 {
+                    candidate.book.fileSizeBytes = size
+                    candidate.book.assets.first(where: { $0.fileName == candidate.book.fileName })?.sizeBytes = size
+                }
             }
             modelContext.saveQuietly()
         }
@@ -149,7 +196,7 @@ final class ImportService {
 
     // MARK: - Background extraction
 
-    private func extractMetadata(for book: Book) {
+    private func extractMetadata(for book: Book, evaluateMatch: Bool = true) {
         let url = book.fileURL
         let uuid = book.uuid
         pendingMetadataUUIDs.insert(uuid)
@@ -159,12 +206,31 @@ final class ImportService {
             guard book.modelContext != nil else { return }
             book.apply(result.metadata)
             book.drmProtected = result.drmProtected
+            refreshWorkIdentity(for: book, allowDisplayTitleFallback: !settings.onlineMetadataEnabled)
             modelContext.saveQuietly()
             wishlist.fulfil(with: [book])
             if settings.onlineMetadataEnabled {
                 await metadata.performEnrich(book, replaceCover: false)
                 guard book.modelContext != nil else { return }
+                refreshWorkIdentity(for: book, allowDisplayTitleFallback: true)
+                modelContext.saveQuietly()
                 wishlist.fulfil(with: [book])
+            }
+            if evaluateMatch, let editions {
+                if let undo = editions.evaluate(book) {
+                    let title = book.work?.displayTitle ?? book.displayTitle
+                    toasts.post(
+                        String(localized: "Grouped with “\(title)”"),
+                        style: .success,
+                        action: .undoEditionAssignment(undo)
+                    )
+                } else if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(book.uuid) }) {
+                    toasts.post(
+                        String(localized: "Edition suggestions are ready to review."),
+                        style: .info,
+                        action: .reviewEditionProposals
+                    )
+                }
             }
         }
     }
@@ -184,6 +250,21 @@ final class ImportService {
         return count > 0
     }
 
+    private func refreshWorkIdentity(for book: Book, allowDisplayTitleFallback: Bool) {
+        guard let work = book.work else { return }
+        if work.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            if let title = book.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+                work.title = title
+            } else if allowDisplayTitleFallback {
+                work.title = book.displayTitle
+            }
+        }
+        if work.author?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            work.author = book.displayAuthor
+        }
+        work.refreshMatchKey()
+    }
+
     private nonisolated static func copyToManagedStore(_ request: CopyRequest) -> CopyResult {
         let accessing = request.source.startAccessingSecurityScopedResource()
         defer { if accessing { request.source.stopAccessingSecurityScopedResource() } }
@@ -193,7 +274,8 @@ final class ImportService {
                 uuid: request.uuid,
                 originalName: request.originalName,
                 fileName: fileName,
-                size: BookFileStore.size(of: fileName)
+                size: BookFileStore.size(of: fileName),
+                contentHash: try? ContentHasher.sha256(of: BookFileStore.url(for: fileName))
             )
         } catch {
             return .failed(originalName: request.originalName)

@@ -10,6 +10,7 @@ final class CalibreImportService {
     private let metadata: MetadataService
     private let wishlist: WishlistService
     private let toasts: ToastCenter
+    private let editions: EditionService?
 
     nonisolated static let kindlePreference = ["azw3", "mobi", "azw", "epub", "pdf", "txt"]
 
@@ -22,13 +23,15 @@ final class CalibreImportService {
         settings: AppSettings,
         metadata: MetadataService,
         wishlist: WishlistService,
-        toasts: ToastCenter
+        toasts: ToastCenter,
+        editions: EditionService? = nil
     ) {
         self.modelContext = modelContext
         self.settings = settings
         self.metadata = metadata
         self.wishlist = wishlist
         self.toasts = toasts
+        self.editions = editions
     }
 
     var progressText: String? {
@@ -96,7 +99,46 @@ final class CalibreImportService {
                 book.rating = cb.rating
                 if let dateAdded = cb.dateAdded { book.dateAdded = dateAdded }
                 book.fileSizeBytes = BookFileStore.size(of: fileName)
+                let work = Work(title: book.title, author: book.author, dateCreated: book.dateAdded)
+                work.preferredEditionUUID = book.uuid
+                let primaryHash = await Task.detached(priority: .utility) {
+                    try? ContentHasher.sha256(of: BookFileStore.url(for: fileName))
+                }.value
+                let primaryAsset = BookAsset(
+                    uuid: uuid,
+                    fileName: fileName,
+                    origin: .imported,
+                    contentHash: primaryHash,
+                    sizeBytes: book.fileSizeBytes,
+                    dateAdded: book.dateAdded,
+                    validationStatus: .ok,
+                    book: book
+                )
+                modelContext.insert(work)
                 modelContext.insert(book)
+                modelContext.insert(primaryAsset)
+                book.work = work
+
+                for siblingURL in cb.additionalFileURLs {
+                    let assetUUID = UUID()
+                    guard let siblingName = await Task.detached(priority: .userInitiated, operation: {
+                        try? BookFileStore.importCopy(of: siblingURL, uuid: assetUUID)
+                    }).value else { continue }
+                    let siblingHash = await Task.detached(priority: .utility) {
+                        try? ContentHasher.sha256(of: BookFileStore.url(for: siblingName))
+                    }.value
+                    let asset = BookAsset(
+                        uuid: assetUUID,
+                        fileName: siblingName,
+                        origin: .imported,
+                        contentHash: siblingHash,
+                        sizeBytes: BookFileStore.size(of: siblingName),
+                        dateAdded: book.dateAdded,
+                        validationStatus: .ok,
+                        book: book
+                    )
+                    modelContext.insert(asset)
+                }
                 imported.append(book)
 
                 if let isbn, !isbn.isEmpty { seenISBNs.insert(isbn) }
@@ -120,6 +162,21 @@ final class CalibreImportService {
             }
             modelContext.saveQuietly()
             wishlist.fulfil(with: imported)
+            if let editions {
+                let previousKeys = Set(editions.pendingProposals.map(\.pairKey))
+                let importedUUIDs = Set(imported.map(\.uuid))
+                await editions.scanLibrary()
+                if editions.pendingProposals.contains(where: {
+                    !previousKeys.contains($0.pairKey)
+                        && !$0.memberUUIDs.allSatisfy { !importedUUIDs.contains($0) }
+                }) {
+                    toasts.post(
+                        String(localized: "Edition suggestions are ready to review."),
+                        style: .info,
+                        action: .reviewEditionProposals
+                    )
+                }
+            }
             progress = nil
 
             finish(summary: Self.summaryText(imported: imported.count, total: total, skipped: skipped))

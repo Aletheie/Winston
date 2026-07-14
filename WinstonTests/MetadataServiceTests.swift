@@ -318,6 +318,43 @@ struct MetadataServiceTests {
         ))
         #expect(!importer.pendingMetadataUUIDs.contains(uuid))
     }
+
+    @Test func importRefreshesWorkIdentityAfterOnlineEnrichment() async throws {
+        let lib = try await TestLibrary()
+        let settings = AppSettings()
+        let oldOnline = settings.onlineMetadataEnabled
+        settings.onlineMetadataEnabled = true
+        defer { settings.onlineMetadataEnabled = oldOnline }
+        let source = lib.root.appending(path: "metadata-less.pdf")
+        try Data("pdf placeholder".utf8).write(to: source)
+        var fetched = FetchedMetadata()
+        fetched.title = "Online Canonical Title"
+        fetched.authors = ["Online Author"]
+        let metadata = MetadataService(
+            modelContext: lib.context,
+            settings: settings,
+            online: FakeOnlineClient(result: fetched)
+        )
+        let importer = ImportService(
+            modelContext: lib.context,
+            settings: settings,
+            metadata: metadata,
+            wishlist: WishlistService(modelContext: lib.context, toasts: ToastCenter()),
+            toasts: ToastCenter(),
+            analyzeBook: { _ in ImportBookAnalysis(metadata: BookMetadata(), drmProtected: false) }
+        )
+
+        importer.addBooks(from: [source])
+        let deadline = Date.now.addingTimeInterval(2)
+        while (lib.context.allBooks().isEmpty || importer.isExtracting), Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let book = try #require(lib.context.allBooks().first)
+
+        #expect(book.title == "Online Canonical Title")
+        #expect(book.work?.title == "Online Canonical Title")
+        #expect(book.work?.author == "Online Author")
+    }
 }
 
 private actor FakeOnlineClient: OnlineMetadataFetching {

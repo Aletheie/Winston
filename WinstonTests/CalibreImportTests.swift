@@ -66,6 +66,7 @@ struct CalibreLibraryReaderTests {
         let bookDir = root.appending(path: "Tolkien/The Hobbit (1)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: bookDir, withIntermediateDirectories: true)
         try Data("dummy".utf8).write(to: bookDir.appending(path: "book.azw3"))
+        try Data("epub".utf8).write(to: bookDir.appending(path: "book.epub"))
         try Data("img".utf8).write(to: bookDir.appending(path: "cover.jpg"))
 
         var db: OpaquePointer?
@@ -130,6 +131,7 @@ struct CalibreLibraryReaderTests {
         #expect(book.rating == 4)
         #expect(book.dateAdded != nil)
         #expect(book.fileURL.lastPathComponent == "book.azw3")
+        #expect(book.additionalFileURLs.map(\.lastPathComponent) == ["book.epub"])
         #expect(book.coverURL?.lastPathComponent == "cover.jpg")
     }
 
