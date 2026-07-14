@@ -15,8 +15,8 @@ final class NoticeService {
     private(set) var isChecking = false
     private(set) var lastCheckFailed = false
 
-    private static let finishFanoutLimit = 3
-    private static let releaseWindowMonths = 12
+    nonisolated private static let finishFanoutLimit = 3
+    nonisolated private static let releaseWindowMonths = 12
 
     init(
         modelContext: ModelContext,
