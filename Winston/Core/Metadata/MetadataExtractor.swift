@@ -38,6 +38,14 @@ enum MetadataExtractor {
         meta.author = xpathString(doc, "//*[local-name()='creator']")
         meta.publisher = xpathString(doc, "//*[local-name()='publisher']")
         meta.language = xpathString(doc, "//*[local-name()='language']")
+        if let contributors = try? doc.nodes(
+            forXPath: "//*[local-name()='contributor'][translate(@*[local-name()='role'], 'TRL', 'trl')='trl']"
+        ) {
+            let translators = contributors.compactMap(\.stringValue)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if !translators.isEmpty { meta.translator = translators.joined(separator: ", ") }
+        }
 
         if let dateStr = xpathString(doc, "//*[local-name()='date']"),
            let range = dateStr.range(of: "\\d{4}", options: .regularExpression) {

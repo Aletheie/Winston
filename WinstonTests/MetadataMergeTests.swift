@@ -17,6 +17,7 @@ struct BookApplyTests {
         var meta = BookMetadata()
         meta.title = "  Dune  "
         meta.author = "Frank Herbert"
+        meta.translator = "Jan Novák"
         meta.publisher = "Ace"
         meta.year = "1965"
         meta.isbn = "9780441013593"
@@ -27,6 +28,7 @@ struct BookApplyTests {
 
         #expect(book.title == "Dune")
         #expect(book.author == "Frank Herbert")
+        #expect(book.translator == "Jan Novák")
         #expect(book.publisher == "Ace")
         #expect(book.year == "1965")
         #expect(book.isbn == "9780441013593")

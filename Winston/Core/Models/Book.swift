@@ -7,6 +7,7 @@ nonisolated struct BookMetadata: Codable, Sendable, Hashable {
     var publisher: String?
     var year: String?
     var language: String?
+    var translator: String?
     var isbn: String?
     var series: String?
     var seriesIndex: String?
@@ -26,6 +27,7 @@ final class Book {
     var publisher: String?
     var year: String?
     var language: String?
+    var translator: String?
     var isbn: String?
     var series: String?
     var seriesIndex: String?
@@ -133,6 +135,7 @@ final class Book {
         publisher = fill(publisher, metadata.publisher)
         year = fill(year, metadata.year)
         language = fill(language, metadata.language)
+        translator = fill(translator, metadata.translator)
         isbn = fill(isbn, metadata.isbn)
         series = fill(series, metadata.series)
         seriesIndex = fill(seriesIndex, metadata.seriesIndex)
