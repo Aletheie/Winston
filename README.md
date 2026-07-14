@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/488cb698-cd61-4d0a-9fb2-f569d8ae6b86
 
 Winston is a native Mac app for managing an ebook library and getting books onto a Kindle. Library management, conversion, covers, device cleanup and highlights are all part of the same workflow. It stays offline until you enable an online feature. Calibre is only an optional fallback for formats Winston does not yet convert natively.
 
-Longer term, I want Winston to understand **books, not files**. Two translations of Dune belong to the same work. Replacing a broken EPUB should not create another book. That part is still on the roadmap.
+Winston models **works, editions and files** separately. Two translations of Dune can belong to the same work, one edition can keep EPUB and Kindle-ready copies together, and replacing a broken file does not create another book.
 
 ## What it does
 
@@ -39,6 +39,9 @@ Longer term, I want Winston to understand **books, not files**. Two translations
 - Grid and table views, search, filters, collections, smart collections, reading status, duplicate detection and bulk editing.
 - Rename an author, series or tag once and it changes across the library. Author names such as "Tolkien, J. R. R." can be flipped to "J. R. R. Tolkien."
 - Import an existing Calibre library with its metadata, or watch a folder for new books. Rescans and online lookups leave manually edited fields alone.
+- Group translations and editions under one work. Each edition can keep several file formats, with reviewable matching suggestions instead of automatic merges.
+- A series row in the book inspector opens that series directly, showing its owned books, reading progress, and missing Hardcover volumes. It also appears for a single owned book when the enabled Hardcover catalog confirms more volumes; the full all-series overview remains available from the Library menu.
+- Hardcover series results are cached for the app session and refreshed when the local books, authors, or positions in that series change.
 - Statistics, a yearly reading goal, **Surprise Me** for picking a random unread book, and cover sizing with `Cmd +` and `Cmd -`.
 - Real page counts for PDFs and estimates for other formats. Very short books are flagged as probable store samples.
 - Automatic backups of the catalog and covers. The catalog exports as CSV; highlights export as plain text.
@@ -46,6 +49,7 @@ Longer term, I want Winston to understand **books, not files**. Two translations
 ### Conversion
 
 - Built-in EPUB to MOBI conversion, written in Swift. No Calibre process and no bundled conversion binary.
+- Conversion preserves the original file and stores the output as another format of the same edition; converting again refreshes that generated copy, and replacing the source invalidates older generated copies before the next Kindle send.
 - TXT, HTML and PDF use the same native pipeline. Calibre is optional for AZW3 and other formats.
 - Splits Czech and other accented text at valid Unicode boundaries, embeds the selected cover, and writes the trailer records Kindle needs for indexing.
 - Runs conversion off the main thread. Byte-level golden tests cover the MOBI writer.
@@ -54,6 +58,7 @@ Longer term, I want Winston to understand **books, not files**. Two translations
 
 - Older Kindles are detected as USB drives. An MTP backend for newer models is implemented but still needs real-hardware testing.
 - A transfer converts when needed, copies the book and its home-screen thumbnail, removes macOS `._` files, then ejects the device so the Kindle can reindex.
+- Send a whole series from either its inspector detail or the Series sheet; Winston skips DRM-protected and already-present books and preserves series order.
 - Books can be copied from the device into the library. `My Clippings.txt` becomes structured notes matched to their books and can be exported.
 
 ### Discovery
@@ -120,7 +125,6 @@ Longer term:
 
 - [ ] **Series watch:** release notifications for series already in the library
 - [ ] **Translation plugin:** optional AI-assisted book translation, starting with English and Czech
-- [ ] **Editions:** group translations and editions under the same work
 - [ ] **Import inbox:** preview changes before import, with one-click undo
 - [ ] **Metadata provenance:** store the source of each value and lock hand-edited fields
 - [ ] **Highlight remapping:** carry highlights over when an EPUB is replaced
