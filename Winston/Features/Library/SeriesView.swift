@@ -45,7 +45,7 @@ struct SeriesView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 18) {
+                    LazyVStack(alignment: .leading, spacing: 16) {
                         ForEach(displayedGroups) { group in
                             SeriesSection(
                                 name: group.name,
@@ -57,7 +57,7 @@ struct SeriesView: View {
                             )
                         }
                     }
-                    .padding(18)
+                    .padding(20)
                 }
             }
 
@@ -127,36 +127,9 @@ struct SeriesView: View {
     }
 
     private func makeGroups() -> [SeriesGroup] {
-        let withSeries = books.filter { !($0.series ?? "").isEmpty }
-        return Dictionary(grouping: withSeries, by: { $0.series ?? "" })
-            .map { name, groupBooks in
-                let sortedBooks = groupBooks.sorted { lhs, rhs in
-                    let left = seriesIndex(lhs)
-                    let right = seriesIndex(rhs)
-                    if left != right { return left < right }
-                    return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
-                }
-                let authors = Array(Set(sortedBooks.compactMap(\.displayAuthor))).sorted()
-                let snapshots = sortedBooks.map {
-                    SeriesLocalBookSnapshot(
-                        id: $0.uuid,
-                        title: $0.displayTitle,
-                        author: $0.displayAuthor,
-                        position: $0.seriesIndex.flatMap(Double.init)
-                    )
-                }
-                return SeriesGroup(
-                    id: name,
-                    name: name,
-                    books: sortedBooks,
-                    lookup: SeriesLookup(name: name, authors: authors, books: snapshots)
-                )
-            }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    private func seriesIndex(_ book: Book) -> Double {
-        book.seriesIndex.flatMap(Double.init) ?? .greatestFiniteMagnitude
+        SeriesLookupBuilder.groups(from: books).map {
+            SeriesGroup(id: $0.id, name: $0.name, books: $0.books, lookup: $0.lookup)
+        }
     }
 
     private func rebuildGroups() {
@@ -181,26 +154,36 @@ private struct SeriesSheetHeader: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(theme.accent.gradient)
+                Image(systemName: "list.number")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 38, height: 38)
+            .accessibilityHidden(true)
             if let seriesName {
                 VStack(alignment: .leading, spacing: 2) {
                     theme.styledText(terminal: "SERIE", native: "Series")
                         .font(theme.label(size: 9, weight: .semibold))
                         .foregroundStyle(theme.textTertiary)
                     Text(verbatim: seriesName)
-                        .font(theme.body(size: 15, weight: .bold))
+                        .font(theme.body(size: 17, weight: .bold))
                         .lineLimit(1)
                 }
             } else if theme.usesTerminalCopy {
                 Text(verbatim: "// series")
-                    .font(theme.body(size: 15, weight: .bold))
+                    .font(theme.body(size: 17, weight: .bold))
             } else {
                 Text("Series")
-                    .font(theme.body(size: 15, weight: .bold))
+                    .font(theme.body(size: 17, weight: .bold))
             }
             Spacer()
         }
-        .padding(16)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
     }
 }
 
@@ -275,7 +258,7 @@ private struct SeriesSection: View {
     private var nextUnread: Book? { books.first { $0.readingStatus != .finished } }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             SeriesSectionHeader(name: name, books: books, nextUnread: nextUnread, onOpen: onOpen)
             LocalReadingProgress(readCount: readCount, totalCount: books.count)
 
@@ -283,22 +266,25 @@ private struct SeriesSection: View {
                 SeriesOwnershipSummary(completion: completion)
             } else if catalogPhase == .loaded {
                 Label("No exact Hardcover match", systemImage: "questionmark.circle")
-                    .font(theme.label(size: 9, weight: .regular))
+                    .font(theme.label(size: 10, weight: .regular))
                     .foregroundStyle(theme.textTertiary)
                     .help("The series name, author, and local titles did not identify one unambiguous Hardcover series.")
             }
 
-            VStack(spacing: 4) {
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(books) { book in
                     SeriesLocalBookRow(book: book)
                 }
             }
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(theme.background.opacity(0.35), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(theme.surfaceGlass.opacity(0.32), in: RoundedRectangle(cornerRadius: 12))
+        .padding(14)
+        .background(theme.surfaceGlass.opacity(0.32), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(isFocused ? theme.accent : theme.borderSubtle, lineWidth: isFocused ? 1.5 : 1)
         }
     }
@@ -313,10 +299,11 @@ private struct SeriesSectionHeader: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack {
+        HStack(spacing: 8) {
             Text(verbatim: name)
-                .font(theme.body(size: 13, weight: .bold))
+                .font(theme.body(size: 15, weight: .semibold))
                 .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
             Spacer()
             SendSeriesButton(books: books)
                 .controlSize(.small)
@@ -337,14 +324,14 @@ private struct LocalReadingProgress: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             ProgressView(value: Double(readCount), total: Double(max(totalCount, 1)))
                 .tint(theme.accent)
-                .frame(maxWidth: 200)
+                .frame(maxWidth: 220)
             Text("Read \(readCount) of \(totalCount)",
                  comment: "Reading progress within the local series: first value is read books, second is local books.")
-                .font(theme.label(size: 9, weight: .regular))
-                .foregroundStyle(theme.textTertiary)
+                .font(theme.label(size: 10, weight: .regular))
+                .foregroundStyle(theme.textSecondary)
                 .monospacedDigit()
         }
     }
@@ -363,14 +350,17 @@ private struct SeriesLocalBookRow: View {
                 .frame(width: 26, alignment: .trailing)
                 .monospacedDigit()
             Image(systemName: book.readingStatus == .finished ? "checkmark.circle.fill" : "circle")
-                .font(.system(size: 10))
+                .font(.system(size: 11))
+                .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(book.readingStatus == .finished ? theme.success : theme.textTertiary)
             Text(book.displayTitle)
-                .font(theme.label(size: 11, weight: .regular))
-                .foregroundStyle(theme.textSecondary)
+                .font(theme.label(size: 12, weight: .regular))
+                .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
             Spacer()
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
     }
 }
 
@@ -434,10 +424,10 @@ private struct SeriesOwnershipSummary: View {
                 }
             }
         }
-        .padding(10)
-        .background(theme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+        .padding(12)
+        .background(theme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .stroke(theme.accent.opacity(0.18), lineWidth: 1)
         }
     }
