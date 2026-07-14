@@ -40,6 +40,8 @@ nonisolated struct HardcoverSeriesBook: Sendable, Equatable, Identifiable {
     let positionText: String?
     let authors: [String]
     let hardcoverURL: URL
+    let releaseDate: DiscoveryReleaseDate?
+    let coverURL: URL?
     fileprivate let popularity: Int
 }
 
@@ -323,6 +325,8 @@ actor HardcoverSeriesService: SeriesCatalogFetching {
                 positionText: entry.details,
                 authors: row.author.map { [$0.name] } ?? [],
                 hardcoverURL: url,
+                releaseDate: book.release_date.flatMap(DiscoveryReleaseDate.init(iso8601:)),
+                coverURL: book.image?.url.flatMap(URL.init(string:)),
                 popularity: book.users_read_count ?? 0
             )
         }
@@ -388,6 +392,8 @@ actor HardcoverSeriesService: SeriesCatalogFetching {
             title
             slug
             users_read_count
+            release_date
+            image { url }
           }
         }
       }
@@ -568,6 +574,10 @@ private nonisolated struct SeriesResponse: Decodable {
             let title: String
             let slug: String
             let users_read_count: Int?
+            let release_date: String?
+            let image: ImageField?
+
+            struct ImageField: Decodable { let url: String? }
         }
     }
 }

@@ -104,6 +104,8 @@ final class AppSettings {
         static let autoBackupEnabled = "autoBackupEnabled"
         static let backupPath = "backupFolderPath"
         static let lastBackupAt = "lastBackupAt"
+        static let releaseCheckEnabled = "releaseCheckEnabled"
+        static let lastReleaseCheckAt = "lastReleaseCheckAt"
         static let readingGoal = "readingGoal"
         static let gridZoom = "gridZoom"
         static let enabledPlugins = "enabledPluginIDs"
@@ -161,6 +163,15 @@ final class AppSettings {
         set { UserDefaults.standard.set(newValue, forKey: Keys.lastBackupAt) }
     }
 
+    var releaseCheckEnabled: Bool {
+        didSet { UserDefaults.standard.set(releaseCheckEnabled, forKey: Keys.releaseCheckEnabled) }
+    }
+
+    var lastReleaseCheckAt: Date? {
+        get { UserDefaults.standard.object(forKey: Keys.lastReleaseCheckAt) as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.lastReleaseCheckAt) }
+    }
+
     var readingGoal: Int {
         didSet { UserDefaults.standard.set(readingGoal, forKey: Keys.readingGoal) }
     }
@@ -190,6 +201,7 @@ final class AppSettings {
         watchFolderPath = UserDefaults.standard.string(forKey: Keys.watchPath)
         autoBackupEnabled = UserDefaults.standard.bool(forKey: Keys.autoBackupEnabled)
         backupFolderPath = UserDefaults.standard.string(forKey: Keys.backupPath)
+        releaseCheckEnabled = UserDefaults.standard.object(forKey: Keys.releaseCheckEnabled) as? Bool ?? true
         let goal = UserDefaults.standard.integer(forKey: Keys.readingGoal)
         readingGoal = goal > 0 ? goal : 12
         let storedZoom = UserDefaults.standard.object(forKey: Keys.gridZoom) as? Double ?? Self.defaultGridZoom

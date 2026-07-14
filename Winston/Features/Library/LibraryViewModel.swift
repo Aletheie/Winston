@@ -19,6 +19,7 @@ final class LibraryViewModel {
     let health: LibraryHealthService
     let editions: EditionService
     let wishlist: WishlistService
+    let notices: NoticeService
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
          online: any OnlineMetadataFetching = OnlineMetadataService()) {
@@ -29,6 +30,12 @@ final class LibraryViewModel {
         let metadata = MetadataService(modelContext: modelContext, settings: settings, online: online)
         self.wishlist = wishlist
         self.metadata = metadata
+        self.notices = NoticeService(
+            modelContext: modelContext,
+            settings: settings,
+            toasts: toasts,
+            wishlist: wishlist
+        )
         let editions = EditionService(modelContext: modelContext)
         self.editions = editions
         self.importer = ImportService(
@@ -355,8 +362,12 @@ final class LibraryViewModel {
     // MARK: - Reading status
 
     func setReadingStatus(_ status: ReadingStatus, for books: [Book]) {
+        let newlyFinished = status == .finished
+            ? books.filter { $0.readingStatus != .finished }
+            : []
         for book in books { book.setStatus(status) }
         modelContext.saveQuietly()
+        notices.booksDidFinish(newlyFinished)
     }
 
     // MARK: - Collections
