@@ -114,16 +114,17 @@ struct PluginServiceTests {
             exports.activate = async () => {
                 const books = await Winston.library.list();
                 const result = await Winston.library.update(books[0].uuid,
-                    { title: "Clobbered", publisher: "Argo" });
+                    { title: "Clobbered", publisher: "Argo", translator: "Jan Novák" });
                 console.log("applied:" + result.applied.join(","));
             };
             """)
         await harness.service.refresh()
         await harness.service.enable("cz.test.sample", grantingPermissions: true)
 
-        #expect(await harness.loggedEventually("applied:publisher", in: "cz.test.sample"))
+        #expect(await harness.loggedEventually("applied:publisher,translator", in: "cz.test.sample"))
         #expect(book.title == "Kept")
         #expect(book.publisher == "Argo")
+        #expect(book.translator == "Jan Novák")
     }
 
     @Test func storageRoundTripsAndPersistsPerPlugin() async throws {

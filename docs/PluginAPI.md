@@ -88,7 +88,7 @@ await Winston.library.list({ text: "čapek" })  // filter on display title/autho
 await Winston.library.get(uuid)          // → Book or null
 await Winston.library.update(uuid, {     // fills empty fields only; returns
     publisher: "Argo",                   //   { applied: ["publisher", ...] }
-    title: "...", author: "...", year: "...", language: "...", isbn: "...",
+    title: "...", author: "...", year: "...", language: "...", translator: "...", isbn: "...",
     series: "...", seriesIndex: "...", description: "...", tags: ["..."]
 })
 
@@ -105,9 +105,10 @@ await Winston.ui.toast("message", "success")    //         "success", "error"
 A `Book` is a snapshot (changing it does nothing — use `library.update`):
 
 ```
-uuid, title, author, displayTitle, displayAuthor, publisher, year, language,
+uuid, title, author, displayTitle, displayAuthor, publisher, year, language, translator,
 isbn, series, seriesIndex, tags, description, rating, communityRating,
-readingStatus, format, fileSizeBytes, dateAdded
+readingStatus, format, fileSizeBytes, dateAdded, workUUID, workTitle,
+editionCount, formats
 ```
 
 ## Rules of the sandbox

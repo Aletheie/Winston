@@ -10,6 +10,7 @@ nonisolated struct PluginBookDTO: Codable, Sendable {
     let publisher: String?
     let year: String?
     let language: String?
+    let translator: String?
     let isbn: String?
     let series: String?
     let seriesIndex: String?
@@ -21,6 +22,10 @@ nonisolated struct PluginBookDTO: Codable, Sendable {
     let format: String
     let fileSizeBytes: Int64
     let dateAdded: Date
+    let workUUID: String?
+    let workTitle: String?
+    let editionCount: Int
+    let formats: [String]
 
     @MainActor init(_ book: Book) {
         uuid = book.uuid.uuidString
@@ -31,6 +36,7 @@ nonisolated struct PluginBookDTO: Codable, Sendable {
         publisher = book.publisher
         year = book.year
         language = book.language
+        translator = book.translator
         isbn = book.isbn
         series = book.series
         seriesIndex = book.seriesIndex
@@ -42,6 +48,10 @@ nonisolated struct PluginBookDTO: Codable, Sendable {
         format = (book.fileName as NSString).pathExtension.lowercased()
         fileSizeBytes = book.fileSizeBytes
         dateAdded = book.dateAdded
+        workUUID = book.work?.uuid.uuidString
+        workTitle = book.work?.title
+        editionCount = max(book.work?.editions.count ?? 1, 1)
+        formats = book.assetFormats.map { $0.lowercased() }
     }
 }
 
@@ -189,6 +199,7 @@ final class PluginHostAPI {
         fill(\.publisher, patch.publisher, "publisher")
         fill(\.year, patch.year, "year")
         fill(\.language, patch.language, "language")
+        fill(\.translator, patch.translator, "translator")
         fill(\.isbn, patch.isbn, "isbn")
         fill(\.series, patch.series, "series")
         fill(\.seriesIndex, patch.seriesIndex, "seriesIndex")

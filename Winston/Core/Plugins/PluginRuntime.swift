@@ -21,6 +21,7 @@ nonisolated struct PluginMetadataPatch: Sendable, Equatable {
     var publisher: String?
     var year: String?
     var language: String?
+    var translator: String?
     var isbn: String?
     var series: String?
     var seriesIndex: String?
@@ -224,6 +225,7 @@ nonisolated final class PluginRuntime: @unchecked Sendable {
                     patch.publisher = field("publisher")
                     patch.year = field("year")
                     patch.language = field("language")
+                    patch.translator = field("translator")
                     patch.isbn = field("isbn")
                     patch.series = field("series")
                     patch.seriesIndex = field("seriesIndex")
