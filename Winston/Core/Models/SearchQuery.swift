@@ -1,7 +1,7 @@
 import Foundation
 
 nonisolated struct SearchQuery: Equatable, Sendable {
-    enum Field: String { case author, tag, series, title, format, year }
+    enum Field: String { case author, tag, series, title, format, year, language, translator }
 
     struct YearConstraint: Equatable, Sendable {
         enum Op: Equatable, Sendable { case greaterThan, lessThan, equal }
@@ -15,11 +15,13 @@ nonisolated struct SearchQuery: Equatable, Sendable {
     var series: [String] = []
     var titles: [String] = []
     var formats: [String] = []
+    var languages: [String] = []
+    var translators: [String] = []
     var year: YearConstraint?
 
     var isEmpty: Bool {
         freeText.isEmpty && authors.isEmpty && tags.isEmpty && series.isEmpty
-            && titles.isEmpty && formats.isEmpty && year == nil
+            && titles.isEmpty && formats.isEmpty && languages.isEmpty && translators.isEmpty && year == nil
     }
 
     static func parse(_ raw: String) -> SearchQuery {
@@ -40,6 +42,8 @@ nonisolated struct SearchQuery: Equatable, Sendable {
             case .series: query.series.append(value)
             case .title:  query.titles.append(value)
             case .format: query.formats.append(value.lowercased())
+            case .language: query.languages.append(value.lowercased())
+            case .translator: query.translators.append(value)
             case .year:   if let constraint = parseYear(value) { query.year = constraint }
             }
         }

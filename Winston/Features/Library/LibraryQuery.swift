@@ -54,6 +54,8 @@ enum LibraryQuery {
                 || book.tags.contains { $0.lowercased().contains(q) }
                 || (book.series?.lowercased().contains(q) ?? false)
                 || (book.notes?.lowercased().contains(q) ?? false)
+                || (book.translator?.lowercased().contains(q) ?? false)
+                || (book.language?.lowercased().contains(q) ?? false)
             if !hit { return false }
         }
         for author in query.authors where !(book.displayAuthor?.lowercased().contains(author.lowercased()) ?? false) {
@@ -69,6 +71,13 @@ enum LibraryQuery {
             return false
         }
         for format in query.formats where book.format.lowercased() != format {
+            return false
+        }
+        for language in query.languages where book.language?.lowercased() != language {
+            return false
+        }
+        for translator in query.translators
+        where !(book.translator?.lowercased().contains(translator.lowercased()) ?? false) {
             return false
         }
         if let constraint = query.year {

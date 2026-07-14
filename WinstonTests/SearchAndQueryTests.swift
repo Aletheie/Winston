@@ -25,6 +25,12 @@ struct SearchQueryTests {
         #expect(q.freeText == "the dispossessed")
     }
 
+    @Test func parsesLanguageAndTranslatorFields() {
+        let query = SearchQuery.parse("language:cs translator:\"Jan Novák\"")
+        #expect(query.languages == ["cs"])
+        #expect(query.translators == ["Jan Novák"])
+    }
+
     @Test(arguments: zip(
         [">2000", "<1990", "=2010", "2010", "abc"],
         [SearchQuery.YearConstraint(op: .greaterThan, value: 2000),
@@ -92,6 +98,19 @@ struct LibraryQueryTests {
         let plain = makeBook("Other")
         let result = LibraryQuery.apply(to: [withNote, plain], filter: .all, searchText: "jana", sort: [])
         #expect(result.map(\.title) == ["Untitled"])
+    }
+
+    @Test func languageAndTranslatorFieldsFilterEditions() {
+        let matching = makeBook("Duna")
+        matching.language = "cs"
+        matching.translator = "Jan Novák"
+        let other = makeBook("Dune")
+        other.language = "en"
+        let result = LibraryQuery.apply(
+            to: [matching, other], filter: .all,
+            searchText: "language:cs translator:novák", sort: []
+        )
+        #expect(result.map(\.title) == ["Duna"])
     }
 
     @Test func titleSortIsAscending() {
