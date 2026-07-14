@@ -54,6 +54,11 @@ final class Book {
     var coverVersion: Int = 0
     var pageCount: Int?
     var sampleNoticeDismissed: Bool?
+    var editionStatement: String?
+    var editionTypeRaw: String?
+    var work: Work?
+    @Relationship(deleteRule: .cascade, inverse: \BookAsset.book)
+    var assets: [BookAsset] = []
 
     init(uuid: UUID = UUID(), fileName: String, originalFileName: String, dateAdded: Date = Date()) {
         self.uuid = uuid
@@ -71,6 +76,10 @@ final class Book {
 
     var format: String {
         (fileName as NSString).pathExtension.uppercased()
+    }
+
+    var assetFormats: [String] {
+        Array(Set(assets.isEmpty ? [format] : assets.map(\.format))).sorted()
     }
 
     var displayTitle: String {
@@ -105,6 +114,11 @@ final class Book {
     var readingStatus: ReadingStatus {
         get { readingStatusRaw.flatMap(ReadingStatus.init(rawValue:)) ?? .unread }
         set { readingStatusRaw = newValue.rawValue }
+    }
+
+    var editionType: EditionType {
+        get { editionTypeRaw.flatMap(EditionType.init(rawValue:)) ?? .standard }
+        set { editionTypeRaw = newValue.rawValue }
     }
 
     func setStatus(_ status: ReadingStatus) {
