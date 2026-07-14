@@ -1,33 +1,34 @@
-import AppKit
 import SwiftUI
 
 struct SeriesView: View {
     let books: [Book]
     let onOpen: (Book) -> Void
+    let seriesName: String?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
 
-    @State private var seriesGroups: [SeriesGroup] = []
+    @State private var displayedGroups: [SeriesGroup] = []
+    @State private var groupFingerprint = ""
     @State private var completionModel: SeriesCompletionViewModel
     @State private var retryGeneration = 0
 
     init(
         books: [Book],
         onOpen: @escaping (Book) -> Void,
-        catalogService: any SeriesCatalogFetching = HardcoverSeriesService()
+        seriesName: String? = nil,
+        catalogService: any SeriesCatalogFetching = HardcoverSeriesService.shared
     ) {
         self.books = books
         self.onOpen = onOpen
-        _completionModel = State(
-            initialValue: SeriesCompletionViewModel(service: catalogService)
-        )
+        self.seriesName = seriesName
+        self.completionModel = SeriesCompletionViewModel(service: catalogService)
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            SeriesSheetHeader()
+            SeriesSheetHeader(seriesName: seriesName)
             Divider()
 
             if let notice = catalogNotice {
@@ -35,7 +36,7 @@ struct SeriesView: View {
                 Divider().opacity(0.35)
             }
 
-            if seriesGroups.isEmpty {
+            if displayedGroups.isEmpty {
                 ContentUnavailableView {
                     Label(String(localized: "No series yet"), systemImage: "books.vertical")
                 } description: {
@@ -45,12 +46,13 @@ struct SeriesView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 18) {
-                        ForEach(seriesGroups) { group in
+                        ForEach(displayedGroups) { group in
                             SeriesSection(
                                 name: group.name,
                                 books: group.books,
                                 completion: completionModel.completions[group.lookup.id],
                                 catalogPhase: completionModel.phase,
+                                isFocused: seriesName != nil,
                                 onOpen: onOpen
                             )
                         }
@@ -74,7 +76,7 @@ struct SeriesView: View {
             idealHeight: 780,
             maxHeight: .infinity
         )
-        .onAppear { seriesGroups = makeGroups() }
+        .onAppear { rebuildGroups() }
         .task(id: catalogTaskID) {
             let token = settings.hardcoverToken.trimmingCharacters(in: .whitespacesAndNewlines)
             guard settings.onlineMetadataEnabled, !token.isEmpty else {
@@ -82,7 +84,7 @@ struct SeriesView: View {
                 return
             }
             await completionModel.load(
-                lookups: seriesGroups.map(\.lookup),
+                lookups: displayedGroups.map(\.lookup),
                 token: token
             )
         }
@@ -102,13 +104,7 @@ struct SeriesView: View {
     }
 
     private var catalogTaskID: CatalogTaskID {
-        let groupFingerprint = seriesGroups.map { group in
-            let books = group.books.map {
-                "\($0.uuid.uuidString):\($0.displayTitle):\($0.seriesIndex ?? "-")"
-            }.joined(separator: ",")
-            return "\(group.id):\(books)"
-        }.joined(separator: "|")
-        return CatalogTaskID(
+        CatalogTaskID(
             onlineEnabled: settings.onlineMetadataEnabled,
             tokenHash: settings.hardcoverToken.hashValue,
             groupFingerprint: groupFingerprint,
@@ -162,14 +158,40 @@ struct SeriesView: View {
     private func seriesIndex(_ book: Book) -> Double {
         book.seriesIndex.flatMap(Double.init) ?? .greatestFiniteMagnitude
     }
+
+    private func rebuildGroups() {
+        let groups = makeGroups()
+        if let seriesName {
+            displayedGroups = groups.filter { $0.name == seriesName }
+        } else {
+            displayedGroups = groups
+        }
+        groupFingerprint = displayedGroups.map { group in
+            let books = group.books.map {
+                "\($0.uuid.uuidString):\($0.displayTitle):\($0.seriesIndex ?? "-")"
+            }.joined(separator: ",")
+            return "\(group.id):\(books)"
+        }.joined(separator: "|")
+    }
 }
 
 private struct SeriesSheetHeader: View {
+    let seriesName: String?
+
     @Environment(\.theme) private var theme
 
     var body: some View {
         HStack {
-            if theme.usesTerminalCopy {
+            if let seriesName {
+                VStack(alignment: .leading, spacing: 2) {
+                    theme.styledText(terminal: "SERIE", native: "Series")
+                        .font(theme.label(size: 9, weight: .semibold))
+                        .foregroundStyle(theme.textTertiary)
+                    Text(verbatim: seriesName)
+                        .font(theme.body(size: 15, weight: .bold))
+                        .lineLimit(1)
+                }
+            } else if theme.usesTerminalCopy {
                 Text(verbatim: "// series")
                     .font(theme.body(size: 15, weight: .bold))
             } else {
@@ -204,13 +226,17 @@ private struct SeriesCatalogNotice: View {
                 Image(systemName: "network.slash")
                 Text("Enable online metadata to check which series books are missing.")
                 Spacer()
-                Button("Open Settings", action: openSettingsWindow)
+                SettingsLink {
+                    Text("Open Settings")
+                }
                     .controlSize(.small)
             case .tokenMissing:
                 Image(systemName: "key")
                 Text("Add a Hardcover API token to check which series books are missing.")
                 Spacer()
-                Button("Open Settings", action: openSettingsWindow)
+                SettingsLink {
+                    Text("Open Settings")
+                }
                     .controlSize(.small)
             case .loading:
                 ProgressView().controlSize(.small)
@@ -231,10 +257,6 @@ private struct SeriesCatalogNotice: View {
         .background(theme.surfaceGlass.opacity(0.45))
     }
 
-    private func openSettingsWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        _ = NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-    }
 }
 
 // MARK: - One local series
@@ -244,6 +266,7 @@ private struct SeriesSection: View {
     let books: [Book]
     let completion: SeriesCompletion?
     let catalogPhase: SeriesCompletionViewModel.Phase
+    let isFocused: Bool
     let onOpen: (Book) -> Void
 
     @Environment(\.theme) private var theme
@@ -253,7 +276,7 @@ private struct SeriesSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SeriesSectionHeader(name: name, nextUnread: nextUnread, onOpen: onOpen)
+            SeriesSectionHeader(name: name, books: books, nextUnread: nextUnread, onOpen: onOpen)
             LocalReadingProgress(readCount: readCount, totalCount: books.count)
 
             if let completion {
@@ -276,13 +299,14 @@ private struct SeriesSection: View {
         .background(theme.surfaceGlass.opacity(0.32), in: RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
-                .stroke(theme.borderSubtle, lineWidth: 1)
+                .stroke(isFocused ? theme.accent : theme.borderSubtle, lineWidth: isFocused ? 1.5 : 1)
         }
     }
 }
 
 private struct SeriesSectionHeader: View {
     let name: String
+    let books: [Book]
     let nextUnread: Book?
     let onOpen: (Book) -> Void
 
@@ -294,6 +318,8 @@ private struct SeriesSectionHeader: View {
                 .font(theme.body(size: 13, weight: .bold))
                 .foregroundStyle(theme.textPrimary)
             Spacer()
+            SendSeriesButton(books: books)
+                .controlSize(.small)
             if let nextUnread {
                 Button { onOpen(nextUnread) } label: {
                     Label("Read next", systemImage: "book")
@@ -421,27 +447,51 @@ private struct MissingSeriesBookRow: View {
     let book: HardcoverSeriesBook
 
     @Environment(\.theme) private var theme
+    @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        Link(destination: book.hardcoverURL) {
-            HStack(spacing: 7) {
-                Text(verbatim: positionLabel)
-                    .font(theme.label(size: 9, weight: .regular))
-                    .foregroundStyle(theme.textTertiary)
-                    .frame(width: 34, alignment: .trailing)
-                    .monospacedDigit()
-                Text(verbatim: book.title)
-                    .font(theme.label(size: 10, weight: .regular))
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
-                Spacer()
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(theme.textTertiary)
+        HStack(spacing: 7) {
+            Link(destination: book.hardcoverURL) {
+                HStack(spacing: 7) {
+                    Text(verbatim: positionLabel)
+                        .font(theme.label(size: 9, weight: .regular))
+                        .foregroundStyle(theme.textTertiary)
+                        .frame(width: 34, alignment: .trailing)
+                        .monospacedDigit()
+                    Text(verbatim: book.title)
+                        .font(theme.label(size: 10, weight: .regular))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(theme.textTertiary)
+                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            if let externalBookURL {
+                Link(destination: externalBookURL) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                        .padding(4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Search External Website")
+                .accessibilityLabel("Search External Website")
+            }
         }
-        .buttonStyle(.plain)
+    }
+
+    private var externalBookURL: URL? {
+        ExternalBookSearchURL.make(
+            websiteURL: settings.externalBookWebsiteURL,
+            title: book.title,
+            author: book.authors.first
+        )
     }
 
     private var positionLabel: String {
