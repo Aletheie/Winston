@@ -118,4 +118,68 @@ struct ModelRoundTripTests {
         #expect(refetched.title == "User Title")
         #expect(refetched.publisher == "Extracted Publisher")
     }
+
+    @Test func workAndAssetsRoundTripAndCascadeCorrectly() throws {
+        let (container, context) = makeContext()
+        _ = container
+
+        let work = Work(title: "Dune", author: "Frank Herbert")
+        let book = Book(fileName: "a.epub", originalFileName: "Dune.epub")
+        let asset = BookAsset(fileName: "a.epub", origin: .original, sizeBytes: 42, book: book)
+        context.insert(work)
+        context.insert(book)
+        context.insert(asset)
+        book.work = work
+        try context.save()
+
+        let fetched = try #require(try fetchBook(uuid: book.uuid, in: context))
+        #expect(fetched.work?.uuid == work.uuid)
+        #expect(fetched.assets.map(\.uuid) == [asset.uuid])
+        #expect(work.editions.map(\.uuid) == [book.uuid])
+
+        context.delete(work)
+        try context.save()
+        #expect(try context.fetchCount(FetchDescriptor<Book>()) == 1)
+        #expect(fetched.work == nil)
+
+        context.delete(fetched)
+        try context.save()
+        #expect(try context.fetchCount(FetchDescriptor<BookAsset>()) == 0)
+    }
+
+    @Test func nilRawEditionAndAssetValuesUseSafeDefaults() {
+        let book = Book(fileName: "a.epub", originalFileName: "A.epub")
+        book.editionTypeRaw = nil
+        let asset = BookAsset(fileName: "a.epub")
+        asset.originRaw = nil
+        asset.validationStatusRaw = nil
+
+        #expect(book.editionType == .standard)
+        #expect(asset.origin == .original)
+        #expect(asset.validationStatus == nil)
+        #expect(asset.generatedFromContentHash == nil)
+    }
+
+    @Test func pluginSnapshotIncludesEditionGroupingAndFormats() throws {
+        let (container, context) = makeContext()
+        _ = container
+        let work = Work(title: "Dune", author: "Frank Herbert")
+        let book = Book(fileName: "dune.epub", originalFileName: "Dune.epub")
+        book.translator = "Jan Novák"
+        let epub = BookAsset(uuid: book.uuid, fileName: "dune.epub", book: book)
+        let mobi = BookAsset(fileName: "dune.mobi", origin: .generated, book: book)
+        context.insert(work)
+        context.insert(book)
+        context.insert(epub)
+        context.insert(mobi)
+        book.work = work
+        try context.save()
+
+        let dto = PluginBookDTO(book)
+        #expect(dto.translator == "Jan Novák")
+        #expect(dto.workUUID == work.uuid.uuidString)
+        #expect(dto.workTitle == "Dune")
+        #expect(dto.editionCount == 1)
+        #expect(dto.formats == ["epub", "mobi"])
+    }
 }
