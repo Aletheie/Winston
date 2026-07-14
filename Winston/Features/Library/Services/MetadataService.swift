@@ -27,7 +27,7 @@ final class MetadataService {
     func updateMetadata(
         for book: Book,
         title: String?, author: String?, publisher: String?, year: String?,
-        series: String?, seriesIndex: String?, language: String?, isbn: String?,
+        series: String?, seriesIndex: String?, language: String?, translator: String?, isbn: String?,
         description: String?, tags: [String]
     ) {
         book.title = title
@@ -37,6 +37,7 @@ final class MetadataService {
         book.series = series
         book.seriesIndex = seriesIndex
         book.language = language
+        book.translator = translator
         book.isbn = isbn
         book.bookDescription = description
         book.tags = tags
@@ -79,6 +80,7 @@ final class MetadataService {
             if let year = edit.year           { book.year = year.isEmpty ? nil : year }
             if let series = edit.series       { book.series = series.isEmpty ? nil : series }
             if let language = edit.language   { book.language = language.isEmpty ? nil : language }
+            if let translator = edit.translator { book.translator = translator.isEmpty ? nil : translator }
             if let status = edit.status       { book.setStatus(status) }
             if let tags = edit.tags {
                 switch edit.tagMode {

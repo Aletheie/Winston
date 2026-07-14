@@ -21,6 +21,7 @@ struct BulkEdit {
     var year: String?
     var series: String?
     var language: String?
+    var translator: String?
     var tags: [String]?
     var tagMode: TagMode = .add
     var status: ReadingStatus?
@@ -32,13 +33,23 @@ struct BulkEditSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    @State private var applyAuthor = false;    @State private var author = ""
-    @State private var applyPublisher = false; @State private var publisher = ""
-    @State private var applyYear = false;      @State private var year = ""
-    @State private var applySeries = false;    @State private var series = ""
-    @State private var applyLanguage = false;  @State private var language = ""
-    @State private var applyTags = false;      @State private var tags = "";  @State private var tagMode: TagMode = .add
-    @State private var applyStatus = false;    @State private var status: ReadingStatus = .unread
+    @State private var applyAuthor = false
+    @State private var author = ""
+    @State private var applyPublisher = false
+    @State private var publisher = ""
+    @State private var applyYear = false
+    @State private var year = ""
+    @State private var applySeries = false
+    @State private var series = ""
+    @State private var applyLanguage = false
+    @State private var language = ""
+    @State private var applyTranslator = false
+    @State private var translator = ""
+    @State private var applyTags = false
+    @State private var tags = ""
+    @State private var tagMode: TagMode = .add
+    @State private var applyStatus = false
+    @State private var status: ReadingStatus = .unread
 
     var body: some View {
         Form {
@@ -54,6 +65,7 @@ struct BulkEditSheet: View {
                 bulkRow("Year", isOn: $applyYear) { TextField("Year", text: $year) }
                 bulkRow("Series", isOn: $applySeries) { TextField("Series", text: $series) }
                 bulkRow("Language", isOn: $applyLanguage) { TextField("Language", text: $language) }
+                bulkRow("Translator", isOn: $applyTranslator) { TextField("Translator", text: $translator) }
                 bulkRow("Status", isOn: $applyStatus) {
                     Picker("", selection: $status) {
                         ForEach(ReadingStatus.allCases) { Text($0.label).tag($0) }
@@ -103,7 +115,7 @@ struct BulkEditSheet: View {
     }
 
     private var hasChanges: Bool {
-        applyAuthor || applyPublisher || applyYear || applySeries || applyLanguage || applyStatus || applyTags
+        applyAuthor || applyPublisher || applyYear || applySeries || applyLanguage || applyTranslator || applyStatus || applyTags
     }
 
     private func apply() {
@@ -113,6 +125,7 @@ struct BulkEditSheet: View {
         if applyYear { edit.year = year }
         if applySeries { edit.series = series }
         if applyLanguage { edit.language = language }
+        if applyTranslator { edit.translator = translator }
         if applyStatus { edit.status = status }
         if applyTags {
             edit.tags = tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }

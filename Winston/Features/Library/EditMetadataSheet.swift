@@ -15,6 +15,7 @@ struct EditMetadataSheet: View {
     @State private var series: String = ""
     @State private var seriesIndex: String = ""
     @State private var language: String = ""
+    @State private var translator: String = ""
     @State private var isbn: String = ""
     @State private var tags: String = ""
     @State private var bookDescription: String = ""
@@ -42,6 +43,7 @@ struct EditMetadataSheet: View {
                 MetaField(label: theme.styledText(terminal: "TITLE", native: "Title"), text: $title)
                 MetaField(label: theme.styledText(terminal: "AUTHOR", native: "Author"), text: $author)
                 MetaField(label: theme.styledText(terminal: "PUBLISHER", native: "Publisher"), text: $publisher)
+                MetaField(label: theme.styledText(terminal: "PREKLAD", native: "Translator"), text: $translator)
 
                 HStack(spacing: 12) {
                     MetaField(label: theme.styledText(terminal: "YEAR", native: "Year"), text: $year)
@@ -102,6 +104,7 @@ struct EditMetadataSheet: View {
                         series: series.isEmpty ? nil : series,
                         seriesIndex: seriesIndex.isEmpty ? nil : seriesIndex,
                         language: language.isEmpty ? nil : language,
+                        translator: translator.isEmpty ? nil : translator,
                         isbn: isbn.isEmpty ? nil : isbn,
                         description: bookDescription.isEmpty ? nil : bookDescription,
                         tags: tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -131,6 +134,7 @@ struct EditMetadataSheet: View {
             series = book.series ?? ""
             seriesIndex = book.seriesIndex ?? ""
             language = book.language ?? ""
+            translator = book.translator ?? ""
             isbn = book.isbn ?? ""
             tags = book.tags.joined(separator: ", ")
             bookDescription = book.bookDescription ?? ""
