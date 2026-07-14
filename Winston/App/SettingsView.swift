@@ -158,6 +158,12 @@ struct SettingsView: View {
                 Text("Optional. Hardcover has the best reader ratings. Paste a token to use it as the rating source; without one, ratings fall back to Google Books and Open Library, which cover far fewer books.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Toggle("Check for new series releases", isOn: $settings.releaseCheckEnabled)
+                    .disabled(!settings.onlineMetadataEnabled
+                        || settings.hardcoverToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Text("Once a day, Winston looks for newly released books in the series you own and posts them to Updates.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             ExternalBookWebsiteSettingsSection(
