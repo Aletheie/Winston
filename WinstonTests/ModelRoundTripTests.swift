@@ -160,6 +160,43 @@ struct ModelRoundTripTests {
         #expect(asset.generatedFromContentHash == nil)
     }
 
+    @Test func libraryNoticeKindRoundTripsAndUnknownRawValueIsSafe() throws {
+        let (container, context) = makeContext()
+        _ = container
+
+        let notice = LibraryNotice(
+            dedupeKey: "release:42",
+            kind: .newRelease,
+            bookTitle: "A New Book"
+        )
+        context.insert(notice)
+        try context.save()
+
+        let fetched = try #require(try context.fetch(FetchDescriptor<LibraryNotice>()).first)
+        #expect(fetched.kind == .newRelease)
+        #expect(fetched.isUnread)
+
+        fetched.kindRaw = "future-kind"
+        #expect(fetched.kind == nil)
+    }
+
+    @Test func seriesCatalogSnapshotEncodesStableSortedSets() throws {
+        let (container, context) = makeContext()
+        _ = container
+
+        let snapshot = SeriesCatalogSnapshot(seriesKey: "series", knownBookIDs: [9, 2, 5])
+        context.insert(snapshot)
+        try context.save()
+
+        let fetched = try #require(try context.fetch(FetchDescriptor<SeriesCatalogSnapshot>()).first)
+        #expect(fetched.knownBookIDsRaw == "2,5,9")
+        #expect(fetched.knownBookIDs == [2, 5, 9])
+
+        fetched.knownBookIDs = []
+        #expect(fetched.knownBookIDsRaw.isEmpty)
+        #expect(fetched.knownBookIDs.isEmpty)
+    }
+
     @Test func pluginSnapshotIncludesEditionGroupingAndFormats() throws {
         let (container, context) = makeContext()
         _ = container

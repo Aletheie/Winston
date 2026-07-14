@@ -42,7 +42,7 @@ struct NoticeRow: View {
                 }
             }
             .font(theme.label(size: 10, weight: .regular))
-            .foregroundStyle(theme.textTertiary)
+            .foregroundStyle(theme.textSecondary)
             .lineLimit(1)
         }
         .contentShape(Rectangle())
@@ -106,7 +106,7 @@ private struct NoticeCopy: View {
             if let detail = metadataLine {
                 Text(verbatim: detail)
                     .font(theme.label(size: 10, weight: .regular))
-                    .foregroundStyle(theme.textTertiary)
+                    .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
             }
         }
@@ -209,6 +209,7 @@ private struct NoticeActions: View {
                 }
             }
             .buttonStyle(.borderless)
+            .tint(theme.accent)
         }
     }
 
@@ -227,6 +228,7 @@ private struct NoticeActions: View {
                     }
                 }
                 .buttonStyle(.bordered)
+                .tint(theme.accent)
             }
 
             Button {
@@ -240,6 +242,7 @@ private struct NoticeActions: View {
                 }
             }
             .buttonStyle(.borderless)
+            .tint(theme.accent)
         } else {
             Label {
                 theme.styledText(
@@ -249,7 +252,7 @@ private struct NoticeActions: View {
             } icon: {
                 Image(systemName: "questionmark.circle")
             }
-            .foregroundStyle(theme.textTertiary)
+            .foregroundStyle(theme.textSecondary)
         }
     }
 
@@ -272,7 +275,7 @@ private struct NoticeActions: View {
             } icon: {
                 Image(systemName: "questionmark.circle")
             }
-            .foregroundStyle(theme.textTertiary)
+            .foregroundStyle(theme.textSecondary)
         }
     }
 }
@@ -291,7 +294,7 @@ private struct NoticeRatingStars: View {
                 } label: {
                     Image(systemName: (rating ?? 0) >= star ? "star.fill" : "star")
                         .font(.system(size: 13))
-                        .foregroundStyle((rating ?? 0) >= star ? theme.highlight : theme.textTertiary)
+                        .foregroundStyle((rating ?? 0) >= star ? theme.highlight : theme.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .help(Text("Rate \(star) out of 5"))

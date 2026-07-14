@@ -43,6 +43,28 @@ nonisolated struct HardcoverSeriesBook: Sendable, Equatable, Identifiable {
     let releaseDate: DiscoveryReleaseDate?
     let coverURL: URL?
     fileprivate let popularity: Int
+
+    init(
+        id: Int,
+        title: String,
+        position: Double?,
+        positionText: String?,
+        authors: [String],
+        hardcoverURL: URL,
+        releaseDate: DiscoveryReleaseDate?,
+        coverURL: URL?,
+        popularity: Int = 0
+    ) {
+        self.id = id
+        self.title = title
+        self.position = position
+        self.positionText = positionText
+        self.authors = authors
+        self.hardcoverURL = hardcoverURL
+        self.releaseDate = releaseDate
+        self.coverURL = coverURL
+        self.popularity = popularity
+    }
 }
 
 nonisolated struct HardcoverSeriesCatalog: Sendable, Equatable, Identifiable {

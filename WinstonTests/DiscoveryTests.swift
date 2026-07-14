@@ -484,6 +484,8 @@ struct SeriesCompletionTests {
                   "title": "Leviathan Wakes",
                   "slug": "leviathan-wakes",
                   "users_read_count": 900,
+                  "release_date": "2011-06-02",
+                  "image": { "url": "https://img.hardcover.app/leviathan-wakes.jpg" },
                   "contributions": [{ "author": { "name": "James S. A. Corey" } }]
                 }
               },
@@ -556,6 +558,10 @@ struct SeriesCompletionTests {
         #expect(catalog.books.map(\.title) == [
             "Leviathan Wakes", "Caliban's War", "Abaddon's Gate",
         ])
+        #expect(catalog.books.first?.releaseDate == DiscoveryReleaseDate(year: 2011, month: 6, day: 2))
+        #expect(catalog.books.first?.coverURL == URL(string: "https://img.hardcover.app/leviathan-wakes.jpg"))
+        #expect(catalog.books.last?.releaseDate == nil)
+        #expect(catalog.books.last?.coverURL == nil)
         #expect(catalog.hardcoverURL == URL(string: "https://hardcover.app/series/the-expanse"))
     }
 

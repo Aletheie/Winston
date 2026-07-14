@@ -320,6 +320,8 @@ private func makePreviewModel(theme: Theme) -> (LibraryViewModel, ModelContainer
         .environment(AppSettings())
         .environment(ToastCenter())
         .environment(\.theme, .black)
+        .tint(Theme.black.accent)
+        .preferredColorScheme(.dark)
         .frame(width: 700, height: 500)
 }
 
@@ -330,6 +332,8 @@ private func makePreviewModel(theme: Theme) -> (LibraryViewModel, ModelContainer
         .environment(AppSettings())
         .environment(ToastCenter())
         .environment(\.theme, .purple)
+        .tint(Theme.purple.accent)
+        .preferredColorScheme(.dark)
         .frame(width: 700, height: 500)
 }
 
@@ -340,6 +344,8 @@ private func makePreviewModel(theme: Theme) -> (LibraryViewModel, ModelContainer
         .environment(AppSettings())
         .environment(ToastCenter())
         .environment(\.theme, .white)
+        .tint(Theme.white.accent)
+        .preferredColorScheme(.light)
         .frame(width: 700, height: 500)
 }
 #endif

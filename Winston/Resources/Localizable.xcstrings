@@ -1,6 +1,377 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : ""
+          }
+        }
+      }
+    },
+    "%lld unread" : {
+      "comment" : "Unread count in the Updates header.",
+      "localizations" : {
+        "cs" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld nepřečtené"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld nepřečtená"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld nepřečtených"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Add a Hardcover API token to get alerts about new series releases." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidejte API token Hardcoveru, abyste dostávali upozornění na nová vydání v sériích."
+          }
+        }
+      }
+    },
+    "Book %@" : {
+      "comment" : "Series position shown in an Updates row; the placeholder is a number or position label.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Díl %@"
+          }
+        }
+      }
+    },
+    "Check for new releases" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zkontrolovat nová vydání"
+          }
+        }
+      }
+    },
+    "Check for new series releases" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kontrolovat nová vydání v sériích"
+          }
+        }
+      }
+    },
+    "Check Now" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zkontrolovat teď"
+          }
+        }
+      }
+    },
+    "Checking for new releases failed." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kontrola nových vydání se nezdařila."
+          }
+        }
+      }
+    },
+    "Checking for new series releases is turned off." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kontrola nových vydání v sériích je vypnutá."
+          }
+        }
+      }
+    },
+    "Enable online metadata to get alerts about new series releases." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zapněte online metadata, abyste dostávali upozornění na nová vydání v sériích."
+          }
+        }
+      }
+    },
+    "Found %lld new releases." : {
+      "comment" : "Summary after manually checking Hardcover for newly released series books.",
+      "localizations" : {
+        "cs" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Nalezeny %lld nové knihy."
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Nalezena %lld nová kniha."
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Nalezeno %lld nových knih."
+                }
+              }
+            }
+          }
+        },
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Found %lld new release."
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "Found %lld new releases."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "How was %@?" : {
+      "comment" : "Rating prompt; the placeholder is the finished book title.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Jak se vám líbila kniha %@?"
+          }
+        }
+      }
+    },
+    "Library update" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Novinka v knihovně"
+          }
+        }
+      }
+    },
+    "Mark all as read" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Označit vše jako přečtené"
+          }
+        }
+      }
+    },
+    "Mark as read" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Označit jako přečtené"
+          }
+        }
+      }
+    },
+    "Mark as unread" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Označit jako nepřečtené"
+          }
+        }
+      }
+    },
+    "New in %@: %@" : {
+      "comment" : "New-release notice title; the first placeholder is the series name, the second is the book title.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Novinka v %@: %@"
+          }
+        }
+      }
+    },
+    "New releases from your series, reading recommendations, and rating prompts will appear here." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nová vydání z vašich sérií, doporučení ke čtení a výzvy k hodnocení se zobrazí tady."
+          }
+        }
+      }
+    },
+    "Next in %@: %@" : {
+      "comment" : "Next-in-series notice title; the first placeholder is the series name, the second is the book title.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Co číst dál – %@: %@"
+          }
+        }
+      }
+    },
+    "No longer in your library" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Už není ve vaší knihovně"
+          }
+        }
+      }
+    },
+    "No new releases found." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nebyla nalezena žádná nová vydání."
+          }
+        }
+      }
+    },
+    "No series to check yet." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zatím nemáte žádnou sérii ke kontrole."
+          }
+        }
+      }
+    },
+    "On Wishlist" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Na wishlistu"
+          }
+        }
+      }
+    },
+    "Once a day, Winston looks for newly released books in the series you own and posts them to Updates." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Winston jednou denně zkontroluje nově vydané knihy v sériích, které vlastníte, a přidá je do Novinek."
+          }
+        }
+      }
+    },
+    "Rate %lld out of 5" : {
+      "comment" : "Accessibility label for a rating star; the value is from one through five.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ohodnotit %lld z 5"
+          }
+        }
+      }
+    },
+    "Read now" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Číst teď"
+          }
+        }
+      }
+    },
+    "Show series" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zobrazit sérii"
+          }
+        }
+      }
+    },
+    "The last check for new releases failed." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Poslední kontrola nových vydání se nezdařila."
+          }
+        }
+      }
+    },
+    "Updates" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Novinky"
+          }
+        }
+      }
+    },
+    "You’re all caught up" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Všechno je vyřízené"
+          }
+        }
+      }
+    },
+    "your series" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "některé z vašich sérií"
+          }
+        }
+      }
+    },
     "“%@” is DRM‑protected and can't be converted." : {
       "localizations" : {
         "cs" : {
@@ -2069,6 +2440,18 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Upravit metadata…"
+          }
+        }
+      }
+    },
+    "Edition" : {
+      "comment" : "Label for the edition of a book.",
+      "isCommentAutoGenerated" : true,
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vydání"
           }
         }
       }
