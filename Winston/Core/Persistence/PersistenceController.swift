@@ -29,6 +29,7 @@ enum PersistenceController {
         do {
             let container = try ModelContainer(
                 for: Work.self, Book.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
+                LibraryNotice.self, SeriesCatalogSnapshot.self,
                 configurations: configuration
             )
             return (container, nil)
@@ -38,6 +39,7 @@ enum PersistenceController {
             do {
                 let container = try ModelContainer(
                     for: Work.self, Book.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
+                    LibraryNotice.self, SeriesCatalogSnapshot.self,
                     configurations: configuration
                 )
                 return (container, .recreatedAfterCorruption(backupPath: backupPath))
@@ -76,6 +78,7 @@ enum PersistenceController {
         do {
             return try ModelContainer(
                 for: Work.self, Book.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
+                LibraryNotice.self, SeriesCatalogSnapshot.self,
                 configurations: configuration
             )
         } catch {
