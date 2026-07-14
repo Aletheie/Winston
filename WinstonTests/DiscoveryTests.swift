@@ -93,7 +93,12 @@ struct DiscoveryTests {
             settings.hardcoverToken = "abc"
             vm.hardcoverCredentialDidChange(delay: .milliseconds(80))
 
-            try? await Task.sleep(for: .milliseconds(160))
+            let deadline = Date.now.addingTimeInterval(1)
+            while Date.now < deadline {
+                let calls = await client.calls
+                if calls == 1, vm.phase == .loaded([sample]) { break }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
             #expect(await client.calls == 1)
             #expect(vm.phase == .loaded([sample]))
         }
@@ -438,7 +443,7 @@ private actor WishlistOfflineMetadataClient: OnlineMetadataFetching {
 
 // MARK: - Series completion
 
-@Suite
+@Suite(.serialized)
 struct SeriesCompletionTests {
     private let response = """
     {
@@ -589,4 +594,69 @@ struct SeriesCompletionTests {
         #expect(completion.ownedCount == 1)
         #expect(completion.missingBooks.map(\.title) == ["Caliban's War", "Abaddon's Gate"])
     }
+
+    @Test func negativeCatalogResultIsCachedWithoutAnotherRequest() async throws {
+        SeriesCacheURLProtocol.prepare()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SeriesCacheURLProtocol.self]
+        let service = HardcoverSeriesService(session: URLSession(configuration: configuration))
+
+        _ = try await service.catalogs(matching: [lookup], token: "test-token")
+        _ = try await service.catalogs(matching: [lookup], token: "test-token")
+
+        #expect(SeriesCacheURLProtocol.requestCount == 1)
+    }
+
+    @Test func concurrentCatalogRequestsForTheSameSeriesAreCoalesced() async throws {
+        SeriesCacheURLProtocol.prepare(responseDelay: 0.15)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SeriesCacheURLProtocol.self]
+        let service = HardcoverSeriesService(session: URLSession(configuration: configuration))
+
+        async let first = service.catalogs(matching: [lookup], token: "test-token")
+        async let second = service.catalogs(matching: [lookup], token: "test-token")
+        _ = try await (first, second)
+
+        #expect(SeriesCacheURLProtocol.requestCount == 1)
+    }
+}
+
+private final class SeriesCacheURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var storedRequestCount = 0
+    nonisolated(unsafe) private static var responseDelay: TimeInterval = 0
+
+    static var requestCount: Int {
+        lock.withLock { storedRequestCount }
+    }
+
+    static func prepare(responseDelay: TimeInterval = 0) {
+        lock.withLock {
+            storedRequestCount = 0
+            self.responseDelay = responseDelay
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let delay = Self.lock.withLock { () -> TimeInterval in
+            Self.storedRequestCount += 1
+            return Self.responseDelay
+        }
+        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"data":{"series":[]}}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

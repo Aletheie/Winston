@@ -72,15 +72,35 @@ nonisolated enum SeriesCatalogError: Error, Equatable {
     case requestFailed
 }
 
+nonisolated enum SeriesCatalogCacheStatus: Sendable {
+    case catalog(HardcoverSeriesCatalog)
+    case noMatch
+    case notCached
+}
+
 // MARK: - Hardcover API
 
 actor HardcoverSeriesService: SeriesCatalogFetching {
+    nonisolated static let shared = HardcoverSeriesService()
+
+    private enum CacheEntry {
+        case catalog(HardcoverSeriesCatalog)
+        case noMatch
+    }
+
+    private struct InFlightRequest: Sendable {
+        let id: UUID
+        let lookups: [SeriesLookup]
+        let task: Task<[String: HardcoverSeriesCatalog], any Error>
+    }
+
     private static let endpoint = URL(string: "https://api.hardcover.app/v1/graphql")!
     private static let batchSize = 20
     private static let minimumRequestInterval: TimeInterval = 0.34
 
     private let session: URLSession
-    private var cache: [String: HardcoverSeriesCatalog] = [:]
+    private var cache: [String: CacheEntry] = [:]
+    private var inFlight: [String: InFlightRequest] = [:]
     private var nextRequestAt = Date.distantPast
 
     init(session: URLSession? = nil) {
@@ -97,6 +117,14 @@ actor HardcoverSeriesService: SeriesCatalogFetching {
         }
     }
 
+    func cacheStatus(for lookup: SeriesLookup) -> SeriesCatalogCacheStatus {
+        switch cache[lookup.cacheKey] {
+        case .catalog(let catalog): .catalog(catalog)
+        case .noMatch: .noMatch
+        case nil: .notCached
+        }
+    }
+
     func catalogs(
         matching lookups: [SeriesLookup],
         token: String
@@ -104,33 +132,80 @@ actor HardcoverSeriesService: SeriesCatalogFetching {
         let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { return [:] }
 
-        var result: [String: HardcoverSeriesCatalog] = [:]
         var uncached: [SeriesLookup] = []
+        var requests: [UUID: InFlightRequest] = [:]
 
         for lookup in lookups {
-            if let catalog = cache[lookup.cacheKey] {
-                result[lookup.id] = catalog
-            } else {
-                uncached.append(lookup)
-            }
-        }
-
-        for start in stride(from: 0, to: uncached.count, by: Self.batchSize) {
-            try Task.checkCancellation()
-            let end = min(start + Self.batchSize, uncached.count)
-            let batch = Array(uncached[start..<end])
-            let data = try await request(batch: batch, token: token)
-            let decoded = try Self.decodeCatalogs(data, matching: batch)
-
-            for lookup in batch {
-                if let catalog = decoded[lookup.id] {
-                    cache[lookup.cacheKey] = catalog
-                    result[lookup.id] = catalog
+            switch cache[lookup.cacheKey] {
+            case .catalog, .noMatch:
+                break
+            case nil:
+                if let request = inFlight[lookup.cacheKey] {
+                    requests[request.id] = request
+                } else {
+                    uncached.append(lookup)
                 }
             }
         }
 
+        for start in stride(from: 0, to: uncached.count, by: Self.batchSize) {
+            let end = min(start + Self.batchSize, uncached.count)
+            let batch = Array(uncached[start..<end])
+            let inFlightRequest = InFlightRequest(
+                id: UUID(),
+                lookups: batch,
+                task: Task { [self] in
+                    let data = try await self.request(batch: batch, token: token)
+                    return try Self.decodeCatalogs(data, matching: batch)
+                }
+            )
+            for lookup in batch {
+                inFlight[lookup.cacheKey] = inFlightRequest
+            }
+            requests[inFlightRequest.id] = inFlightRequest
+        }
+
+        var firstError: (any Error)?
+        for request in requests.values {
+            do {
+                let decoded = try await request.task.value
+                finish(request, decoded: decoded)
+            } catch {
+                clear(request)
+                if firstError == nil { firstError = error }
+            }
+        }
+        if let firstError { throw firstError }
+        try Task.checkCancellation()
+
+        var result: [String: HardcoverSeriesCatalog] = [:]
+        for lookup in lookups {
+            if case .catalog(let catalog) = cache[lookup.cacheKey] {
+                result[lookup.id] = catalog
+            }
+        }
+
         return result
+    }
+
+    private func finish(
+        _ request: InFlightRequest,
+        decoded: [String: HardcoverSeriesCatalog]
+    ) {
+        for lookup in request.lookups {
+            if let catalog = decoded[lookup.id] {
+                cache[lookup.cacheKey] = .catalog(catalog)
+            } else {
+                cache[lookup.cacheKey] = .noMatch
+            }
+        }
+        clear(request)
+    }
+
+    private func clear(_ request: InFlightRequest) {
+        for lookup in request.lookups where inFlight[lookup.cacheKey]?.id == request.id {
+            inFlight[lookup.cacheKey] = nil
+        }
     }
 
     nonisolated static func decodeCatalogs(
@@ -427,7 +502,7 @@ final class SeriesCompletionViewModel {
     private(set) var phase: Phase = .idle
     private(set) var completions: [String: SeriesCompletion] = [:]
 
-    init(service: any SeriesCatalogFetching = HardcoverSeriesService()) {
+    init(service: any SeriesCatalogFetching = HardcoverSeriesService.shared) {
         self.service = service
     }
 
