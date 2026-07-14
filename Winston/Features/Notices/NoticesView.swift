@@ -1,5 +1,5 @@
-import SwiftUI
 import SwiftData
+import SwiftUI
 
 struct NoticesView: View {
     let notices: NoticeService
@@ -10,33 +10,32 @@ struct NoticesView: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(spacing: 0) {
-            NoticesHeader(notices: notices)
-            Divider().opacity(0.3)
-
-            if let reason = gatingReason {
-                NoticesGatingBanner(reason: reason)
-            } else if notices.lastCheckFailed {
-                NoticesFailureBanner(notices: notices)
-            }
+        ZStack {
+            ThemedBackground()
 
             if notices.notices.isEmpty {
-                NoticesEmptyState(
+                NoticesEmptyFeed(
                     notices: notices,
-                    releaseCheckAvailable: gatingReason == nil
+                    releaseCheckAvailable: gatingReason == nil,
+                    gatingReason: gatingReason,
+                    lastCheckFailed: notices.lastCheckFailed
                 )
             } else {
-                NoticesList(
+                NoticesFeed(
                     items: notices.notices,
                     notices: notices,
                     viewModel: viewModel,
+                    gatingReason: gatingReason,
+                    lastCheckFailed: notices.lastCheckFailed,
                     onOpenSeries: onOpenSeries
                 )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(ThemedBackground())
         .navigationTitle(theme.usesTerminalCopy ? Text(verbatim: "") : Text("Updates"))
+        .toolbar {
+            NoticesToolbar(notices: notices)
+        }
     }
 
     private var gatingReason: NoticesGatingBanner.Reason? {
@@ -49,91 +48,218 @@ struct NoticesView: View {
     }
 }
 
-// MARK: - Content
+// MARK: - Feed
 
-private struct NoticesList: View {
+private struct NoticesFeed: View {
     let items: [LibraryNotice]
     let notices: NoticeService
     let viewModel: LibraryViewModel
+    let gatingReason: NoticesGatingBanner.Reason?
+    let lastCheckFailed: Bool
     let onOpenSeries: (String) -> Void
 
     @Environment(\.theme) private var theme
 
     var body: some View {
-        List(items) { notice in
-            NoticeRow(
-                notice: notice,
-                notices: notices,
-                viewModel: viewModel,
-                onOpenSeries: onOpenSeries
-            )
-            .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
-            .listRowBackground(Color.clear)
-            .listRowSeparatorTint(theme.borderSubtle)
+        List {
+            NoticesMasthead(unreadCount: notices.unreadCount)
+                .frame(maxWidth: 920)
+                .frame(maxWidth: .infinity)
+                .listRowInsets(EdgeInsets(top: 30, leading: 34, bottom: 18, trailing: 34))
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+
+            if let gatingReason {
+                NoticesGatingBanner(reason: gatingReason)
+                    .frame(maxWidth: 920)
+                    .frame(maxWidth: .infinity)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 34, bottom: 18, trailing: 34))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            } else if lastCheckFailed {
+                NoticesFailureBanner(notices: notices)
+                    .frame(maxWidth: 920)
+                    .frame(maxWidth: .infinity)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 34, bottom: 18, trailing: 34))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
+
+            if let latest = items.first {
+                NoticeFeaturedStory(
+                    notice: latest,
+                    notices: notices,
+                    viewModel: viewModel,
+                    onOpenSeries: onOpenSeries
+                )
+                .frame(maxWidth: 920)
+                .frame(maxWidth: .infinity)
+                .listRowInsets(EdgeInsets(top: 0, leading: 34, bottom: 28, trailing: 34))
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+            }
+
+            if items.count > 1 {
+                Section {
+                    ForEach(items.dropFirst()) { notice in
+                        NoticeTimelineRow(
+                            notice: notice,
+                            notices: notices,
+                            viewModel: viewModel,
+                            onOpenSeries: onOpenSeries
+                        )
+                        .frame(maxWidth: 920)
+                        .frame(maxWidth: .infinity)
+                        .listRowInsets(EdgeInsets(top: 16, leading: 34, bottom: 16, trailing: 34))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparatorTint(theme.borderSubtle)
+                    }
+                } header: {
+                    NoticesSectionHeader()
+                        .frame(maxWidth: 920)
+                        .frame(maxWidth: .infinity)
+                }
+            }
         }
         .listStyle(.inset)
         .scrollContentBackground(.hidden)
     }
 }
 
-private struct NoticesEmptyState: View {
-    let notices: NoticeService
-    let releaseCheckAvailable: Bool
+private struct NoticesMasthead: View {
+    let unreadCount: Int
 
     @Environment(\.theme) private var theme
 
     var body: some View {
-        ContentUnavailableView {
-            if theme.usesTerminalCopy {
-                Label { Text(verbatim: "no_new_updates") } icon: { Image(systemName: "bell") }
-            } else {
-                Label("You’re all caught up", systemImage: "bell")
-            }
-        } description: {
-            theme.styledText(
-                terminal: "new releases, recommendations and rating prompts land here",
-                native: "New releases from your series, reading recommendations, and rating prompts will appear here."
-            )
-        } actions: {
-            if releaseCheckAvailable {
-                Button {
-                    Task { await notices.checkForNewReleases() }
-                } label: {
-                    theme.styledText(terminal: "check_now", native: "Check Now")
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                theme.styledText(terminal: "// updates", native: "Updates")
+                    .font(theme.display(size: 34, weight: .bold))
+                    .foregroundStyle(theme.textPrimary)
+
+                Spacer(minLength: 16)
+
+                if unreadCount > 0 {
+                    Label {
+                        Group {
+                            if theme.usesTerminalCopy {
+                                Text(verbatim: "\(unreadCount) unread")
+                            } else {
+                                Text("\(unreadCount) unread")
+                            }
+                        }
+                        .monospacedDigit()
+                    } icon: {
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: 7))
+                    }
+                    .font(theme.label(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.accent)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(notices.isChecking)
             }
+
+            theme.styledText(
+                terminal: "a reading journal for your library",
+                native: "A reading journal for your library — new releases, what to read next, and the books you’ve finished."
+            )
+            .font(theme.body(size: 13, weight: .regular))
+            .foregroundStyle(theme.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-// MARK: - Header
+private struct NoticesSectionHeader: View {
+    @Environment(\.theme) private var theme
 
-private struct NoticesHeader: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            theme.styledText(terminal: "earlier_updates", native: "Earlier Updates")
+                .font(theme.body(size: 15, weight: .semibold))
+                .foregroundStyle(theme.textPrimary)
+            Rectangle()
+                .fill(theme.borderSubtle)
+                .frame(height: 1)
+        }
+        .padding(.top, 4)
+        .padding(.bottom, 2)
+    }
+}
+
+// MARK: - Empty state
+
+private struct NoticesEmptyFeed: View {
     let notices: NoticeService
+    let releaseCheckAvailable: Bool
+    let gatingReason: NoticesGatingBanner.Reason?
+    let lastCheckFailed: Bool
 
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "bell.fill")
-                .foregroundStyle(theme.accent)
-            theme.styledText(terminal: "// updates", native: "Updates")
-                .font(theme.display(size: 22, weight: .heavy))
-                .foregroundStyle(theme.textPrimary)
-            if notices.unreadCount > 0 {
-                NoticesUnreadBadge(count: notices.unreadCount)
+        VStack(spacing: 0) {
+            NoticesMasthead(unreadCount: 0)
+                .frame(maxWidth: 920, alignment: .leading)
+                .padding(.horizontal, 34)
+                .padding(.top, 30)
+                .padding(.bottom, 20)
+
+            if let gatingReason {
+                NoticesGatingBanner(reason: gatingReason)
+                    .frame(maxWidth: 920)
+                    .padding(.horizontal, 34)
+            } else if lastCheckFailed {
+                NoticesFailureBanner(notices: notices)
+                    .frame(maxWidth: 920)
+                    .padding(.horizontal, 34)
             }
-            Spacer()
+
+            ContentUnavailableView {
+                Label {
+                    theme.styledText(terminal: "no_new_updates", native: "You’re all caught up")
+                } icon: {
+                    Image(systemName: "newspaper")
+                }
+            } description: {
+                theme.styledText(
+                    terminal: "new releases, recommendations and rating prompts land here",
+                    native: "New releases from your series, reading recommendations, and rating prompts will appear here."
+                )
+            } actions: {
+                if releaseCheckAvailable {
+                    Button {
+                        Task { await notices.checkForNewReleases() }
+                    } label: {
+                        Label {
+                            theme.styledText(terminal: "check_now", native: "Check Now")
+                        } icon: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(notices.isChecking)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+// MARK: - Toolbar
+
+private struct NoticesToolbar: ToolbarContent {
+    let notices: NoticeService
+
+    @Environment(\.theme) private var theme
+
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
             Button {
                 notices.markAllRead()
             } label: {
-                Image(systemName: "checkmark.circle")
-                    .foregroundStyle(notices.unreadCount > 0 ? theme.textSecondary : theme.textTertiary)
+                Label("Mark all as read", systemImage: "checkmark.circle")
             }
-            .buttonStyle(.plain)
             .disabled(notices.unreadCount == 0)
             .help(theme.styledText(terminal: "mark_all_read", native: "Mark all as read"))
 
@@ -144,44 +270,18 @@ private struct NoticesHeader: View {
                     ProgressView()
                         .controlSize(.small)
                 } else {
-                    Image(systemName: "arrow.clockwise")
-                        .foregroundStyle(notices.releaseCheckAvailable ? theme.textSecondary : theme.textTertiary)
+                    Label("Check for new releases", systemImage: "arrow.clockwise")
                 }
             }
-            .buttonStyle(.plain)
             .disabled(!notices.releaseCheckAvailable || notices.isChecking)
             .help(theme.styledText(terminal: "check_for_new_releases", native: "Check for new releases"))
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
     }
 }
 
-private struct NoticesUnreadBadge: View {
-    let count: Int
+// MARK: - Release status
 
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        Group {
-            if theme.usesTerminalCopy {
-                Text(verbatim: "\(count) unread")
-            } else {
-                Text("\(count) unread")
-            }
-        }
-        .font(theme.label(size: 11, weight: .semibold))
-        .foregroundStyle(theme.background)
-        .monospacedDigit()
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
-        .background(theme.accent, in: Capsule())
-    }
-}
-
-// MARK: - Gating & failure banners
-
-private struct NoticesGatingBanner: View {
+struct NoticesGatingBanner: View {
     enum Reason {
         case onlineDisabled
         case tokenMissing
@@ -193,23 +293,26 @@ private struct NoticesGatingBanner: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .foregroundStyle(theme.textSecondary)
-            message
-                .font(theme.body(size: 12))
-                .foregroundStyle(theme.textSecondary)
-            Spacer()
-            SettingsLink {
-                theme.styledText(terminal: "settings", native: "Open Settings")
+        GroupBox {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                message
+                    .font(theme.body(size: 12, weight: .regular))
+                    .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                SettingsLink {
+                    theme.styledText(terminal: "settings", native: "Open Settings")
+                }
+                .controlSize(.small)
             }
-            .controlSize(.small)
+        } label: {
+            Label {
+                theme.styledText(terminal: "release_alerts", native: "Release Alerts")
+            } icon: {
+                Image(systemName: icon)
+            }
+            .foregroundStyle(theme.textPrimary)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .glassCard(cornerRadius: 8)
-        .padding(.horizontal, 20)
-        .padding(.top, 12)
     }
 
     private var icon: String {
@@ -247,29 +350,31 @@ private struct NoticesFailureBanner: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle")
-                .foregroundStyle(theme.destructive)
-            theme.styledText(
-                terminal: "release_check_failed",
-                native: "The last check for new releases failed."
-            )
-            .font(theme.body(size: 12))
-            .foregroundStyle(theme.textSecondary)
-            Spacer()
-            Button {
-                Task { await notices.checkForNewReleases() }
-            } label: {
-                theme.styledText(terminal: "retry", native: "Try Again")
+        GroupBox {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                theme.styledText(
+                    terminal: "release_check_failed",
+                    native: "The last check for new releases failed."
+                )
+                .font(theme.body(size: 12, weight: .regular))
+                .foregroundStyle(theme.textSecondary)
+                Spacer(minLength: 12)
+                Button {
+                    Task { await notices.checkForNewReleases() }
+                } label: {
+                    theme.styledText(terminal: "retry", native: "Try Again")
+                }
+                .controlSize(.small)
+                .disabled(notices.isChecking)
             }
-            .controlSize(.small)
-            .disabled(notices.isChecking)
+        } label: {
+            Label {
+                theme.styledText(terminal: "release_check_failed", native: "Release Check Failed")
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+            }
+            .foregroundStyle(theme.destructive)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .glassCard(cornerRadius: 8)
-        .padding(.horizontal, 20)
-        .padding(.top, 12)
     }
 }
 
@@ -288,22 +393,38 @@ private func makePreviewModel(theme: Theme) -> (LibraryViewModel, ModelContainer
     book.seriesIndex = "1"
     context.insert(book)
 
-    let release = LibraryNotice(dedupeKey: "release:1", kind: .newRelease, bookTitle: "Třetí díl")
+    let release = LibraryNotice(
+        dedupeKey: "release:1",
+        kind: .newRelease,
+        dateCreated: .now,
+        bookTitle: "Třetí díl"
+    )
     release.seriesName = "Kroniky"
     release.author = "Jana Nováková"
+    release.positionText = "3"
     release.hardcoverBookID = "1"
     release.hardcoverURLString = "https://hardcover.app/books/treti-dil"
     release.releaseDateRaw = "2026-05-14"
     context.insert(release)
 
-    let next = LibraryNotice(dedupeKey: "next:\(book.uuid)", kind: .nextInSeries, bookTitle: "První díl")
+    let next = LibraryNotice(
+        dedupeKey: "next:\(book.uuid)",
+        kind: .nextInSeries,
+        dateCreated: .now.addingTimeInterval(-86_400),
+        bookTitle: "První díl"
+    )
     next.seriesName = "Kroniky"
     next.author = "Jana Nováková"
     next.bookUUID = book.uuid
     next.readAt = .now
     context.insert(next)
 
-    let rate = LibraryNotice(dedupeKey: "rate:\(book.uuid)", kind: .ratingPrompt, bookTitle: "První díl")
+    let rate = LibraryNotice(
+        dedupeKey: "rate:\(book.uuid)",
+        kind: .ratingPrompt,
+        dateCreated: .now.addingTimeInterval(-172_800),
+        bookTitle: "První díl"
+    )
     rate.author = "Jana Nováková"
     rate.bookUUID = book.uuid
     context.insert(rate)
@@ -322,7 +443,7 @@ private func makePreviewModel(theme: Theme) -> (LibraryViewModel, ModelContainer
         .environment(\.theme, .black)
         .tint(Theme.black.accent)
         .preferredColorScheme(.dark)
-        .frame(width: 700, height: 500)
+        .frame(width: 820, height: 680)
 }
 
 #Preview("Purple") {
@@ -334,7 +455,7 @@ private func makePreviewModel(theme: Theme) -> (LibraryViewModel, ModelContainer
         .environment(\.theme, .purple)
         .tint(Theme.purple.accent)
         .preferredColorScheme(.dark)
-        .frame(width: 700, height: 500)
+        .frame(width: 820, height: 680)
 }
 
 #Preview("White") {
@@ -346,6 +467,6 @@ private func makePreviewModel(theme: Theme) -> (LibraryViewModel, ModelContainer
         .environment(\.theme, .white)
         .tint(Theme.white.accent)
         .preferredColorScheme(.light)
-        .frame(width: 700, height: 500)
+        .frame(width: 820, height: 680)
 }
 #endif
