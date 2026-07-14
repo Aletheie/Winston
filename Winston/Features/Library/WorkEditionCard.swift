@@ -18,15 +18,16 @@ struct WorkEditionCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Button(action: toggleComparison) {
-                Image(systemName: isCompared ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(isCompared ? theme.accent : theme.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isCompared ? "Remove from comparison" : "Select for comparison")
+            Toggle(isOn: comparisonBinding) { EmptyView() }
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .accessibilityLabel(
+                    isCompared ? Text("Remove from comparison") : Text("Select for comparison")
+                )
             BookCoverImageView(book: book, tier: .thumb)
                 .frame(width: compact ? 38 : 54, height: compact ? 54 : 78)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
             WorkEditionDetails(book: book, isPreferred: isPreferred)
             Spacer()
             WorkEditionMenu(
@@ -38,20 +39,25 @@ struct WorkEditionCard: View {
                 onDelete: onDelete
             )
         }
-        .padding(10)
-        .background(theme.surface.opacity(isCompared ? 0.75 : 0.35), in: RoundedRectangle(cornerRadius: 9))
+        .padding(12)
+        .background(theme.surface.opacity(isCompared ? 0.75 : 0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 9)
-                .stroke(isCompared ? theme.accent : theme.borderSubtle)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isCompared ? theme.accent : theme.borderSubtle, lineWidth: isCompared ? 1.5 : 1)
         }
     }
 
-    private func toggleComparison() {
-        if isCompared {
-            selectedEditionUUIDs.remove(book.uuid)
-        } else {
-            selectedEditionUUIDs.insert(book.uuid)
-        }
+    private var comparisonBinding: Binding<Bool> {
+        Binding(
+            get: { selectedEditionUUIDs.contains(book.uuid) },
+            set: { isOn in
+                if isOn {
+                    selectedEditionUUIDs.insert(book.uuid)
+                } else {
+                    selectedEditionUUIDs.remove(book.uuid)
+                }
+            }
+        )
     }
 }
 
@@ -63,13 +69,14 @@ private struct WorkEditionDetails: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 5) {
                 Text(book.displayTitle)
-                    .font(theme.body(size: 12, weight: .bold))
+                    .font(theme.body(size: 13, weight: .semibold))
                     .lineLimit(2)
                 if isPreferred {
                     Image(systemName: "star.fill")
                         .font(.system(size: 9))
+                        .symbolRenderingMode(.hierarchical)
                         .foregroundStyle(theme.highlight)
                         .accessibilityLabel("Preferred edition")
                 }
@@ -80,6 +87,7 @@ private struct WorkEditionDetails: View {
             }
             if let translator = nonempty(book.translator) {
                 theme.styledText(terminal: "preklad: \(translator)", native: "Translation: \(translator)")
+                    .foregroundStyle(theme.textSecondary)
             }
             if let publication = publicationDescription {
                 Text(publication)
@@ -88,14 +96,15 @@ private struct WorkEditionDetails: View {
             HStack(spacing: 4) {
                 ForEach(book.assetFormats, id: \.self) { format in
                     Text(format)
-                        .font(theme.label(size: 8, weight: .bold))
-                        .padding(.horizontal, 5)
+                        .font(theme.label(size: 9, weight: .bold))
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(theme.accent.opacity(0.12), in: Capsule())
                 }
             }
+            .padding(.top, 1)
         }
-        .font(theme.label(size: 10))
+        .font(theme.label(size: 11))
     }
 
     private var publicationDescription: String? {

@@ -36,12 +36,11 @@ struct WorkDetailSheet: View {
                     author: $author,
                     editionCount: editions.count,
                     compactList: $compactList,
-                    onCommit: commitIdentity,
-                    onClose: { dismiss() }
+                    onCommit: commitIdentity
                 )
                 Divider()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 14) {
                         WorkEditionSection(
                             editions: editions,
                             work: work,
@@ -59,10 +58,10 @@ struct WorkDetailSheet: View {
                                 Label("Add another translation or edition", systemImage: "plus.circle")
                             }
                             .buttonStyle(.link)
-                            .font(theme.label(size: 10))
+                            .font(theme.label(size: 11))
                         }
                     }
-                    .padding(18)
+                    .padding(20)
                 }
                 Divider()
                 WorkDetailFooter(
@@ -70,7 +69,8 @@ struct WorkDetailSheet: View {
                     showMerge: $showMerge,
                     isConfirmingEditionMerge: $isConfirmingEditionMerge,
                     showCompare: $showCompare,
-                    isAddingEdition: $isAddingEdition
+                    isAddingEdition: $isAddingEdition,
+                    onClose: { dismiss() }
                 )
             }
             .frame(minWidth: 560, idealWidth: 680, maxWidth: 980, minHeight: 540, idealHeight: 700)
@@ -144,7 +144,6 @@ private struct WorkDetailHeader: View {
     let editionCount: Int
     @Binding var compactList: Bool
     let onCommit: () -> Void
-    let onClose: () -> Void
 
     @Environment(\.theme) private var theme
     @FocusState private var focusedField: Field?
@@ -155,19 +154,25 @@ private struct WorkDetailHeader: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "books.vertical.fill")
-                .font(.system(size: 24))
-                .foregroundStyle(theme.accent)
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(theme.accent.gradient)
+                Image(systemName: "books.vertical.fill")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 44, height: 44)
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
                 TextField("Work Title", text: $title)
                     .textFieldStyle(.plain)
-                    .font(theme.body(size: 17, weight: .bold))
+                    .font(theme.body(size: 18, weight: .bold))
                     .focused($focusedField, equals: .title)
                     .onSubmit(onCommit)
                 TextField("Author", text: $author)
                     .textFieldStyle(.plain)
-                    .font(theme.label(size: 11))
+                    .font(theme.label(size: 12))
                     .foregroundStyle(theme.textSecondary)
                     .focused($focusedField, equals: .author)
                     .onSubmit(onCommit)
@@ -190,10 +195,9 @@ private struct WorkDetailHeader: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 78)
-            Button("Done", action: onClose)
-                .keyboardShortcut(.defaultAction)
         }
-        .padding(16)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
         .onChange(of: focusedField) { oldValue, newValue in
             if oldValue != nil, newValue == nil { onCommit() }
         }
@@ -251,18 +255,22 @@ private struct WorkDetailFooter: View {
     @Binding var isConfirmingEditionMerge: Bool
     @Binding var showCompare: Bool
     @Binding var isAddingEdition: Bool
+    let onClose: () -> Void
 
     var body: some View {
-        HStack {
+        HStack(spacing: 8) {
             Button("Merge With Another Work…") { showMerge = true }
             Spacer()
-            Button("Merge Editions") { isConfirmingEditionMerge = true }
-                .disabled(!canUseComparison)
             Button("Compare") { showCompare = true }
                 .disabled(!canUseComparison)
+            Button("Merge Editions") { isConfirmingEditionMerge = true }
+                .disabled(!canUseComparison)
             Button("Add Edition…") { isAddingEdition = true }
+            Button("Done", action: onClose)
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
         }
-        .padding(14)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 }
