@@ -5,10 +5,10 @@ enum CoverStore {
         AppPaths.coversDirectory.appending(path: "\(uuid.uuidString).jpg")
     }
 
-    nonisolated static func save(_ image: NSImage, for uuid: UUID) {
-        guard let jpeg = ImageTranscoder.jpegData(from: image) else { return }
-        try? AppPaths.ensureDirectory(AppPaths.coversDirectory)
-        try? jpeg.write(to: coverURL(for: uuid))
+    @discardableResult
+    nonisolated static func save(_ image: NSImage, for uuid: UUID) -> Bool {
+        guard let jpeg = ImageTranscoder.jpegData(from: image) else { return false }
+        return write(jpeg, for: uuid)
     }
 
     nonisolated static func load(for uuid: UUID) -> NSImage? {
@@ -23,8 +23,34 @@ enum CoverStore {
         try? Data(contentsOf: coverURL(for: uuid))
     }
 
-    nonisolated static func delete(for uuid: UUID) {
-        try? FileManager.default.removeItem(at: coverURL(for: uuid))
+    @discardableResult
+    nonisolated static func delete(for uuid: UUID) -> Bool {
+        let url = coverURL(for: uuid)
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return true }
+        do {
+            try FileManager.default.removeItem(at: url)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    @discardableResult
+    nonisolated static func restore(_ data: Data?, for uuid: UUID) -> Bool {
+        if let data {
+            return write(data, for: uuid)
+        }
+        return delete(for: uuid)
+    }
+
+    private nonisolated static func write(_ data: Data, for uuid: UUID) -> Bool {
+        do {
+            try AppPaths.ensureDirectory(AppPaths.coversDirectory)
+            try data.write(to: coverURL(for: uuid), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     nonisolated static func makeThumbnailFile(from image: NSImage,
