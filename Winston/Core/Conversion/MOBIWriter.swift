@@ -122,8 +122,9 @@ nonisolated enum MOBIWriter {
         let dir = FileManager.default.temporaryDirectory
             .appending(path: "WinstonConversions", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let output = dir.appending(path: source.deletingPathExtension().lastPathComponent + ".mobi")
-        try? FileManager.default.removeItem(at: output)
+        let output = dir.appending(
+            path: "\(UUID().uuidString)-\(source.deletingPathExtension().lastPathComponent).mobi"
+        )
         try data.write(to: output, options: .atomic)
         return output
     }
