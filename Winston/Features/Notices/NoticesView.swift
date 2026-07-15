@@ -58,71 +58,52 @@ private struct NoticesFeed: View {
     let lastCheckFailed: Bool
     let onOpenSeries: (String) -> Void
 
-    @Environment(\.theme) private var theme
-
     var body: some View {
-        List {
-            NoticesMasthead(unreadCount: notices.unreadCount)
-                .frame(maxWidth: 920)
-                .frame(maxWidth: .infinity)
-                .listRowInsets(EdgeInsets(top: 30, leading: 34, bottom: 18, trailing: 34))
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                NoticesMasthead(unreadCount: notices.unreadCount)
+                    .padding(.bottom, 16)
 
-            if let gatingReason {
-                NoticesGatingBanner(reason: gatingReason)
-                    .frame(maxWidth: 920)
-                    .frame(maxWidth: .infinity)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 34, bottom: 18, trailing: 34))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            } else if lastCheckFailed {
-                NoticesFailureBanner(notices: notices)
-                    .frame(maxWidth: 920)
-                    .frame(maxWidth: .infinity)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 34, bottom: 18, trailing: 34))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
+                if let gatingReason {
+                    NoticesGatingBanner(reason: gatingReason)
+                        .padding(.bottom, 16)
+                } else if lastCheckFailed {
+                    NoticesFailureBanner(notices: notices)
+                        .padding(.bottom, 16)
+                }
 
-            if let latest = items.first {
-                NoticeFeaturedStory(
-                    notice: latest,
-                    notices: notices,
-                    viewModel: viewModel,
-                    onOpenSeries: onOpenSeries
-                )
-                .frame(maxWidth: 920)
-                .frame(maxWidth: .infinity)
-                .listRowInsets(EdgeInsets(top: 0, leading: 34, bottom: 28, trailing: 34))
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-            }
+                if let latest = items.first {
+                    NoticeFeaturedStory(
+                        notice: latest,
+                        notices: notices,
+                        viewModel: viewModel,
+                        onOpenSeries: onOpenSeries
+                    )
+                    .padding(.bottom, 28)
+                }
 
-            if items.count > 1 {
-                Section {
-                    ForEach(items.dropFirst()) { notice in
-                        NoticeTimelineRow(
-                            notice: notice,
-                            notices: notices,
-                            viewModel: viewModel,
-                            onOpenSeries: onOpenSeries
-                        )
-                        .frame(maxWidth: 920)
-                        .frame(maxWidth: .infinity)
-                        .listRowInsets(EdgeInsets(top: 16, leading: 34, bottom: 16, trailing: 34))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparatorTint(theme.borderSubtle)
-                    }
-                } header: {
+                if items.count > 1 {
                     NoticesSectionHeader()
-                        .frame(maxWidth: 920)
-                        .frame(maxWidth: .infinity)
+                        .padding(.bottom, 12)
+
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(items.dropFirst()) { notice in
+                            NoticeTimelineRow(
+                                notice: notice,
+                                notices: notices,
+                                viewModel: viewModel,
+                                onOpenSeries: onOpenSeries
+                            )
+                        }
+                    }
                 }
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 24)
+            .frame(maxWidth: 860)
+            .frame(maxWidth: .infinity)
         }
-        .listStyle(.inset)
-        .scrollContentBackground(.hidden)
     }
 }
 
@@ -132,30 +113,32 @@ private struct NoticesMasthead: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: "bell.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(theme.accent)
                 theme.styledText(terminal: "// updates", native: "Updates")
-                    .font(theme.display(size: 34, weight: .bold))
+                    .font(theme.display(size: 22, weight: .heavy))
                     .foregroundStyle(theme.textPrimary)
 
                 Spacer(minLength: 16)
 
                 if unreadCount > 0 {
-                    Label {
-                        Group {
-                            if theme.usesTerminalCopy {
-                                Text(verbatim: "\(unreadCount) unread")
-                            } else {
-                                Text("\(unreadCount) unread")
-                            }
+                    Group {
+                        if theme.usesTerminalCopy {
+                            Text(verbatim: "\(unreadCount) unread")
+                        } else {
+                            Text("\(unreadCount) unread")
                         }
-                        .monospacedDigit()
-                    } icon: {
-                        Image(systemName: "circle.fill")
-                            .font(.system(size: 7))
                     }
                     .font(theme.label(size: 11, weight: .semibold))
                     .foregroundStyle(theme.accent)
+                    .monospacedDigit()
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(theme.accent.opacity(0.14), in: Capsule())
+                    .overlay(Capsule().stroke(theme.accent.opacity(0.25), lineWidth: 1))
                 }
             }
 
@@ -174,16 +157,14 @@ private struct NoticesSectionHeader: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: 8) {
-            theme.styledText(terminal: "earlier_updates", native: "Earlier Updates")
-                .font(theme.body(size: 15, weight: .semibold))
-                .foregroundStyle(theme.textPrimary)
+        HStack(spacing: 10) {
+            theme.styledText(terminal: "EARLIER", native: "Earlier Updates")
+                .font(theme.label(size: 11, weight: .semibold))
+                .foregroundStyle(theme.textSecondary)
             Rectangle()
                 .fill(theme.borderSubtle)
                 .frame(height: 1)
         }
-        .padding(.top, 4)
-        .padding(.bottom, 2)
     }
 }
 
@@ -200,19 +181,19 @@ private struct NoticesEmptyFeed: View {
     var body: some View {
         VStack(spacing: 0) {
             NoticesMasthead(unreadCount: 0)
-                .frame(maxWidth: 920, alignment: .leading)
-                .padding(.horizontal, 34)
-                .padding(.top, 30)
-                .padding(.bottom, 20)
+                .frame(maxWidth: 860, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 16)
 
             if let gatingReason {
                 NoticesGatingBanner(reason: gatingReason)
-                    .frame(maxWidth: 920)
-                    .padding(.horizontal, 34)
+                    .frame(maxWidth: 860)
+                    .padding(.horizontal, 20)
             } else if lastCheckFailed {
                 NoticesFailureBanner(notices: notices)
-                    .frame(maxWidth: 920)
-                    .padding(.horizontal, 34)
+                    .frame(maxWidth: 860)
+                    .padding(.horizontal, 20)
             }
 
             ContentUnavailableView {
@@ -293,26 +274,23 @@ struct NoticesGatingBanner: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        GroupBox {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                message
-                    .font(theme.body(size: 12, weight: .regular))
-                    .foregroundStyle(theme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 12)
-                SettingsLink {
-                    theme.styledText(terminal: "settings", native: "Open Settings")
-                }
-                .controlSize(.small)
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.textSecondary)
+            message
+                .font(theme.body(size: 12, weight: .regular))
+                .foregroundStyle(theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 12)
+            SettingsLink {
+                theme.styledText(terminal: "settings", native: "Open Settings")
             }
-        } label: {
-            Label {
-                theme.styledText(terminal: "release_alerts", native: "Release Alerts")
-            } icon: {
-                Image(systemName: icon)
-            }
-            .foregroundStyle(theme.textPrimary)
+            .controlSize(.small)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassCard(cornerRadius: 10, tintOpacity: 0.35)
     }
 
     private var icon: String {
@@ -350,31 +328,29 @@ private struct NoticesFailureBanner: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        GroupBox {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                theme.styledText(
-                    terminal: "release_check_failed",
-                    native: "The last check for new releases failed."
-                )
-                .font(theme.body(size: 12, weight: .regular))
-                .foregroundStyle(theme.textSecondary)
-                Spacer(minLength: 12)
-                Button {
-                    Task { await notices.checkForNewReleases() }
-                } label: {
-                    theme.styledText(terminal: "retry", native: "Try Again")
-                }
-                .controlSize(.small)
-                .disabled(notices.isChecking)
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.destructive)
+            theme.styledText(
+                terminal: "release_check_failed",
+                native: "The last check for new releases failed."
+            )
+            .font(theme.body(size: 12, weight: .regular))
+            .foregroundStyle(theme.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 12)
+            Button {
+                Task { await notices.checkForNewReleases() }
+            } label: {
+                theme.styledText(terminal: "retry", native: "Try Again")
             }
-        } label: {
-            Label {
-                theme.styledText(terminal: "release_check_failed", native: "Release Check Failed")
-            } icon: {
-                Image(systemName: "exclamationmark.triangle")
-            }
-            .foregroundStyle(theme.destructive)
+            .controlSize(.small)
+            .disabled(notices.isChecking)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassCard(cornerRadius: 10, tintOpacity: 0.35)
     }
 }
 

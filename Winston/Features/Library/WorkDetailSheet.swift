@@ -73,6 +73,7 @@ struct WorkDetailSheet: View {
                     onClose: { dismiss() }
                 )
             }
+            .background(ThemedBackground())
             .frame(minWidth: 560, idealWidth: 680, maxWidth: 980, minHeight: 540, idealHeight: 700)
             .onAppear {
                 title = work.title ?? ""
@@ -163,6 +164,7 @@ private struct WorkDetailHeader: View {
                     .foregroundStyle(.white)
             }
             .frame(width: 44, height: 44)
+            .shadow(color: theme.accent.opacity(0.35), radius: 6, y: 3)
             .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 TextField("Work Title", text: $title)
@@ -180,8 +182,12 @@ private struct WorkDetailHeader: View {
                     terminal: "vydani: \(editionCount)",
                     native: "You own \(editionCount) editions"
                 )
-                .font(theme.label(size: 10))
-                .foregroundStyle(theme.textTertiary)
+                .font(theme.label(size: 10, weight: .semibold))
+                .foregroundStyle(theme.textSecondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(theme.surfaceGlass, in: Capsule())
+                .padding(.top, 2)
             }
             Spacer()
             Picker("Layout", selection: $compactList) {
@@ -270,7 +276,8 @@ private struct WorkDetailFooter: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 20)
         .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
     }
 }

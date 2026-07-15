@@ -27,7 +27,11 @@ struct WorkEditionCard: View {
             BookCoverImageView(book: book, tier: .thumb)
                 .frame(width: compact ? 38 : 54, height: compact ? 54 : 78)
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
+                }
+                .shadow(color: .black.opacity(0.22), radius: 3, y: 2)
             WorkEditionDetails(book: book, isPreferred: isPreferred)
             Spacer()
             WorkEditionMenu(
@@ -40,10 +44,12 @@ struct WorkEditionCard: View {
             )
         }
         .padding(12)
-        .background(theme.surface.opacity(isCompared ? 0.75 : 0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .glassCard(cornerRadius: 10, tintOpacity: isCompared ? 0.7 : 0.4)
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(isCompared ? theme.accent : theme.borderSubtle, lineWidth: isCompared ? 1.5 : 1)
+            if isCompared {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(theme.accent, lineWidth: 1.5)
+            }
         }
     }
 

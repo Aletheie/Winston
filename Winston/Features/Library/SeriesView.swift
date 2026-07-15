@@ -33,7 +33,8 @@ struct SeriesView: View {
 
             if let notice = catalogNotice {
                 SeriesCatalogNotice(state: notice, onRetry: { retryGeneration += 1 })
-                Divider().opacity(0.35)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
             }
 
             if displayedGroups.isEmpty {
@@ -66,8 +67,11 @@ struct SeriesView: View {
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
-            .padding(12)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial)
         }
+        .background(ThemedBackground())
         .frame(
             minWidth: 560,
             idealWidth: 680,
@@ -163,6 +167,7 @@ private struct SeriesSheetHeader: View {
                     .foregroundStyle(.white)
             }
             .frame(width: 38, height: 38)
+            .shadow(color: theme.accent.opacity(0.35), radius: 6, y: 3)
             .accessibilityHidden(true)
             if let seriesName {
                 VStack(alignment: .leading, spacing: 2) {
@@ -235,9 +240,9 @@ private struct SeriesCatalogNotice: View {
         }
         .font(theme.label(size: 11, weight: .regular))
         .foregroundStyle(theme.textSecondary)
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(theme.surfaceGlass.opacity(0.45))
+        .glassCard(cornerRadius: 10, tintOpacity: 0.35)
     }
 
 }
@@ -281,11 +286,13 @@ private struct SeriesSection: View {
             .background(theme.background.opacity(0.35), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(theme.surfaceGlass.opacity(0.32), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(16)
+        .glassCard(cornerRadius: 14, tintOpacity: 0.4)
         .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isFocused ? theme.accent : theme.borderSubtle, lineWidth: isFocused ? 1.5 : 1)
+            if isFocused {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(theme.accent.opacity(0.55), lineWidth: 1.5)
+            }
         }
     }
 }

@@ -14,10 +14,10 @@ struct NoticeFeaturedStory: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 24) {
-            NoticeStoryCover(notice: notice, book: book)
-                .frame(width: 142, height: 213)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .shadow(color: .black.opacity(0.18), radius: 5, y: 3)
+            NoticeStoryCover(notice: notice, book: book, cornerRadius: 10)
+                .frame(width: 148, height: 222)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .shadow(color: .black.opacity(0.24), radius: 9, y: 5)
 
             VStack(alignment: .leading, spacing: 13) {
                 NoticeStoryMeta(
@@ -40,15 +40,18 @@ struct NoticeFeaturedStory: View {
                     openURL: openURL
                 )
             }
-            .frame(maxWidth: .infinity, minHeight: 213, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 222, alignment: .topLeading)
         }
-        .padding(22)
-        .background(theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(24)
+        .glassCard(cornerRadius: 16, tintOpacity: 0.5)
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(theme.borderSubtle, lineWidth: 1)
+            if notice.isUnread {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(theme.accent.opacity(0.38), lineWidth: 1)
+            }
         }
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .shadow(color: .black.opacity(0.10), radius: 18, y: 9)
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .contextMenu {
             NoticeManagementActions(notice: notice, notices: notices)
         }
@@ -63,15 +66,16 @@ struct NoticeTimelineRow: View {
     let onOpenSeries: (String) -> Void
 
     @Environment(\.openURL) private var openURL
+    @Environment(\.theme) private var theme
 
     private var book: Book? { notices.book(for: notice) }
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
             NoticeStoryCover(notice: notice, book: book)
-                .frame(width: 64, height: 96)
+                .frame(width: 60, height: 90)
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .shadow(color: .black.opacity(0.13), radius: 3, y: 2)
+                .shadow(color: .black.opacity(0.15), radius: 3, y: 2)
 
             VStack(alignment: .leading, spacing: 8) {
                 NoticeStoryMeta(
@@ -94,7 +98,15 @@ struct NoticeTimelineRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .contentShape(Rectangle())
+        .padding(14)
+        .glassCard(cornerRadius: 12, tintOpacity: 0.35)
+        .overlay {
+            if notice.isUnread {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(theme.accent.opacity(0.3), lineWidth: 1)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .contextMenu {
             NoticeManagementActions(notice: notice, notices: notices)
         }
@@ -658,6 +670,7 @@ private struct NoticeManagementActions: View {
 private struct NoticeStoryCover: View {
     let notice: LibraryNotice
     let book: Book?
+    var cornerRadius: CGFloat = 6
 
     var body: some View {
         ZStack {
@@ -673,7 +686,7 @@ private struct NoticeStoryCover: View {
             }
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
         }
         .accessibilityHidden(true)

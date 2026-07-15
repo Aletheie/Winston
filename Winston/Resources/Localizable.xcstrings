@@ -4453,6 +4453,7 @@
       }
     },
     "Release Alerts" : {
+      "extractionState" : "stale",
       "localizations" : {
         "cs" : {
           "stringUnit" : {
@@ -4463,6 +4464,7 @@
       }
     },
     "Release Check Failed" : {
+      "extractionState" : "stale",
       "localizations" : {
         "cs" : {
           "stringUnit" : {
