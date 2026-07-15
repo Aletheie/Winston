@@ -54,7 +54,7 @@ enum PersistenceController {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let suffix = ".broken-\(formatter.string(from: .now))"
+        let suffix = ".broken-\(formatter.string(from: .now))-\(UUID().uuidString)"
 
         let fileManager = FileManager.default
         let base = storeURL.path(percentEncoded: false)
@@ -67,7 +67,7 @@ enum PersistenceController {
                 try fileManager.moveItem(at: source, to: destination)
                 if sidecar.isEmpty { movedTo = base + suffix }
             } catch {
-                try? fileManager.removeItem(at: source)
+                Log.persistence.error("Preserving \(source.lastPathComponent, privacy: .public) after recovery move failed: \(error.localizedDescription, privacy: .public)")
             }
         }
         return movedTo
