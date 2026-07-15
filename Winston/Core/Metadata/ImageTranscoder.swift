@@ -8,26 +8,32 @@ import UniformTypeIdentifiers
 nonisolated enum ImageTranscoder {
 
     static let defaultQuality = 0.85
+    private static let defaultMaxPixel = 4_096
+    private static let maxSourcePixels = 100_000_000
 
     // MARK: - Decode
 
     static func decodedImage(from data: Data, maxPixel: Int? = nil) -> CGImage? {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
+        if let (width, height) = dimensions(of: source),
+           width > maxSourcePixels / max(1, height) {
+            return nil
+        }
         var options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
         ]
-        options[kCGImageSourceThumbnailMaxPixelSize] = maxPixel ?? longestEdge(of: source) ?? 20_000
+        options[kCGImageSourceThumbnailMaxPixelSize] = maxPixel ?? defaultMaxPixel
         return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 
-    private static func longestEdge(of source: CGImageSource) -> Int? {
+    private static func dimensions(of source: CGImageSource) -> (Int, Int)? {
         guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
               let width = props[kCGImagePropertyPixelWidth as String] as? Int,
               let height = props[kCGImagePropertyPixelHeight as String] as? Int else { return nil }
-        return max(width, height)
+        return (width, height)
     }
 
     // MARK: - Encode

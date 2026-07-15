@@ -23,11 +23,12 @@ nonisolated enum HTMLReader {
            size > maxDocumentBytes {
             throw ReadError.tooLarge
         }
-        guard let data = try? Data(contentsOf: url),
-              let html = String(data: data, encoding: .utf8)
-                ?? String(data: data, encoding: .isoLatin1) else {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
             throw ReadError.unreadable
         }
+        guard data.count <= maxDocumentBytes else { throw ReadError.tooLarge }
+        guard let html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) else { throw ReadError.unreadable }
 
         let body = MOBIHTMLBuilder.bodyInner(of: html)
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -77,7 +78,7 @@ nonisolated enum HTMLReader {
                 images.append(.init(ref: src, data: data))
                 continue
             }
-            guard !lower.hasPrefix("http") else { continue }
+            guard !lower.hasPrefix("data:"), !lower.hasPrefix("http") else { continue }
             guard let fileURL = localAssetURL(for: src, inside: baseDir),
                   let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
                   size <= maxInlineImageBytes,

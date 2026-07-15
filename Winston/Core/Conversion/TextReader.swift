@@ -4,19 +4,27 @@ nonisolated enum TextReader {
     enum ReadError: Error, LocalizedError {
         case unreadable
         case empty
+        case tooLarge
 
         var errorDescription: String? {
             switch self {
             case .unreadable: "Couldn’t read the text file"
             case .empty:      "The text file is empty"
+            case .tooLarge:   "The text file is too large to convert safely"
             }
         }
     }
 
+    private static let maxDocumentBytes = 64 * 1_024 * 1_024
+
     static func read(_ url: URL) throws -> SourceDocument {
-        guard let data = try? Data(contentsOf: url), let text = decode(data) else {
-            throw ReadError.unreadable
+        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           size > maxDocumentBytes {
+            throw ReadError.tooLarge
         }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { throw ReadError.unreadable }
+        guard data.count <= maxDocumentBytes else { throw ReadError.tooLarge }
+        guard let text = decode(data) else { throw ReadError.unreadable }
         let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
                              .replacingOccurrences(of: "\r", with: "\n")
 

@@ -5,11 +5,14 @@ nonisolated enum MOBIWriter {
 
     enum WriteError: Error, LocalizedError {
         case unreadableEPUB(Error)
+        case outputTooLarge
 
         var errorDescription: String? {
             switch self {
             case .unreadableEPUB(let underlying):
                 "Couldn’t read the EPUB: \(underlying.localizedDescription)"
+            case .outputTooLarge:
+                "The book is too large for the MOBI format"
             }
         }
     }
@@ -28,6 +31,7 @@ nonisolated enum MOBIWriter {
             .flatMap { archive.entry($0) }
             .flatMap { ImageTranscoder.jpegData(from: $0) }
         let content = MOBIHTMLBuilder.build(from: parsed, coverJPEG: coverJPEG, archive: archive)
+        guard !archive.rejectedUnsafeEntry else { throw WriteError.outputTooLarge }
         let title = parsed.metadata.title?.nonEmpty
             ?? source.deletingPathExtension().lastPathComponent
         return try emit(content: content, title: title, metadata: parsed.metadata, source: source)
@@ -53,6 +57,11 @@ nonisolated enum MOBIWriter {
         let fcisRecord = flisRecord + 1
         let recordCount = fcisRecord + 2
         let firstImageIndex = imageCount > 0 ? firstImageRecord : recordCount
+        guard html.count <= Int(UInt32.max),
+              textRecords.count <= Int(UInt16.max),
+              recordCount <= Int(UInt16.max) else {
+            throw WriteError.outputTooLarge
+        }
 
         Log.conversion.debug(
             "MOBI \"\(title, privacy: .public)\": \(html.count) HTML bytes, \(textRecords.count) text record(s), \(imageCount) image record(s), cover=\(content.coverIndex != nil), FLIS=\(flisRecord) FCIS=\(fcisRecord)"
@@ -78,6 +87,11 @@ nonisolated enum MOBIWriter {
         records.append(MOBITrailer.flis())
         records.append(MOBITrailer.fcis(textLength: html.count))
         records.append(MOBITrailer.eof())
+
+        let fileSize = records.reduce(UInt64(80 + records.count * 8)) {
+            $0 + UInt64($1.count)
+        }
+        guard fileSize <= UInt64(UInt32.max) else { throw WriteError.outputTooLarge }
 
         let file = PDBWriter.assemble(records: records, name: title)
         return try writeToTemp(file, basedOn: source)
