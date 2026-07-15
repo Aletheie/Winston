@@ -49,6 +49,7 @@ struct SidebarView: View {
     @State private var browseRename: BrowseRename?
     @State private var browseRenameText = ""
     @State private var dismissedAuthorTips: Set<String> = []
+    @State private var dismissedSeriesTips: Set<String> = []
 
     enum BrowseRename: Identifiable {
         case author(String), series(String), tag(String)
@@ -173,11 +174,29 @@ struct SidebarView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 if let tip = authorTip {
-                    SidebarAuthorTip(
+                    SidebarFixTip(
+                        title: theme.styledText(terminal: "fix_author?", native: "Author name looks reversed"),
+                        applyHelp: theme.styledText(
+                            terminal: "rename author everywhere",
+                            native: "Rename this author across the library"
+                        ),
                         original: tip.original,
                         suggestion: tip.suggestion,
                         onApply: { viewModel.renameAuthor(tip.original, to: tip.suggestion) },
                         onDismiss: { dismissedAuthorTips.insert(tip.original) }
+                    )
+                    Divider().opacity(0.3)
+                } else if let tip = seriesTip {
+                    SidebarFixTip(
+                        title: theme.styledText(terminal: "fix_series?", native: "Series name looks duplicated"),
+                        applyHelp: theme.styledText(
+                            terminal: "rename series everywhere",
+                            native: "Rename this series across the library"
+                        ),
+                        original: tip.original,
+                        suggestion: tip.suggestion,
+                        onApply: { viewModel.renameSeries(tip.original, to: tip.suggestion) },
+                        onDismiss: { dismissedSeriesTips.insert(tip.original) }
                     )
                     Divider().opacity(0.3)
                 }
@@ -240,13 +259,8 @@ struct SidebarView: View {
         facets.authorTips.first { !dismissedAuthorTips.contains($0.original) }
     }
 
-    static func reversedAuthorSuggestion(_ name: String) -> String? {
-        let parts = name.components(separatedBy: ",")
-        guard parts.count == 2 else { return nil }
-        let last = parts[0].trimmingCharacters(in: .whitespaces)
-        let first = parts[1].trimmingCharacters(in: .whitespaces)
-        guard !last.isEmpty, !first.isEmpty, !last.contains(" ") else { return nil }
-        return "\(first) \(last)"
+    private var seriesTip: (original: String, suggestion: String)? {
+        facets.seriesTips.first { !dismissedSeriesTips.contains($0.original) }
     }
 
     // MARK: - Facets
@@ -267,6 +281,7 @@ struct SidebarView: View {
         var recent = 0
         var smartCounts: [UUID: Int] = [:]
         var authorTips: [(original: String, suggestion: String)] = []
+        var seriesTips: [(original: String, suggestion: String)] = []
     }
 
     private func makeFacets() -> Facets {
@@ -287,11 +302,14 @@ struct SidebarView: View {
         }
         facets.formatKeys = facets.formats.keys.sorted()
         facets.authorKeys = facets.authors.keys.sorted()
-        facets.seriesKeys = facets.series.keys.sorted()
+        facets.seriesKeys = facets.series.compactMap { series, count in
+            count > 1 ? series : nil
+        }.sorted()
         facets.tagKeys = facets.tags.keys.sorted()
         facets.authorTips = facets.authorKeys.compactMap { author in
-            Self.reversedAuthorSuggestion(author).map { (author, $0) }
+            MetadataFixFinder.reversedAuthorSuggestion(author).map { (author, $0) }
         }
+        facets.seriesTips = SeriesSuggestions.unificationTips(counts: facets.series)
         for collection in collections where collection.isSmart && !collection.isWishlist {
             facets.smartCounts[collection.id] = LibraryQuery.apply(
                 to: books,

@@ -137,9 +137,11 @@ struct BrowseDisclosure: View {
     }
 }
 
-// MARK: - Author fix tip
+// MARK: - Fix tips (author / series)
 
-struct SidebarAuthorTip: View {
+struct SidebarFixTip: View {
+    let title: Text
+    let applyHelp: Text
     let original: String
     let suggestion: String
     let onApply: () -> Void
@@ -153,7 +155,7 @@ struct SidebarAuthorTip: View {
                 Image(systemName: "lightbulb")
                     .font(.system(size: 10))
                     .foregroundStyle(theme.highlight)
-                theme.styledText(terminal: "fix_author?", native: "Author name looks reversed")
+                title
                     .font(theme.label(size: 10, weight: .semibold))
                     .foregroundStyle(theme.textSecondary)
                 Spacer()
@@ -186,7 +188,7 @@ struct SidebarAuthorTip: View {
                 )
             }
             .buttonStyle(.pressable)
-            .help("Rename this author across the library")
+            .help(applyHelp)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
