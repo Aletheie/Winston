@@ -54,6 +54,7 @@ nonisolated enum HTMLAssetInliner {
     private static let maxHTMLBytes = 32 * 1_024 * 1_024
     private static let maxImageBytes = 8 * 1_024 * 1_024
     private static let maxTotalImageBytes = 24 * 1_024 * 1_024
+    private static let maxPortableHTMLBytes = 64 * 1_024 * 1_024
 
     static func portableData(for source: URL) throws -> Data? {
         guard ["html", "htm"].contains(source.pathExtension.lowercased()) else { return nil }
@@ -92,7 +93,9 @@ nonisolated enum HTMLAssetInliner {
         for (range, replacement) in replacements.reversed() {
             portable.replaceCharacters(in: range, with: replacement)
         }
-        return Data((portable as String).utf8)
+        let data = Data((portable as String).utf8)
+        guard data.count <= maxPortableHTMLBytes else { throw ImportError.sourceTooLarge }
+        return data
     }
 
     private static let sourceAttributeRegex = try! NSRegularExpression(
