@@ -7,6 +7,7 @@ enum LibrarySheet: Identifiable {
     case edit(Book)
     case bulkEdit
     case duplicates
+    case metadataFixes
     case statistics
     case highlights
     case series(name: String?)
@@ -18,6 +19,7 @@ enum LibrarySheet: Identifiable {
         case .edit(let book): "edit-\(book.uuid.uuidString)"
         case .bulkEdit:       "bulkEdit"
         case .duplicates:     "duplicates"
+        case .metadataFixes:  "metadataFixes"
         case .statistics:     "statistics"
         case .highlights:     "highlights"
         case .series(let name): "series-\(name ?? "all")"
@@ -174,6 +176,8 @@ struct LibraryView: View {
                     }
                 case .duplicates:
                     DuplicatesSheet(viewModel: viewModel, onReviewEditions: { activeSheet = .editionReview })
+                case .metadataFixes:
+                    MetadataFixesSheet(viewModel: viewModel)
                 case .statistics:
                     StatisticsView(books: books)
                 case .highlights:
@@ -353,6 +357,8 @@ struct LibraryView: View {
             viewModel.fetchOnlineMetadata(for: selectedBooks)
         case .findDuplicates:
             activeSheet = .duplicates
+        case .showMetadataFixes:
+            activeSheet = .metadataFixes
         case .reviewEditions:
             activeSheet = .editionReview
         case .showStatistics:

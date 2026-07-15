@@ -19,6 +19,7 @@ enum LibraryCommand: Equatable {
     case convertSelected
     case fetchMetadata
     case findDuplicates
+    case showMetadataFixes
     case reviewEditions
     case showStatistics
     case showHighlights
@@ -148,6 +149,8 @@ struct AppCommands: Commands {
             Button("Statistics\u{2026}") { library?.perform(.showStatistics) }
                 .disabled(library == nil)
             Button("Find Duplicates\u{2026}") { library?.perform(.findDuplicates) }
+                .disabled(library == nil)
+            Button("Metadata Fixes\u{2026}") { library?.perform(.showMetadataFixes) }
                 .disabled(library == nil)
             Button("Review Edition Suggestions\u{2026}") { library?.perform(.reviewEditions) }
                 .disabled(library == nil)
