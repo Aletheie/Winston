@@ -5,13 +5,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleIdentifier</key>
-    <string>cz.annajung.Winston.help</string>
+    <string>cz.annajung.Winston.helpbook</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
     <key>CFBundleName</key>
     <string>Winston Help</string>
     <key>CFBundlePackageType</key>
     <string>BNDL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>0.1</string>
+    <key>CFBundleVersion</key>
+    <string>4</string>
     <key>HPDBookAccessPath</key>
     <string>index.html</string>
     <key>HPDBookTitle</key>

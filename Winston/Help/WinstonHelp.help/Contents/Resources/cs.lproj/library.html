@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>Budování knihovny</title>
+    <link rel="stylesheet" href="sty/winston.css">
+</head>
+<body>
+    <p class="nav"><a href="index.html">&larr; Nápověda Winston</a></p>
+    <h1>Budování knihovny</h1>
+
+    <h2>Import knih</h2>
+    <ul>
+        <li>Přetáhněte soubory do okna, použijte tlačítko <span class="badge">Přidat soubory</span> v panelu nástrojů nebo stiskněte <kbd>⌘O</kbd>.</li>
+        <li>Podporované formáty: EPUB, MOBI, AZW3, PDF a TXT.</li>
+        <li>Importované soubory se <b>zkopírují</b> do složky knihovny Winston, takže přesunutí nebo smazání originálů vaši knihovnu neovlivní.</li>
+        <li>Pro automatický import zapněte v Nastavení → Automatický import <b>sledovanou složku</b>. Nové knihy vložené do této složky se přidají automaticky, duplicity se přeskočí.</li>
+    </ul>
+
+    <h2>Import z Calibre</h2>
+    <ul>
+        <li>Zvolte <b>Soubor → Importovat z knihovny Calibre…</b> (<kbd>⌘⇧O</kbd>) a vyberte složku knihovny Calibre, která obsahuje soubor <code>metadata.db</code>.</li>
+        <li>Winston čte databázi Calibre přímo — Calibre nemusí být spuštěné ani nainstalované — a přenese každou knihu včetně obálky, autora, série, štítků, hodnocení, vydavatele, roku a popisu.</li>
+        <li>Pokud má kniha několik formátů, zvolí se ten nejvhodnější pro Kindle (AZW3, poté MOBI, AZW, EPUB, PDF a TXT).</li>
+        <li>Import se seskupí do kolekce <b>„Import z Calibre“</b> s datem, abyste jej mohli zkontrolovat. Knihy, které už v knihovně máte, se přeskočí.</li>
+    </ul>
+
+    <h2 id="search">Zobrazení, hledání a řazení</h2>
+    <ul>
+        <li>Mezi <b>mřížkou</b> a <b>seznamem</b> přepnete segmentovým ovladačem v panelu nástrojů.</li>
+        <li>V nabídce řazení můžete řadit podle názvu, autora, data přidání nebo hodnocení; v seznamu stačí kliknout na záhlaví sloupce.</li>
+        <li>Hledejte pomocí pole v panelu nástrojů (<kbd>⌘F</kbd>). Běžný text prohledává název, autora, štítky a sérii.</li>
+        <li><b>Hledání podle polí:</b> použijte <code>author:</code>, <code>tag:</code>, <code>series:</code>, <code>title:</code>, <code>format:</code> a <code>year:</code> — například <code>author:tolkien tag:"science fiction" year:&gt;2000</code>. Hodnoty s mezerami uzavřete do uvozovek a u roku použijte <code>&gt;</code>, <code>&lt;</code> nebo <code>=</code>.</li>
+        <li>Sidebar umožňuje filtrovat podle formátu, autora, série, štítku, data přidání a hodnocení.</li>
+        <li><b>Chytré kolekce:</b> při aktivním hledání zvolte <b>Knihovna → Uložit hledání jako kolekci…</b>. Kolekce se objeví v sidebaru s ikonou ✦ a vždy obsahuje knihy, které aktuálně odpovídají hledání.</li>
+    </ul>
+
+    <h2 id="collections">Kolekce a stav čtení</h2>
+    <ul>
+        <li><b>Kolekci</b> vytvoříte pomocí tlačítka <span class="badge">+</span> vedle položky „Kolekce“ v sidebaru; přejmenovat nebo smazat ji můžete z kontextové nabídky.</li>
+        <li>Knihy přidáte do kolekce přes kontextovou nabídku knihy → <b>Přidat do kolekce</b>.</li>
+        <li>Knihy uložené z nabídky <b>Objevovat</b> se objeví ve vestavěné chytré kolekci <b>Seznam přání</b>. Import stejného názvu a autora knihu ze seznamu přání odebere a potvrdí, že už je ve vaší knihovně.</li>
+        <li><b>Stav čtení</b> (Nepřečteno / Rozečteno / Dočteno) nastavíte v inspektoru nebo v kontextové nabídce. Sidebar umí filtrovat rozečtené a dočtené knihy.</li>
+    </ul>
+
+    <h2>Úprava metadat a obálek</h2>
+    <ul>
+        <li>Jednu knihu upravíte tlačítkem <b>Upravit</b> v inspektoru. Více knih upravíte najednou jejich výběrem a volbou <b>Upravit metadata pro N…</b>.</li>
+        <li>Autora, sérii nebo štítek můžete v celé knihovně přejmenovat z jejich kontextové nabídky v sidebaru.</li>
+        <li>Pokud se autor importoval v obráceném pořadí (například „Tolkien, J. R. R.“), tip ve spodní části sidebaru nabídne opravu na „J. R. R. Tolkien“ jedním kliknutím.</li>
+        <li>Obálku změníte přetažením obrázku na obálku v inspektoru nebo přes kontextovou nabídku obálky → <b>Vybrat obálku…</b> / <b>Obnovit obálku</b>.</li>
+        <li>Kopie najdete a uklidíte pomocí <b>Knihovna → Najít duplicity…</b>. Shodují se podle názvu a autora bez ohledu na pořadí jména; v každé skupině lze vybrat knihu, kterou chcete <b>Ponechat</b>.</li>
+    </ul>
+
+    <h2 id="highlights">Zvýraznění</h2>
+    <ul>
+        <li>Winston shromažďuje zvýraznění a poznámky vytvořené na Kindlu. Importujte je ze zobrazení zařízení (viz <a href="kindle.html#highlights">Odesílání a synchronizace</a>); kniha se zvýrazněními má odznak 💬.</li>
+        <li>V nabídce <b>Knihovna → Zvýraznění…</b> můžete procházet a prohledávat všechna zvýraznění seskupená podle knih.</li>
+        <li>Kliknutím na <b>Exportovat…</b> je uložíte jako <b>Markdown</b> — jeden soubor „Autor - Název.md“ pro každou knihu — připravený pro Obsidian, poznámkové aplikace nebo zálohu.</li>
+    </ul>
+
+    <h2 id="online">Dohledávání metadat a komunitních hodnocení online</h2>
+    <ul>
+        <li>Zapněte <b>Nastavení → Metadata → Dohledávat metadata online</b>. Winston pak u importovaných knih hledá obálky a podrobnosti ve veřejných katalozích Open Library a Google Books.</li>
+        <li>Doplní se pouze chybějící pole — existující ani ručně upravená data se nikdy nepřepíšou. Pokud se nic nenajde, knize zůstanou vložená metadata.</li>
+        <li>Metadata lze dohledat i ručně: vyberte knihy a zvolte <b>Kniha → Dohledat metadata online</b>.</li>
+        <li><b>Komunitní hodnocení</b> ukazuje, jak knihu hodnotili ostatní čtenáři, a zobrazuje se pod vaším hodnocením. Bere se z Hardcoveru, pokud v <b>Nastavení → Komunitní hodnocení</b> zadáte bezplatný token, jinak z Google Books nebo Open Library. Každá kniha se hledá jednou; po pozdějším přidání tokenu použijte znovu <b>Dohledat metadata online</b>.</li>
+        <li>S nastaveným tokenem Hardcover otevřete <b>Knihovna → Série…</b> a porovnejte své série s hlavním katalogem. Winston ukáže počet vlastněných dílů, názvy chybějících knih a přímý odkaz na každý titul na Hardcoveru.</li>
+        <li>Když je nastavení vypnuté, Winston se nepřipojuje k síti a funguje zcela offline.</li>
+    </ul>
+
+    <h2 id="backup">Zálohování a stav knihovny</h2>
+    <ul>
+        <li>V <b>Nastavení → Zálohování</b> zapněte zálohy a vyberte složku. Winston do ní přibližně jednou denně zkopíruje katalog a obálky a ponechá několik posledních záloh.</li>
+        <li>Záloha chrání vaše uspořádání, hodnocení, kolekce, stav čtení a zvýraznění. Chcete-li přenést i samotné soubory knih, použijte <b>Knihovna → Exportovat knihovnu…</b>; vytvoří čitelné soubory „Autor - Název“ a metadata ve formátu CSV/JSON.</li>
+        <li>Pokud se soubor knihy přesune nebo smaže mimo Winston, kniha dostane odznak ⚠️. V její kontextové nabídce zvolte <b>Nahradit soubor…</b> a znovu ukažte na správný soubor.</li>
+    </ul>
+
+    <p class="nav"><a href="index.html">&larr; Nápověda Winston</a> · <a href="kindle.html">Odesílání do Kindlu &rarr;</a></p>
+</body>
+</html>

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>Odesílání knih do Kindlu</title>
+    <link rel="stylesheet" href="sty/winston.css">
+</head>
+<body>
+    <p class="nav"><a href="index.html">&larr; Nápověda Winston</a></p>
+    <h1>Odesílání knih do Kindlu</h1>
+
+    <h2>Připojení</h2>
+    <ul>
+        <li>Připojte Kindle kabelem USB. Winston rozpozná moderní zařízení přes MTP i starší modely, které se připojují jako USB disk.</li>
+        <li>Po připojení se v sidebaru v části „Zařízení“ objeví zelená položka. Kliknutím zobrazíte obsah Kindlu.</li>
+    </ul>
+
+    <h2>Odesílání a import</h2>
+    <ul>
+        <li>Chcete-li poslat konkrétní knihy, vyberte je v knihovně a v panelu nástrojů klikněte na <span class="badge">Odeslat do zařízení</span>.</li>
+        <li>Nebo použijte dvě tlačítka v záhlaví zobrazení zařízení, která jasně ukazují směr:
+            <ul>
+                <li><b>⬆ Odeslat N do Kindlu</b> zkopíruje knihy, které máte v knihovně, ale zatím ne v Kindlu. Vaše knihovna se nezmění.</li>
+                <li><b>⬇ Importovat N do knihovny</b> zkopíruje do knihovny knihy, které jsou v Kindlu, ale zatím ne ve Winstonu.</li>
+            </ul>
+        </li>
+        <li>Přenosy probíhají po jednom. Průběh včetně převodu se zobrazuje ve stavovém oznámení v pravém dolním rohu; tlačítkem <b>Zrušit</b> zastavíte frontu.</li>
+        <li>Knihy, které už jsou v zařízení, mají v knihovně odznak.</li>
+    </ul>
+
+    <h2>Správa obsahu Kindlu</h2>
+    <ul>
+        <li>Zobrazení zařízení vypisuje obsah Kindlu a u každé knihy autora dohledaného z vaší knihovny.</li>
+        <li>V kontextové nabídce zvolte <b>Kopírovat do knihovny</b> nebo <b>Odebrat ze zařízení</b>, a to pro jednu knihu i vícenásobný výběr.</li>
+        <li>Chcete-li odebrat knihy určitého autora, klikněte pravým tlačítkem na jeho knihu a zvolte <b>Odebrat vše od ⟨autora⟩</b>.</li>
+    </ul>
+
+    <h2 id="highlights">Zvýraznění a poznámky</h2>
+    <ul>
+        <li>Kliknutím na tlačítko 💬 v záhlaví zařízení importujete zvýraznění a poznámky ze souboru výstřižků v Kindlu.</li>
+        <li>Přiřadí se k odpovídajícím knihám ve vaší knihovně. Později je můžete procházet a exportovat přes <b>Knihovna → Zvýraznění…</b> (viz <a href="library.html#highlights">Zvýraznění</a>).</li>
+    </ul>
+
+    <h2>Převod pro Kindle</h2>
+    <ul>
+        <li>Kindle neumí číst EPUB nahraný přes kabel, proto jej Winston při odesílání automaticky převede do formátu <b>AZW3</b>.</li>
+        <li>Knihy můžete převést i předem: vyberte je a zvolte <b>Převést do AZW3</b> v kontextové nabídce, nabídce Kniha nebo inspektoru. Převod nahradí soubor knihy a zachová obálku.</li>
+        <li>Převod vyžaduje nainstalované <a href="https://calibre-ebook.com">Calibre</a>, protože Winston používá nástroj <code>ebook-convert</code>. Bez Calibre je akce Převést vypnutá.</li>
+        <li>Winston se také pokusí odeslat náhled obálky, aby knihy nahrané přes kabel zobrazovaly grafiku. Výsledek závisí na firmwaru zařízení.</li>
+    </ul>
+
+    <h2 id="themes">Motivy a nastavení</h2>
+    <ul>
+        <li>Motivy přepínejte pomocí <kbd>⌘⇧T</kbd> nebo je vyberte v Nastavení → Vzhled: <b>Purple</b> (retro), <b>White</b> a <b>Black</b> (klasický tmavý).</li>
+        <li>Všechny motivy používají stejné nativní rozvržení macOS; mění se pouze barvy, písma a styl textů.</li>
+        <li><b>Jazyk</b> aplikace (angličtina / čeština) přepnete v Nastavení → Jazyk. Změna se projeví po novém spuštění.</li>
+        <li>Další volby najdete v <b>Nastavení</b> (<kbd>⌘,</kbd>): online metadata, token Hardcover pro komunitní hodnocení, sledovanou složku pro automatický import a automatické zálohování.</li>
+    </ul>
+
+    <p class="nav"><a href="index.html">&larr; Nápověda Winston</a> · <a href="library.html">Budování knihovny &rarr;</a></p>
+</body>
+</html>

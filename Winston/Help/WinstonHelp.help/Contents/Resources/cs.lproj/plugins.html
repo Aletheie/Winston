@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>Pluginy</title>
+    <link rel="stylesheet" href="sty/winston.css">
+</head>
+<body>
+    <p class="nav"><a href="index.html">&larr; Nápověda Winston</a></p>
+    <h1>Pluginy</h1>
+    <p class="subtitle">Volitelné komunitní doplňky rozšiřující Winston.</p>
+
+    <p>Pluginy jsou malé doplňky napsané v JavaScriptu. Mohou například doplňovat
+    chybějící údaje o knihách nebo vytvářet přehledy. Ve výchozím stavu jsou
+    <b>vypnuté</b>: nic se nespustí, dokud plugin nenainstalujete a nezapnete,
+    a každý smí dělat jen to, co mu výslovně povolíte.</p>
+
+    <h2>Jsou pluginy bezpečné?</h2>
+    <ul>
+        <li>Plugin běží v <b>izolovaném prostředí</b> bez přímého přístupu k vašim souborům, síti nebo jiným aplikacím. Může používat jen konkrétní možnosti poskytované Winstonem.</li>
+        <li>Před prvním spuštěním Winston přesně ukáže, co chce plugin dělat, například „Číst metadata knihovny“, a <b>požádá vás o potvrzení</b>.</li>
+        <li>Plugin nikdy nemůže přepsat metadata, která jste zadali nebo upravili; smí pouze <i>doplnit prázdná pole</i>.</li>
+        <li>Online vyhledávání respektuje přepínač <b>Nastavení → Metadata</b>, takže při vypnutých online metadatech plugin neprovádí žádná síťová volání.</li>
+        <li>Pokud plugin opakovaně chybuje nebo se zasekne, Winston jej automaticky vypne a umístí do karantény, aniž by ovlivnil zbytek aplikace.</li>
+    </ul>
+
+    <h2 id="install">Instalace pluginu</h2>
+    <ul>
+        <li>Otevřete <b>Nastavení → Pluginy</b> a klikněte na <span class="badge">Otevřít složku pluginů</span>. Nachází se v <code>~/Library/Application&nbsp;Support/Winston/Plugins/</code>.</li>
+        <li>Vložte dovnitř složku pluginu. Každý plugin je jedna složka obsahující soubor <code>manifest.json</code> a skript.</li>
+        <li>V Nastavení → Pluginy klikněte na <span class="badge">Obnovit</span>. Plugin se objeví v seznamu jako <b>Vypnutý</b>.</li>
+    </ul>
+
+    <h2 id="enable">Zapnutí a oprávnění</h2>
+    <ul>
+        <li>Plugin zapnete jeho přepínačem.</li>
+        <li>Winston zobrazí okno <b>Zapnout „…“?</b> se seznamem požadovaných oprávnění. Přečtěte si je a klikněte na <span class="badge">Zapnout</span> nebo Zrušit.</li>
+        <li>Běžná oprávnění jsou <b>Číst metadata knihovny</b>, <b>Doplňovat chybějící metadata knih</b> a <b>Zobrazovat oznámení</b>.</li>
+        <li>Pokud novější verze pluginu požádá o další oprávnění, Winston si vyžádá nové potvrzení. Aktualizace nemůže potají získat větší přístup.</li>
+    </ul>
+
+    <h2 id="manage">Správa pluginů</h2>
+    <ul>
+        <li>Každý plugin zobrazuje <b>stav</b>: <i>Aktivní</i>, <i>Vypnutý</i>, <i>Neplatný</i> (složka neobsahuje použitelný plugin), <i>Selhal</i> (nepodařilo se jej spustit a zobrazí se důvod) nebo <i>V karanténě</i> (vypnutý po opakovaných chybách).</li>
+        <li>Rozbalte <b>Protokol</b> a zobrazte poslední zprávy pluginu. Pomohou zjistit, co provedl nebo proč selhal.</li>
+        <li>Volba <b>Zobrazit ve Finderu</b> otevře složku pluginu.</li>
+        <li>Plugin můžete kdykoli vypnout. Plugin v karanténě lze znovu zapnout a vyzkoušet.</li>
+    </ul>
+
+    <h2 id="troubleshoot">Řešení potíží</h2>
+    <ul>
+        <li><b>Plugin se po přidání nezobrazuje.</b> Název jeho složky musí odpovídat hodnotě <code>id</code> v souboru <code>manifest.json</code> a složka musí obsahovat manifest i skript. Klikněte na <span class="badge">Obnovit</span>.</li>
+        <li><b>Zobrazuje se „Neplatný“.</b> Manifest chybí nebo má chybný formát; důvod je uveden vedle stavu.</li>
+        <li><b>Zobrazuje se „Selhal“.</b> Skript pluginu při spuštění narazil na chybu. Podrobnosti najdete v <b>Protokolu</b>.</li>
+        <li><b>Zobrazuje se „V karanténě“.</b> Plugin příliš často chyboval nebo trval příliš dlouho. Zbytek Winstonu to neovlivní; po opravě autorem jej můžete znovu zapnout.</li>
+    </ul>
+
+    <h2 id="write">Vytvoření vlastního pluginu</h2>
+    <ul>
+        <li>Pluginy jsou běžný JavaScript, který používá malé API <code>Winston</code>. Může číst knihovnu, dohledávat metadata, ukládat menší množství vlastních dat a zobrazovat oznámení.</li>
+        <li>Příklad připravený ke zkopírování a podrobný návod pro začátečníky „Your First Metadata Fetcher“ jsou v projektu Winston ve složkách <code>docs/example-plugin/</code> a <code>docs/WritingPlugins.md</code>; kompletní referenci API najdete v <code>docs/PluginAPI.md</code>.</li>
+    </ul>
+
+    <p class="nav"><a href="index.html">&larr; Nápověda Winston</a></p>
+</body>
+</html>

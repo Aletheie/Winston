@@ -95,7 +95,7 @@ let project = Project(
                 "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
                 "NSHumanReadableCopyright": "",
                 "CFBundleHelpBookFolder": "WinstonHelp.help",
-                "CFBundleHelpBookName": "Winston Help",
+                "CFBundleHelpBookName": "cz.annajung.Winston.helpbook",
                 "CFBundleDevelopmentRegion": "en",
                 "CFBundleLocalizations": .array([.string("en"), .string("cs")]),
                 "UTImportedTypeDeclarations": kindleTypeDeclarations,

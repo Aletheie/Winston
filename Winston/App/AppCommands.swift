@@ -1,6 +1,4 @@
 import SwiftUI
-import AppKit
-import OSLog
 
 // MARK: - Focused values
 
@@ -142,7 +140,7 @@ struct AppCommands: Commands {
         }
 
         CommandGroup(replacing: .help) {
-            Button("Winston Help") { NSApplication.shared.showHelp(nil) }
+            Button("Winston Help") { WinstonHelp.open(for: settings.appLanguage) }
                 .keyboardShortcut("?", modifiers: .command)
         }
 
