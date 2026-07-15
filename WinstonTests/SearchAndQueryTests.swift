@@ -113,6 +113,22 @@ struct LibraryQueryTests {
         #expect(result.map(\.title) == ["Duna"])
     }
 
+    @Test func batchedSmartCountsMatchIndividualQueries() {
+        let books = [
+            makeBook("Dune", author: "Frank Herbert", tags: ["sci-fi"], year: "1965"),
+            makeBook("Foundation", author: "Isaac Asimov", tags: ["sci-fi"], year: "1951"),
+            makeBook("Emma", author: "Jane Austen", tags: ["classic"], year: "1815"),
+        ]
+        let scienceFiction = UUID()
+        let modern = UUID()
+        let searches = [(scienceFiction, "tag:sci-fi"), (modern, "year:>1900")]
+
+        let counts = LibraryQuery.smartCounts(for: books, searches: searches)
+
+        #expect(counts[scienceFiction] == 2)
+        #expect(counts[modern] == 2)
+    }
+
     @Test func titleSortIsAscending() {
         let books = [makeBook("Banana"), makeBook("Apple")]
         let sort = [BookSort.title.comparator(ascending: true)]

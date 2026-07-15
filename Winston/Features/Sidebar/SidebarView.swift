@@ -310,14 +310,11 @@ struct SidebarView: View {
             MetadataFixFinder.reversedAuthorSuggestion(author).map { (author, $0) }
         }
         facets.seriesTips = SeriesSuggestions.unificationTips(counts: facets.series)
-        for collection in collections where collection.isSmart && !collection.isWishlist {
-            facets.smartCounts[collection.id] = LibraryQuery.apply(
-                to: books,
-                filter: .all,
-                searchText: collection.savedSearch ?? "",
-                sort: []
-            ).count
+        let searches = collections.compactMap { collection -> (UUID, String)? in
+            guard collection.isSmart, !collection.isWishlist, let search = collection.savedSearch else { return nil }
+            return (collection.id, search)
         }
+        facets.smartCounts = LibraryQuery.smartCounts(for: books, searches: searches)
         return facets
     }
 }
