@@ -62,14 +62,14 @@ private struct NoticesFeed: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 NoticesMasthead(unreadCount: notices.unreadCount)
-                    .padding(.bottom, 16)
+                    .padding(.bottom, 22)
 
                 if let gatingReason {
                     NoticesGatingBanner(reason: gatingReason)
-                        .padding(.bottom, 16)
+                        .padding(.bottom, 20)
                 } else if lastCheckFailed {
                     NoticesFailureBanner(notices: notices)
-                        .padding(.bottom, 16)
+                        .padding(.bottom, 20)
                 }
 
                 if let latest = items.first {
@@ -79,24 +79,15 @@ private struct NoticesFeed: View {
                         viewModel: viewModel,
                         onOpenSeries: onOpenSeries
                     )
-                    .padding(.bottom, 28)
+                    .padding(.bottom, 32)
                 }
 
-                if items.count > 1 {
-                    NoticesSectionHeader()
-                        .padding(.bottom, 12)
-
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(items.dropFirst()) { notice in
-                            NoticeTimelineRow(
-                                notice: notice,
-                                notices: notices,
-                                viewModel: viewModel,
-                                onOpenSeries: onOpenSeries
-                            )
-                        }
-                    }
-                }
+                NoticesArchive(
+                    sections: NoticeDateBucket.sections(from: Array(items.dropFirst()), now: .now),
+                    notices: notices,
+                    viewModel: viewModel,
+                    onOpenSeries: onOpenSeries
+                )
             }
             .padding(.horizontal, 20)
             .padding(.top, 18)
@@ -107,38 +98,52 @@ private struct NoticesFeed: View {
     }
 }
 
+private struct NoticesArchive: View {
+    let sections: [NoticeDateBucket.Section]
+    let notices: NoticeService
+    let viewModel: LibraryViewModel
+    let onOpenSeries: (String) -> Void
+
+    var body: some View {
+        ForEach(sections) { section in
+            NoticeBucketHeader(bucket: section.bucket)
+                .padding(.bottom, 14)
+
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(section.notices) { notice in
+                    NoticeTimelineRow(
+                        notice: notice,
+                        notices: notices,
+                        viewModel: viewModel,
+                        onOpenSeries: onOpenSeries
+                    )
+                }
+            }
+            .padding(.bottom, 26)
+        }
+    }
+}
+
+// MARK: - Masthead
+
 private struct NoticesMasthead: View {
     let unreadCount: Int
 
     @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Image(systemName: "bell.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(theme.accent)
+        VStack(alignment: .leading, spacing: 10) {
+            NoticesDateline()
+
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
                 theme.styledText(terminal: "// updates", native: "Updates")
-                    .font(theme.display(size: 22, weight: .heavy))
+                    .font(theme.display(size: 30, weight: .heavy))
                     .foregroundStyle(theme.textPrimary)
 
-                Spacer(minLength: 16)
+                Spacer(minLength: 12)
 
                 if unreadCount > 0 {
-                    Group {
-                        if theme.usesTerminalCopy {
-                            Text(verbatim: "\(unreadCount) unread")
-                        } else {
-                            Text("\(unreadCount) unread")
-                        }
-                    }
-                    .font(theme.label(size: 11, weight: .semibold))
-                    .foregroundStyle(theme.accent)
-                    .monospacedDigit()
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(theme.accent.opacity(0.14), in: Capsule())
-                    .overlay(Capsule().stroke(theme.accent.opacity(0.25), lineWidth: 1))
+                    NoticesUnreadPill(count: unreadCount)
                 }
             }
 
@@ -149,21 +154,140 @@ private struct NoticesMasthead: View {
             .font(theme.body(size: 13, weight: .regular))
             .foregroundStyle(theme.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
+
+            Rectangle()
+                .fill(theme.borderSubtle)
+                .frame(height: 1)
+                .padding(.top, 8)
         }
     }
 }
 
-private struct NoticesSectionHeader: View {
+private struct NoticesDateline: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: 10) {
-            theme.styledText(terminal: "EARLIER", native: "Earlier Updates")
+        Group {
+            if theme.usesTerminalCopy {
+                Text(verbatim: "// " + Date.now.formatted(date: .numeric, time: .omitted))
+            } else {
+                Text(Date.now, format: .dateTime.weekday(.wide).day().month(.wide))
+            }
+        }
+        .font(theme.label(size: 11, weight: .semibold))
+        .tracking(1.6)
+        .textCase(.uppercase)
+        .foregroundStyle(theme.accent)
+        .lineLimit(1)
+    }
+}
+
+private struct NoticesUnreadPill: View {
+    let count: Int
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(theme.accent)
+                .frame(width: 6, height: 6)
+
+            Group {
+                if theme.usesTerminalCopy {
+                    Text(verbatim: "\(count) unread")
+                } else {
+                    Text("\(count) unread")
+                }
+            }
+            .monospacedDigit()
+        }
+        .font(theme.label(size: 11, weight: .semibold))
+        .foregroundStyle(theme.accent)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(theme.accent.opacity(0.12), in: Capsule())
+        .overlay(Capsule().stroke(theme.accent.opacity(0.22), lineWidth: 1))
+    }
+}
+
+private struct NoticeBucketHeader: View {
+    let bucket: NoticeDateBucket
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 12) {
+            theme.styledText(terminal: bucket.terminalTitle, native: bucket.nativeTitle)
                 .font(theme.label(size: 11, weight: .semibold))
+                .tracking(1.3)
+                .textCase(.uppercase)
                 .foregroundStyle(theme.textSecondary)
+                .fixedSize()
+
             Rectangle()
                 .fill(theme.borderSubtle)
                 .frame(height: 1)
+        }
+    }
+}
+
+// MARK: - Date buckets
+
+nonisolated enum NoticeDateBucket: String, CaseIterable, Identifiable {
+    case today
+    case thisWeek
+    case thisMonth
+    case earlier
+
+    var id: String { rawValue }
+
+    struct Section: Identifiable {
+        let bucket: NoticeDateBucket
+        let notices: [LibraryNotice]
+        var id: String { bucket.id }
+    }
+
+    var terminalTitle: String {
+        switch self {
+        case .today:     "today"
+        case .thisWeek:  "this_week"
+        case .thisMonth: "this_month"
+        case .earlier:   "earlier"
+        }
+    }
+
+    var nativeTitle: LocalizedStringKey {
+        switch self {
+        case .today:     "Today"
+        case .thisWeek:  "This Week"
+        case .thisMonth: "This Month"
+        case .earlier:   "Earlier"
+        }
+    }
+
+    static func bucket(for date: Date, now: Date, calendar: Calendar = .current) -> NoticeDateBucket {
+        let startOfDate = calendar.startOfDay(for: date)
+        let startOfNow = calendar.startOfDay(for: now)
+        let days = calendar.dateComponents([.day], from: startOfDate, to: startOfNow).day ?? 0
+        switch days {
+        case ..<1:    return .today
+        case 1..<7:   return .thisWeek
+        case 7..<30:  return .thisMonth
+        default:      return .earlier
+        }
+    }
+
+    @MainActor
+    static func sections(from notices: [LibraryNotice], now: Date) -> [Section] {
+        var grouped: [NoticeDateBucket: [LibraryNotice]] = [:]
+        for notice in notices {
+            let bucket = bucket(for: notice.dateCreated, now: now)
+            grouped[bucket, default: []].append(notice)
+        }
+        return allCases.compactMap { bucket in
+            guard let items = grouped[bucket], !items.isEmpty else { return nil }
+            return Section(bucket: bucket, notices: items)
         }
     }
 }
@@ -386,7 +510,7 @@ private func makePreviewModel(theme: Theme) -> (LibraryViewModel, ModelContainer
     let next = LibraryNotice(
         dedupeKey: "next:\(book.uuid)",
         kind: .nextInSeries,
-        dateCreated: .now.addingTimeInterval(-86_400),
+        dateCreated: .now.addingTimeInterval(-86_400 * 3),
         bookTitle: "První díl"
     )
     next.seriesName = "Kroniky"
@@ -398,7 +522,7 @@ private func makePreviewModel(theme: Theme) -> (LibraryViewModel, ModelContainer
     let rate = LibraryNotice(
         dedupeKey: "rate:\(book.uuid)",
         kind: .ratingPrompt,
-        dateCreated: .now.addingTimeInterval(-172_800),
+        dateCreated: .now.addingTimeInterval(-86_400 * 21),
         bookTitle: "První díl"
     )
     rate.author = "Jana Nováková"

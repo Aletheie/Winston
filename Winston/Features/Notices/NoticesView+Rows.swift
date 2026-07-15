@@ -13,13 +13,13 @@ struct NoticeFeaturedStory: View {
     private var book: Book? { notices.book(for: notice) }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 24) {
-            NoticeStoryCover(notice: notice, book: book, cornerRadius: 10)
-                .frame(width: 148, height: 222)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .shadow(color: .black.opacity(0.24), radius: 9, y: 5)
+        HStack(alignment: .top, spacing: 26) {
+            NoticeStoryCover(notice: notice, book: book, cornerRadius: 12)
+                .frame(width: 152, height: 228)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .shadow(color: .black.opacity(0.28), radius: 14, y: 9)
 
-            VStack(alignment: .leading, spacing: 13) {
+            VStack(alignment: .leading, spacing: 14) {
                 NoticeStoryMeta(
                     notice: notice,
                     notices: notices,
@@ -40,18 +40,18 @@ struct NoticeFeaturedStory: View {
                     openURL: openURL
                 )
             }
-            .frame(maxWidth: .infinity, minHeight: 222, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 228, alignment: .topLeading)
         }
-        .padding(24)
-        .glassCard(cornerRadius: 16, tintOpacity: 0.5)
+        .padding(26)
+        .glassCard(cornerRadius: 20, tintOpacity: 0.5)
         .overlay {
             if notice.isUnread {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(theme.accent.opacity(0.38), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(theme.accent.opacity(0.36), lineWidth: 1)
             }
         }
-        .shadow(color: .black.opacity(0.10), radius: 18, y: 9)
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .shadow(color: .black.opacity(0.12), radius: 20, y: 10)
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .contextMenu {
             NoticeManagementActions(notice: notice, notices: notices)
         }
@@ -72,10 +72,10 @@ struct NoticeTimelineRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
-            NoticeStoryCover(notice: notice, book: book)
-                .frame(width: 60, height: 90)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .shadow(color: .black.opacity(0.15), radius: 3, y: 2)
+            NoticeStoryCover(notice: notice, book: book, cornerRadius: 7)
+                .frame(width: 56, height: 84)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .shadow(color: .black.opacity(0.16), radius: 3, y: 2)
 
             VStack(alignment: .leading, spacing: 8) {
                 NoticeStoryMeta(
@@ -98,19 +98,70 @@ struct NoticeTimelineRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(14)
-        .glassCard(cornerRadius: 12, tintOpacity: 0.35)
-        .overlay {
+        .padding(15)
+        .glassCard(cornerRadius: 13, tintOpacity: 0.32)
+        .overlay(alignment: .leading) {
             if notice.isUnread {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(theme.accent.opacity(0.3), lineWidth: 1)
+                Capsule()
+                    .fill(theme.accent)
+                    .frame(width: 3)
+                    .padding(.vertical, 13)
+                    .padding(.leading, 4)
             }
         }
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            if notice.isUnread {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(theme.accent.opacity(0.22), lineWidth: 1)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .contextMenu {
             NoticeManagementActions(notice: notice, notices: notices)
         }
         .accessibilityElement(children: .contain)
+    }
+}
+
+// MARK: - Kind styling
+
+private struct NoticeKindStyle {
+    let kind: NoticeKind?
+
+    var icon: String {
+        switch kind {
+        case .newRelease:   "sparkles"
+        case .nextInSeries: "books.vertical.fill"
+        case .ratingPrompt: "star.bubble.fill"
+        case nil:           "bell.fill"
+        }
+    }
+
+    var terminalTitle: String {
+        switch kind {
+        case .newRelease:   "new_release"
+        case .nextInSeries: "next_to_read"
+        case .ratingPrompt: "your_review"
+        case nil:           "library_update"
+        }
+    }
+
+    var nativeTitle: LocalizedStringKey {
+        switch kind {
+        case .newRelease:   "New Release"
+        case .nextInSeries: "Next to Read"
+        case .ratingPrompt: "Your Review"
+        case nil:           "Library update"
+        }
+    }
+
+    func tint(_ theme: Theme) -> Color {
+        switch kind {
+        case .newRelease:   theme.accent
+        case .nextInSeries: theme.accentSecondary
+        case .ratingPrompt: theme.accentTertiary
+        case nil:           theme.textSecondary
+        }
     }
 }
 
@@ -129,7 +180,7 @@ private struct NoticeStoryMeta: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: presentation == .featured ? 10 : 7) {
+        HStack(spacing: presentation == .featured ? 10 : 8) {
             NoticeKindLabel(kind: notice.kind, presentation: presentation)
 
             Spacer(minLength: 8)
@@ -161,54 +212,23 @@ private struct NoticeKindLabel: View {
 
     @Environment(\.theme) private var theme
 
+    private var style: NoticeKindStyle { NoticeKindStyle(kind: kind) }
+
     var body: some View {
-        Label {
-            theme.styledText(terminal: terminalTitle, native: nativeTitle)
-        } icon: {
-            Image(systemName: icon)
+        HStack(spacing: 5) {
+            Image(systemName: style.icon)
+                .font(.system(size: presentation == .featured ? 10 : 9, weight: .bold))
+
+            theme.styledText(terminal: style.terminalTitle, native: style.nativeTitle)
+                .tracking(1.1)
+                .textCase(.uppercase)
         }
         .font(theme.label(
             size: presentation == .featured ? 11 : 10,
             weight: .semibold
         ))
-        .foregroundStyle(tint)
+        .foregroundStyle(style.tint(theme))
         .lineLimit(1)
-    }
-
-    private var terminalTitle: String {
-        switch kind {
-        case .newRelease:   "new_release"
-        case .nextInSeries: "next_to_read"
-        case .ratingPrompt: "your_review"
-        case nil:           "library_update"
-        }
-    }
-
-    private var nativeTitle: LocalizedStringKey {
-        switch kind {
-        case .newRelease:   "New Release"
-        case .nextInSeries: "Next to Read"
-        case .ratingPrompt: "Your Review"
-        case nil:           "Library update"
-        }
-    }
-
-    private var icon: String {
-        switch kind {
-        case .newRelease:   "sparkles"
-        case .nextInSeries: "books.vertical.fill"
-        case .ratingPrompt: "star.bubble.fill"
-        case nil:           "bell.fill"
-        }
-    }
-
-    private var tint: Color {
-        switch kind {
-        case .newRelease:   theme.accent
-        case .nextInSeries: theme.accentSecondary
-        case .ratingPrompt: theme.accentTertiary
-        case nil:           theme.textSecondary
-        }
     }
 }
 
@@ -238,10 +258,10 @@ private struct NoticeStoryCopy: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: presentation == .featured ? 9 : 4) {
+        VStack(alignment: .leading, spacing: presentation == .featured ? 10 : 5) {
             headline
                 .font(theme.display(
-                    size: presentation == .featured ? 26 : 17,
+                    size: presentation == .featured ? 27 : 17,
                     weight: presentation == .featured ? .bold : .semibold
                 ))
                 .foregroundStyle(theme.textPrimary)
@@ -250,7 +270,7 @@ private struct NoticeStoryCopy: View {
 
             summary
                 .font(theme.body(
-                    size: presentation == .featured ? 13 : 11,
+                    size: presentation == .featured ? 14 : 11,
                     weight: .regular
                 ))
                 .foregroundStyle(theme.textSecondary)
@@ -260,8 +280,10 @@ private struct NoticeStoryCopy: View {
             if let metadataLine {
                 Text(verbatim: metadataLine)
                     .font(theme.label(size: presentation == .featured ? 11 : 10, weight: .medium))
-                    .foregroundStyle(theme.textSecondary)
+                    .tracking(0.4)
+                    .foregroundStyle(theme.textTertiary)
                     .lineLimit(1)
+                    .padding(.top, presentation == .featured ? 1 : 0)
             }
         }
     }
