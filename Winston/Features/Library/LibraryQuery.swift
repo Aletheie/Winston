@@ -44,22 +44,41 @@ enum LibraryQuery {
     private static func searched(_ books: [Book], query: SearchQuery) -> [Book] {
         guard !query.isEmpty else { return books }
         let query = NormalizedQuery(query)
-        return books.filter { SearchableBook($0).matches(query) }
+        return books.filter { matches($0, query) }
     }
 
     static func smartCounts(for books: [Book], searches: [(UUID, String)]) -> [UUID: Int] {
+        guard !searches.isEmpty else { return [:] }
         let queries = searches.map { ($0.0, NormalizedQuery(SearchQuery.parse($0.1))) }
+        if queries.count == 1, let (id, query) = queries.first {
+            let count = books.count(where: { matches($0, query) })
+            return count == 0 ? [:] : [id: count]
+        }
+        return smartCounts(for: books.map(SearchSnapshot.init), queries: queries)
+    }
+
+    nonisolated static func smartCounts(
+        for books: [SearchSnapshot], searches: [(UUID, String)]
+    ) -> [UUID: Int] {
+        let queries = searches.map { ($0.0, NormalizedQuery(SearchQuery.parse($0.1))) }
+        return smartCounts(for: books, queries: queries)
+    }
+
+    private nonisolated static func smartCounts(
+        for books: [SearchSnapshot], queries: [(UUID, NormalizedQuery)]
+    ) -> [UUID: Int] {
+        guard !queries.isEmpty else { return [:] }
         var counts: [UUID: Int] = [:]
         for book in books {
-            let searchable = SearchableBook(book)
-            for (id, query) in queries where searchable.matches(query) {
+            guard !Task.isCancelled else { return counts }
+            for (id, query) in queries where book.matches(query) {
                 counts[id, default: 0] += 1
             }
         }
         return counts
     }
 
-    private struct NormalizedQuery {
+    fileprivate nonisolated struct NormalizedQuery: Sendable {
         let freeText: String
         let authors: [String]
         let tags: [String]
@@ -83,7 +102,7 @@ enum LibraryQuery {
         }
     }
 
-    private struct SearchableBook {
+    nonisolated struct SearchSnapshot: Sendable {
         let title: String
         let author: String
         let tags: [String]
@@ -94,7 +113,7 @@ enum LibraryQuery {
         let format: String
         let year: Int?
 
-        init(_ book: Book) {
+        @MainActor init(_ book: Book) {
             title = book.displayTitle.lowercased()
             author = book.displayAuthor?.lowercased() ?? ""
             tags = book.tags.map { $0.lowercased() }
@@ -106,24 +125,57 @@ enum LibraryQuery {
             year = book.year.flatMap { Int($0.prefix(4)) }
         }
 
-        func matches(_ query: NormalizedQuery) -> Bool {
+        fileprivate func matches(_ query: NormalizedQuery) -> Bool {
+            if !query.freeText.isEmpty {
+                let q = query.freeText
+                let hit = title.contains(q) || author.contains(q) || tags.contains { $0.contains(q) }
+                    || series.contains(q) || notes.contains(q) || translator.contains(q) || language.contains(q)
+                if !hit { return false }
+            }
+            for value in query.authors where !author.contains(value) { return false }
+            for tag in query.tags where !tags.contains(where: { $0.contains(tag) }) { return false }
+            for value in query.series where !series.contains(value) { return false }
+            for value in query.titles where !title.contains(value) { return false }
+            for value in query.formats where format != value { return false }
+            for value in query.languages where language != value { return false }
+            for value in query.translators where !translator.contains(value) { return false }
+            if let constraint = query.year {
+                guard let year else { return false }
+                switch constraint.op {
+                case .greaterThan: if !(year > constraint.value) { return false }
+                case .lessThan:    if !(year < constraint.value) { return false }
+                case .equal:       if year != constraint.value { return false }
+                }
+            }
+            return true
+        }
+    }
+
+    private static func matches(_ book: Book, _ query: NormalizedQuery) -> Bool {
         if !query.freeText.isEmpty {
             let q = query.freeText
-            let hit = title.contains(q) || author.contains(q) || tags.contains { $0.contains(q) }
-                || series.contains(q) || notes.contains(q) || translator.contains(q) || language.contains(q)
+            let hit = book.displayTitle.lowercased().contains(q)
+                || (book.displayAuthor?.lowercased().contains(q) ?? false)
+                || book.tags.contains { $0.lowercased().contains(q) }
+                || (book.series?.lowercased().contains(q) ?? false)
+                || (book.notes?.lowercased().contains(q) ?? false)
+                || (book.translator?.lowercased().contains(q) ?? false)
+                || (book.language?.lowercased().contains(q) ?? false)
             if !hit { return false }
         }
-        for value in query.authors where !author.contains(value) { return false }
-        for tag in query.tags where !tags.contains(where: { $0.contains(tag) }) {
-            return false
-        }
-        for value in query.series where !series.contains(value) { return false }
-        for value in query.titles where !title.contains(value) { return false }
-        for value in query.formats where format != value { return false }
-        for value in query.languages where language != value { return false }
-        for value in query.translators where !translator.contains(value) { return false }
+        for value in query.authors
+        where !(book.displayAuthor?.lowercased().contains(value) ?? false) { return false }
+        for value in query.tags
+        where !book.tags.contains(where: { $0.lowercased().contains(value) }) { return false }
+        for value in query.series
+        where !(book.series?.lowercased().contains(value) ?? false) { return false }
+        for value in query.titles where !book.displayTitle.lowercased().contains(value) { return false }
+        for value in query.formats where book.format.lowercased() != value { return false }
+        for value in query.languages where book.language?.lowercased() != value { return false }
+        for value in query.translators
+        where !(book.translator?.lowercased().contains(value) ?? false) { return false }
         if let constraint = query.year {
-            guard let year else { return false }
+            guard let year = book.year.flatMap({ Int($0.prefix(4)) }) else { return false }
             switch constraint.op {
             case .greaterThan: if !(year > constraint.value) { return false }
             case .lessThan:    if !(year < constraint.value) { return false }
@@ -131,7 +183,6 @@ enum LibraryQuery {
             }
         }
         return true
-        }
     }
 
     // MARK: - Sort

@@ -124,9 +124,14 @@ struct LibraryQueryTests {
         let searches = [(scienceFiction, "tag:sci-fi"), (modern, "year:>1900")]
 
         let counts = LibraryQuery.smartCounts(for: books, searches: searches)
+        let snapshotCounts = LibraryQuery.smartCounts(
+            for: books.map(LibraryQuery.SearchSnapshot.init),
+            searches: searches
+        )
 
         #expect(counts[scienceFiction] == 2)
         #expect(counts[modern] == 2)
+        #expect(snapshotCounts == counts)
     }
 
     @Test func titleSortIsAscending() {

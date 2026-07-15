@@ -168,8 +168,12 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .onChange(of: LibraryMutationLog.shared.revision, initial: true) { facets = makeFacets() }
-        .onChange(of: books.count) { facets = makeFacets() }
+        .task(id: FacetRevision(
+            revision: LibraryMutationLog.shared.revision,
+            bookCount: books.count
+        )) {
+            await refreshFacets()
+        }
         .tint(theme.accent)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
@@ -265,7 +269,32 @@ struct SidebarView: View {
 
     // MARK: - Facets
 
-    private struct Facets {
+    private struct FacetRevision: Hashable {
+        let revision: Int
+        let bookCount: Int
+    }
+
+    private nonisolated struct FacetBook: Sendable {
+        let format: String
+        let author: String?
+        let series: String?
+        let tags: [String]
+        let isRated: Bool
+        let readingStatus: ReadingStatus
+        let dateAdded: Date
+
+        @MainActor init(_ book: Book) {
+            format = book.format
+            author = book.displayAuthor
+            series = book.series
+            tags = book.tags
+            isRated = (book.rating ?? 0) > 0
+            readingStatus = book.readingStatus
+            dateAdded = book.dateAdded
+        }
+    }
+
+    private nonisolated struct Facets: Sendable {
         var formats: [String: Int] = [:]
         var authors: [String: Int] = [:]
         var series: [String: Int] = [:]
@@ -284,15 +313,50 @@ struct SidebarView: View {
         var seriesTips: [(original: String, suggestion: String)] = []
     }
 
-    private func makeFacets() -> Facets {
+    private func refreshFacets() async {
+        let searches = collections.compactMap { collection -> (UUID, String)? in
+            guard collection.isSmart, !collection.isWishlist,
+                  let search = collection.savedSearch else { return nil }
+            return (collection.id, search)
+        }
+        var facetBooks: [FacetBook] = []
+        var searchBooks: [LibraryQuery.SearchSnapshot] = []
+        let includesSearch = !searches.isEmpty
+        facetBooks.reserveCapacity(books.count)
+        if includesSearch { searchBooks.reserveCapacity(books.count) }
+        for (index, book) in books.enumerated() {
+            facetBooks.append(FacetBook(book))
+            if includesSearch { searchBooks.append(LibraryQuery.SearchSnapshot(book)) }
+            if (index + 1).isMultiple(of: 512) {
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+            }
+        }
+        let updated = await Self.makeFacets(
+            books: facetBooks,
+            searchBooks: searchBooks,
+            searches: searches
+        )
+        guard !Task.isCancelled else { return }
+        facets = updated
+    }
+
+    // @Model values are snapshotted on the main actor before this work starts.
+    @concurrent
+    private static func makeFacets(
+        books: [FacetBook],
+        searchBooks: [LibraryQuery.SearchSnapshot],
+        searches: [(UUID, String)]
+    ) async -> Facets {
         var facets = Facets()
         let recentCutoff = Date.now.addingTimeInterval(-14 * 24 * 3600)
         for book in books {
+            guard !Task.isCancelled else { return facets }
             facets.formats[book.format, default: 0] += 1
-            if let author = book.displayAuthor { facets.authors[author, default: 0] += 1 }
+            if let author = book.author { facets.authors[author, default: 0] += 1 }
             if let series = book.series, !series.isEmpty { facets.series[series, default: 0] += 1 }
             for tag in book.tags { facets.tags[tag, default: 0] += 1 }
-            if (book.rating ?? 0) > 0 { facets.rated += 1 }
+            if book.isRated { facets.rated += 1 }
             switch book.readingStatus {
             case .unread:   facets.unread += 1
             case .reading:  facets.reading += 1
@@ -310,11 +374,7 @@ struct SidebarView: View {
             MetadataFixFinder.reversedAuthorSuggestion(author).map { (author, $0) }
         }
         facets.seriesTips = SeriesSuggestions.unificationTips(counts: facets.series)
-        let searches = collections.compactMap { collection -> (UUID, String)? in
-            guard collection.isSmart, !collection.isWishlist, let search = collection.savedSearch else { return nil }
-            return (collection.id, search)
-        }
-        facets.smartCounts = LibraryQuery.smartCounts(for: books, searches: searches)
+        facets.smartCounts = LibraryQuery.smartCounts(for: searchBooks, searches: searches)
         return facets
     }
 }
