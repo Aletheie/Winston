@@ -246,6 +246,13 @@ final class PluginHostAPI {
         guard let store = try? JSONDecoder().decode([String: String].self, from: data) else {
             throw PluginError.unavailable("plugin storage is unreadable")
         }
+        guard store.count <= PluginStorageLimits.maxEntries,
+              store.allSatisfy({
+                  PluginStorageLimits.accepts(key: $0.key)
+                      && $0.value.utf8.count <= PluginStorageLimits.maxValueBytes
+              }) else {
+            throw PluginError.unavailable("plugin storage exceeds its entry or value limit")
+        }
         return store
     }
 
