@@ -124,6 +124,33 @@ nonisolated struct EditionMatchProposal: Identifiable, Hashable, Sendable {
 }
 
 nonisolated enum EditionMatcher {
+    struct CandidateIndex: Sendable {
+        private var candidates: [UUID: EditionCandidate]
+        private var buckets: [String: [UUID]] = [:]
+
+        init(_ candidates: [EditionCandidate]) {
+            self.candidates = Dictionary(uniqueKeysWithValues: candidates.map { ($0.uuid, $0) })
+            for candidate in candidates {
+                for key in EditionMatcher.bucketKeys(for: candidate) {
+                    buckets[key, default: []].append(candidate.uuid)
+                }
+            }
+        }
+
+        func matches(for candidate: EditionCandidate) -> [EditionCandidate] {
+            var seen: Set<UUID> = [candidate.uuid]
+            return EditionMatcher.bucketKeys(for: candidate).flatMap { buckets[$0] ?? [] }
+                .compactMap { uuid in
+                    guard seen.insert(uuid).inserted else { return nil }
+                    return candidates[uuid]
+                }
+        }
+
+        mutating func update(_ candidate: EditionCandidate) {
+            candidates[candidate.uuid] = candidate
+        }
+    }
+
     static func normalizedISBN(_ value: String?) -> String {
         (value ?? "")
             .uppercased()
@@ -172,6 +199,15 @@ nonisolated enum EditionMatcher {
 
     static func pairKey(_ lhs: UUID, _ rhs: UUID) -> String {
         [lhs.uuidString.lowercased(), rhs.uuidString.lowercased()].sorted().joined(separator: ":")
+    }
+
+    private static func bucketKeys(for candidate: EditionCandidate) -> [String] {
+        var keys = candidate.contentHashes.map { "h:\($0)" }
+        if !candidate.isbn.isEmpty { keys.append("i:\(candidate.isbn)") }
+        if !candidate.openLibraryWorkKey.isEmpty { keys.append("o:\(candidate.openLibraryWorkKey)") }
+        if let matchKey = candidate.matchKey { keys.append("k:\(matchKey)") }
+        if !candidate.title.isEmpty { keys.append("t:\(candidate.title)") }
+        return keys
     }
 
     private static func proposal(

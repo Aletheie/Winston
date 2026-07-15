@@ -197,4 +197,24 @@ struct EditionServiceTests {
             $0.verdict == .duplicateFile && $0.memberUUIDs.contains(newBook.uuid)
         }))
     }
+
+    @Test func batchEvaluationPrefersAnExistingWorkOverAnotherIncomingBook() async throws {
+        let library = try await TestLibrary()
+        let existing = insertBook(library, name: "existing", title: "Original")
+        let first = insertBook(library, name: "first", title: "Translation One")
+        let second = insertBook(library, name: "second", title: "Translation Two")
+        for book in [existing, first, second] {
+            book.work?.openLibraryWorkKey = "/works/OL-BATCH"
+        }
+        let existingWorkUUID = try #require(existing.work?.uuid)
+        try library.context.save()
+        let service = EditionService(modelContext: library.context)
+
+        let assignments = service.evaluate([first, second])
+
+        #expect(assignments.count == 2)
+        #expect(first.work?.uuid == existingWorkUUID)
+        #expect(second.work?.uuid == existingWorkUUID)
+        #expect(service.pendingProposals.isEmpty)
+    }
 }

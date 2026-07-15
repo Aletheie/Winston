@@ -69,8 +69,51 @@ final class EditionService {
 
     @discardableResult
     func evaluate(_ book: Book, allowAutomaticAssignment: Bool = true) -> AssignmentUndo? {
-        let others = modelContext.allBooks().filter { $0.uuid != book.uuid }.map(Self.candidate)
-        let proposals = EditionMatcher.proposals(for: Self.candidate(book), against: others)
+        let allBooks = modelContext.allBooks()
+        var index = EditionMatcher.CandidateIndex(allBooks.map(Self.candidate))
+        return evaluate(
+            book,
+            allowAutomaticAssignment: allowAutomaticAssignment,
+            index: &index,
+            booksByUUID: Dictionary(uniqueKeysWithValues: allBooks.map { ($0.uuid, $0) }),
+            incomingUUIDs: [book.uuid]
+        )
+    }
+
+    func evaluate(_ books: [Book], allowAutomaticAssignment: Bool = true) -> [UUID: AssignmentUndo] {
+        let books = books.filter { $0.modelContext != nil }
+        guard !books.isEmpty else { return [:] }
+        let allBooks = modelContext.allBooks()
+        var index = EditionMatcher.CandidateIndex(allBooks.map(Self.candidate))
+        let booksByUUID = Dictionary(uniqueKeysWithValues: allBooks.map { ($0.uuid, $0) })
+        let incomingUUIDs = Set(books.map(\.uuid))
+        var assignments: [UUID: AssignmentUndo] = [:]
+        for book in books {
+            if let undo = evaluate(
+                book,
+                allowAutomaticAssignment: allowAutomaticAssignment,
+                index: &index,
+                booksByUUID: booksByUUID,
+                incomingUUIDs: incomingUUIDs
+            ) {
+                assignments[book.uuid] = undo
+            }
+        }
+        return assignments
+    }
+
+    private func evaluate(
+        _ book: Book,
+        allowAutomaticAssignment: Bool,
+        index: inout EditionMatcher.CandidateIndex,
+        booksByUUID: [UUID: Book],
+        incomingUUIDs: Set<UUID>
+    ) -> AssignmentUndo? {
+        let candidate = Self.candidate(book)
+        let matches = index.matches(for: candidate).filter {
+            candidate.workUUID == nil || candidate.workUUID != $0.workUUID
+        }
+        let proposals = EditionMatcher.proposals(for: candidate, against: matches)
             .filter { !dismissedPairKeys.contains($0.pairKey) }
         guard !proposals.isEmpty else { return nil }
 
@@ -79,14 +122,17 @@ final class EditionService {
         }
         if allowAutomaticAssignment, !containsDestructiveMatch,
            (book.work?.editions.count ?? 0) <= 1,
-           let automatic = proposals.first(where: {
-               $0.verdict == .sameWorkOtherEdition && $0.confidence == .high
-           }),
-           let otherUUID = automatic.memberUUIDs.first(where: { $0 != book.uuid }),
-           let other = lookupBook(uuid: otherUUID),
+           let other = automaticTarget(
+               for: book,
+               proposals: proposals,
+               booksByUUID: booksByUUID,
+               incomingUUIDs: incomingUUIDs
+           ),
            let target = other.work {
             let undo = assignmentUndo(for: book)
             assign(book, to: target)
+            guard book.work?.uuid == target.uuid else { return nil }
+            index.update(Self.candidate(book))
             pendingProposals.removeAll { $0.memberUUIDs.contains(book.uuid) }
             return undo
         }
@@ -95,6 +141,33 @@ final class EditionService {
         pendingProposals.append(contentsOf: proposals.filter { !existing.contains($0.pairKey) })
         pendingProposals.sort(by: EditionMatcher.proposalPrecedes)
         return nil
+    }
+
+    private func automaticTarget(
+        for book: Book,
+        proposals: [EditionMatchProposal],
+        booksByUUID: [UUID: Book],
+        incomingUUIDs: Set<UUID>
+    ) -> Book? {
+        var best: Book?
+        for proposal in proposals
+        where proposal.verdict == .sameWorkOtherEdition && proposal.confidence == .high {
+            guard let uuid = proposal.memberUUIDs.first(where: { $0 != book.uuid }),
+                  let candidate = booksByUUID[uuid] else { continue }
+            guard let current = best else { best = candidate; continue }
+            let candidateRank = (
+                incomingUUIDs.contains(candidate.uuid) ? 1 : 0,
+                -(candidate.work?.editions.count ?? 0),
+                candidate.uuid.uuidString
+            )
+            let currentRank = (
+                incomingUUIDs.contains(current.uuid) ? 1 : 0,
+                -(current.work?.editions.count ?? 0),
+                current.uuid.uuidString
+            )
+            if candidateRank < currentRank { best = candidate }
+        }
+        return best
     }
 
     func dismiss(_ proposal: EditionMatchProposal) {
