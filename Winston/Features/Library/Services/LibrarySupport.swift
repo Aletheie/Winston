@@ -8,13 +8,21 @@ extension ModelContext {
         (try? fetch(FetchDescriptor<Book>())) ?? []
     }
 
-    func saveQuietly() {
+    @discardableResult
+    func saveQuietly(rollbackOnFailure: Bool = false) -> Bool {
         do {
             try save()
+            LibraryMutationLog.shared.bump()
+            return true
         } catch {
-            Log.persistence.error("SwiftData save failed (will retry on next mutation): \(error.localizedDescription, privacy: .public)")
+            if rollbackOnFailure {
+                rollback()
+                Log.persistence.error("SwiftData save failed; rolled back: \(error.localizedDescription, privacy: .public)")
+            } else {
+                Log.persistence.error("SwiftData save failed; changes remain pending: \(error.localizedDescription, privacy: .public)")
+            }
+            return false
         }
-        LibraryMutationLog.shared.bump()
     }
 }
 
