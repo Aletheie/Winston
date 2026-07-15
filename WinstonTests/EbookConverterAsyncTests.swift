@@ -47,8 +47,31 @@ struct EbookConverterAsyncTests {
         try await withOverrides(executable: script) {
             let output = try await EbookConverter.convert(source, to: .epub)
             defer { try? FileManager.default.removeItem(at: output) }
-            #expect(output.lastPathComponent == "book.epub")
+            #expect(output.lastPathComponent.hasSuffix("-book.epub"))
             #expect(FileManager.default.fileExists(atPath: output.path(percentEncoded: false)))
+        }
+    }
+
+    @Test func concurrentSameBasenameConversionsUseDistinctOutputs() async throws {
+        let script = try makeScript(#"cp "$1" "$2""#)
+        defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
+        let first = try makeFB2Source()
+        let second = try makeFB2Source()
+        defer {
+            try? FileManager.default.removeItem(at: first.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: second.deletingLastPathComponent())
+        }
+        try Data("first".utf8).write(to: first)
+        try Data("second".utf8).write(to: second)
+
+        try await withOverrides(executable: script) {
+            async let firstOutput = EbookConverter.convert(first, to: .epub)
+            async let secondOutput = EbookConverter.convert(second, to: .epub)
+            let outputs = try await [firstOutput, secondOutput]
+            defer { outputs.forEach { try? FileManager.default.removeItem(at: $0) } }
+
+            #expect(outputs[0] != outputs[1])
+            #expect(try Data(contentsOf: outputs[0]) != Data(contentsOf: outputs[1]))
         }
     }
 
@@ -98,6 +121,30 @@ struct EbookConverterAsyncTests {
         #expect(clock.now - start < .seconds(10))
     }
 
+    @Test func cancellationTerminatesTheConverterPromptly() async throws {
+        let script = try makeScript("sleep 30")
+        defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
+        let source = try makeFB2Source()
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        await withOverrides(executable: script) {
+            let task = Task { try await EbookConverter.convert(source, to: .epub) }
+            try? await Task.sleep(for: .milliseconds(100))
+            task.cancel()
+            do {
+                _ = try await task.value
+                Issue.record("expected cancellation")
+            } catch is CancellationError {
+                // Expected.
+            } catch {
+                Issue.record("unexpected error: \(error)")
+            }
+        }
+        #expect(clock.now - start < .seconds(5))
+    }
+
     @Test func missingCalibreThrowsConverterNotFound() async throws {
         let source = try makeFB2Source()
         defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
@@ -134,10 +181,8 @@ struct EbookConverterAsyncTests {
         library.context.insert(book)
         try library.context.save()
 
-        let temporaryOutput = FileManager.default.temporaryDirectory
+        let conversionDirectory = FileManager.default.temporaryDirectory
             .appending(path: "WinstonConversions", directoryHint: .isDirectory)
-            .appending(path: "\(uuid.uuidString).epub")
-        try? FileManager.default.removeItem(at: temporaryOutput)
 
         EbookConverter.calibreExecutableOverride = .some(script)
         EbookConverter.conversionTimeout = 180
@@ -150,10 +195,14 @@ struct EbookConverterAsyncTests {
         service.convert(book, to: .epub)
 
         let outputDeadline = Date.now.addingTimeInterval(2)
-        while !FileManager.default.fileExists(atPath: temporaryOutput.path(percentEncoded: false)),
-              Date.now < outputDeadline {
+        var outputCandidate: URL?
+        while outputCandidate == nil, Date.now < outputDeadline {
+            outputCandidate = (try? FileManager.default.contentsOfDirectory(
+                at: conversionDirectory, includingPropertiesForKeys: nil
+            ))?.first { $0.lastPathComponent.hasSuffix("-\(uuid.uuidString).epub") }
             try? await Task.sleep(for: .milliseconds(10))
         }
+        let temporaryOutput = try #require(outputCandidate)
         #expect(FileManager.default.fileExists(atPath: temporaryOutput.path(percentEncoded: false)))
 
         BookFileStore.delete(fileName: oldFileName)

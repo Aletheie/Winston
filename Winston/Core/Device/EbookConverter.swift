@@ -132,6 +132,55 @@ nonisolated enum EbookConverter {
         let process: Process
     }
 
+    private final class ProcessRunState: @unchecked Sendable {
+        private enum State {
+            case pending
+            case active(CheckedContinuation<Int32, any Error>)
+            case completed(Result<Int32, any Error>)
+        }
+
+        private let state = OSAllocatedUnfairLock(initialState: State.pending)
+
+        func install(_ continuation: CheckedContinuation<Int32, any Error>) -> Bool {
+            let result = state.withLock { state -> Result<Int32, any Error>? in
+                switch state {
+                case .pending:
+                    state = .active(continuation)
+                    return nil
+                case .active:
+                    return nil
+                case .completed(let result):
+                    return result
+                }
+            }
+            if let result { continuation.resume(with: result); return false }
+            return true
+        }
+
+        func complete(_ result: Result<Int32, any Error>) {
+            let continuation = state.withLock { state -> CheckedContinuation<Int32, any Error>? in
+                switch state {
+                case .pending:
+                    state = .completed(result)
+                    return nil
+                case .active(let continuation):
+                    state = .completed(result)
+                    return continuation
+                case .completed:
+                    return nil
+                }
+            }
+            continuation?.resume(with: result)
+        }
+
+        var isCompleted: Bool {
+            state.withLock { state in
+                if case .completed = state { return true }
+                return false
+            }
+        }
+    }
+
     private static func convertViaCalibre(_ source: URL, to format: OutputFormat) async throws -> URL {
         guard let executable = calibreExecutableURL() else {
             Log.conversion.error("Calibre not installed; cannot convert \(source.lastPathComponent, privacy: .public)")
@@ -143,9 +192,12 @@ nonisolated enum EbookConverter {
             .appending(path: "WinstonConversions", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
-        let outputName = source.deletingPathExtension().lastPathComponent + ".\(format.ext)"
+        let outputName = "\(UUID().uuidString)-\(source.deletingPathExtension().lastPathComponent).\(format.ext)"
         let output = outputDir.appending(path: outputName)
-        try? FileManager.default.removeItem(at: output)
+        var succeeded = false
+        defer {
+            if !succeeded { try? FileManager.default.removeItem(at: output) }
+        }
 
         let process = Process()
         process.executableURL = executable
@@ -163,43 +215,44 @@ nonisolated enum EbookConverter {
             Log.conversion.error("Calibre exited with status \(status)")
             throw ConversionError.conversionFailed(status: status)
         }
+        succeeded = true
         return output
     }
 
     private static func run(_ process: Process, timeout: TimeInterval) async throws -> Int32 {
         let box = ProcessBox(process: process)
-        return try await withCheckedThrowingContinuation { continuation in
-            let resumed = OSAllocatedUnfairLock(initialState: false)
-            @Sendable func claimResume() -> Bool {
-                resumed.withLock { done in
-                    if done { return false }
-                    done = true
-                    return true
+        let state = ProcessRunState()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard state.install(continuation) else { return }
+                let watchdog = Task {
+                    try? await Task.sleep(for: .seconds(timeout))
+                    guard !Task.isCancelled else { return }
+                    state.complete(.failure(ConversionError.timedOut))
+                    if box.process.isRunning { box.process.terminate() }
+                    Log.conversion.error("Calibre timed out after \(Int(timeout))s and was stopped")
+                }
+
+                process.terminationHandler = { finished in
+                    watchdog.cancel()
+                    state.complete(.success(finished.terminationStatus))
+                }
+
+                guard !state.isCompleted else {
+                    watchdog.cancel()
+                    return
+                }
+                do {
+                    try process.run()
+                    if state.isCompleted, process.isRunning { process.terminate() }
+                } catch {
+                    watchdog.cancel()
+                    state.complete(.failure(error))
                 }
             }
-
-            let watchdog = Task {
-                try? await Task.sleep(for: .seconds(timeout))
-                guard !Task.isCancelled, claimResume() else { return }
-                box.process.terminate()
-                Log.conversion.error("Calibre timed out after \(Int(timeout))s and was stopped")
-                continuation.resume(throwing: ConversionError.timedOut)
-            }
-
-            process.terminationHandler = { finished in
-                watchdog.cancel()
-                guard claimResume() else { return }
-                continuation.resume(returning: finished.terminationStatus)
-            }
-
-            do {
-                try process.run()
-            } catch {
-                watchdog.cancel()
-                if claimResume() {
-                    continuation.resume(throwing: error)
-                }
-            }
+        } onCancel: {
+            state.complete(.failure(CancellationError()))
+            if box.process.isRunning { box.process.terminate() }
         }
     }
 }
