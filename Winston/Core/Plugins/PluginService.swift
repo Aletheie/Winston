@@ -94,7 +94,8 @@ final class PluginService {
     }
 
     func enable(_ id: String, grantingPermissions: Bool = false) async {
-        guard let manifest = state(of: id)?.manifest else { return }
+        guard let state = state(of: id), state.status != .quarantined,
+              let manifest = state.manifest else { return }
         if grantingPermissions {
             settings.pluginGrants[manifest.grantKey] = manifest.permissions.map(\.rawValue).sorted()
         }
