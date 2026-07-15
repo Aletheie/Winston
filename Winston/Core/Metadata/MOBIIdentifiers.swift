@@ -1,6 +1,8 @@
 import Foundation
 
 nonisolated enum MOBIIdentifiers {
+    private static let maxEXTHRecordBytes = 1 * 1_024 * 1_024
+
     struct Identifiers: Equatable, Sendable {
         var asin: String?
         var cdeType: String?
@@ -72,7 +74,9 @@ nonisolated enum MOBIIdentifiers {
             guard offset + 8 <= data.count else { break }
             let type = Int(data.readUInt32BE(at: offset))
             let length = Int(data.readUInt32BE(at: offset + 4))
-            guard length >= 8, offset + length <= data.count else { break }
+            guard length >= 8,
+                  length <= maxEXTHRecordBytes,
+                  offset + length <= data.count else { break }
             body(type, data.subdata(in: (offset + 8) ..< (offset + length)))
             offset += length
         }

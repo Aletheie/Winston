@@ -1,6 +1,8 @@
 import Foundation
 
 nonisolated enum MOBICoverExtractor {
+    private static let maxImageRecordBytes = 32 * 1_024 * 1_024
+
     static func coverData(from url: URL) -> Data? {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
               data.count > 132 else { return nil }
@@ -65,7 +67,9 @@ nonisolated enum MOBICoverExtractor {
     private static func record(at index: Int, offsets: [Int], data: Data) -> Data {
         let start = offsets[index]
         let end = index + 1 < offsets.count ? offsets[index + 1] : data.count
-        guard start < end, start < data.count else { return Data() }
+        guard start < end,
+              start < data.count,
+              end - start <= maxImageRecordBytes else { return Data() }
         return data.subdata(in: start..<min(end, data.count))
     }
 

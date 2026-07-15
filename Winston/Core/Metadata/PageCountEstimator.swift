@@ -5,6 +5,7 @@ nonisolated enum PageCountEstimator {
 
     static let charactersPerPage = 1800
     static let mobiBytesPerPage = 2048
+    private static let maxTextBytes = 64 * 1_024 * 1_024
 
     @concurrent static func pageCount(at url: URL, format: String) async -> Int? {
         pageCountSync(at: url, format: format)
@@ -13,7 +14,8 @@ nonisolated enum PageCountEstimator {
     static func pageCountSync(at url: URL, format: String) -> Int? {
         switch format.lowercased() {
         case "pdf":
-            guard let doc = PDFDocument(url: url), doc.pageCount > 0 else { return nil }
+            guard PDFReader.isWithinSizeLimit(url),
+                  let doc = PDFDocument(url: url), doc.pageCount > 0 else { return nil }
             return doc.pageCount
         case "epub":
             guard let archive = try? EPUBArchive(url: url),
@@ -29,12 +31,12 @@ nonisolated enum PageCountEstimator {
             guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
             return mobiPageCount(in: data)
         case "txt":
-            guard let data = try? Data(contentsOf: url),
+            guard let data = boundedTextData(at: url),
                   let text = String(data: data, encoding: .utf8)
                     ?? String(data: data, encoding: .isoLatin1) else { return nil }
             return pages(forCharacters: text.count)
         case "html", "htm":
-            guard let data = try? Data(contentsOf: url),
+            guard let data = boundedTextData(at: url),
                   let raw = String(data: data, encoding: .utf8)
                     ?? String(data: data, encoding: .isoLatin1) else { return nil }
             return pages(forCharacters: raw.removingHTMLNonContent.strippedHTML.count)
@@ -94,5 +96,13 @@ nonisolated enum PageCountEstimator {
     static func pages(forCharacters count: Int) -> Int? {
         guard count > 0 else { return nil }
         return max(1, (count + charactersPerPage - 1) / charactersPerPage)
+    }
+
+    static func boundedTextData(at url: URL) -> Data? {
+        if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           size > maxTextBytes { return nil }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              data.count <= maxTextBytes else { return nil }
+        return data
     }
 }

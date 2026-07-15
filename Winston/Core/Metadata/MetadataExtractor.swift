@@ -141,7 +141,8 @@ enum MetadataExtractor {
     // MARK: - PDF
 
     nonisolated private static func extractPDF(from url: URL) -> BookMetadata {
-        guard let doc = PDFDocument(url: url) else { return BookMetadata() }
+        guard PDFReader.isWithinSizeLimit(url),
+              let doc = PDFDocument(url: url) else { return BookMetadata() }
         var meta = BookMetadata()
         let attrs = doc.documentAttributes ?? [:]
         meta.title = attrs[PDFDocumentAttribute.titleAttribute] as? String
@@ -156,7 +157,7 @@ enum MetadataExtractor {
     // MARK: - HTML
 
     nonisolated private static func extractHTML(from url: URL) -> BookMetadata {
-        guard let data = try? Data(contentsOf: url),
+        guard let data = PageCountEstimator.boundedTextData(at: url),
               let raw = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1) else {
             return BookMetadata()
