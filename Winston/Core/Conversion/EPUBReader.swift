@@ -44,7 +44,7 @@ nonisolated enum EPUBReader {
             throw ReadError.notAnEPUB
         }
         guard let opfData = archive.entry(opfPath),
-              let doc = try? XMLDocument(data: opfData, options: []) else {
+              let doc = try? XMLDocument(data: opfData, options: .nodeLoadExternalEntitiesNever) else {
             throw ReadError.missingOPF
         }
         let opfDir = (opfPath as NSString).deletingLastPathComponent

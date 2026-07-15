@@ -85,7 +85,7 @@ enum CoverExtractor {
               let containerData = archive.entry("META-INF/container.xml"),
               let opfPath = MetadataExtractor.parseOPFPath(from: containerData),
               let opfData = archive.entry(opfPath),
-              let doc = try? XMLDocument(data: opfData, options: []) else { return nil }
+              let doc = try? XMLDocument(data: opfData, options: .nodeLoadExternalEntitiesNever) else { return nil }
 
         let opfDir = (opfPath as NSString).deletingLastPathComponent
         return epubCoverData(doc: doc, opfDir: opfDir, archive: archive).flatMap { NSImage(data: $0) }

@@ -24,7 +24,7 @@ enum MetadataExtractor {
               let containerData = archive.entry("META-INF/container.xml"),
               let opfPath = parseOPFPath(from: containerData),
               let opfData = archive.entry(opfPath),
-              let doc = try? XMLDocument(data: opfData, options: []) else {
+              let doc = try? XMLDocument(data: opfData, options: .nodeLoadExternalEntitiesNever) else {
             return BookMetadata()
         }
         var meta = parseOPFMetadata(doc)
@@ -191,7 +191,7 @@ enum MetadataExtractor {
     }
 
     nonisolated static func parseOPFPath(from data: Data) -> String? {
-        guard let doc = try? XMLDocument(data: data, options: []),
+        guard let doc = try? XMLDocument(data: data, options: .nodeLoadExternalEntitiesNever),
               let nodes = try? doc.nodes(forXPath: "//*[local-name()='rootfile']/@full-path"),
               let path = nodes.first?.stringValue else { return nil }
         return path

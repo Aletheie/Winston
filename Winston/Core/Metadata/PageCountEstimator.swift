@@ -20,7 +20,10 @@ nonisolated enum PageCountEstimator {
                   let containerData = archive.entry("META-INF/container.xml"),
                   let opfPath = MetadataExtractor.parseOPFPath(from: containerData),
                   let opfData = archive.entry(opfPath),
-                  let opf = try? XMLDocument(data: opfData, options: []) else { return nil }
+                  let opf = try? XMLDocument(
+                      data: opfData,
+                      options: .nodeLoadExternalEntitiesNever
+                  ) else { return nil }
             return epubPageCount(archive: archive, opfPath: opfPath, opf: opf)
         case "mobi", "azw", "azw3":
             guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }

@@ -84,6 +84,25 @@ enum EPUBFixture {
         return url
     }
 
+    static func makeWithOPF(_ opf: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonEPUBFixture-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let url = dir.appending(path: "book.epub")
+        let archive = try Archive(url: url, accessMode: .create)
+        func add(_ path: String, _ data: Data) throws {
+            let staged = dir.appending(path: "stage_" + path.replacingOccurrences(of: "/", with: "_"))
+            try data.write(to: staged)
+            try archive.addEntry(with: path, fileURL: staged)
+        }
+        try add("mimetype", Data("application/epub+zip".utf8))
+        try add("META-INF/container.xml", Data(container.utf8))
+        try add("OEBPS/content.opf", Data(opf.utf8))
+        try add("OEBPS/chap1.xhtml", Data(chapter(bodyText: "Safe body").utf8))
+        return url
+    }
+
     static func jpegData(width: Int = 120, height: Int = 180) -> Data {
         let size = NSSize(width: width, height: height)
         let image = NSImage(size: size)

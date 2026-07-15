@@ -34,6 +34,30 @@ struct PageCountTests {
         #expect(MetadataExtractor.extractMetadata(from: url).translator == "Jan Novák")
     }
 
+    @Test func epubMetadataDoesNotResolveLocalExternalEntities() throws {
+        let secret = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonXXE-\(UUID().uuidString)")
+        let secretText = "WINSTON-LOCAL-SECRET"
+        try Data(secretText.utf8).write(to: secret)
+        defer { try? FileManager.default.removeItem(at: secret) }
+
+        let opf = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE package [<!ENTITY local SYSTEM "\(secret.absoluteString)">]>
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <dc:title>&local;</dc:title>
+          </metadata>
+          <manifest><item id="chapter" href="chap1.xhtml" media-type="application/xhtml+xml"/></manifest>
+          <spine><itemref idref="chapter"/></spine>
+        </package>
+        """
+        let url = try EPUBFixture.makeWithOPF(opf)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        #expect(MetadataExtractor.extractMetadata(from: url).title != secretText)
+    }
+
     // MARK: - PDF
 
     @Test func pdfReportsItsRealPageCount() throws {
