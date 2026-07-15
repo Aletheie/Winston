@@ -126,6 +126,7 @@ private struct ThemedBorderModifier: ViewModifier {
 // MARK: - Shimmer (skeleton loading)
 
 private struct ShimmerModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var phase: CGFloat = -1
 
     func body(content: Content) -> some View {
@@ -143,10 +144,18 @@ private struct ShimmerModifier: ViewModifier {
                 .allowsHitTesting(false)
             }
             .onAppear {
-                withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
-                    phase = 1
-                }
+                startAnimation()
             }
+            .onChange(of: reduceMotion) { _, shouldReduce in
+                if shouldReduce { phase = -1 } else { startAnimation() }
+            }
+    }
+
+    private func startAnimation() {
+        guard !reduceMotion else { return }
+        withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
+            phase = 1
+        }
     }
 }
 
