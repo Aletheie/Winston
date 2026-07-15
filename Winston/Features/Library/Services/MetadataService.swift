@@ -111,20 +111,65 @@ final class MetadataService {
     }
 
     func renameSeries(_ old: String, to new: String) {
+        applySeriesRename(old, to: new)
+        modelContext.saveQuietly()
+    }
+
+    func renameAuthor(_ old: String, to new: String) {
+        applyAuthorRename(old, to: new)
+        modelContext.saveQuietly()
+    }
+
+    func applyMetadataFix(_ fix: MetadataFix) {
+        applyMetadataFixCore(fix)
+        modelContext.saveQuietly()
+    }
+
+    func applyMetadataFixes(_ fixes: [MetadataFix]) {
+        guard !fixes.isEmpty else { return }
+        for fix in fixes { applyMetadataFixCore(fix) }
+        modelContext.saveQuietly()
+    }
+
+    private func applyMetadataFixCore(_ fix: MetadataFix) {
+        switch fix.kind {
+        case .author:
+            applyAuthorRename(fix.original, to: fix.suggestion)
+        case .series:
+            applySeriesRename(fix.original, to: fix.suggestion)
+        case .seriesAssignment:
+            applySeriesAssignment(fix)
+        }
+    }
+
+    private func applySeriesRename(_ old: String, to new: String) {
         let name = new.trimmingCharacters(in: .whitespaces)
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.series == old })
         for book in (try? modelContext.fetch(descriptor)) ?? [] {
             book.series = name.isEmpty ? nil : name
         }
-        modelContext.saveQuietly()
     }
 
-    func renameAuthor(_ old: String, to new: String) {
+    private func applyAuthorRename(_ old: String, to new: String) {
         let name = new.trimmingCharacters(in: .whitespaces)
         for book in modelContext.allBooks() where book.displayAuthor == old {
             book.author = name.isEmpty ? nil : name
         }
-        modelContext.saveQuietly()
+    }
+
+    private func applySeriesAssignment(_ fix: MetadataFix) {
+        guard let bookID = fix.bookID else { return }
+        var descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == bookID })
+        descriptor.fetchLimit = 1
+        guard let book = ((try? modelContext.fetch(descriptor)) ?? []).first,
+              book.series?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else { return }
+
+        let series = fix.suggestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !series.isEmpty else { return }
+        book.series = series
+        if book.seriesIndex?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            book.seriesIndex = fix.seriesIndex
+        }
     }
 
     // MARK: - Online enrichment (gated by Settings; no network calls when off)

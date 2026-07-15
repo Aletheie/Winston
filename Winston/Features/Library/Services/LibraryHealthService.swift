@@ -38,12 +38,65 @@ struct DuplicateGroup: Identifiable {
 final class LibraryHealthService {
     private let modelContext: ModelContext
     private(set) var missingFileUUIDs: Set<UUID> = []
+    private var cachedMetadataAnalysis: MetadataFixAnalysis?
+    private var cachedMetadataAnalysisRevision = -1
+    private var metadataAnalysisTask: (revision: Int, task: Task<MetadataFixAnalysis, Never>)?
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
     }
 
     func isMissing(_ book: Book) -> Bool { missingFileUUIDs.contains(book.uuid) }
+
+    func metadataFixes() async -> [MetadataFix] {
+        await metadataAnalysis().fixes
+    }
+
+    func seriesSuggestions() async -> [String] {
+        await metadataAnalysis().seriesSuggestions
+    }
+
+    private func metadataAnalysis() async -> MetadataFixAnalysis {
+        while true {
+            let revision = LibraryMutationLog.shared.revision
+            if cachedMetadataAnalysisRevision == revision, let cachedMetadataAnalysis {
+                return cachedMetadataAnalysis
+            }
+
+            let task: Task<MetadataFixAnalysis, Never>
+            if let inFlight = metadataAnalysisTask, inFlight.revision == revision {
+                task = inFlight.task
+            } else {
+                let rows = modelContext.allBooks().map {
+                    MetadataFixRow(
+                        bookID: $0.uuid,
+                        title: $0.displayTitle,
+                        originalFileName: $0.originalFileName,
+                        author: $0.displayAuthor,
+                        series: $0.series,
+                        seriesIndex: $0.seriesIndex
+                    )
+                }
+                task = Task { await Self.computeMetadataAnalysis(rows: rows) }
+                metadataAnalysisTask = (revision, task)
+            }
+
+            let analysis = await task.value
+            if metadataAnalysisTask?.revision == revision {
+                metadataAnalysisTask = nil
+            }
+            guard LibraryMutationLog.shared.revision == revision else { continue }
+
+            cachedMetadataAnalysis = analysis
+            cachedMetadataAnalysisRevision = revision
+            return analysis
+        }
+    }
+
+    @concurrent
+    private static func computeMetadataAnalysis(rows: [MetadataFixRow]) async -> MetadataFixAnalysis {
+        MetadataFixFinder.analysis(rows: rows)
+    }
 
     @discardableResult
     func scanForMissingFiles() async -> Int {

@@ -151,6 +151,53 @@ struct MetadataServiceTests {
         #expect(b.author == "Other Author")
     }
 
+    @Test func `Applying metadata fixes batches every rename into one save`() async throws {
+        let lib = try await TestLibrary()
+        let a = Book(fileName: "a.epub", originalFileName: "A.epub")
+        a.author = "Herbert, Frank"
+        a.series = "Zaklinac"
+        let b = Book(fileName: "b.epub", originalFileName: "B.epub")
+        b.author = "Herbert, Frank"
+        b.series = "Zaklínač"
+        let c = Book(fileName: "c.epub", originalFileName: "Orel a lev 02 - Dvoji trun.epub")
+        c.title = "Dvojí trůn"
+        for book in [a, b, c] { lib.context.insert(book) }
+        try lib.context.save()
+
+        let service = makeService(in: lib, online: FakeOnlineClient())
+        let revision = LibraryMutationLog.shared.revision
+        service.applyMetadataFixes([
+            MetadataFix(
+                kind: .author,
+                original: "Herbert, Frank",
+                suggestion: "Frank Herbert",
+                bookCount: 2
+            ),
+            MetadataFix(
+                kind: .series,
+                original: "Zaklinac",
+                suggestion: "Zaklínač",
+                bookCount: 1
+            ),
+            MetadataFix(
+                kind: .seriesAssignment,
+                original: "Dvojí trůn",
+                suggestion: "Orel a lev",
+                bookCount: 1,
+                bookID: c.uuid,
+                seriesIndex: "2"
+            ),
+        ])
+
+        #expect(LibraryMutationLog.shared.revision == revision + 1)
+        #expect(a.author == "Frank Herbert")
+        #expect(b.author == "Frank Herbert")
+        #expect(a.series == "Zaklínač")
+        #expect(b.series == "Zaklínač")
+        #expect(c.series == "Orel a lev")
+        #expect(c.seriesIndex == "2")
+    }
+
     @Test func deleteTagRemovesItEverywhere() async throws {
         let lib = try await TestLibrary()
         let a = Book(fileName: "a.epub", originalFileName: "A.epub")

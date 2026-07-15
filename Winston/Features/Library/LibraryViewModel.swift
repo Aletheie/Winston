@@ -140,6 +140,8 @@ final class LibraryViewModel {
     func deleteTag(_ tag: String) { metadata.deleteTag(tag) }
     func renameSeries(_ old: String, to new: String) { metadata.renameSeries(old, to: new) }
     func renameAuthor(_ old: String, to new: String) { metadata.renameAuthor(old, to: new) }
+    func applyMetadataFix(_ fix: MetadataFix) { metadata.applyMetadataFix(fix) }
+    func applyMetadataFixes(_ fixes: [MetadataFix]) { metadata.applyMetadataFixes(fixes) }
     func backfillPageCount(for book: Book) async { await metadata.backfillPageCount(for: book) }
     func markNotSample(_ book: Book) { metadata.markNotSample(book) }
     func fetchOnlineMetadata(for book: Book) { metadata.fetchOnlineMetadata(for: book) }
@@ -160,6 +162,8 @@ final class LibraryViewModel {
     func setCustomCover(for book: Book, from url: URL) { covers.setCustomCover(for: book, from: url) }
     func resetCover(for book: Book) { covers.resetCover(for: book) }
     func duplicateGroups() async -> [DuplicateGroup] { await health.duplicateGroups() }
+    func metadataFixes() async -> [MetadataFix] { await health.metadataFixes() }
+    func seriesSuggestions() async -> [String] { await health.seriesSuggestions() }
 
     // MARK: - Maintenance (forwarded)
 
