@@ -19,6 +19,7 @@ struct EditMetadataSheet: View {
     @State private var isbn: String = ""
     @State private var tags: String = ""
     @State private var bookDescription: String = ""
+    @State private var seriesSuggestions: [String] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -48,7 +49,8 @@ struct EditMetadataSheet: View {
                 HStack(spacing: 12) {
                     MetaField(label: theme.styledText(terminal: "YEAR", native: "Year"), text: $year)
                         .frame(width: 100)
-                    MetaField(label: theme.styledText(terminal: "SERIES", native: "Series"), text: $series)
+                    MetaField(label: theme.styledText(terminal: "SERIES", native: "Series"), text: $series,
+                              suggestions: seriesSuggestions, showsSuggestionMenu: true)
                     MetaField(label: theme.styledText(terminal: "NO.", native: "No."), text: $seriesIndex)
                         .frame(width: 60)
                 }
@@ -139,6 +141,11 @@ struct EditMetadataSheet: View {
             tags = book.tags.joined(separator: ", ")
             bookDescription = book.bookDescription ?? ""
         }
+        .task {
+            let suggestions = await viewModel.seriesSuggestions()
+            guard !Task.isCancelled else { return }
+            seriesSuggestions = suggestions
+        }
     }
 
     private var saveBackground: Color {
@@ -154,6 +161,8 @@ private struct MetaField: View {
     let label: Text
     @Binding var text: String
     var hint: LocalizedStringKey? = nil
+    var suggestions: [String] = []
+    var showsSuggestionMenu = false
 
     @Environment(\.theme) private var theme
     @FocusState private var isFocused: Bool
@@ -170,20 +179,32 @@ private struct MetaField: View {
                         .foregroundStyle(theme.textTertiary.opacity(0.6))
                 }
             }
-            TextField("", text: $text)
-                .font(theme.label(size: 12, weight: .regular))
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(theme.surface.opacity(0.5))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .stroke(isFocused ? focusBorder : theme.borderSubtle, lineWidth: 1)
-                )
-                .focused($isFocused)
+            HStack(spacing: 0) {
+                TextField("", text: $text)
+                    .seriesAutocomplete(text: $text, suggestions: suggestions)
+                    .font(theme.label(size: 12, weight: .regular))
+                    .textFieldStyle(.plain)
+                    .focused($isFocused)
+
+                if showsSuggestionMenu {
+                    Rectangle()
+                        .fill(theme.borderSubtle)
+                        .frame(width: 1, height: 16)
+                    SeriesSuggestionMenu(text: $text, suggestions: suggestions)
+                        .padding(.leading, 2)
+                }
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, showsSuggestionMenu ? 3 : 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(theme.surface.opacity(0.5))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(isFocused ? focusBorder : theme.borderSubtle, lineWidth: 1)
+            )
         }
     }
 

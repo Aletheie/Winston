@@ -1375,6 +1375,22 @@
         }
       }
     },
+    "Choose Series" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vybrat sérii"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choose Series"
+          }
+        }
+      }
+    },
     "Choose the file to link to this book." : {
       "localizations" : {
         "cs" : {

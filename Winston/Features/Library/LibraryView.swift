@@ -166,7 +166,10 @@ struct LibraryView: View {
                 case .edit(let book):
                     EditMetadataSheet(book: book, viewModel: viewModel)
                 case .bulkEdit:
-                    BulkEditSheet(bookCount: selectedBooks.count) { edit in
+                    BulkEditSheet(
+                        bookCount: selectedBooks.count,
+                        viewModel: viewModel
+                    ) { edit in
                         viewModel.bulkUpdate(selectedBooks, edit)
                     }
                 case .duplicates:

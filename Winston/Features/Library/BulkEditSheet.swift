@@ -29,6 +29,7 @@ struct BulkEdit {
 
 struct BulkEditSheet: View {
     let bookCount: Int
+    let viewModel: LibraryViewModel
     let onApply: (BulkEdit) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -50,6 +51,7 @@ struct BulkEditSheet: View {
     @State private var tagMode: TagMode = .add
     @State private var applyStatus = false
     @State private var status: ReadingStatus = .unread
+    @State private var seriesSuggestions: [String] = []
 
     var body: some View {
         Form {
@@ -63,7 +65,13 @@ struct BulkEditSheet: View {
                 bulkRow("Author", isOn: $applyAuthor) { TextField("Author", text: $author) }
                 bulkRow("Publisher", isOn: $applyPublisher) { TextField("Publisher", text: $publisher) }
                 bulkRow("Year", isOn: $applyYear) { TextField("Year", text: $year) }
-                bulkRow("Series", isOn: $applySeries) { TextField("Series", text: $series) }
+                bulkRow("Series", isOn: $applySeries) {
+                    HStack(spacing: 4) {
+                        TextField("Series", text: $series)
+                            .seriesAutocomplete(text: $series, suggestions: seriesSuggestions)
+                        SeriesSuggestionMenu(text: $series, suggestions: seriesSuggestions)
+                    }
+                }
                 bulkRow("Language", isOn: $applyLanguage) { TextField("Language", text: $language) }
                 bulkRow("Translator", isOn: $applyTranslator) { TextField("Translator", text: $translator) }
                 bulkRow("Status", isOn: $applyStatus) {
@@ -100,6 +108,11 @@ struct BulkEditSheet: View {
             }
             .padding()
             .background(.bar)
+        }
+        .task {
+            let suggestions = await viewModel.seriesSuggestions()
+            guard !Task.isCancelled else { return }
+            seriesSuggestions = suggestions
         }
     }
 
