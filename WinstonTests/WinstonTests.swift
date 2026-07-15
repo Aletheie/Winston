@@ -437,4 +437,9 @@ struct HTMLTextTests {
         #expect("Fish & chips for 5".strippedHTML == "Fish & chips for 5")
         #expect("plain description".strippedHTML == "plain description")
     }
+
+    @Test func strayAmpersandsAreDecodedInLinearTime() {
+        let text = String(repeating: "&", count: 100_000)
+        #expect(text.decodingHTMLEntities() == text)
+    }
 }

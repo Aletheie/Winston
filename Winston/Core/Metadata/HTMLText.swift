@@ -55,12 +55,15 @@ extension String {
         result.reserveCapacity(count)
         var i = startIndex
         while i < endIndex {
-            guard self[i] == "&",
-                  let semi = self[i...].firstIndex(of: ";"),
-                  distance(from: i, to: semi) <= 12 else {
+            guard self[i] == "&" else {
                 result.append(self[i]); i = index(after: i); continue
             }
-            let body = self[index(after: i)..<semi]
+            let bodyStart = index(after: i)
+            let searchEnd = index(bodyStart, offsetBy: 12, limitedBy: endIndex) ?? endIndex
+            guard let semi = self[bodyStart..<searchEnd].firstIndex(of: ";") else {
+                result.append(self[i]); i = bodyStart; continue
+            }
+            let body = self[bodyStart..<semi]
             if body.first == "#" {
                 let digits = body.dropFirst()
                 let scalar: Unicode.Scalar? = (digits.first == "x" || digits.first == "X")
