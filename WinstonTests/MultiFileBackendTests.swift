@@ -231,6 +231,36 @@ struct MultiFileBackendTests {
         #expect(Set(work.editions.map { $0.assets.first?.contentHash }).count == 2)
     }
 
+    @Test func regularImportAllowsDifferentFilesWithTheSameBasename() async throws {
+        let library = try await TestLibrary()
+        let first = try EPUBFixture.make(title: "First", author: "A")
+        let second = try EPUBFixture.make(title: "Second", author: "B")
+        defer {
+            try? FileManager.default.removeItem(at: first.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: second.deletingLastPathComponent())
+        }
+        #expect(first.lastPathComponent == second.lastPathComponent)
+
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: library.context, settings: settings),
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
+            toasts: ToastCenter()
+        )
+
+        importer.addBooks(from: [first, second])
+        let deadline = Date.now.addingTimeInterval(4)
+        while (library.context.allBooks().count < 2 || importer.isExtracting), Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(library.context.allBooks().count == 2)
+        #expect(Set(library.context.allBooks().map(\.displayTitle)) == ["First", "Second"])
+    }
+
     @Test func switchingPrimaryRefreshesBookDRMState() async throws {
         let library = try await TestLibrary()
         let lockedName = "locked.epub"

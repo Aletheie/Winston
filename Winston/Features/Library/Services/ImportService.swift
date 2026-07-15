@@ -9,6 +9,11 @@ struct ImportBookAnalysis: Sendable {
 @MainActor
 @Observable
 final class ImportService {
+    private struct MatchBatch {
+        let books: [Book]
+        var remaining: Set<UUID>
+    }
+
     nonisolated private struct CopyRequest: Sendable {
         let source: URL
         let uuid: UUID
@@ -29,7 +34,8 @@ final class ImportService {
     private let analyzeBook: @Sendable (URL) async -> ImportBookAnalysis
 
     private(set) var pendingMetadataUUIDs: Set<UUID> = []
-    private var pendingOriginalFileNames: Set<String> = []
+    private var pendingSourcePaths: Set<String> = []
+    private var matchBatches: [UUID: MatchBatch] = [:]
 
     init(
         modelContext: ModelContext,
@@ -63,11 +69,8 @@ final class ImportService {
             guard libraryEbookExtensions.contains(url.pathExtension.lowercased()) else { failed += 1; continue }
 
             let originalName = url.lastPathComponent
-            if targetWork == nil {
-                guard !pendingOriginalFileNames.contains(originalName),
-                      !isDuplicate(originalFileName: originalName) else { continue }
-                pendingOriginalFileNames.insert(originalName)
-            }
+            let sourcePath = url.standardizedFileURL.path(percentEncoded: false)
+            guard pendingSourcePaths.insert(sourcePath).inserted else { continue }
             requests.append(CopyRequest(source: url, uuid: UUID(), originalName: originalName))
         }
 
@@ -82,6 +85,9 @@ final class ImportService {
             let results = await Task.detached(priority: .userInitiated) {
                 requests.map(Self.copyToManagedStore)
             }.value
+            for request in requests {
+                pendingSourcePaths.remove(request.source.standardizedFileURL.path(percentEncoded: false))
+            }
             if let targetWork, targetWork.modelContext == nil {
                 for result in results {
                     if case .copied(_, _, let fileName, _, _) = result {
@@ -93,14 +99,13 @@ final class ImportService {
 
             var imported: [Book] = []
             var failureCount = validationFailures
-            var knownHashes = Set(
+            var knownHashes: Set<String> = targetWork == nil ? [] : Set(
                 ((try? modelContext.fetch(FetchDescriptor<BookAsset>())) ?? [])
                     .compactMap(\.contentHash)
             )
             for result in results {
                 switch result {
                 case .copied(let uuid, let originalName, let fileName, let size, let contentHash):
-                    if targetWork == nil { pendingOriginalFileNames.remove(originalName) }
                     if targetWork != nil,
                        let contentHash,
                        knownHashes.contains(contentHash) {
@@ -127,16 +132,36 @@ final class ImportService {
                     if work.preferredEditionUUID == nil { work.preferredEditionUUID = book.uuid }
                     imported.append(book)
                     if let contentHash { knownHashes.insert(contentHash) }
-                case .failed(let originalName):
-                    if targetWork == nil { pendingOriginalFileNames.remove(originalName) }
+                case .failed:
                     failureCount += 1
                 }
             }
 
             if !imported.isEmpty {
-                modelContext.saveQuietly()
-                if targetWork != nil { editions?.refreshEditionCounts() }
-                for book in imported { extractMetadata(for: book, evaluateMatch: targetWork == nil) }
+                if modelContext.saveQuietly(rollbackOnFailure: true) {
+                    if targetWork != nil { editions?.refreshEditionCounts() }
+                    let batchID: UUID?
+                    if targetWork == nil, editions != nil {
+                        let id = UUID()
+                        matchBatches[id] = MatchBatch(
+                            books: imported,
+                            remaining: Set(imported.map(\.uuid))
+                        )
+                        batchID = id
+                    } else {
+                        batchID = nil
+                    }
+                    for book in imported {
+                        extractMetadata(
+                            for: book,
+                            evaluateMatch: targetWork == nil && batchID == nil,
+                            matchBatchID: batchID
+                        )
+                    }
+                } else {
+                    imported.forEach { BookFileStore.delete(fileName: $0.fileName) }
+                    failureCount += imported.count
+                }
             }
             reportImportFailures(failureCount)
         }
@@ -196,12 +221,19 @@ final class ImportService {
 
     // MARK: - Background extraction
 
-    private func extractMetadata(for book: Book, evaluateMatch: Bool = true) {
+    private func extractMetadata(
+        for book: Book,
+        evaluateMatch: Bool = true,
+        matchBatchID: UUID? = nil
+    ) {
         let url = book.fileURL
         let uuid = book.uuid
         pendingMetadataUUIDs.insert(uuid)
         Task {
-            defer { pendingMetadataUUIDs.remove(uuid) }
+            defer {
+                pendingMetadataUUIDs.remove(uuid)
+                if let matchBatchID { finishMatchBatch(matchBatchID, completed: uuid) }
+            }
             let result = await analyzeBook(url)
             guard book.modelContext != nil else { return }
             book.apply(result.metadata)
@@ -235,6 +267,40 @@ final class ImportService {
         }
     }
 
+    private func finishMatchBatch(_ id: UUID, completed uuid: UUID) {
+        guard var batch = matchBatches[id] else { return }
+        batch.remaining.remove(uuid)
+        guard batch.remaining.isEmpty else {
+            matchBatches[id] = batch
+            return
+        }
+        matchBatches.removeValue(forKey: id)
+        guard let editions else { return }
+
+        let books = batch.books.filter { $0.modelContext != nil }
+        let assignments = editions.evaluate(books)
+        var hasSuggestions = false
+        for book in books {
+            if let undo = assignments[book.uuid] {
+                let title = book.work?.displayTitle ?? book.displayTitle
+                toasts.post(
+                    String(localized: "Grouped with “\(title)”"),
+                    style: .success,
+                    action: .undoEditionAssignment(undo)
+                )
+            } else if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(book.uuid) }) {
+                hasSuggestions = true
+            }
+        }
+        if hasSuggestions {
+            toasts.post(
+                String(localized: "Edition suggestions are ready to review."),
+                style: .info,
+                action: .reviewEditionProposals
+            )
+        }
+    }
+
     nonisolated static func defaultAnalysis(for url: URL) async -> ImportBookAnalysis {
         await Task.detached(priority: .userInitiated) {
             ImportBookAnalysis(
@@ -242,12 +308,6 @@ final class ImportService {
                 drmProtected: DRMDetector.isProtected(url: url)
             )
         }.value
-    }
-
-    private func isDuplicate(originalFileName: String) -> Bool {
-        let predicate = #Predicate<Book> { $0.originalFileName == originalFileName }
-        let count = (try? modelContext.fetchCount(FetchDescriptor(predicate: predicate))) ?? 0
-        return count > 0
     }
 
     private func refreshWorkIdentity(for book: Book, allowDisplayTitleFallback: Bool) {
