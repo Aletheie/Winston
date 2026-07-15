@@ -16,7 +16,11 @@ enum BookFileStore {
         let fileManager = FileManager.default
         defer { try? fileManager.removeItem(at: temporary) }
 
-        try fileManager.copyItem(at: source, to: temporary)
+        if let portableHTML = try HTMLAssetInliner.portableData(for: source) {
+            try portableHTML.write(to: temporary)
+        } else {
+            try fileManager.copyItem(at: source, to: temporary)
+        }
         if fileManager.fileExists(atPath: destination.path(percentEncoded: false)) {
             _ = try fileManager.replaceItemAt(
                 destination,
@@ -42,5 +46,115 @@ enum BookFileStore {
 
     nonisolated static func delete(fileName: String) {
         try? FileManager.default.removeItem(at: url(for: fileName))
+    }
+}
+
+nonisolated enum HTMLAssetInliner {
+    private enum ImportError: Error { case sourceTooLarge }
+    private static let maxHTMLBytes = 32 * 1_024 * 1_024
+    private static let maxImageBytes = 8 * 1_024 * 1_024
+    private static let maxTotalImageBytes = 24 * 1_024 * 1_024
+
+    static func portableData(for source: URL) throws -> Data? {
+        guard ["html", "htm"].contains(source.pathExtension.lowercased()) else { return nil }
+        if let size = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           size > maxHTMLBytes {
+            throw ImportError.sourceTooLarge
+        }
+        let sourceData = try Data(contentsOf: source, options: .mappedIfSafe)
+        guard sourceData.count <= maxHTMLBytes else { throw ImportError.sourceTooLarge }
+        guard let html = String(data: sourceData, encoding: .utf8)
+                ?? String(data: sourceData, encoding: .isoLatin1) else { return nil }
+
+        let imageTags = try NSRegularExpression(pattern: "<img\\b[^>]*>", options: [.caseInsensitive])
+        let ns = html as NSString
+        var replacements: [(NSRange, String)] = []
+        var cachedURIs: [String: String] = [:]
+        var totalImageBytes = 0
+
+        for imageTag in imageTags.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            let tag = ns.substring(with: imageTag.range)
+            guard let sourceAttribute = sourceAttribute(in: tag),
+                  let uri = dataURI(
+                for: sourceAttribute.value,
+                relativeTo: source.deletingLastPathComponent(),
+                cached: &cachedURIs,
+                totalBytes: &totalImageBytes
+            ) else { continue }
+            var rewrittenTag = tag
+            guard let valueRange = Range(sourceAttribute.range, in: rewrittenTag) else { continue }
+            let replacement = sourceAttribute.quoted ? uri : "\"\(uri)\""
+            rewrittenTag.replaceSubrange(valueRange, with: replacement)
+            replacements.append((imageTag.range, rewrittenTag))
+        }
+
+        let portable = NSMutableString(string: html)
+        for (range, replacement) in replacements.reversed() {
+            portable.replaceCharacters(in: range, with: replacement)
+        }
+        return Data((portable as String).utf8)
+    }
+
+    private static let sourceAttributeRegex = try! NSRegularExpression(
+        pattern: "(?:^|\\s)src\\s*=\\s*(?:([\\\"'])([^\\\"']*)\\1|([^\\s\\\"'>]+))",
+        options: [.caseInsensitive]
+    )
+
+    private static func sourceAttribute(in tag: String) -> (value: String, range: NSRange, quoted: Bool)? {
+        let fullRange = NSRange(location: 0, length: (tag as NSString).length)
+        guard let match = sourceAttributeRegex.firstMatch(in: tag, range: fullRange) else { return nil }
+        let quotedRange = match.range(at: 2)
+        let valueRange = quotedRange.location == NSNotFound ? match.range(at: 3) : quotedRange
+        guard valueRange.location != NSNotFound else { return nil }
+        return ((tag as NSString).substring(with: valueRange), valueRange, quotedRange.location != NSNotFound)
+    }
+
+    private static func dataURI(
+        for ref: String,
+        relativeTo baseDirectory: URL,
+        cached: inout [String: String],
+        totalBytes: inout Int
+    ) -> String? {
+        let lower = ref.lowercased()
+        guard !lower.hasPrefix("data:"), !lower.hasPrefix("http:"), !lower.hasPrefix("https:") else {
+            return nil
+        }
+        if let cached = cached[ref] { return cached }
+
+        let path = ref.split(whereSeparator: { $0 == "?" || $0 == "#" }).first.map(String.init) ?? ref
+        let decoded = path.removingPercentEncoding ?? path
+        guard !decoded.hasPrefix("/") else { return nil }
+
+        let root = baseDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        let file = root.appending(path: decoded)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let rawRootPath = root.path(percentEncoded: false)
+        let rootPath = rawRootPath.hasSuffix("/") ? rawRootPath : rawRootPath + "/"
+        guard file.path(percentEncoded: false).hasPrefix(rootPath) else { return nil }
+
+        guard let values = try? file.resourceValues(forKeys: [.fileSizeKey]) else { return nil }
+        guard let size = values.fileSize,
+              size <= maxImageBytes,
+              totalBytes <= maxTotalImageBytes - size,
+              let mime = mimeType(for: file.pathExtension) else { return nil }
+        guard let data = try? Data(contentsOf: file, options: .mappedIfSafe) else { return nil }
+        guard data.count == size else { return nil }
+
+        totalBytes += size
+        let uri = "data:\(mime);base64,\(data.base64EncodedString())"
+        cached[ref] = uri
+        return uri
+    }
+
+    private static func mimeType(for fileExtension: String) -> String? {
+        switch fileExtension.lowercased() {
+        case "jpg", "jpeg": "image/jpeg"
+        case "png":         "image/png"
+        case "gif":         "image/gif"
+        case "webp":        "image/webp"
+        case "tif", "tiff": "image/tiff"
+        case "heic", "heif": "image/heic"
+        default: nil
+        }
     }
 }

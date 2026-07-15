@@ -82,6 +82,40 @@ struct NativeConversionTests {
         #expect(rendered.contains("recindex=\"1\""))
     }
 
+    @Test func importedHTMLKeepsLocalImagesWithoutEscapingItsFolder() throws {
+        let root = TempFile.makeDir()
+        let managedRoot = TempFile.makeDir()
+        let sourceDir = root.appending(path: "book", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: sourceDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: managedRoot)
+        }
+
+        let pixel = try #require(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII="
+        ))
+        try pixel.write(to: sourceDir.appending(path: "inside.png"))
+        try pixel.write(to: root.appending(path: "outside.png"))
+        let source = sourceDir.appending(path: "page.html")
+        try Data("<body><img data-src=\"../outside.png\" alt=\"inside.png\" src=\"inside.png\"><img src=\"../outside.png\"></body>".utf8)
+            .write(to: source)
+
+        let managed = managedRoot.appending(path: "page.html")
+        let portable = try #require(try HTMLAssetInliner.portableData(for: source))
+        try portable.write(to: managed)
+        let managedHTML = try String(contentsOf: managed, encoding: .utf8)
+        #expect(managedHTML.contains("data:image/png;base64,"))
+        #expect(managedHTML.contains("alt=\"inside.png\""))
+        #expect(managedHTML.contains("../outside.png"))
+        #expect(try HTMLReader.read(source).images.count == 1)
+
+        try FileManager.default.removeItem(at: root)
+        let document = try HTMLReader.read(managed)
+        #expect(document.images.count == 1)
+        #expect(MOBIHTMLBuilder.build(from: document).images.count == 1)
+    }
+
     @Test func htmlConvertsToReadableMOBI() throws {
         let dir = TempFile.makeDir()
         defer { try? FileManager.default.removeItem(at: dir) }

@@ -131,8 +131,9 @@ nonisolated enum MOBIHTMLBuilder {
     private static let attributeRegexes = OSAllocatedUnfairLock<[String: NSRegularExpression]>(initialState: [:])
 
     static func attribute(_ name: String, in tag: String) -> String? {
-        firstGroup(cachedRegex("q:\(name)", pattern: "\(name)\\s*=\\s*[\"']([^\"']*)[\"']"), in: tag)
-            ?? firstGroup(cachedRegex("u:\(name)", pattern: "\(name)\\s*=\\s*([^\\s\"'>]+)"), in: tag)
+        let prefix = "(?:^|\\s)\(name)\\s*=\\s*"
+        return firstGroup(cachedRegex("q:\(name)", pattern: prefix + "[\"']([^\"']*)[\"']"), in: tag)
+            ?? firstGroup(cachedRegex("u:\(name)", pattern: prefix + "([^\\s\"'>]+)"), in: tag)
     }
 
     private static func cachedRegex(_ key: String, pattern: String) -> NSRegularExpression {
