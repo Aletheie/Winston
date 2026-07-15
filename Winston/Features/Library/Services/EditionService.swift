@@ -355,25 +355,27 @@ final class EditionService {
         }
         fillEmptyBookMetadata(winner, from: loser)
         mergeReadingHistory(into: winner, from: loser)
-        if !CoverStore.exists(for: winner.uuid), let cover = CoverStore.load(for: loser.uuid) {
-            CoverStore.save(cover, for: winner.uuid)
+        let installedWinnerCover: Bool
+        if !CoverStore.exists(for: winner.uuid),
+           let cover = CoverStore.load(for: loser.uuid),
+           CoverStore.save(cover, for: winner.uuid) {
             winner.coverVersion += 1
+            installedWinnerCover = true
+        } else {
+            installedWinnerCover = false
         }
 
+        modelContext.delete(loser)
         do {
-            try modelContext.save()
-            LibraryMutationLog.shared.bump()
-            for fileName in discardedFileNames {
-                BookFileStore.delete(fileName: fileName)
-            }
-            modelContext.delete(loser)
             try modelContext.save()
             LibraryMutationLog.shared.bump()
         } catch {
             modelContext.rollback()
+            if installedWinnerCover { CoverStore.delete(for: winner.uuid) }
             return false
         }
 
+        discardedFileNames.forEach { BookFileStore.delete(fileName: $0) }
         CoverStore.delete(for: loser.uuid)
         pendingProposals.removeAll { $0.memberUUIDs.contains(loser.uuid) }
         WorkService.pruneIfOrphaned(losingWork, context: modelContext)
