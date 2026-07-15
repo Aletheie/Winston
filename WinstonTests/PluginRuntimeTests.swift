@@ -139,6 +139,20 @@ struct PluginRuntimeTests {
         #expect(recorder.calls.isEmpty)
     }
 
+    @Test func oversizedStorageValueRejectsBeforeReachingTheHost() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            exports.activate = async () => {
+                try { await Winston.storage.set("large", "x".repeat(300 * 1024)); }
+                catch (e) { console.log("code:" + e.code); }
+            };
+            """)
+        try await runtime.load(granted: [], handler: recorder.handler())
+
+        #expect(await logged("code:invalid-argument", in: runtime))
+        #expect(recorder.calls.isEmpty)
+    }
+
     // MARK: - Permission gating
 
     @Test func ungrantedNamespacesDoNotExist() async throws {

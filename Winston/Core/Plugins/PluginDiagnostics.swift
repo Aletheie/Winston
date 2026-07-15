@@ -54,6 +54,17 @@ nonisolated enum PluginError: Error, Sendable, Equatable {
     }
 }
 
+nonisolated enum PluginStorageLimits {
+    static let maxKeyBytes = 256
+    static let maxValueBytes = 256 * 1_024
+    static let maxFileBytes = 2 * 1_024 * 1_024
+    static let maxEntries = 512
+
+    static func accepts(key: String) -> Bool {
+        !key.isEmpty && key.utf8.count <= maxKeyBytes
+    }
+}
+
 // JSC has no interruption API: on timeout the plugin is quarantined and its wedged
 // queue thread is deliberately leaked (one thread, never the main actor).
 nonisolated func withPluginDeadline<T: Sendable>(

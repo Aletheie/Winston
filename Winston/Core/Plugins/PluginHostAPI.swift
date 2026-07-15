@@ -141,18 +141,36 @@ final class PluginHostAPI {
             return encode(outcome.metadata.map(PluginFetchedMetadataDTO.init))
 
         case .storageGet(let key):
-            let store = loadStorage(for: manifest)
-            return .success(store[key].map { Data($0.utf8) })
+            do {
+                let store = try loadStorage(for: manifest)
+                return .success(store[key].map { Data($0.utf8) })
+            } catch let error as PluginError {
+                return .failure(error)
+            } catch {
+                return .failure(.unavailable("could not read plugin storage"))
+            }
 
         case .storageSet(let key, let valueJSON):
-            var store = loadStorage(for: manifest)
-            store[key] = valueJSON
-            return saveStorage(store, for: manifest)
+            do {
+                var store = try loadStorage(for: manifest)
+                store[key] = valueJSON
+                return saveStorage(store, for: manifest)
+            } catch let error as PluginError {
+                return .failure(error)
+            } catch {
+                return .failure(.unavailable("could not read plugin storage"))
+            }
 
         case .storageRemove(let key):
-            var store = loadStorage(for: manifest)
-            store.removeValue(forKey: key)
-            return saveStorage(store, for: manifest)
+            do {
+                var store = try loadStorage(for: manifest)
+                store.removeValue(forKey: key)
+                return saveStorage(store, for: manifest)
+            } catch let error as PluginError {
+                return .failure(error)
+            } catch {
+                return .failure(.unavailable("could not read plugin storage"))
+            }
 
         case .toast(let message, let style):
             if let denied = require(.uiToast) { return .failure(denied) }
@@ -218,15 +236,33 @@ final class PluginHostAPI {
         AppPaths.pluginDataDirectory(for: manifest.id).appending(path: "storage.json")
     }
 
-    private func loadStorage(for manifest: PluginManifest) -> [String: String] {
-        guard let data = try? Data(contentsOf: storageURL(for: manifest)) else { return [:] }
-        return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+    private func loadStorage(for manifest: PluginManifest) throws -> [String: String] {
+        let url = storageURL(for: manifest)
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return [:] }
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard data.count <= PluginStorageLimits.maxFileBytes else {
+            throw PluginError.unavailable("plugin storage exceeds its 2 MB quota")
+        }
+        guard let store = try? JSONDecoder().decode([String: String].self, from: data) else {
+            throw PluginError.unavailable("plugin storage is unreadable")
+        }
+        return store
     }
 
     private func saveStorage(_ store: [String: String], for manifest: PluginManifest) -> Result<Data?, PluginError> {
         do {
             try AppPaths.ensurePluginDataDirectory(for: manifest.id)
+            guard store.count <= PluginStorageLimits.maxEntries,
+                  store.allSatisfy({
+                      PluginStorageLimits.accepts(key: $0.key)
+                          && $0.value.utf8.count <= PluginStorageLimits.maxValueBytes
+                  }) else {
+                return .failure(.invalidArgument("plugin storage exceeds its entry or value limit"))
+            }
             let data = try JSONEncoder().encode(store)
+            guard data.count <= PluginStorageLimits.maxFileBytes else {
+                return .failure(.invalidArgument("plugin storage exceeds its 2 MB quota"))
+            }
             try data.write(to: storageURL(for: manifest), options: .atomic)
             return .success(nil)
         } catch {

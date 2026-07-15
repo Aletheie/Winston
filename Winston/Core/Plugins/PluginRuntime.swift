@@ -184,7 +184,11 @@ nonisolated final class PluginRuntime: @unchecked Sendable {
 
         let storage = JSValue(newObjectIn: context)!
         installAsyncMethod(named: "get", on: storage, handler: handler) { arg0, _ in
-            .storageGet(key: try Self.requireString(arg0, "storage.get expects a string key"))
+            let key = try Self.requireString(arg0, "storage.get expects a string key")
+            guard PluginStorageLimits.accepts(key: key) else {
+                throw PluginError.invalidArgument("storage keys are limited to 256 UTF-8 bytes")
+            }
+            return .storageGet(key: key)
         }
         installAsyncMethod(named: "set", on: storage, handler: handler) { arg0, arg1 in
             let key = try Self.requireString(arg0, "storage.set expects a string key")
@@ -193,10 +197,18 @@ nonisolated final class PluginRuntime: @unchecked Sendable {
                   let json = String(data: data, encoding: .utf8) else {
                 throw PluginError.invalidArgument("storage.set value must be JSON-serializable")
             }
+            guard PluginStorageLimits.accepts(key: key),
+                  data.count <= PluginStorageLimits.maxValueBytes else {
+                throw PluginError.invalidArgument("plugin storage key or value exceeds its size limit")
+            }
             return .storageSet(key: key, valueJSON: json)
         }
         installAsyncMethod(named: "remove", on: storage, handler: handler) { arg0, _ in
-            .storageRemove(key: try Self.requireString(arg0, "storage.remove expects a string key"))
+            let key = try Self.requireString(arg0, "storage.remove expects a string key")
+            guard PluginStorageLimits.accepts(key: key) else {
+                throw PluginError.invalidArgument("storage keys are limited to 256 UTF-8 bytes")
+            }
+            return .storageRemove(key: key)
         }
         winston.setObject(storage, forKeyedSubscript: "storage")
 
