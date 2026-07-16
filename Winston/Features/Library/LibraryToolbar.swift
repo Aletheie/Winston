@@ -34,6 +34,7 @@ struct LibraryToolbar: ToolbarContent {
     @Binding var sortOrder: [KeyPathComparator<Book>]
     @Binding var showInspector: Bool
     let transmitEnabled: Bool
+    let onRecommend: () -> Void
     let onSearchInsideBooks: () -> Void
     let onImport: () -> Void
     let onTransmit: () -> Void
@@ -66,6 +67,12 @@ struct LibraryToolbar: ToolbarContent {
                 Label("Sort", systemImage: "arrow.up.arrow.down")
             }
             .help("Sort order")
+
+            Button(action: onRecommend) {
+                Label("What Should I Read Today?", systemImage: "sparkles")
+            }
+            .help("Get a personalized pick from your local library")
+            .accessibilityIdentifier("readingRecommendation.open")
 
             Button(action: onSearchInsideBooks) {
                 Label("Search Inside Books", systemImage: "doc.text.magnifyingglass")

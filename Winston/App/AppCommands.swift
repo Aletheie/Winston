@@ -27,7 +27,7 @@ enum LibraryCommand: Equatable {
     case showSeries
     case exportLibrary
     case saveSearchAsCollection
-    case surpriseMe
+    case recommendReading
     case markSelection(ReadingStatus)
     case replaceSelected
     case inspectSelected
@@ -165,7 +165,7 @@ struct AppCommands: Commands {
             Button("Series\u{2026}") { library?.perform(.showSeries) }
                 .disabled(library == nil)
             Divider()
-            Button("Surprise Me") { library?.perform(.surpriseMe) }
+            Button("What Should I Read Today\u{2026}") { library?.perform(.recommendReading) }
                 .keyboardShortcut("s", modifiers: [.command, .option])
                 .disabled(library == nil)
             Divider()

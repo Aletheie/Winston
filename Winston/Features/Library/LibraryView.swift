@@ -16,6 +16,7 @@ enum LibrarySheet: Identifiable {
     case bookDoctor(BookDoctorRequest)
     case readingHistory(Book)
     case fullTextSearch
+    case readingRecommendation
 
     var id: String {
         switch self {
@@ -31,6 +32,7 @@ enum LibrarySheet: Identifiable {
         case .bookDoctor(let request): "bookDoctor-\(request.id.uuidString)"
         case .readingHistory(let book): "readingHistory-\(book.uuid.uuidString)"
         case .fullTextSearch: "fullTextSearch"
+        case .readingRecommendation: "readingRecommendation"
         }
     }
 }
@@ -185,6 +187,7 @@ struct LibraryView: View {
                     sortOrder: $sortOrder,
                     showInspector: $showInspector,
                     transmitEnabled: deviceMonitor.isConnected && selection.hasSelection && !transferQueue.isTransferring,
+                    onRecommend: { activeSheet = .readingRecommendation },
                     onSearchInsideBooks: { activeSheet = .fullTextSearch },
                     onImport: { isImporting = true },
                     onTransmit: transmitSelected
@@ -243,8 +246,14 @@ struct LibraryView: View {
                 case .fullTextSearch:
                     FullTextSearchSheet(
                         books: books,
-                        onOpen: openFullTextResult,
-                        onShowInLibrary: showFullTextResultInLibrary
+                        onOpen: openBook,
+                        onShowInLibrary: showBookInLibrary
+                    )
+                case .readingRecommendation:
+                    ReadingRecommendationSheet(
+                        books: books,
+                        onOpen: openBook,
+                        onShowInLibrary: showBookInLibrary
                     )
                 }
             }
@@ -438,8 +447,8 @@ struct LibraryView: View {
         case .saveSearchAsCollection:
             saveSearchName = ""
             showSaveSearchAlert = true
-        case .surpriseMe:
-            surpriseMe()
+        case .recommendReading:
+            activeSheet = .readingRecommendation
         case .markSelection(let status):
             viewModel.setReadingStatus(status, for: selectedBooks)
         case .replaceSelected:
@@ -455,27 +464,12 @@ struct LibraryView: View {
         viewModel.convertBooks(selectedBooks)
     }
 
-    private func surpriseMe() {
-        guard let pick = books.filter({ $0.readingStatus == .unread }).randomElement() else { return }
-        onShowAll()
-        searchText = ""
-        debouncedSearch = ""
-        displayed = LibraryQuery.apply(to: books, filter: .all, searchText: "", sort: sortOrder)
-        selection.selectedBookIDs = [pick.id]
-        selection.lastClickedBookID = pick.id
-        if !showInspector { showInspector = true }
-        Task { @MainActor in
-            await Task.yield()
-            scrollTarget = pick.id
-        }
-    }
-
-    private func openFullTextResult(_ bookID: UUID) {
+    private func openBook(_ bookID: UUID) {
         guard let book = books.first(where: { $0.uuid == bookID }) else { return }
         LibraryExternalActions.openInReader(book)
     }
 
-    private func showFullTextResultInLibrary(_ bookID: UUID) {
+    private func showBookInLibrary(_ bookID: UUID) {
         guard let book = books.first(where: { $0.uuid == bookID }) else { return }
         showInLibrary(book)
     }
