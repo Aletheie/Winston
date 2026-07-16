@@ -393,7 +393,9 @@ nonisolated enum BookDoctorService {
         _ document: XMLDocument,
         removingSpineIDs ids: Set<String>
     ) throws -> Data {
-        let copy = document.copy() as! XMLDocument
+        guard let copy = document.copy() as? XMLDocument else {
+            throw RepairError.unreadableArchive
+        }
         let nodes = try copy.nodes(forXPath: "//*[local-name()='spine']/*[local-name()='itemref']")
         for node in nodes {
             guard let element = node as? XMLElement,
