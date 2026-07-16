@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import AppKit
 
 @MainActor
 @Observable
@@ -12,6 +13,7 @@ final class ConversionService {
         let sourceAssetUUID: UUID?
         let sourceAssetDateAdded: Date?
         let sourceContentHash: String?
+        let coverVersion: Int
         let assetUUID: UUID
         let existingAssetUUID: UUID?
         let title: String
@@ -109,6 +111,7 @@ final class ConversionService {
             sourceAssetUUID: sourceAsset?.uuid,
             sourceAssetDateAdded: sourceAsset?.dateAdded,
             sourceContentHash: sourceAsset?.contentHash,
+            coverVersion: book.coverVersion,
             assetUUID: existing?.uuid ?? UUID(),
             existingAssetUUID: existing?.uuid,
             title: book.displayTitle,
@@ -142,27 +145,32 @@ final class ConversionService {
             sourceAsset.contentHash = sourceHash
         }
 
-        let installedCover = await Task.detached(priority: .utility) {
+        let extractedCover: NSImage? = await Task.detached(priority: .utility) { () -> NSImage? in
             if !CoverStore.exists(for: uuid),
                let cover = CoverExtractor.extractCover(from: sourceURL) {
-                CoverStore.save(cover, for: uuid)
-                return true
+                return cover
             }
-            return false
+            return nil
         }.value
 
-        guard sourceSnapshotIsCurrent(request) else {
-            if installedCover { CoverStore.delete(for: uuid) }
-            return
+        guard sourceSnapshotIsCurrent(request) else { return }
+        var installedCoverVersion: Int?
+        if let extractedCover,
+           book.coverVersion == request.coverVersion,
+           !CoverStore.exists(for: uuid),
+           CoverStore.save(extractedCover, for: uuid) {
+            book.coverVersion += 1
+            installedCoverVersion = book.coverVersion
         }
 
         let converted: URL? = try? await EbookConverter.convert(sourceURL, to: request.format)
         guard sourceSnapshotIsCurrent(request) else {
             if let converted { try? FileManager.default.removeItem(at: converted) }
-            if installedCover { CoverStore.delete(for: uuid) }
+            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
             return
         }
         guard let converted else {
+            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
@@ -172,17 +180,30 @@ final class ConversionService {
             try? ContentHasher.sha256(of: converted)
         }.value
         guard sourceSnapshotIsCurrent(request) else {
-            if installedCover { CoverStore.delete(for: uuid) }
+            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
             return
         }
 
-        guard let newFileName = try? BookFileStore.importCopy(of: converted, uuid: request.assetUUID) else {
+        let existingAsset = request.existingAssetUUID.flatMap { existingUUID in
+            book.assets.first { $0.uuid == existingUUID }
+        }
+        let oldFileName = existingAsset?.fileName
+        let newFileName: String
+        do {
+            if let oldFileName {
+                newFileName = try BookFileStore.replacementCopy(
+                    of: converted, replacing: oldFileName, uuid: request.assetUUID
+                )
+            } else {
+                newFileName = try BookFileStore.importCopy(of: converted, uuid: request.assetUUID)
+            }
+        } catch {
+            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
         let size = BookFileStore.size(of: newFileName)
-        if let existingAssetUUID = request.existingAssetUUID,
-           let asset = book.assets.first(where: { $0.uuid == existingAssetUUID }) {
+        if let asset = existingAsset {
             asset.fileName = newFileName
             asset.sizeBytes = size
             asset.contentHash = contentHash
@@ -202,8 +223,29 @@ final class ConversionService {
             )
             modelContext.insert(asset)
         }
-        modelContext.saveQuietly()
+        guard modelContext.saveQuietly(rollbackOnFailure: true) else {
+            BookFileStore.delete(fileName: newFileName)
+            await removeInstalledCover(
+                for: book, url: sourceURL, version: installedCoverVersion, force: true
+            )
+            toasts.error(String(localized: "Couldn\u{2019}t save \u{201C}\(request.title)\u{201D}."))
+            return
+        }
+        if let oldFileName, oldFileName != newFileName {
+            BookFileStore.delete(fileName: oldFileName)
+        }
         toasts.success(String(localized: "Created \(request.format.label) copy."))
+    }
+
+    private func removeInstalledCover(
+        for book: Book,
+        url: URL,
+        version: Int?,
+        force: Bool = false
+    ) async {
+        guard let version, force || book.coverVersion == version,
+              CoverStore.delete(for: book.uuid) else { return }
+        await CoverCache.shared.replace(nil, for: url)
     }
 
     private func sourceSnapshotIsCurrent(_ request: Request) -> Bool {
