@@ -84,7 +84,7 @@ enum EPUBFixture {
         return url
     }
 
-    static func makeWithOPF(_ opf: String) throws -> URL {
+    static func makeWithOPF(_ opf: String, additionalEntries: [String: Data] = [:]) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appending(path: "WinstonEPUBFixture-\(UUID().uuidString)", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -100,6 +100,9 @@ enum EPUBFixture {
         try add("META-INF/container.xml", Data(container.utf8))
         try add("OEBPS/content.opf", Data(opf.utf8))
         try add("OEBPS/chap1.xhtml", Data(chapter(bodyText: "Safe body").utf8))
+        for (path, data) in additionalEntries {
+            try add(path, data)
+        }
         return url
     }
 

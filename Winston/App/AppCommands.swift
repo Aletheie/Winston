@@ -29,6 +29,7 @@ enum LibraryCommand: Equatable {
     case surpriseMe
     case markSelection(ReadingStatus)
     case replaceSelected
+    case inspectSelected
 }
 
 struct LibraryCommandAvailability: Equatable {
@@ -183,6 +184,9 @@ struct AppCommands: Commands {
                 .disabled(library?.availability.hasSelection != true)
 
             Button("Replace File\u{2026}") { library?.perform(.replaceSelected) }
+                .disabled(library?.availability.hasSelection != true)
+
+            Button("Inspect with Book Doctor\u{2026}") { library?.perform(.inspectSelected) }
                 .disabled(library?.availability.hasSelection != true)
 
             Divider()

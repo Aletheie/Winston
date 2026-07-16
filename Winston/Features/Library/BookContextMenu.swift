@@ -16,6 +16,7 @@ struct BookActions {
     var setCover: (Book, URL) -> Void
     var resetCover: (Book) -> Void
     var relink: (Book) -> Void
+    var inspect: (Book) -> Void
     var convert: (Book) -> Void
     var convertTo: (Book, EbookConverter.OutputFormat) -> Void
     var convertSelection: () -> Void
@@ -61,6 +62,9 @@ struct BookContextMenu: View {
         }
         Button { actions.relink(book) } label: {
             Label("Replace File\u{2026}", systemImage: "arrow.triangle.2.circlepath.doc.on.clipboard")
+        }
+        Button { actions.inspect(book) } label: {
+            Label("Inspect with Book Doctor…", systemImage: "stethoscope")
         }
         Divider()
 

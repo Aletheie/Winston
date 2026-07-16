@@ -24,6 +24,23 @@ enum FilePanel {
         return await begin(panel)
     }
 
+    static func saveFile(
+        message: String,
+        suggestedName: String,
+        allowedContentType: UTType? = nil
+    ) async -> URL? {
+        let panel = NSSavePanel()
+        panel.message = message
+        panel.nameFieldStringValue = suggestedName
+        panel.canCreateDirectories = true
+        if let allowedContentType { panel.allowedContentTypes = [allowedContentType] }
+        return await withCheckedContinuation { continuation in
+            panel.begin { response in
+                continuation.resume(returning: response == .OK ? panel.url : nil)
+            }
+        }
+    }
+
     private static func begin(_ panel: NSOpenPanel) async -> URL? {
         await withCheckedContinuation { continuation in
             panel.begin { response in

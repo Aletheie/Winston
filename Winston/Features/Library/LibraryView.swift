@@ -13,6 +13,7 @@ enum LibrarySheet: Identifiable {
     case series(name: String?)
     case work(Work)
     case editionReview
+    case bookDoctor(BookDoctorRequest)
 
     var id: String {
         switch self {
@@ -25,6 +26,7 @@ enum LibrarySheet: Identifiable {
         case .series(let name): "series-\(name ?? "all")"
         case .work(let work): "work-\(work.uuid.uuidString)"
         case .editionReview:  "editionReview"
+        case .bookDoctor(let request): "bookDoctor-\(request.id.uuidString)"
         }
     }
 }
@@ -100,6 +102,7 @@ struct LibraryView: View {
             setCover: { book, url in viewModel.setCustomCover(for: book, from: url) },
             resetCover: { book in viewModel.resetCover(for: book) },
             relink: { book in Task { await LibraryExternalActions.relink(book, via: viewModel) } },
+            inspect: { book in presentBookDoctor(for: [book], purpose: .review) },
             convert: { book in viewModel.convert(book) },
             convertTo: { book, format in viewModel.convert(book, to: format) },
             convertSelection: convertSelectedBooks,
@@ -161,7 +164,10 @@ struct LibraryView: View {
                 allowedContentTypes: [.item],
                 allowsMultipleSelection: true
             ) { result in
-                if case .success(let urls) = result { viewModel.addBooks(from: urls) }
+                if case .success(let urls) = result, !urls.isEmpty {
+                    let sources = urls.map { BookDoctorSource(title: $0.lastPathComponent, url: $0) }
+                    activeSheet = .bookDoctor(BookDoctorRequest(sources: sources, purpose: .importFiles))
+                }
             }
             .sheet(item: $activeSheet) { sheet in
                 switch sheet {
@@ -192,6 +198,10 @@ struct LibraryView: View {
                     WorkDetailSheet(work: work, viewModel: viewModel, onShowInLibrary: showInLibrary)
                 case .editionReview:
                     EditionReviewSheet(books: books, service: viewModel.editions)
+                case .bookDoctor(let request):
+                    BookDoctorSheet(request: request) { urls in
+                        handleBookDoctorProceed(request, urls: urls)
+                    }
                 }
             }
             .alert("Delete \(selection.count) books?",
@@ -380,6 +390,8 @@ struct LibraryView: View {
             if let book = primarySelectedBook {
                 Task { await LibraryExternalActions.relink(book, via: viewModel) }
             }
+        case .inspectSelected:
+            presentBookDoctor(for: selectedBooks, purpose: .review)
         }
     }
 
@@ -410,7 +422,29 @@ struct LibraryView: View {
     private func transmitSelected() {
         let toSend = books.filter { selection.selectedBookIDs.contains($0.id) }
         guard !toSend.isEmpty else { return }
-        transferQueue.beginSend(books: toSend, via: deviceMonitor)
+        presentBookDoctor(for: toSend, purpose: .sendToKindle)
+    }
+
+    private func presentBookDoctor(for books: [Book], purpose: BookDoctorRequest.Purpose) {
+        guard !books.isEmpty else { return }
+        let sources = books.map {
+            BookDoctorSource(id: $0.uuid, title: $0.displayTitle, url: $0.fileURL)
+        }
+        activeSheet = .bookDoctor(BookDoctorRequest(sources: sources, purpose: purpose))
+    }
+
+    private func handleBookDoctorProceed(_ request: BookDoctorRequest, urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        switch request.purpose {
+        case .importFiles:
+            viewModel.addBooks(from: urls)
+        case .sendToKindle:
+            let paths = Set(urls.map { $0.standardizedFileURL.path(percentEncoded: false) })
+            let ready = books.filter { paths.contains($0.fileURL.standardizedFileURL.path(percentEncoded: false)) }
+            if !ready.isEmpty { transferQueue.beginSend(books: ready, via: deviceMonitor) }
+        case .review:
+            break
+        }
     }
 
     private func deleteSelected() {

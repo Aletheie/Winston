@@ -6540,6 +6540,556 @@
         }
       }
     },
+    "%lld blocked" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Blokováno: %lld"
+          }
+        }
+      }
+    },
+    "%lld content files are not UTF‑8. A repaired copy can normalize readable Latin‑1 text." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Textové soubory mimo UTF‑8: %lld. Opravená kopie může převést čitelný text Latin‑1."
+          }
+        }
+      }
+    },
+    "%lld need review" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ke kontrole: %lld"
+          }
+        }
+      }
+    },
+    "%lld referenced images are missing from the EPUB. Winston will preserve the file but cannot recreate the artwork." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "V EPUBu chybí odkazované obrázky: %lld. Winston soubor zachová, ale obrázky nedokáže znovu vytvořit."
+          }
+        }
+      }
+    },
+    "%lld spine entries point to missing chapters. A repaired copy can remove those dead references." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Položky pořadí čtení odkazující na chybějící kapitoly: %lld. Opravená kopie může neplatné odkazy odstranit."
+          }
+        }
+      }
+    },
+    "A local, read-only inspection of the selected books." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Místní kontrola vybraných knih pouze pro čtení."
+          }
+        }
+      }
+    },
+    "About %lld pages" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přibližně %lld stran"
+          }
+        }
+      }
+    },
+    "Automatic repair can remove dead spine references and normalize readable text encoding." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automatická oprava může odstranit neplatné odkazy v pořadí čtení a sjednotit kódování čitelného textu."
+          }
+        }
+      }
+    },
+    "Book Doctor" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Knižní doktor"
+          }
+        }
+      }
+    },
+    "Book Doctor currently checks EPUB, PDF, MOBI, AZW, and AZW3 files." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Knižní doktor nyní kontroluje soubory EPUB, PDF, MOBI, AZW a AZW3."
+          }
+        }
+      }
+    },
+    "Book Doctor found no safe automatic repairs for this file." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Knižní doktor pro tento soubor nenašel žádné bezpečné automatické opravy."
+          }
+        }
+      }
+    },
+    "Broken reading order" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Poškozené pořadí čtení"
+          }
+        }
+      }
+    },
+    "Checking structure, content, cover, encoding, and DRM…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kontroluji strukturu, obsah, obálku, kódování a DRM…"
+          }
+        }
+      }
+    },
+    "Choose a different destination so the original stays untouched." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vyberte jiné umístění, aby originál zůstal beze změny."
+          }
+        }
+      }
+    },
+    "DRM protection detected" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zjištěna ochrana DRM"
+          }
+        }
+      }
+    },
+    "Image-only PDF" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PDF obsahuje pouze obrázky"
+          }
+        }
+      }
+    },
+    "Import %lld Books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Importovat knihy: %lld"
+          }
+        }
+      }
+    },
+    "Import %lld Usable Books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Importovat použitelné knihy: %lld"
+          }
+        }
+      }
+    },
+    "Legacy text encoding" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Starší kódování textu"
+          }
+        }
+      }
+    },
+    "Locked PDF" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uzamčené PDF"
+          }
+        }
+      }
+    },
+    "Missing images" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chybějící obrázky"
+          }
+        }
+      }
+    },
+    "No extractable text was found in the first pages. Conversion and search may be limited." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Na prvních stranách nebyl nalezen žádný extrahovatelný text. Převod a vyhledávání mohou být omezené."
+          }
+        }
+      }
+    },
+    "No issues found" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nebyly nalezeny žádné problémy"
+          }
+        }
+      }
+    },
+    "No pages" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Žádné stránky"
+          }
+        }
+      }
+    },
+    "No readable chapters" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Žádné čitelné kapitoly"
+          }
+        }
+      }
+    },
+    "No readable cover image was found. The book can still be imported or sent." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nebyla nalezena čitelná obálka. Knihu lze přesto importovat nebo odeslat."
+          }
+        }
+      }
+    },
+    "No usable cover" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chybí použitelná obálka"
+          }
+        }
+      }
+    },
+    "Possibly a sample" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Možná pouze ukázka"
+          }
+        }
+      }
+    },
+    "Ready" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Připraveno"
+          }
+        }
+      }
+    },
+    "Repair Failed" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Oprava se nezdařila"
+          }
+        }
+      }
+    },
+    "Repairs are saved as new files. Originals stay untouched." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Opravy se ukládají jako nové soubory. Originály zůstávají beze změny."
+          }
+        }
+      }
+    },
+    "Review files before adding them to your library." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Před přidáním do knihovny soubory zkontrolujte."
+          }
+        }
+      }
+    },
+    "Review the selected books before sending them to Kindle." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Před odesláním do Kindlu vybrané knihy zkontrolujte."
+          }
+        }
+      }
+    },
+    "Save Repaired Copy…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uložit opravenou kopii…"
+          }
+        }
+      }
+    },
+    "Save a repaired copy. Book Doctor will not modify the original." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uložte opravenou kopii. Knižní doktor originál nezmění."
+          }
+        }
+      }
+    },
+    "Saved “%@”" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uloženo „%@“"
+          }
+        }
+      }
+    },
+    "Send %lld Ready Books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Odeslat připravené knihy: %lld"
+          }
+        }
+      }
+    },
+    "The EPUB archive couldn’t be read or rebuilt." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Archiv EPUB se nepodařilo přečíst ani znovu sestavit."
+          }
+        }
+      }
+    },
+    "The EPUB container or package document is damaged." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kontejner EPUB nebo dokument balíčku je poškozený."
+          }
+        }
+      }
+    },
+    "The EPUB contains an oversized or suspiciously compressed entry and was not fully opened." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "EPUB obsahuje příliš velkou nebo podezřele komprimovanou položku a nebyl zcela otevřen."
+          }
+        }
+      }
+    },
+    "The EPUB has no readable chapters to preserve." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "EPUB neobsahuje žádné čitelné kapitoly, které by bylo možné zachovat."
+          }
+        }
+      }
+    },
+    "The EPUB spine does not point to any readable chapter." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pořadí čtení EPUBu neodkazuje na žádnou čitelnou kapitolu."
+          }
+        }
+      }
+    },
+    "The MOBI/AZW header or text records are damaged." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hlavička nebo textové záznamy MOBI/AZW jsou poškozené."
+          }
+        }
+      }
+    },
+    "The PDF does not contain any readable pages." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PDF neobsahuje žádné čitelné stránky."
+          }
+        }
+      }
+    },
+    "The PDF is damaged, inaccessible, or too large to inspect safely." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "PDF je poškozené, nepřístupné nebo příliš velké pro bezpečnou kontrolu."
+          }
+        }
+      }
+    },
+    "The file is only about %lld pages long. Check that it is the complete book." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Soubor má jen přibližně %lld stran. Zkontrolujte, zda jde o úplnou knihu."
+          }
+        }
+      }
+    },
+    "This PDF requires a password and can’t be converted or sent by Winston." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Toto PDF vyžaduje heslo a Winston ho nemůže převést ani odeslat."
+          }
+        }
+      }
+    },
+    "Unreadable EPUB" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nečitelný EPUB"
+          }
+        }
+      }
+    },
+    "Unreadable Kindle file" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nečitelný soubor Kindle"
+          }
+        }
+      }
+    },
+    "Unreadable PDF" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nečitelné PDF"
+          }
+        }
+      }
+    },
+    "Unsafe archive entry" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nebezpečná položka archivu"
+          }
+        }
+      }
+    },
+    "Unsupported format" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nepodporovaný formát"
+          }
+        }
+      }
+    },
+    "Winston can preserve this file, but it can’t convert or send DRM-protected content." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Winston může tento soubor zachovat, ale obsah chráněný DRM nemůže převést ani odeslat."
+          }
+        }
+      }
+    },
+    "Winston can’t find this file. Relink it before importing or sending." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Winston tento soubor nemůže najít. Před importem nebo odesláním ho znovu propojte."
+          }
+        }
+      }
+    },
+    "Inspect with Book Doctor…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zkontrolovat Knižním doktorem…"
+          }
+        }
+      }
+    },
     "Zoom In" : {
       "localizations" : {
         "cs" : {
