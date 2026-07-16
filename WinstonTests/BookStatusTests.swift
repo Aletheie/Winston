@@ -25,7 +25,12 @@ struct BookStatusTests {
         #expect(book.dateFinished == first)
     }
 
-    @Test(arguments: [ReadingStatus.unread, ReadingStatus.reading])
+    @Test(arguments: [
+        ReadingStatus.unread,
+        ReadingStatus.reading,
+        ReadingStatus.paused,
+        ReadingStatus.didNotFinish,
+    ])
     func leavingFinishedClearsDate(_ status: ReadingStatus) {
         let book = makeBook()
         book.setStatus(.finished)
@@ -179,5 +184,22 @@ struct LibraryStatsTests {
         #expect(stats.monthly[2].finished == 1)
         #expect(stats.monthly[5].started == 1)
         #expect(stats.monthly[5].finished == 0)
+    }
+
+    @Test func rereadsCountAsSeparateYearlyCompletions() {
+        let now = date(2026, 6, 15)
+        let book = Book(fileName: "reread.epub", originalFileName: "reread.epub")
+        book.setStatus(.reading, at: date(2026, 1, 1))
+        book.setStatus(.finished, at: date(2026, 1, 11))
+        book.setStatus(.reading, at: date(2026, 5, 1))
+        book.setStatus(.finished, at: date(2026, 5, 21))
+
+        let stats = LibraryStats(books: [book], calendar: .current, now: now)
+
+        #expect(stats.finishedCount == 1)
+        #expect(stats.finishedThisYear == 2)
+        #expect(stats.monthly[0].finished == 1)
+        #expect(stats.monthly[4].finished == 1)
+        #expect(stats.averageDaysToFinish == 15)
     }
 }

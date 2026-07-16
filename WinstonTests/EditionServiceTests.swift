@@ -155,6 +155,25 @@ struct EditionServiceTests {
         #expect(winner.dateFinished == finished)
     }
 
+    @Test func absorbReparentsEveryReadingCycle() async throws {
+        let library = try await TestLibrary()
+        let winner = insertBook(library, name: "winner", format: "mobi")
+        let loser = insertBook(library, name: "loser")
+        loser.setStatus(.reading, at: Date(timeIntervalSince1970: 100))
+        loser.setStatus(.finished, at: Date(timeIntervalSince1970: 200))
+        loser.setStatus(.reading, at: Date(timeIntervalSince1970: 300))
+        try library.context.save()
+
+        let service = EditionService(modelContext: library.context)
+        #expect(service.absorb(loser, into: winner))
+
+        #expect(winner.readingSessions.count == 2)
+        #expect(winner.readingSessions.allSatisfy { $0.book?.uuid == winner.uuid })
+        #expect(winner.readingStatus == .reading)
+        #expect(winner.dateStarted == Date(timeIntervalSince1970: 300))
+        #expect(try library.context.fetchCount(FetchDescriptor<ReadingSession>()) == 2)
+    }
+
     @Test func absorbingOneBookRemovesEveryProposalThatReferencesIt() async throws {
         let library = try await TestLibrary()
         let books = [

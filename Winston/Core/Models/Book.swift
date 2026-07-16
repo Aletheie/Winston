@@ -47,8 +47,11 @@ final class Book {
     @Relationship(deleteRule: .cascade, inverse: \Highlight.book)
     var highlights: [Highlight] = []
     var notes: String?
+    // Compatibility summary for the current/latest cycle. Full history lives in readingSessions.
     var dateFinished: Date?
     var dateStarted: Date?
+    @Relationship(deleteRule: .cascade, inverse: \ReadingSession.book)
+    var readingSessions: [ReadingSession] = []
     var drmProtected: Bool?
     var fileSizeBytes: Int64 = 0
     var coverVersion: Int = 0
@@ -121,18 +124,150 @@ final class Book {
         set { editionTypeRaw = newValue.rawValue }
     }
 
-    func setStatus(_ status: ReadingStatus) {
-        readingStatus = status
+    var readingSessionsChronological: [ReadingSession] {
+        readingSessions.sorted {
+            if $0.startedAt == $1.startedAt {
+                return $0.uuid.uuidString < $1.uuid.uuidString
+            }
+            return $0.startedAt < $1.startedAt
+        }
+    }
+
+    var activeReadingSession: ReadingSession? {
+        readingSessionsChronological.last {
+            $0.endedAt == nil && $0.status.isActive
+        }
+    }
+
+    var finishedReadingCount: Int {
+        readingSessions.count { $0.status == .finished }
+    }
+
+    @discardableResult
+    func setStatus(_ status: ReadingStatus, at date: Date = .now) -> ReadingSession? {
         switch status {
         case .unread:
+            closeActiveSessions(as: .didNotFinish, at: date)
+            readingStatus = .unread
             dateStarted = nil
             dateFinished = nil
+
         case .reading:
-            if dateStarted == nil { dateStarted = Date() }
-            dateFinished = nil
+            if let active = activeReadingSession {
+                active.status = .reading
+                active.endedAt = nil
+                applySummary(status: .reading, session: active)
+                return active
+            }
+            let session = makeReadingSession(startedAt: date, status: .reading)
+            applySummary(status: .reading, session: session)
+            return session
+
+        case .paused:
+            let session: ReadingSession
+            if let active = activeReadingSession {
+                session = active
+                session.status = .paused
+            } else {
+                session = makeReadingSession(startedAt: date, status: .paused)
+            }
+            session.endedAt = nil
+            applySummary(status: .paused, session: session)
+            return session
+
         case .finished:
-            if dateFinished == nil { dateFinished = Date() }
+            let legacyFinishedAt = dateFinished
+            if readingStatus == .finished,
+               let latest = readingSessionsChronological.last,
+               latest.status == .finished {
+                applySummary(status: .finished, session: latest)
+                return latest
+            }
+            let session: ReadingSession
+            if let active = activeReadingSession {
+                session = active
+            } else if readingStatus == .didNotFinish,
+                      let latest = readingSessionsChronological.last,
+                      latest.status == .didNotFinish {
+                session = latest
+            } else {
+                session = makeReadingSession(
+                    startedAt: dateStarted ?? legacyFinishedAt ?? date,
+                    status: .reading
+                )
+            }
+            session.status = .finished
+            session.endedAt = session.endedAt ?? legacyFinishedAt ?? date
+            session.setProgress(1)
+            applySummary(status: .finished, session: session)
+            return session
+
+        case .didNotFinish:
+            if readingStatus == .didNotFinish,
+               let latest = readingSessionsChronological.last,
+               latest.status == .didNotFinish {
+                applySummary(status: .didNotFinish, session: latest)
+                return latest
+            }
+            let session: ReadingSession
+            if let active = activeReadingSession {
+                session = active
+            } else if readingStatus == .finished,
+                      let latest = readingSessionsChronological.last,
+                      latest.status == .finished {
+                session = latest
+            } else {
+                session = makeReadingSession(startedAt: dateStarted ?? date, status: .reading)
+            }
+            session.status = .didNotFinish
+            session.endedAt = session.endedAt ?? date
+            applySummary(status: .didNotFinish, session: session)
+            return session
         }
+        return nil
+    }
+
+    @discardableResult
+    func updateReadingProgress(_ value: Double) -> Bool {
+        guard let session = activeReadingSession else { return false }
+        session.setProgress(value)
+        applySummary(status: session.status.readingStatus, session: session)
+        return true
+    }
+
+    @discardableResult
+    func refreshReadingSummaryFromHistory() -> Bool {
+        if let active = activeReadingSession {
+            applySummary(status: active.status.readingStatus, session: active)
+            return true
+        }
+        guard let latest = readingSessionsChronological.last else { return false }
+        applySummary(status: latest.status.readingStatus, session: latest)
+        return true
+    }
+
+    private func makeReadingSession(
+        startedAt: Date,
+        status: ReadingSessionStatus
+    ) -> ReadingSession {
+        let session = ReadingSession(startedAt: startedAt, status: status, book: self)
+        if !readingSessions.contains(where: { $0.uuid == session.uuid }) {
+            readingSessions.append(session)
+        }
+        return session
+    }
+
+    private func closeActiveSessions(as status: ReadingSessionStatus, at date: Date) {
+        for session in readingSessions where session.endedAt == nil && session.status.isActive {
+            session.status = status
+            session.endedAt = date
+        }
+    }
+
+    private func applySummary(status: ReadingStatus, session: ReadingSession) {
+        readingStatus = status
+        dateStarted = session.startedAt
+        dateFinished = status == .finished ? session.endedAt : nil
     }
 
     // MARK: - Metadata

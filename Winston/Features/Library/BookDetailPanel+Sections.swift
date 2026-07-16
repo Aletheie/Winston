@@ -221,16 +221,41 @@ struct DetailStatusRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Picker("", selection: Binding(
-                get: { book.readingStatus },
-                set: { actions.setStatus(book, $0) }
-            )) {
-                ForEach(ReadingStatus.allCases) { status in
-                    Text(theme.usesTerminalCopy ? status.terminalLabel : status.label).tag(status)
+            HStack(spacing: 6) {
+                Picker("Reading Status", selection: Binding(
+                    get: { book.readingStatus },
+                    set: { actions.setStatus(book, $0) }
+                )) {
+                    ForEach(ReadingStatus.allCases) { status in
+                        Label(
+                            theme.usesTerminalCopy ? status.terminalLabel : status.label,
+                            systemImage: status.systemImage
+                        )
+                        .tag(status)
+                    }
                 }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button { actions.readingHistory(book) } label: {
+                    Label("History", systemImage: "clock.arrow.circlepath")
+                }
+                .help("Show reading history")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+
+            if let active = book.activeReadingSession {
+                HStack(spacing: 7) {
+                    ProgressView(value: active.progress)
+                        .controlSize(.small)
+                    Text(active.progress, format: .percent.precision(.fractionLength(0)))
+                        .font(theme.label(size: 9, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                        .monospacedDigit()
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Reading progress")
+            }
 
             if book.dateStarted != nil || book.dateFinished != nil {
                 HStack(spacing: 10) {

@@ -512,7 +512,19 @@ final class EditionService {
     }
 
     private func mergeReadingHistory(into winner: Book, from loser: Book) {
-        let rank: [ReadingStatus: Int] = [.unread: 0, .reading: 1, .finished: 2]
+        let losingSessions = loser.readingSessions
+        for session in losingSessions {
+            session.book = winner
+        }
+        if winner.refreshReadingSummaryFromHistory() { return }
+
+        let rank: [ReadingStatus: Int] = [
+            .unread: 0,
+            .didNotFinish: 1,
+            .paused: 2,
+            .reading: 3,
+            .finished: 4,
+        ]
         if (rank[loser.readingStatus] ?? 0) > (rank[winner.readingStatus] ?? 0) {
             winner.readingStatusRaw = loser.readingStatusRaw
         }

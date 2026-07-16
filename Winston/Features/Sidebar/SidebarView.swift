@@ -157,15 +157,16 @@ struct SidebarView: View {
             }
 
             Section {
-                SidebarRow(title: theme.styledText(terminal: "UNREAD", native: "Unread"),
-                           systemImage: "book.closed", count: facets.unread)
-                    .tag(SidebarItem.status(.unread))
-                SidebarRow(title: theme.styledText(terminal: "READING", native: "Reading"),
-                           systemImage: "book", count: facets.reading)
-                    .tag(SidebarItem.status(.reading))
-                SidebarRow(title: theme.styledText(terminal: "FINISHED", native: "Finished"),
-                           systemImage: "checkmark.circle", count: facets.finished)
-                    .tag(SidebarItem.status(.finished))
+                ForEach(ReadingStatus.allCases) { status in
+                    SidebarRow(
+                        title: Text(verbatim: theme.usesTerminalCopy
+                            ? status.terminalLabel.uppercased()
+                            : status.label),
+                        systemImage: status == .unread ? "book.closed" : status.systemImage,
+                        count: facets.statusCounts[status, default: 0]
+                    )
+                    .tag(SidebarItem.status(status))
+                }
             } header: {
                 header(terminal: "STATUS", native: "Reading Status")
             }
@@ -337,9 +338,7 @@ struct SidebarView: View {
         var seriesKeys: [String] = []
         var tagKeys: [String] = []
         var rated = 0
-        var unread = 0
-        var reading = 0
-        var finished = 0
+        var statusCounts: [ReadingStatus: Int] = [:]
         var recent = 0
         var smartCounts: [UUID: Int] = [:]
         var authorTips: [(original: String, suggestion: String)] = []
@@ -406,11 +405,7 @@ struct SidebarView: View {
             if let series = book.series, !series.isEmpty { facets.series[series, default: 0] += 1 }
             for tag in book.tags { facets.tags[tag, default: 0] += 1 }
             if book.isRated { facets.rated += 1 }
-            switch book.readingStatus {
-            case .unread:   facets.unread += 1
-            case .reading:  facets.reading += 1
-            case .finished: facets.finished += 1
-            }
+            facets.statusCounts[book.readingStatus, default: 0] += 1
             if book.dateAdded > recentCutoff { facets.recent += 1 }
         }
         facets.formatKeys = facets.formats.keys.sorted()

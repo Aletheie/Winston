@@ -26,6 +26,7 @@ struct WinstonApp: App {
         if !isRunningUnitTests {
             LegacyLibraryMigrator.migrateIfNeeded(context: context)
             EditionsBackfill.run(context: context)
+            ReadingHistoryBackfill.run(context: context)
             EditionsBackfill.pruneOrphanWorks(context: context)
         }
         let settings = AppSettings()

@@ -373,10 +373,11 @@ private struct SeriesLocalBookRow: View {
                 .foregroundStyle(theme.textTertiary)
                 .frame(width: 26, alignment: .trailing)
                 .monospacedDigit()
-            Image(systemName: book.readingStatus == .finished ? "checkmark.circle.fill" : "circle")
+            Image(systemName: book.readingStatus.systemImage)
                 .font(.system(size: 11))
                 .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(book.readingStatus == .finished ? theme.success : theme.textTertiary)
+                .foregroundStyle(readingStatusColor)
+                .help(book.readingStatus.label)
             Text(book.displayTitle)
                 .font(theme.label(size: 12, weight: .regular))
                 .foregroundStyle(theme.textPrimary)
@@ -385,6 +386,16 @@ private struct SeriesLocalBookRow: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
+    }
+
+    private var readingStatusColor: Color {
+        switch book.readingStatus {
+        case .unread: theme.textTertiary
+        case .reading: theme.accent
+        case .paused: theme.highlight
+        case .finished: theme.success
+        case .didNotFinish: theme.destructive
+        }
     }
 }
 

@@ -11,14 +11,19 @@ nonisolated struct LibraryStats: Sendable {
     }
 
     struct Input: Sendable {
+        struct ReadingCycle: Sendable {
+            let status: ReadingSessionStatus
+            let startedAt: Date
+            let endedAt: Date?
+        }
+
         let title: String
         let author: String?
         let series: String?
         let format: String
         let rating: Int?
         let status: ReadingStatus
-        let dateStarted: Date?
-        let dateFinished: Date?
+        let readingCycles: [ReadingCycle]
         let fileSizeBytes: Int64
         let workUUID: UUID
     }
@@ -37,10 +42,45 @@ nonisolated struct LibraryStats: Sendable {
                         return total + (asset.fileName == book.fileName ? book.fileSizeBytes : 0)
                     }
             }
-            return Input(title: book.displayTitle, author: book.displayAuthor, series: book.series,
-                         format: book.format, rating: book.rating, status: book.readingStatus,
-                         dateStarted: book.dateStarted, dateFinished: book.dateFinished,
-                         fileSizeBytes: retainedBytes, workUUID: book.work?.uuid ?? book.uuid)
+            let readingCycles: [Input.ReadingCycle]
+            if book.readingSessions.isEmpty {
+                readingCycles = legacyCycle(for: book)
+            } else {
+                readingCycles = book.readingSessions.map {
+                    Input.ReadingCycle(status: $0.status, startedAt: $0.startedAt, endedAt: $0.endedAt)
+                }
+            }
+            return Input(
+                title: book.displayTitle,
+                author: book.displayAuthor,
+                series: book.series,
+                format: book.format,
+                rating: book.rating,
+                status: book.readingStatus,
+                readingCycles: readingCycles,
+                fileSizeBytes: retainedBytes,
+                workUUID: book.work?.uuid ?? book.uuid
+            )
+        }
+    }
+
+    @MainActor
+    private static func legacyCycle(for book: Book) -> [Input.ReadingCycle] {
+        switch book.readingStatus {
+        case .unread:
+            return []
+        case .reading:
+            guard let startedAt = book.dateStarted else { return [] }
+            return [Input.ReadingCycle(status: .reading, startedAt: startedAt, endedAt: nil)]
+        case .paused:
+            guard let startedAt = book.dateStarted else { return [] }
+            return [Input.ReadingCycle(status: .paused, startedAt: startedAt, endedAt: nil)]
+        case .finished:
+            guard let endedAt = book.dateFinished else { return [] }
+            return [Input.ReadingCycle(status: .finished, startedAt: book.dateStarted ?? endedAt, endedAt: endedAt)]
+        case .didNotFinish:
+            guard let startedAt = book.dateStarted else { return [] }
+            return [Input.ReadingCycle(status: .didNotFinish, startedAt: startedAt, endedAt: nil)]
         }
     }
 
@@ -87,25 +127,27 @@ nonisolated struct LibraryStats: Sendable {
 
             switch book.status {
             case .finished: finishedCount += 1
-            case .reading:  readingCount += 1
-            case .unread:   break
+            case .reading, .paused: readingCount += 1
+            case .unread, .didNotFinish: break
             }
 
-            if let started = book.dateStarted, calendar.component(.year, from: started) == year {
-                startedByMonth[calendar.component(.month, from: started) - 1] += 1
-            }
-            if let finished = book.dateFinished {
+            var hasFinishedCycle = false
+            for cycle in book.readingCycles {
+                if calendar.component(.year, from: cycle.startedAt) == year {
+                    startedByMonth[calendar.component(.month, from: cycle.startedAt) - 1] += 1
+                }
+                guard cycle.status == .finished, let finished = cycle.endedAt else { continue }
+                hasFinishedCycle = true
                 if calendar.component(.year, from: finished) == year {
                     finishedThisYear += 1
                     finishedByMonth[calendar.component(.month, from: finished) - 1] += 1
                 }
-                if let started = book.dateStarted, finished >= started {
-                    finishDurations.append(finished.timeIntervalSince(started) / 86_400)
+                if finished >= cycle.startedAt {
+                    finishDurations.append(finished.timeIntervalSince(cycle.startedAt) / 86_400)
                 }
-                if book.status == .finished,
-                   book.fileSizeBytes > (largest?.fileSizeBytes ?? 0) {
-                    largest = book
-                }
+            }
+            if hasFinishedCycle, book.fileSizeBytes > (largest?.fileSizeBytes ?? 0) {
+                largest = book
             }
         }
 

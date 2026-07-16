@@ -11,6 +11,7 @@ struct BookActions {
     var fetchMetadata: (Book) -> Void
     var fetchMetadataSelection: () -> Void
     var setStatus: (Book, ReadingStatus) -> Void
+    var readingHistory: (Book) -> Void
     var addToCollection: (Book, BookCollection) -> Void
     var newCollection: (Book) -> Void
     var setCover: (Book, URL) -> Void
@@ -80,6 +81,9 @@ struct BookContextMenu: View {
             }
         } label: {
             Label("Reading Status", systemImage: "bookmark")
+        }
+        Button { actions.readingHistory(book) } label: {
+            Label("Reading History\u{2026}", systemImage: "clock.arrow.circlepath")
         }
 
         Menu {

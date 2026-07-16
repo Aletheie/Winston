@@ -169,7 +169,7 @@ private struct CardTitleStrip: View {
                 if book.readingStatus != .unread {
                     Image(systemName: book.readingStatus.systemImage)
                         .font(.system(size: 10))
-                        .foregroundStyle(book.readingStatus == .finished ? theme.success : theme.accent)
+                        .foregroundStyle(readingStatusColor)
                         .help(book.readingStatus.label)
                 }
                 if isOnDevice {
@@ -202,6 +202,16 @@ private struct CardTitleStrip: View {
         .padding(.horizontal, 10)
         .padding(.top, 4)
         .padding(.bottom, 10)
+    }
+
+    private var readingStatusColor: Color {
+        switch book.readingStatus {
+        case .unread: theme.textTertiary
+        case .reading: theme.accent
+        case .paused: theme.highlight
+        case .finished: theme.success
+        case .didNotFinish: theme.destructive
+        }
     }
 }
 

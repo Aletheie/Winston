@@ -420,6 +420,11 @@ final class LibraryViewModel {
         notices.booksDidFinish(newlyFinished)
     }
 
+    func updateReadingProgress(_ progress: Double, for book: Book) {
+        guard book.updateReadingProgress(progress) else { return }
+        modelContext.saveQuietly()
+    }
+
     // MARK: - Collections
 
     @discardableResult

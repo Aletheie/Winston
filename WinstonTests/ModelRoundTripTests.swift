@@ -85,6 +85,21 @@ struct ModelRoundTripTests {
         #expect(try context.fetchCount(FetchDescriptor<Highlight>()) == 0)
     }
 
+    @Test func deletingBookCascadesItsReadingHistory() throws {
+        let (container, context) = makeContext()
+        _ = container
+
+        let book = Book(fileName: "a.epub", originalFileName: "A.epub")
+        context.insert(book)
+        book.setStatus(.reading)
+        try context.save()
+        #expect(try context.fetchCount(FetchDescriptor<ReadingSession>()) == 1)
+
+        context.delete(book)
+        try context.save()
+        #expect(try context.fetchCount(FetchDescriptor<ReadingSession>()) == 0)
+    }
+
     @Test func duplicateUUIDUpsertsToASingleRow() throws {
         let (container, context) = makeContext()
         _ = container

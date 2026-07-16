@@ -28,7 +28,7 @@ enum PersistenceController {
         let configuration = ModelConfiguration(url: storeURL)
         do {
             let container = try ModelContainer(
-                for: Work.self, Book.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
+                for: Work.self, Book.self, ReadingSession.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
                 LibraryNotice.self, SeriesCatalogSnapshot.self,
                 configurations: configuration
             )
@@ -38,7 +38,7 @@ enum PersistenceController {
             let backupPath = moveBrokenStoreAside(storeURL: storeURL)
             do {
                 let container = try ModelContainer(
-                    for: Work.self, Book.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
+                    for: Work.self, Book.self, ReadingSession.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
                     LibraryNotice.self, SeriesCatalogSnapshot.self,
                     configurations: configuration
                 )
@@ -77,7 +77,7 @@ enum PersistenceController {
         let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
         do {
             return try ModelContainer(
-                for: Work.self, Book.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
+                for: Work.self, Book.self, ReadingSession.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
                 LibraryNotice.self, SeriesCatalogSnapshot.self,
                 configurations: configuration
             )

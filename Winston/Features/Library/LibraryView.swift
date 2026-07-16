@@ -14,6 +14,7 @@ enum LibrarySheet: Identifiable {
     case work(Work)
     case editionReview
     case bookDoctor(BookDoctorRequest)
+    case readingHistory(Book)
 
     var id: String {
         switch self {
@@ -27,6 +28,7 @@ enum LibrarySheet: Identifiable {
         case .work(let work): "work-\(work.uuid.uuidString)"
         case .editionReview:  "editionReview"
         case .bookDoctor(let request): "bookDoctor-\(request.id.uuidString)"
+        case .readingHistory(let book): "readingHistory-\(book.uuid.uuidString)"
         }
     }
 }
@@ -122,6 +124,7 @@ struct LibraryView: View {
             fetchMetadata: { book in viewModel.fetchOnlineMetadata(for: book) },
             fetchMetadataSelection: { viewModel.fetchOnlineMetadata(for: selectedBooks) },
             setStatus: { book, status in viewModel.setReadingStatus(status, for: targetBooks(for: book)) },
+            readingHistory: { activeSheet = .readingHistory($0) },
             addToCollection: { book, collection in viewModel.add(targetBooks(for: book), to: collection) },
             newCollection: { book in
                 newCollectionTargets = targetBooks(for: book)
@@ -232,6 +235,8 @@ struct LibraryView: View {
                     BookDoctorSheet(request: request) { urls in
                         handleBookDoctorProceed(request, urls: urls)
                     }
+                case .readingHistory(let book):
+                    ReadingHistorySheet(book: book, viewModel: viewModel)
                 }
             }
             .alert("Delete \(selection.count) books?",
