@@ -1,6 +1,6 @@
 import SwiftUI
 
-nonisolated struct DiscoveryReleaseDate: Sendable, Equatable, Comparable {
+nonisolated struct DiscoveryReleaseDate: Sendable, Codable, Equatable, Comparable {
     let year: Int
     let month: Int
     let day: Int
@@ -44,6 +44,12 @@ nonisolated struct DiscoveryReleaseDate: Sendable, Equatable, Comparable {
         return "\(year)-\(month)-\(day)"
     }
 
+    var date: Date? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar.date(from: DateComponents(year: year, month: month, day: day))
+    }
+
     static func < (lhs: DiscoveryReleaseDate, rhs: DiscoveryReleaseDate) -> Bool {
         if lhs.year != rhs.year { return lhs.year < rhs.year }
         if lhs.month != rhs.month { return lhs.month < rhs.month }
@@ -51,7 +57,7 @@ nonisolated struct DiscoveryReleaseDate: Sendable, Equatable, Comparable {
     }
 }
 
-nonisolated struct DiscoveryBook: Sendable, Identifiable, Equatable {
+nonisolated struct DiscoveryBook: Sendable, Codable, Identifiable, Equatable {
     let id: String
     let title: String
     let author: String?

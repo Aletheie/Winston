@@ -7,6 +7,7 @@ struct DiscoveryCardView: View {
     let onToggleWishlist: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
     @State private var isShowingActions = false
 
@@ -16,7 +17,12 @@ struct DiscoveryCardView: View {
                 isShowingActions.toggle()
             } label: {
                 DiscoveryBookLinkContent(
-                    book: book,
+                    bookID: book.id,
+                    title: book.title,
+                    author: book.author,
+                    coverURL: book.coverURL,
+                    rating: book.rating,
+                    releaseDate: book.releaseDate,
                     isWishlisted: isWishlisted
                 )
             }
@@ -48,10 +54,10 @@ struct DiscoveryCardView: View {
                 .stroke(isHovered ? theme.accent.opacity(0.4) : theme.borderSubtle,
                         lineWidth: 1)
         }
-        .scaleEffect(isHovered ? 1.01 : 1.0)
+        .scaleEffect(isHovered && !reduceMotion ? 1.01 : 1.0)
         .shadow(color: .black.opacity(isHovered ? 0.14 : 0.07),
                 radius: isHovered ? 6 : 3, y: isHovered ? 2 : 1)
-        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovered)
         .contentShape(RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous))
         .onHover { isHovered = $0 }
     }
@@ -172,45 +178,71 @@ private struct DiscoveryCardActions: View {
 }
 
 private struct DiscoveryBookLinkContent: View {
-    let book: DiscoveryBook
+    let bookID: String
+    let title: String
+    let author: String?
+    let coverURL: URL?
+    let rating: Double?
+    let releaseDate: DiscoveryReleaseDate?
     let isWishlisted: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            DiscoveryCoverImageView(book: book)
+            DiscoveryCoverImageView(bookID: bookID, coverURL: coverURL)
                 .frame(maxWidth: .infinity)
                 .aspectRatio(WinstonLayout.coverAspect, contentMode: .fill)
                 .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .padding(6)
-            DiscoveryTitleStrip(book: book, isWishlisted: isWishlisted)
+            DiscoveryTitleStrip(
+                title: title,
+                author: author,
+                rating: rating,
+                releaseDate: releaseDate,
+                isWishlisted: isWishlisted
+            )
         }
         .contentShape(Rectangle())
     }
 }
 
 private struct DiscoveryTitleStrip: View {
-    let book: DiscoveryBook
+    let title: String
+    let author: String?
+    let rating: Double?
+    let releaseDate: DiscoveryReleaseDate?
     let isWishlisted: Bool
 
     @Environment(\.theme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(verbatim: book.title)
+            Text(verbatim: title)
                 .font(theme.body(size: 12, weight: .bold))
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(2)
 
-            if let author = book.author {
+            if let author {
                 Text(verbatim: author)
                     .font(theme.label(size: 9))
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
+            } else {
+                Text("Author not listed")
+                    .font(theme.label(size: 9))
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
             }
 
-            HStack(spacing: 4) {
-                if let rating = book.rating {
+            HStack(spacing: 5) {
+                if let date = releaseDate?.date {
+                    Text(date, format: .dateTime.day().month(.abbreviated).year())
+                        .font(theme.label(size: 9, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 2)
+                if let rating {
                     Image(systemName: "star.fill")
                         .font(.system(size: 9))
                         .foregroundStyle(theme.highlight)
@@ -218,7 +250,6 @@ private struct DiscoveryTitleStrip: View {
                         .font(theme.label(size: 9, weight: .semibold))
                         .foregroundStyle(theme.textSecondary)
                 }
-                Spacer()
                 if isWishlisted {
                     Image(systemName: "heart.fill")
                         .font(.system(size: 9, weight: .semibold))
@@ -236,7 +267,8 @@ private struct DiscoveryTitleStrip: View {
 }
 
 private struct DiscoveryCoverImageView: View {
-    let book: DiscoveryBook
+    let bookID: String
+    let coverURL: URL?
 
     @Environment(\.theme) private var theme
     @State private var image: NSImage?
@@ -252,17 +284,18 @@ private struct DiscoveryCoverImageView: View {
                 }
             }
             .clipped()
-            .task(id: book.id) {
+            .task(id: coverURL) {
                 image = nil
-                guard let url = book.coverURL else { return }
-                image = await DiscoveryImageLoader.shared.image(for: url)
+                guard let coverURL else { return }
+                image = await DiscoveryImageLoader.shared.image(for: coverURL)
             }
     }
 
     private var palette: ColorPair {
         let palettes = theme.coverPalettes
         guard !palettes.isEmpty else { return ColorPair(primary: theme.accent, secondary: theme.accentSecondary) }
-        return palettes[abs(book.id.hashValue) % palettes.count]
+        let index = bookID.utf8.reduce(0) { ($0 &* 31 &+ Int($1)) % palettes.count }
+        return palettes[index]
     }
 }
 

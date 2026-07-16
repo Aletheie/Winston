@@ -52,7 +52,8 @@ struct DiscoveryTests {
         await withOnlineEnabled { settings in
             let vm = DiscoveryViewModel(settings: settings, service: FakeDiscoveryClient(.books([sample])))
             await vm.load()
-            #expect(vm.phase == .loaded([sample]))
+            #expect(vm.phase == .loaded)
+            #expect(vm.visibleBooks == [sample])
         }
     }
 
@@ -96,27 +97,28 @@ struct DiscoveryTests {
             let deadline = Date.now.addingTimeInterval(1)
             while Date.now < deadline {
                 let calls = await client.calls
-                if calls == 1, vm.phase == .loaded([sample]) { break }
+                if calls == 1, vm.phase == .loaded { break }
                 try? await Task.sleep(for: .milliseconds(10))
             }
             #expect(await client.calls == 1)
-            #expect(vm.phase == .loaded([sample]))
+            #expect(vm.phase == .loaded)
+            #expect(vm.visibleBooks == [sample])
         }
     }
 
     // MARK: - Caching
 
-    @Test func reloadingSameGenreServesCache() async {
+    @Test func reloadingSameGenreDelegatesCachePolicyToService() async {
         await withOnlineEnabled { settings in
             let client = FakeDiscoveryClient(.books([sample]))
             let vm = DiscoveryViewModel(settings: settings, service: client)
             await vm.load()
             await vm.load()
-            #expect(await client.calls == 1)
+            #expect(await client.calls == 2)
         }
     }
 
-    @Test func returningToACachedGenreDoesNotRefetch() async {
+    @Test func returningToAGenreDelegatesCachePolicyToService() async {
         await withOnlineEnabled { settings in
             let client = FakeDiscoveryClient(.books([sample]))
             let vm = DiscoveryViewModel(settings: settings, service: client)
@@ -125,7 +127,7 @@ struct DiscoveryTests {
             await vm.load()
             vm.select(DiscoveryGenre.default)
             await vm.load()
-            #expect(await client.calls == 2)
+            #expect(await client.calls == 3)
         }
     }
 
@@ -139,46 +141,50 @@ struct DiscoveryTests {
         }
     }
 
-    // MARK: - Wire decoding
+    @Test func catalogIsRevealedInLocalPagesWithoutAnotherServiceCall() async {
+        await withOnlineEnabled { settings in
+            let books = (0..<55).map { index in
+                DiscoveryBook(
+                    id: String(index),
+                    title: "Book \(index)",
+                    author: nil,
+                    coverURL: nil,
+                    hardcoverURL: URL(string: "https://hardcover.app/books/\(index)")!,
+                    rating: nil
+                )
+            }
+            let client = FakeDiscoveryClient(.books(books))
+            let viewModel = DiscoveryViewModel(settings: settings, service: client)
 
-    @Test func parseDecodesHardcoverSearchResponse() {
-        let json = """
-        { "data": { "search": { "results": { "hits": [
-            { "document": {
-                "id": "42", "slug": "the-fifth-season", "title": "The Fifth Season",
-                "rating": 4.31, "release_date": "2015-08-04", "release_year": 2015,
-                "image": { "url": "https://img.hardcover.app/cover.jpg" },
-                "contributions": [ { "author": { "name": "N. K. Jemisin" } } ]
-            } },
-            { "document": {
-                "slug": "a-second-book", "title": "A Second Book",
-                "author_names": ["Jane Roe"],
-                "release_date": 1735689600, "release_year": 2025
-            } },
-            { "document": { "title": "Skipped — no slug" } }
-        ] } } } }
-        """.data(using: .utf8)!
+            await viewModel.load()
+            #expect(viewModel.visibleBooks.count == DiscoveryViewModel.pageSize)
+            #expect(viewModel.hasMore)
 
-        let books = DiscoveryService.parse(json)
-
-        #expect(books.count == 2)
-
-        let first = books[0]
-        #expect(first.id == "42")
-        #expect(first.title == "The Fifth Season")
-        #expect(first.author == "N. K. Jemisin")
-        #expect(first.hardcoverURL == URL(string: "https://hardcover.app/books/the-fifth-season"))
-        #expect(first.coverURL == URL(string: "https://img.hardcover.app/cover.jpg"))
-        #expect(first.rating == 4.31)
-        #expect(first.releaseDate == DiscoveryReleaseDate(year: 2015, month: 8, day: 4))
-
-        let second = books[1]
-        #expect(second.id == "a-second-book")
-        #expect(second.author == "Jane Roe")
-        #expect(second.coverURL == nil)
-        #expect(second.rating == nil)
-        #expect(second.releaseDate == DiscoveryReleaseDate(year: 2025, month: 1, day: 1))
+            await viewModel.loadNextPage()
+            #expect(viewModel.visibleBooks.count == DiscoveryViewModel.pageSize * 2)
+            await viewModel.loadNextPage()
+            #expect(viewModel.visibleBooks == books)
+            #expect(!viewModel.hasMore)
+            #expect(await client.calls == 1)
+        }
     }
+
+    @Test func failedManualRefreshKeepsTheVisibleCatalog() async {
+        await withOnlineEnabled { settings in
+            let client = SequencedDiscoveryClient([.books([sample]), .failed])
+            let viewModel = DiscoveryViewModel(settings: settings, service: client)
+
+            await viewModel.load()
+            await viewModel.refresh()
+
+            #expect(viewModel.phase == .loaded)
+            #expect(viewModel.visibleBooks == [sample])
+            #expect(viewModel.refreshFailed)
+            #expect(!viewModel.isRefreshing)
+        }
+    }
+
+    // MARK: - Wire decoding
 
     @Test func parseBooksDecodesGraphQLReleaseDate() {
         let json = """
@@ -198,25 +204,85 @@ struct DiscoveryTests {
 
     // MARK: - Release-date filter
 
-    @Test func releasedKeepsOnlyBooksProvenAvailableByToday() {
-        func book(_ id: String, year: Int? = nil, date: String? = nil) -> DiscoveryBook {
-            DiscoveryBook(id: id, title: id, author: nil, coverURL: nil,
+    @Test func rankingKeepsCoveredReleasedBooksNewestFirst() {
+        func book(
+            _ id: String,
+            year: Int? = nil,
+            date: String? = nil,
+            hasCover: Bool = true
+        ) -> DiscoveryBook {
+            DiscoveryBook(id: id, title: id, author: nil,
+                          coverURL: hasCover ? URL(string: "https://img.hardcover.app/\(id).jpg") : nil,
                           hardcoverURL: URL(string: "https://hardcover.app/books/\(id)")!,
                           rating: nil, releaseYear: year,
                           releaseDate: date.flatMap { DiscoveryReleaseDate(iso8601: $0) })
         }
         let now = DateComponents(calendar: .current, year: 2025, month: 6, day: 1).date!
-        let kept = DiscoveryService.released(
+        let kept = DiscoveryService.rankedReleasedBooks(
             [book("pastDate", date: "2025-05-31"),
              book("today", date: "2025-06-01"),
              book("laterThisYear", date: "2025-12-01"),
              book("pastYearOnly", year: 2024),
              book("currentYearOnly", year: 2025),
              book("futureYear", year: 2027),
-             book("unknown")],
+             book("unknown"),
+             book("uncovered", date: "2025-06-01", hasCover: false)],
             now: now
         )
-        #expect(kept.map(\.id) == ["pastDate", "today", "pastYearOnly"])
+        #expect(kept.map(\.id) == ["today", "pastDate"])
+    }
+
+    @Test func newestReleaseQueryHasNoPopularityGateAndRequiresCovers() {
+        let query = DiscoveryService.genreQuery
+        #expect(!query.contains("users_count"))
+        #expect(query.contains("release_date: { _lte: $today }"))
+        #expect(query.contains("image_id: { _is_null: false }"))
+        #expect(query.contains("release_date: desc_nulls_last"))
+        #expect(query.contains("limit: 200"))
+    }
+
+    @Test func dailyCacheSurvivesServiceRecreationAndManualRefreshBypassesIt() async throws {
+        DiscoveryURLProtocol.prepare()
+        let folder = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonDiscoveryCache-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let cacheURL = folder.appending(path: "catalog.json")
+        let session = URLSession(configuration: DiscoveryURLProtocol.configuration)
+
+        let first = DiscoveryService(session: session, cacheURL: cacheURL)
+        let initial = await first.books(matching: "Science Fiction", token: "test-token")
+        guard case .books(let books) = initial else {
+            Issue.record("Expected a decoded discovery catalog")
+            return
+        }
+        #expect(books.map(\.id) == ["42"])
+        _ = await first.books(matching: "Science Fiction", token: "test-token")
+
+        let relaunched = DiscoveryService(session: session, cacheURL: cacheURL)
+        _ = await relaunched.books(matching: "Science Fiction", token: "test-token")
+        #expect(DiscoveryURLProtocol.requestCount == 1)
+
+        _ = await relaunched.refreshBooks(matching: "Science Fiction", token: "test-token")
+        #expect(DiscoveryURLProtocol.requestCount == 2)
+        let cacheText = try String(contentsOf: cacheURL, encoding: .utf8)
+        #expect(!cacheText.contains("test-token"))
+    }
+
+    @Test func concurrentRefreshesForOneGenreShareARequest() async {
+        DiscoveryURLProtocol.prepare(responseDelay: 0.1)
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonDiscoveryCache-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        let service = DiscoveryService(
+            session: URLSession(configuration: DiscoveryURLProtocol.configuration),
+            cacheURL: cacheURL
+        )
+
+        async let first = service.refreshBooks(matching: "Fantasy", token: "test-token")
+        async let second = service.refreshBooks(matching: "Fantasy", token: "test-token")
+        _ = await (first, second)
+
+        #expect(DiscoveryURLProtocol.requestCount == 1)
     }
 
     @Test func releaseDateRejectsInvalidCalendarDays() {
@@ -234,6 +300,77 @@ private actor FakeDiscoveryClient: DiscoveryFetching {
         calls += 1
         return result
     }
+}
+
+private actor SequencedDiscoveryClient: DiscoveryFetching {
+    private var results: [DiscoveryResult]
+
+    init(_ results: [DiscoveryResult]) {
+        self.results = results
+    }
+
+    func books(matching queryTerm: String, token: String) async -> DiscoveryResult {
+        guard !results.isEmpty else { return .failed }
+        return results.removeFirst()
+    }
+}
+
+private final class DiscoveryURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var storedRequestCount = 0
+    nonisolated(unsafe) private static var responseDelay: TimeInterval = 0
+
+    static var configuration: URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DiscoveryURLProtocol.self]
+        return configuration
+    }
+
+    static var requestCount: Int {
+        lock.withLock { storedRequestCount }
+    }
+
+    static func prepare(responseDelay: TimeInterval = 0) {
+        lock.withLock {
+            storedRequestCount = 0
+            self.responseDelay = responseDelay
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let delay = Self.lock.withLock { () -> TimeInterval in
+            Self.storedRequestCount += 1
+            return Self.responseDelay
+        }
+        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        let body = """
+        { "data": { "books": [{
+          "id": 42,
+          "slug": "a-new-release",
+          "title": "A New Release",
+          "release_date": "2026-07-01",
+          "release_year": 2026,
+          "image": { "url": "https://img.hardcover.app/42.jpg" },
+          "contributions": [{ "author": { "name": "New Author" } }]
+        }] } }
+        """
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 // MARK: - External book website

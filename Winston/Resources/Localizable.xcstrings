@@ -988,6 +988,17 @@
         }
       }
     },
+    "Author not listed" : {
+      "comment" : "Fallback shown when Hardcover has no author for a release.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Autor není uveden"
+          }
+        }
+      }
+    },
     "Authors" : {
       "localizations" : {
         "cs" : {
@@ -3466,6 +3477,17 @@
         }
       }
     },
+    "Loading more releases…" : {
+      "comment" : "Progress label at the bottom of the Discover grid.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Načítají se další novinky…"
+          }
+        }
+      }
+    },
     "Log" : {
       "localizations" : {
         "cs" : {
@@ -3810,6 +3832,17 @@
         }
       }
     },
+    "Newest released books with covers, updated at most once every 24 hours." : {
+      "comment" : "Discover subtitle describing ordering and cache frequency.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nejnovější vydané knihy s obálkou, aktualizované nejvýše jednou za 24 hodin."
+          }
+        }
+      }
+    },
     "Next in %@: %@" : {
       "comment" : "Next-in-series notice title; the first placeholder is the series name, the second is the book title.",
       "extractionState" : "stale",
@@ -4079,6 +4112,7 @@
       }
     },
     "No results — try another genre." : {
+      "extractionState" : "stale",
       "localizations" : {
         "cs" : {
           "stringUnit" : {
@@ -4556,6 +4590,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Obnovit obsah zařízení"
+          }
+        }
+      }
+    },
+    "Refresh failed. Showing the previous results." : {
+      "comment" : "Discover status shown when a manual Hardcover refresh fails.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovení se nezdařilo. Zobrazuji předchozí výsledky."
           }
         }
       }
