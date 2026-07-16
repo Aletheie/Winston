@@ -11,6 +11,9 @@ final class NoticeService {
     private let wishlist: WishlistService
     private let catalogService: any SeriesCatalogFetching
 
+    @ObservationIgnored private var cachedBooksByID: [UUID: Book] = [:]
+    @ObservationIgnored private var cachedBooksRevision: Int?
+
     private(set) var notices: [LibraryNotice]
     private(set) var isChecking = false
     private(set) var lastCheckFailed = false
@@ -222,9 +225,15 @@ final class NoticeService {
 
     func book(for notice: LibraryNotice) -> Book? {
         guard let uuid = notice.bookUUID else { return nil }
-        var descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == uuid })
-        descriptor.fetchLimit = 1
-        return ((try? modelContext.fetch(descriptor)) ?? []).first
+        let revision = LibraryMutationLog.shared.revision
+        if cachedBooksRevision != revision {
+            cachedBooksByID = Dictionary(
+                modelContext.allBooks().map { ($0.uuid, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            cachedBooksRevision = revision
+        }
+        return cachedBooksByID[uuid]
     }
 
     func isWishlisted(_ notice: LibraryNotice) -> Bool {
@@ -296,6 +305,8 @@ final class NoticeService {
     }
 
     private func prune(existingBookUUIDs: Set<UUID>) {
+        cachedBooksByID = cachedBooksByID.filter { existingBookUUIDs.contains($0.key) }
+
         let stale = notices.filter { notice in
             guard let bookUUID = notice.bookUUID else { return false }
             return !existingBookUUIDs.contains(bookUUID)

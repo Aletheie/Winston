@@ -119,6 +119,37 @@ struct ReadingHistoryImportParserTests {
 @Suite("Reading history matching and application")
 @MainActor
 struct ReadingHistoryImportApplicationTests {
+    @Test func largePreviewBindingsUseIndexedRowLookup() async throws {
+        let rowCount = 10_000
+        let header = "Book Id,Title,Author,Exclusive Shelf\n"
+        let body = (0..<rowCount).map { "\($0),Book \($0),Author,read" }.joined(separator: "\n")
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "reading-preview-\(UUID().uuidString).csv")
+        try Data((header + body).utf8).write(to: url, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let book = Book(fileName: "book-0.epub", originalFileName: "Book 0.epub")
+        book.title = "Book 0"
+        book.author = "Author"
+        let model = ReadingHistoryImportViewModel()
+        await model.load(fileURL: url, books: [book])
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        var selected = 0
+        for row in model.visibleRows where model[included: row.id] {
+            selected += 1
+        }
+        let elapsed = startedAt.duration(to: clock.now)
+
+        print("Reading history preview lookup benchmark: \(elapsed)")
+        #expect(model.rows.count == rowCount)
+        #expect(model.readyCount == 1)
+        #expect(model.unmatchedCount == rowCount - 1)
+        #expect(selected == 1)
+        #expect(elapsed < .seconds(1))
+    }
+
     @Test func matcherPrefersISBNAndLeavesTitleOnlyMatchForReview() throws {
         let isbnBook = Book(fileName: "one.epub", originalFileName: "One.epub")
         isbnBook.title = "Different Export Title"
