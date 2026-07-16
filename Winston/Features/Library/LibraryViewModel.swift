@@ -96,27 +96,45 @@ final class LibraryViewModel {
     func relink(_ book: Book, from url: URL) async { await health.relink(book, from: url) }
 
     func remove(_ book: Book) {
-        forget(book)
-        modelContext.saveQuietly()
+        guard let cleanup = forget(book),
+              modelContext.saveQuietly(rollbackOnFailure: true) else { return }
+        finishRemoval(cleanup)
         editions.refreshEditionCounts()
     }
 
     func removeBooks(_ books: [Book]) {
-        for book in books { forget(book) }
-        modelContext.saveQuietly()
+        var seen: Set<UUID> = []
+        let cleanups = books.compactMap { book -> RemovedBook? in
+            guard seen.insert(book.uuid).inserted else { return nil }
+            return forget(book)
+        }
+        guard !cleanups.isEmpty,
+              modelContext.saveQuietly(rollbackOnFailure: true) else { return }
+        cleanups.forEach(finishRemoval)
         editions.refreshEditionCounts()
     }
 
-    private func forget(_ book: Book) {
+    private struct RemovedBook {
+        let uuid: UUID
+        let fileNames: Set<String>
+    }
+
+    private func forget(_ book: Book) -> RemovedBook? {
+        guard book.modelContext != nil else { return nil }
         let work = book.work
         let assetNames = book.assets.isEmpty ? [book.fileName] : book.assets.map(\.fileName)
-        for fileName in Set(assetNames) { BookFileStore.delete(fileName: fileName) }
-        CoverStore.delete(for: book.uuid)
-        importer.cancelPending(book.uuid)
-        editions.removeProposals(referencing: book.uuid)
+        covers.cancelPending(for: book.uuid)
         book.work = nil
         modelContext.delete(book)
         WorkService.pruneIfOrphaned(work, context: modelContext, save: false)
+        return RemovedBook(uuid: book.uuid, fileNames: Set(assetNames))
+    }
+
+    private func finishRemoval(_ removed: RemovedBook) {
+        removed.fileNames.forEach { BookFileStore.delete(fileName: $0) }
+        CoverStore.delete(for: removed.uuid)
+        importer.cancelPending(removed.uuid)
+        editions.removeProposals(referencing: removed.uuid)
     }
 
     // MARK: - Metadata (forwarded)
