@@ -350,7 +350,7 @@
       }
     },
     "%lld books" : {
-      "comment" : "Number of books owned from the selected series.",
+      "comment" : "Number of books owned from the selected series.\nNumber of books visible in the selected backup filter.",
       "localizations" : {
         "cs" : {
           "variations" : {
@@ -9261,6 +9261,869 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Jazyk: %@"
+          }
+        }
+      }
+    },
+    "%lld backups · %lld changes" : {
+      "comment" : "Time Machine summary; first value is backup count, second is changed book count.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zálohy: %1$lld · změny: %2$lld"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld backups · %2$lld changes"
+          }
+        }
+      }
+    },
+    "A safety backup could not be created: %@" : {
+      "comment" : "Restore error. The interpolated value describes the underlying failure.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pojistnou zálohu se nepodařilo vytvořit: %@"
+          }
+        }
+      }
+    },
+    "A safety backup is created before every restore. Book files are never replaced." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Před každou obnovou se vytvoří pojistná záloha. Soubory knih se nikdy nenahrazují."
+          }
+        }
+      }
+    },
+    "Added later" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidáno později"
+          }
+        }
+      }
+    },
+    "Backup Couldn’t Be Opened" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zálohu se nepodařilo otevřít"
+          }
+        }
+      }
+    },
+    "Backups" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zálohy"
+          }
+        }
+      }
+    },
+    "Book file records are compared but never restored." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Záznamy souborů knih se porovnávají, ale nikdy neobnovují."
+          }
+        }
+      }
+    },
+    "Browse Backup History…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Procházet historii záloh…"
+          }
+        }
+      }
+    },
+    "Change the filter or search to see more books." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Změňte filtr nebo hledání a zobrazte další knihy."
+          }
+        }
+      }
+    },
+    "Changed" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Změněné"
+          }
+        }
+      }
+    },
+    "Changed Areas" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Změněné oblasti"
+          }
+        }
+      }
+    },
+    "Changed Fields" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Změněná pole"
+          }
+        }
+      }
+    },
+    "Choose a Backup" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vyberte zálohu"
+          }
+        }
+      }
+    },
+    "Choose a book to inspect exactly what changed." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vyberte knihu a prohlédněte si přesně, co se změnilo."
+          }
+        }
+      }
+    },
+    "Collection memberships" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zařazení do kolekcí"
+          }
+        }
+      }
+    },
+    "Community rating" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Komunitní hodnocení"
+          }
+        }
+      }
+    },
+    "Community rating count" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Počet komunitních hodnocení"
+          }
+        }
+      }
+    },
+    "Community rating source" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zdroj komunitního hodnocení"
+          }
+        }
+      }
+    },
+    "Compare snapshots and restore only the book data you need." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Porovnejte snímky a obnovte jen ta data knihy, která potřebujete."
+          }
+        }
+      }
+    },
+    "Cover" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obálka"
+          }
+        }
+      }
+    },
+    "Create a backup first, then return here to compare it." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nejprve vytvořte zálohu a potom se sem vraťte a porovnejte ji."
+          }
+        }
+      }
+    },
+    "Current" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aktuální"
+          }
+        }
+      }
+    },
+    "Current bibliographic metadata, ratings, and notes will be replaced. Reading history, highlights, collections, and book files stay untouched." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Současná bibliografická metadata, hodnocení a poznámky budou nahrazeny. Historie čtení, zvýraznění, kolekce a soubory knih zůstanou beze změny."
+          }
+        }
+      }
+    },
+    "DRM" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DRM"
+          }
+        }
+      }
+    },
+    "Deleted" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Smazáno"
+          }
+        }
+      }
+    },
+    "Edition type" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Typ vydání"
+          }
+        }
+      }
+    },
+    "File record" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Záznam souboru"
+          }
+        }
+      }
+    },
+    "Highlights and notes" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zvýraznění a poznámky"
+          }
+        }
+      }
+    },
+    "Latest" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nejnovější"
+          }
+        }
+      }
+    },
+    "Library Time Machine" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Time Machine knihovny"
+          }
+        }
+      }
+    },
+    "Metadata, reading history, highlights, collection memberships, and the saved cover will return to this backup’s state. Book files stay untouched." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Metadata, historie čtení, zvýraznění, zařazení do kolekcí a uložená obálka se vrátí do stavu této zálohy. Soubory knih zůstanou beze změny."
+          }
+        }
+      }
+    },
+    "Modified" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Upraveno"
+          }
+        }
+      }
+    },
+    "My rating" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Moje hodnocení"
+          }
+        }
+      }
+    },
+    "No" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ne"
+          }
+        }
+      }
+    },
+    "No Backups" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Žádné zálohy"
+          }
+        }
+      }
+    },
+    "No metadata changes to restore" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Žádné změny metadat k obnovení"
+          }
+        }
+      }
+    },
+    "No saved backup cover to restore" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "V záloze není uložená obálka k obnovení"
+          }
+        }
+      }
+    },
+    "Not available" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Není k dispozici"
+          }
+        }
+      }
+    },
+    "Not set" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nenastaveno"
+          }
+        }
+      }
+    },
+    "Notes" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Poznámky"
+          }
+        }
+      }
+    },
+    "Opening a safe working copy…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Otevírám bezpečnou pracovní kopii…"
+          }
+        }
+      }
+    },
+    "Opening backup" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Otevírání zálohy"
+          }
+        }
+      }
+    },
+    "Reading cycles" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cykly čtení"
+          }
+        }
+      }
+    },
+    "Reading history" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Historie čtení"
+          }
+        }
+      }
+    },
+    "Restorable" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovitelné"
+          }
+        }
+      }
+    },
+    "Restore Book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit knihu"
+          }
+        }
+      }
+    },
+    "Restore Book…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit knihu…"
+          }
+        }
+      }
+    },
+    "Restore Cover" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit obálku"
+          }
+        }
+      }
+    },
+    "Restore Cover…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit obálku…"
+          }
+        }
+      }
+    },
+    "Restore Metadata" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit metadata"
+          }
+        }
+      }
+    },
+    "Restore Metadata…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit metadata…"
+          }
+        }
+      }
+    },
+    "Restore from Backup?" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit ze zálohy?"
+          }
+        }
+      }
+    },
+    "Restore only bibliographic metadata, ratings, and notes" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit jen bibliografická metadata, hodnocení a poznámky"
+          }
+        }
+      }
+    },
+    "Restore only the saved cover" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit jen uloženou obálku"
+          }
+        }
+      }
+    },
+    "Restore this book from the backup?" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit tuto knihu ze zálohy?"
+          }
+        }
+      }
+    },
+    "Restore this book’s catalog data without replacing its EPUB or PDF file" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit katalogová data této knihy bez nahrazení jejího souboru EPUB nebo PDF"
+          }
+        }
+      }
+    },
+    "Restore this book’s cover?" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit obálku této knihy?"
+          }
+        }
+      }
+    },
+    "Restore this book’s metadata?" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit metadata této knihy?"
+          }
+        }
+      }
+    },
+    "Restored “%@” and saved the previous state as a new backup." : {
+      "comment" : "Restore result. The interpolated value is the book title.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kniha „%@“ byla obnovena a předchozí stav byl uložen jako nová záloha."
+          }
+        }
+      }
+    },
+    "Restored “%@”. Its book file is missing and must be relinked." : {
+      "comment" : "Restore result. The interpolated value is the book title.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kniha „%@“ byla obnovena. Její soubor chybí a je nutné ho znovu propojit."
+          }
+        }
+      }
+    },
+    "Restored “%@”. Some deleted collections could not be reattached." : {
+      "comment" : "Restore result. The interpolated value is the book title.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kniha „%@“ byla obnovena. Některé smazané kolekce se nepodařilo znovu přiřadit."
+          }
+        }
+      }
+    },
+    "Saved cover" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uložená obálka"
+          }
+        }
+      }
+    },
+    "Search backup" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hledat v záloze"
+          }
+        }
+      }
+    },
+    "Select a Book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vyberte knihu"
+          }
+        }
+      }
+    },
+    "Select a snapshot to compare it with your library." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vyberte snímek, který chcete porovnat se svou knihovnou."
+          }
+        }
+      }
+    },
+    "Series position" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pořadí v sérii"
+          }
+        }
+      }
+    },
+    "Show" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zobrazit"
+          }
+        }
+      }
+    },
+    "Stored With This Book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uloženo s touto knihou"
+          }
+        }
+      }
+    },
+    "The backup and current catalog contain different data for this book." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Záloha a současný katalog obsahují u této knihy odlišná data."
+          }
+        }
+      }
+    },
+    "The backup catalog could not be opened: %@" : {
+      "comment" : "Time Machine error. The interpolated value describes the catalog failure.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Katalog zálohy se nepodařilo otevřít: %@"
+          }
+        }
+      }
+    },
+    "The book file is no longer present and will need to be relinked." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Soubor knihy už není dostupný a bude ho nutné znovu propojit."
+          }
+        }
+      }
+    },
+    "The current saved cover will be replaced. Metadata, reading data, and book files stay untouched." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Současná uložená obálka bude nahrazena. Metadata, data o čtení a soubory knih zůstanou beze změny."
+          }
+        }
+      }
+    },
+    "The restored book could not be saved: %@" : {
+      "comment" : "Restore error. The interpolated value describes the underlying failure.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovenou knihu se nepodařilo uložit: %@"
+          }
+        }
+      }
+    },
+    "The restored cover could not be saved." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovenou obálku se nepodařilo uložit."
+          }
+        }
+      }
+    },
+    "The saved cover in this backup could not be read." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uloženou obálku v této záloze se nepodařilo přečíst."
+          }
+        }
+      }
+    },
+    "This backup does not contain a library catalog." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato záloha neobsahuje katalog knihovny."
+          }
+        }
+      }
+    },
+    "This backup does not contain a saved cover for the book." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato záloha neobsahuje uloženou obálku této knihy."
+          }
+        }
+      }
+    },
+    "This book existed in the backup but is no longer in the current catalog." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato kniha byla v záloze, ale v současném katalogu už není."
+          }
+        }
+      }
+    },
+    "This book is no longer available for that restore action." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato kniha už pro zvolenou obnovu není dostupná."
+          }
+        }
+      }
+    },
+    "This book matches the selected backup." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato kniha odpovídá vybrané záloze."
+          }
+        }
+      }
+    },
+    "This book was added after the selected backup and cannot be restored from it." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato kniha byla přidána až po vybrané záloze a nelze ji z ní obnovit."
+          }
+        }
+      }
+    },
+    "Unchanged" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Beze změny"
+          }
+        }
+      }
+    },
+    "Unknown" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Neznámé"
+          }
+        }
+      }
+    },
+    "Yes" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ano"
+          }
+        }
+      }
+    },
+    "—" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "—"
           }
         }
       }

@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var showRelaunchPrompt = false
     @State private var backups: [URL] = []
     @State private var restoreCandidate: URL?
+    @State private var showLibraryTimeMachine = false
     @State private var zoomDraft = AppSettings.defaultGridZoom
 
     var body: some View {
@@ -51,6 +52,14 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) { restoreCandidate = nil }
         } message: {
             Text("Winston relaunches and replaces the current catalog (metadata, collections, reading status, covers) with this backup. The current state is saved as a new backup first. Book files are not touched.")
+        }
+        .sheet(isPresented: $showLibraryTimeMachine, onDismiss: reloadBackups) {
+            if let path = settings.backupFolderPath {
+                LibraryTimeMachineSheet(
+                    backupFolder: URL(fileURLWithPath: path, isDirectory: true),
+                    onBackupsChanged: reloadBackups
+                )
+            }
         }
     }
 
@@ -200,6 +209,13 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
 
                 if !backups.isEmpty {
+                    Button {
+                        showLibraryTimeMachine = true
+                    } label: {
+                        Label("Browse Backup History…", systemImage: "clock.arrow.circlepath")
+                    }
+                    .accessibilityIdentifier("libraryTimeMachine.open")
+
                     ForEach(backups, id: \.self) { backup in
                         HStack {
                             if let date = LibraryBackup.date(of: backup) {

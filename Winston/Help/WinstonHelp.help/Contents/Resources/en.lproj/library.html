@@ -89,6 +89,8 @@
     <h2 id="backup">Backup &amp; library health</h2>
     <ul>
         <li>Turn on <b>Settings → Backup</b> and choose a folder. Winston then copies your catalog and covers there about once a day, keeping the most recent few backups.</li>
+        <li>Choose <b>Browse Backup History…</b> to compare any snapshot with the current library. You can restore only a book's metadata, only its cover, or all of its catalog data. Winston creates a new safety backup before every restore.</li>
+        <li>Time Machine never replaces EPUB or PDF files. If you restore a catalog entry whose book file is gone, Winston keeps the restored record and asks you to relink the file.</li>
         <li>This is a safety net for your organization (ratings, collections, reading status, highlights). To move the actual book files somewhere portable, use <b>Library → Export Library…</b>, which writes readable “Author - Title” files plus a metadata CSV/JSON.</li>
         <li>If a book's file is moved or deleted outside Winston, the book is flagged with a ⚠️ badge; right‑click it and choose <b>Replace File…</b> to point it at the file again.</li>
     </ul>

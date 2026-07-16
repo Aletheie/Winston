@@ -88,6 +88,7 @@ struct WinstonApp: App {
 
         Settings {
             SettingsView()
+                .modelContainer(container)
                 .environment(themeManager)
                 .environment(settings)
                 .environment(pluginService)

@@ -18,6 +18,7 @@ nonisolated enum LibraryBackup {
     static let folderPrefix = "Winston Backup "
     // Backups made before the app was renamed from Kalibre — keep them listed and restorable.
     static let legacyFolderPrefix = "Kalibre Backup "
+    static let currentStoreName = "Winston.store"
     static let legacyStoreName = "Kalibre.store"
     static let pendingRestoreKey = "pendingRestorePath"
 
@@ -82,6 +83,27 @@ nonisolated enum LibraryBackup {
         let prefix = name.hasPrefix(legacyFolderPrefix) ? legacyFolderPrefix : folderPrefix
         let stamp = name.replacingOccurrences(of: prefix, with: "")
         return timestampFormatter().date(from: String(stamp.prefix(17)))
+    }
+
+    static func catalogURL(in backup: URL) -> URL? {
+        let fileManager = FileManager.default
+        for name in [currentStoreName, legacyStoreName] {
+            let candidate = backup.appending(path: name)
+            if fileManager.fileExists(atPath: candidate.path(percentEncoded: false)) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    static func coverURL(for bookID: UUID, in backup: URL) -> URL? {
+        let candidate = backup
+            .appending(path: "covers", directoryHint: .isDirectory)
+            .appending(path: "\(bookID.uuidString).jpg")
+        guard FileManager.default.fileExists(atPath: candidate.path(percentEncoded: false)) else {
+            return nil
+        }
+        return candidate
     }
 
     static func requestRestore(from backup: URL) {
