@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import SwiftData
+import AppKit
 @testable import Winston
 
 @MainActor
@@ -109,6 +110,37 @@ struct MetadataServiceTests {
         #expect(matched)
         #expect(CoverStore.load(for: book.uuid) != nil)
         #expect(book.coverVersion == 1)
+    }
+
+    @Test func lateOnlineCoverDoesNotOverwriteANewerUserCover() async throws {
+        let lib = try await TestLibrary()
+        let book = Book(fileName: "cover.epub", originalFileName: "Cover.epub")
+        lib.context.insert(book)
+        try lib.context.save()
+
+        var fetched = FetchedMetadata()
+        fetched.title = "Covered"
+        fetched.coverURL = URL(string: "https://example.invalid/cover.jpg")
+        let online = CoverGateOnlineClient(result: fetched, data: EPUBFixture.jpegData())
+        let service = makeService(in: lib, online: online)
+        let task = Task { @MainActor in
+            await service.performEnrich(book, replaceCover: true)
+        }
+
+        await online.waitUntilDownloadStarted()
+        let custom = NSImage(size: NSSize(width: 17, height: 23))
+        custom.lockFocus()
+        NSColor.systemPink.setFill()
+        NSRect(origin: .zero, size: custom.size).fill()
+        custom.unlockFocus()
+        CoverStore.save(custom, for: book.uuid)
+        book.coverVersion += 1
+        try lib.context.save()
+        let expected = try #require(CoverStore.loadData(for: book.uuid))
+
+        await online.resumeDownload()
+        #expect(await task.value)
+        #expect(CoverStore.loadData(for: book.uuid) == expected)
     }
 
     @Test func renameTagRewritesEveryBookAndDeduplicates() async throws {

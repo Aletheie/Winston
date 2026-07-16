@@ -233,6 +233,7 @@ final class MetadataService {
         let title = book.displayTitle
         let author = book.displayAuthor
         let hasCover = CoverStore.exists(for: uuid)
+        let coverVersion = book.coverVersion
 
         enrichingUUIDs.insert(uuid)
         defer { enrichingUUIDs.remove(uuid) }
@@ -264,14 +265,31 @@ final class MetadataService {
 
         guard book.modelContext != nil else { return false }
 
+        if downloadedCover != nil,
+           book.coverVersion != coverVersion || (!replaceCover && CoverStore.exists(for: uuid)) {
+            downloadedCover = nil
+        }
+
+        var installedCoverVersion: Int?
+        var previousCoverData: Data?
+        var installedCoverURL: URL?
         if let image = downloadedCover {
             let fileURL = book.fileURL
-            CoverStore.save(image, for: uuid)
-            await CoverCache.shared.replace(image, for: fileURL)
-            guard book.modelContext != nil else {
-                CoverStore.delete(for: uuid)
-                await CoverCache.shared.replace(nil, for: fileURL)
-                return false
+            previousCoverData = CoverStore.loadData(for: uuid)
+            if CoverStore.save(image, for: uuid) {
+                book.coverVersion += 1
+                installedCoverVersion = book.coverVersion
+                installedCoverURL = fileURL
+                await CoverCache.shared.replace(image, for: fileURL)
+                guard book.modelContext != nil else {
+                    if book.coverVersion == installedCoverVersion {
+                        CoverStore.delete(for: uuid)
+                        await CoverCache.shared.replace(nil, for: fileURL)
+                    }
+                    return false
+                }
+            } else {
+                downloadedCover = nil
             }
         }
 
@@ -290,8 +308,19 @@ final class MetadataService {
         }
         book.onlineLookupAt = .now
         book.onlineLookupConfiguration = configuration
-        if downloadedCover != nil { book.coverVersion += 1 }
-        if save { modelContext.saveQuietly() }
+        if save {
+            let coverStillOurs = installedCoverVersion.map { $0 == book.coverVersion } ?? false
+            guard modelContext.saveQuietly(rollbackOnFailure: true) else {
+                if coverStillOurs, let installedCoverURL,
+                   CoverStore.restore(previousCoverData, for: uuid) {
+                    await CoverCache.shared.replace(
+                        previousCoverData.flatMap(NSImage.init(data:)),
+                        for: installedCoverURL
+                    )
+                }
+                return false
+            }
+        }
         return true
     }
 
