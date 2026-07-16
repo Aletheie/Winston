@@ -171,6 +171,20 @@ struct NoticeServiceTests {
         #expect(NoticeService.isDue(last: now.addingTimeInterval(-25 * 3600), now: now))
     }
 
+    @Test func eachReleaseCheckRequestsFreshCatalogs() async {
+        let harness = makeHarness(catalog: catalog(books: [
+            remoteBook(id: 1, title: "Owned", position: 1),
+        ]))
+        defer { harness.defaults.restore(on: harness.settings) }
+        insertBook(title: "Owned", series: "Saga", position: "1", into: harness.context)
+
+        await harness.service.checkForNewReleases()
+        await harness.service.checkForNewReleases()
+
+        let refreshCalls = await harness.catalogService.refreshCalls
+        #expect(refreshCalls == 2)
+    }
+
     private func makeHarness(catalog: HardcoverSeriesCatalog? = nil) -> NoticeHarness {
         let container = PersistenceController.inMemory()
         let context = container.mainContext
@@ -294,6 +308,7 @@ private struct NoticeDefaultsSnapshot {
 private actor FakeSeriesCatalogService: SeriesCatalogFetching {
     private var catalog: HardcoverSeriesCatalog?
     private(set) var calls = 0
+    private(set) var refreshCalls = 0
 
     init(catalog: HardcoverSeriesCatalog? = nil) {
         self.catalog = catalog
@@ -310,5 +325,13 @@ private actor FakeSeriesCatalogService: SeriesCatalogFetching {
         calls += 1
         guard let catalog else { return [:] }
         return Dictionary(uniqueKeysWithValues: lookups.map { ($0.id, catalog) })
+    }
+
+    func refreshCatalogs(
+        matching lookups: [SeriesLookup],
+        token: String
+    ) async throws -> [String: HardcoverSeriesCatalog] {
+        refreshCalls += 1
+        return try await catalogs(matching: lookups, token: token)
     }
 }

@@ -750,6 +750,21 @@ struct SeriesCompletionTests {
         #expect(SeriesCacheURLProtocol.requestCount == 1)
     }
 
+    @Test func refreshingCatalogsBypassesCachedResults() async throws {
+        SeriesCacheURLProtocol.prepare()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SeriesCacheURLProtocol.self]
+        let service = HardcoverSeriesService(session: URLSession(configuration: configuration))
+
+        _ = try await service.catalogs(matching: [lookup], token: "test-token")
+        _ = try await service.catalogs(matching: [lookup], token: "test-token")
+        #expect(SeriesCacheURLProtocol.requestCount == 1)
+
+        _ = try await service.refreshCatalogs(matching: [lookup], token: "test-token")
+
+        #expect(SeriesCacheURLProtocol.requestCount == 2)
+    }
+
     @Test func concurrentCatalogRequestsForTheSameSeriesAreCoalesced() async throws {
         SeriesCacheURLProtocol.prepare(responseDelay: 0.15)
         let configuration = URLSessionConfiguration.ephemeral

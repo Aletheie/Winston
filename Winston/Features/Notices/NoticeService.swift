@@ -76,7 +76,7 @@ final class NoticeService {
         isChecking = true
         defer { isChecking = false }
         do {
-            let catalogs = try await catalogService.catalogs(matching: lookups, token: token)
+            let catalogs = try await catalogService.refreshCatalogs(matching: lookups, token: token)
             let inserted = applyCatalogs(catalogs, lookups: lookups)
             modelContext.saveQuietly()
             reload()

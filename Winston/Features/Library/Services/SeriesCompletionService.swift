@@ -89,6 +89,20 @@ nonisolated protocol SeriesCatalogFetching: Sendable {
         matching lookups: [SeriesLookup],
         token: String
     ) async throws -> [String: HardcoverSeriesCatalog]
+
+    func refreshCatalogs(
+        matching lookups: [SeriesLookup],
+        token: String
+    ) async throws -> [String: HardcoverSeriesCatalog]
+}
+
+nonisolated extension SeriesCatalogFetching {
+    func refreshCatalogs(
+        matching lookups: [SeriesLookup],
+        token: String
+    ) async throws -> [String: HardcoverSeriesCatalog] {
+        try await catalogs(matching: lookups, token: token)
+    }
 }
 
 nonisolated enum SeriesCatalogError: Error, Equatable {
@@ -210,6 +224,27 @@ actor HardcoverSeriesService: SeriesCatalogFetching {
         }
 
         return result
+    }
+
+    func refreshCatalogs(
+        matching lookups: [SeriesLookup],
+        token: String
+    ) async throws -> [String: HardcoverSeriesCatalog] {
+        var previousCache: [String: CacheEntry] = [:]
+        for lookup in lookups {
+            if let entry = cache[lookup.cacheKey] {
+                previousCache[lookup.cacheKey] = entry
+            }
+            cache[lookup.cacheKey] = nil
+        }
+        do {
+            return try await catalogs(matching: lookups, token: token)
+        } catch {
+            for (key, entry) in previousCache where cache[key] == nil {
+                cache[key] = entry
+            }
+            throw error
+        }
     }
 
     private func finish(
