@@ -7763,6 +7763,16 @@
         }
       }
     },
+    "More reading statuses" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Další stavy čtení"
+          }
+        }
+      }
+    },
     "No Reading History" : {
       "localizations" : {
         "cs" : {
