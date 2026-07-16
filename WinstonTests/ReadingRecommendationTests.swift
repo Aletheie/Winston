@@ -220,4 +220,30 @@ struct ReadingRecommendationTests {
 
         #expect(result.map(\.bookID) == [available.id])
     }
+
+    @Test func rankingScalesToALargeLibrary() {
+        var books = (0..<4_000).map { index in
+            candidate(title: "Book \(index)", series: "Long Series")
+        }
+        books.append(candidate(
+            title: "Finished Prelude",
+            status: .finished,
+            series: "Long Series"
+        ))
+        var preferences = ReadingRecommendationPreferences.default
+        preferences.preferHighlyRated = false
+        preferences.preferWaitingLongest = false
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let result = ReadingRecommendationService.rank(
+            books,
+            preferences: preferences,
+            now: now
+        )
+        let elapsed = startedAt.duration(to: clock.now)
+
+        print("Reading recommendation ranking benchmark: \(elapsed)")
+        #expect(result.count == 4_000)
+    }
 }
