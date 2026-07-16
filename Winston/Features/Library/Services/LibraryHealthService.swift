@@ -140,14 +140,14 @@ final class LibraryHealthService {
         let oldFileName = book.fileName
         let asset = book.assets.first { $0.fileName == oldFileName }
             ?? book.assets.first { $0.uuid == book.uuid }
-        guard let fileName = try? BookFileStore.importCopy(of: url, uuid: asset?.uuid ?? book.uuid) else { return }
+        guard let fileName = try? BookFileStore.replacementCopy(
+            of: url, replacing: oldFileName, uuid: asset?.uuid ?? book.uuid
+        ) else { return }
         let replacementDate = Date()
-        if fileName != oldFileName { BookFileStore.delete(fileName: oldFileName) }
         book.fileName = fileName
         book.fileSizeBytes = BookFileStore.size(of: fileName)
         book.drmProtected = nil
         book.coverVersion += 1
-        missingFileUUIDs.remove(book.uuid)
 
         let updatedAsset: BookAsset
         if let asset {
@@ -172,7 +172,12 @@ final class LibraryHealthService {
             modelContext.insert(asset)
             updatedAsset = asset
         }
-        modelContext.saveQuietly()
+        guard modelContext.saveQuietly(rollbackOnFailure: true) else {
+            BookFileStore.delete(fileName: fileName)
+            return
+        }
+        missingFileUUIDs.remove(book.uuid)
+        if fileName != oldFileName { BookFileStore.delete(fileName: oldFileName) }
 
         let managedURL = BookFileStore.url(for: fileName)
         let analysis = await Task.detached(priority: .utility) {

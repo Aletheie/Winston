@@ -1,10 +1,18 @@
 import Foundation
 
 enum BookFileStore {
+    nonisolated static func replacementCopy(
+        of source: URL,
+        replacing existingFileName: String,
+        uuid: UUID
+    ) throws -> String {
+        let candidate = fileName(for: source, uuid: uuid)
+        return try importCopy(of: source, uuid: candidate == existingFileName ? UUID() : uuid)
+    }
+
     nonisolated static func importCopy(of source: URL, uuid: UUID) throws -> String {
         try AppPaths.ensureDirectory(AppPaths.booksDirectory)
-        let ext = source.pathExtension.lowercased()
-        let fileName = ext.isEmpty ? uuid.uuidString : "\(uuid.uuidString).\(ext)"
+        let fileName = fileName(for: source, uuid: uuid)
         let destination = AppPaths.booksDirectory.appending(path: fileName)
 
         if source.standardizedFileURL == destination.standardizedFileURL {
@@ -32,6 +40,11 @@ enum BookFileStore {
             try fileManager.moveItem(at: temporary, to: destination)
         }
         return fileName
+    }
+
+    private nonisolated static func fileName(for source: URL, uuid: UUID) -> String {
+        let ext = source.pathExtension.lowercased()
+        return ext.isEmpty ? uuid.uuidString : "\(uuid.uuidString).\(ext)"
     }
 
     nonisolated static func url(for fileName: String) -> URL {
