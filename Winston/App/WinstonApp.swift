@@ -80,7 +80,7 @@ struct WinstonApp: App {
         }
         .modelContainer(container)
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
+        .windowResizability(.automatic)
         .defaultSize(width: 1100, height: 700)
         .commands {
             AppCommands(themeManager: themeManager, settings: settings, updater: updater)
