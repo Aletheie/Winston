@@ -223,19 +223,34 @@ struct DetailStatusRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Picker("Reading Status", selection: Binding(
-                    get: { book.readingStatus },
-                    set: { actions.setStatus(book, $0) }
-                )) {
-                    ForEach(Self.primaryStatuses) { status in
-                        Text(theme.usesTerminalCopy ? status.terminalLabel : status.label)
-                            .tag(status)
-                    }
+            Picker("Reading Status", selection: Binding(
+                get: { book.readingStatus },
+                set: { actions.setStatus(book, $0) }
+            )) {
+                ForEach(Self.primaryStatuses) { status in
+                    Text(theme.usesTerminalCopy ? status.terminalLabel : status.label)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .tag(status)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(minWidth: 0, maxWidth: .infinity)
+
+            HStack(spacing: 6) {
+                if let secondaryStatus {
+                    Label(
+                        theme.usesTerminalCopy ? secondaryStatus.terminalLabel : secondaryStatus.label,
+                        systemImage: secondaryStatus.systemImage
+                    )
+                    .font(theme.label(size: 9, weight: .semibold))
+                    .foregroundStyle(secondaryStatusColor)
+                    .accessibilityIdentifier("bookDetail.secondaryReadingStatus")
+                }
+
+                Spacer(minLength: 0)
 
                 Menu {
                     secondaryStatusButton(.paused)
@@ -250,16 +265,7 @@ struct DetailStatusRow: View {
                 .help("More reading statuses")
                 .accessibilityLabel("More reading statuses")
             }
-
-            if let secondaryStatus {
-                Label(
-                    theme.usesTerminalCopy ? secondaryStatus.terminalLabel : secondaryStatus.label,
-                    systemImage: secondaryStatus.systemImage
-                )
-                .font(theme.label(size: 9, weight: .semibold))
-                .foregroundStyle(secondaryStatusColor)
-                .accessibilityIdentifier("bookDetail.secondaryReadingStatus")
-            }
+            .controlSize(.small)
 
             if let active = book.activeReadingSession {
                 HStack(spacing: 7) {
