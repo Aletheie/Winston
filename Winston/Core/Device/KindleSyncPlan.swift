@@ -89,6 +89,7 @@ nonisolated enum KindleSyncPlanner {
         )
         let deviceByKey = Dictionary(grouping: deviceBooks, by: \.matchKey)
         let candidateGroups = Dictionary(grouping: candidates, by: \.matchKey)
+        let candidateKeys = Set(candidateGroups.keys)
         let collidingKeys = Set(candidateGroups.compactMap { entry in
             entry.value.count > 1 ? entry.key : nil
         })
@@ -108,7 +109,13 @@ nonisolated enum KindleSyncPlanner {
                 continue
             }
 
-            let preferred = preferredDeviceBook(in: matches, targetFileName: candidate.targetFileName)
+            guard let preferred = preferredDeviceBook(
+                in: matches,
+                targetFileName: candidate.targetFileName
+            ) else {
+                items.append(missingItem(for: candidate))
+                continue
+            }
             let receipt = receipts[candidate.id]
             let decision = decision(for: candidate, deviceBook: preferred, receipt: receipt)
             items.append(item(for: candidate, deviceBook: preferred, decision: decision))
@@ -121,7 +128,7 @@ nonisolated enum KindleSyncPlanner {
         }
 
         for deviceBook in deviceBooks where !consumedDeviceIDs.contains(deviceBook.id) {
-            let hasLibraryPeer = candidates.contains { $0.matchKey == deviceBook.matchKey }
+            let hasLibraryPeer = candidateKeys.contains(deviceBook.matchKey)
             items.append(KindleSyncPlanItem(
                 id: "remove|\(deviceBook.id)",
                 action: .remove,
@@ -249,7 +256,7 @@ nonisolated enum KindleSyncPlanner {
     private static func preferredDeviceBook(
         in books: [DeviceBook],
         targetFileName: String
-    ) -> DeviceBook {
+    ) -> DeviceBook? {
         if let exact = books.first(where: {
             $0.fileName.caseInsensitiveCompare(targetFileName) == .orderedSame
         }) {
@@ -261,7 +268,9 @@ nonisolated enum KindleSyncPlanner {
         }) {
             return matchingFormat
         }
-        return books.sorted { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }[0]
+        return books.min {
+            $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending
+        }
     }
 
     private static func candidatePrecedes(_ lhs: KindleSyncCandidate, _ rhs: KindleSyncCandidate) -> Bool {

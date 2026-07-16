@@ -240,6 +240,32 @@ struct KindleSyncPlanTests {
         #expect(plan.count(for: .remove) == 0)
     }
 
+    @Test func planningScalesToLargeLibrariesAndDevices() {
+        let candidates = (0..<4_000).map { index in
+            candidate(title: "Library \(index)", matchKey: "library-\(index)")
+        }
+        let deviceBooks = (0..<4_000).map { index in
+            DeviceBook(
+                path: "/documents/Device \(index).azw3",
+                fileName: "Device \(index).azw3",
+                sizeBytes: 1_000
+            )
+        }
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let plan = KindleSyncPlanner.makePlan(
+            candidates: candidates,
+            deviceBooks: deviceBooks,
+            profile: profile()
+        )
+        let elapsed = startedAt.duration(to: clock.now)
+
+        print("Kindle sync planning benchmark: \(elapsed)")
+        #expect(plan.items.count == 8_000)
+        #expect(elapsed < .seconds(2))
+    }
+
     @Test func profilesPersistSeparateTransferHistoriesForTwoKindles() throws {
         let suiteName = "KindleSyncPlanTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
