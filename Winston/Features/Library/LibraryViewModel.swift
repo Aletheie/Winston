@@ -219,16 +219,33 @@ final class LibraryViewModel {
             $0.origin == .generated && $0.format.lowercased() == format
         }
         let assetUUID = existing?.uuid ?? UUID()
-        guard let fileName = try? BookFileStore.importCopy(of: url, uuid: assetUUID) else { return }
+        let oldFileName = existing?.fileName
+        let fileName: String
+        do {
+            if let oldFileName {
+                fileName = try BookFileStore.replacementCopy(
+                    of: url, replacing: oldFileName, uuid: assetUUID
+                )
+            } else {
+                fileName = try BookFileStore.importCopy(of: url, uuid: assetUUID)
+            }
+        } catch {
+            return
+        }
         let size = BookFileStore.size(of: fileName)
         if primary?.contentHash == nil { primary?.contentHash = sourceHash }
         if let existing {
+            let wasPrimary = book.fileName == existing.fileName
             existing.fileName = fileName
             existing.sizeBytes = size
             existing.contentHash = artifactHash
             existing.generatedFromContentHash = sourceHash
             existing.validationStatus = .ok
             existing.dateAdded = Date()
+            if wasPrimary {
+                book.fileName = fileName
+                book.fileSizeBytes = size
+            }
         } else {
             let asset = BookAsset(
                 uuid: assetUUID,
@@ -242,7 +259,13 @@ final class LibraryViewModel {
             )
             modelContext.insert(asset)
         }
-        modelContext.saveQuietly()
+        guard modelContext.saveQuietly(rollbackOnFailure: true) else {
+            BookFileStore.delete(fileName: fileName)
+            return
+        }
+        if let oldFileName, oldFileName != fileName {
+            BookFileStore.delete(fileName: oldFileName)
+        }
     }
 
     @discardableResult
@@ -288,9 +311,10 @@ final class LibraryViewModel {
               asset.book?.uuid == book.uuid else { return }
         let oldName = asset.fileName
         let wasPrimary = book.fileName == oldName
-        guard let fileName = try? BookFileStore.importCopy(of: url, uuid: asset.uuid) else { return }
+        guard let fileName = try? BookFileStore.replacementCopy(
+            of: url, replacing: oldName, uuid: asset.uuid
+        ) else { return }
         let replacementDate = Date()
-        if fileName != oldName { BookFileStore.delete(fileName: oldName) }
         asset.fileName = fileName
         asset.sizeBytes = BookFileStore.size(of: fileName)
         asset.contentHash = nil
@@ -304,7 +328,11 @@ final class LibraryViewModel {
             book.drmProtected = nil
             book.coverVersion += 1
         }
-        modelContext.saveQuietly()
+        guard modelContext.saveQuietly(rollbackOnFailure: true) else {
+            BookFileStore.delete(fileName: fileName)
+            return
+        }
+        if fileName != oldName { BookFileStore.delete(fileName: oldName) }
 
         let managedURL = BookFileStore.url(for: fileName)
         let analysis = await Task.detached(priority: .utility) {
