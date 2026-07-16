@@ -12,7 +12,7 @@
     <h2>Importing books</h2>
     <ul>
         <li>Drag files onto the window, use the <span class="badge">Add Files</span> toolbar button, or press <kbd>⌘O</kbd>.</li>
-        <li>Supported formats: EPUB, MOBI, AZW3, PDF, TXT.</li>
+        <li>Supported formats: EPUB, MOBI, AZW3, PDF, TXT, HTML.</li>
         <li>Imported files are <b>copied</b> into Winston's library folder, so moving or deleting the originals won't affect your library.</li>
         <li>To import automatically, turn on a <b>watch folder</b> in Settings → Auto‑Import. New books dropped there are added for you (duplicates are skipped).</li>
     </ul>
@@ -33,6 +33,14 @@
         <li><b>Field search:</b> narrow with <code>author:</code>, <code>tag:</code>, <code>series:</code>, <code>title:</code>, <code>format:</code> and <code>year:</code> — for example <code>author:tolkien tag:"science fiction" year:&gt;2000</code>. Use quotes for values with spaces and <code>&gt;</code>/<code>&lt;</code>/<code>=</code> with years.</li>
         <li>The sidebar filters by format, author, series, tag, recently added, and rating.</li>
         <li><b>Smart collections:</b> with a search active, choose <b>Library → Save Search as Collection…</b>. It appears in the sidebar with a ✦ icon and always shows the books currently matching that search.</li>
+    </ul>
+
+    <h2 id="full-text">Searching inside books</h2>
+    <ul>
+        <li>Click <b>Search Inside Books</b> in the toolbar, choose <b>Library → Search Inside Books…</b>, or press <kbd>⌘⇧F</kbd>.</li>
+        <li>Winston searches text in EPUB, PDF, TXT, and HTML files and groups each result as <b>book → chapter or page → excerpt</b>. Click an excerpt to open the book, or use <b>Show in Library</b> to select it in the normal library view.</li>
+        <li>The index stays on this Mac and makes no network requests. Refreshing it reuses every book whose content hash is unchanged; text is extracted again only after the book file changes.</li>
+        <li>Image-only scanned PDFs have no extractable text and cannot be searched without OCR.</li>
     </ul>
 
     <h2 id="collections">Collections &amp; reading status</h2>

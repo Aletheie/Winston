@@ -16,6 +16,7 @@ enum LibraryCommand: Equatable {
     case setGridView
     case setListView
     case focusSearch
+    case searchInsideBooks
     case convertSelected
     case fetchMetadata
     case findDuplicates
@@ -147,6 +148,10 @@ struct AppCommands: Commands {
         }
 
         CommandMenu("Library") {
+            Button("Search Inside Books\u{2026}") { library?.perform(.searchInsideBooks) }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(library == nil)
+            Divider()
             Button("Statistics\u{2026}") { library?.perform(.showStatistics) }
                 .disabled(library == nil)
             Button("Find Duplicates\u{2026}") { library?.perform(.findDuplicates) }

@@ -12,7 +12,7 @@
     <h2>Import knih</h2>
     <ul>
         <li>Přetáhněte soubory do okna, použijte tlačítko <span class="badge">Přidat soubory</span> v panelu nástrojů nebo stiskněte <kbd>⌘O</kbd>.</li>
-        <li>Podporované formáty: EPUB, MOBI, AZW3, PDF a TXT.</li>
+        <li>Podporované formáty: EPUB, MOBI, AZW3, PDF, TXT a HTML.</li>
         <li>Importované soubory se <b>zkopírují</b> do složky knihovny Winston, takže přesunutí nebo smazání originálů vaši knihovnu neovlivní.</li>
         <li>Pro automatický import zapněte v Nastavení → Automatický import <b>sledovanou složku</b>. Nové knihy vložené do této složky se přidají automaticky, duplicity se přeskočí.</li>
     </ul>
@@ -33,6 +33,14 @@
         <li><b>Hledání podle polí:</b> použijte <code>author:</code>, <code>tag:</code>, <code>series:</code>, <code>title:</code>, <code>format:</code> a <code>year:</code> — například <code>author:tolkien tag:"science fiction" year:&gt;2000</code>. Hodnoty s mezerami uzavřete do uvozovek a u roku použijte <code>&gt;</code>, <code>&lt;</code> nebo <code>=</code>.</li>
         <li>Sidebar umožňuje filtrovat podle formátu, autora, série, štítku, data přidání a hodnocení.</li>
         <li><b>Chytré kolekce:</b> při aktivním hledání zvolte <b>Knihovna → Uložit hledání jako kolekci…</b>. Kolekce se objeví v sidebaru s ikonou ✦ a vždy obsahuje knihy, které aktuálně odpovídají hledání.</li>
+    </ul>
+
+    <h2 id="full-text">Hledání uvnitř knih</h2>
+    <ul>
+        <li>Klikněte v panelu nástrojů na <b>Hledat uvnitř knih</b>, zvolte <b>Knihovna → Hledat uvnitř knih…</b> nebo stiskněte <kbd>⌘⇧F</kbd>.</li>
+        <li>Winston prohledává text souborů EPUB, PDF, TXT a HTML a výsledky seskupuje jako <b>kniha → kapitola nebo stránka → úryvek</b>. Kliknutím na úryvek knihu otevřete; tlačítkem <b>Zobrazit v knihovně</b> ji vyberete v běžném zobrazení knihovny.</li>
+        <li>Index zůstává na tomto Macu a nevytváří žádné síťové požadavky. Při obnovení se znovu použijí všechny knihy se stejným hashem obsahu; text se extrahuje znovu pouze po změně souboru knihy.</li>
+        <li>Naskenované PDF tvořené pouze obrázky nemá extrahovatelný text a bez OCR je nelze prohledávat.</li>
     </ul>
 
     <h2 id="collections">Kolekce a stav čtení</h2>

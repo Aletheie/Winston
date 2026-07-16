@@ -8435,6 +8435,263 @@
           }
         }
       }
+    },
+    "%lld books indexed" : {
+      "comment" : "Full-text index status; the value is the number of searchable books.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "V indexu je %lld knih"
+          }
+        }
+      }
+    },
+    "%lld files couldn’t be indexed" : {
+      "comment" : "Full-text index warning; the value is the number of failed files.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nešlo indexovat soubory: %lld"
+          }
+        }
+      }
+    },
+    "%lld matches" : {
+      "comment" : "Full-text result count for one book.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Počet shod: %lld"
+          }
+        }
+      }
+    },
+    "Add an EPUB, PDF, TXT, or HTML book to search inside its text." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidejte knihu ve formátu EPUB, PDF, TXT nebo HTML a prohledávejte její text."
+          }
+        }
+      }
+    },
+    "Building a private search index on this Mac…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Na tomto Macu se vytváří soukromý vyhledávací index…"
+          }
+        }
+      }
+    },
+    "Chapter %lld" : {
+      "comment" : "Fallback full-text result location; the value is the chapter number.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kapitola %lld"
+          }
+        }
+      }
+    },
+    "Document" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dokument"
+          }
+        }
+      }
+    },
+    "Enter at least two characters to search %lld locally indexed books." : {
+      "comment" : "Full-text search prompt; the value is the number of searchable books.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zadejte alespoň dva znaky a prohledejte %lld místně indexovaných knih."
+          }
+        }
+      }
+    },
+    "Index unavailable" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Index není dostupný"
+          }
+        }
+      }
+    },
+    "Indexing %lld books…" : {
+      "comment" : "Full-text indexing progress; the value is the number of searchable books.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Indexuje se %lld knih…"
+          }
+        }
+      }
+    },
+    "Local index" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Místní index"
+          }
+        }
+      }
+    },
+    "Local only · no network requests" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pouze místně · bez síťových požadavků"
+          }
+        }
+      }
+    },
+    "No Searchable Books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Žádné prohledávatelné knihy"
+          }
+        }
+      }
+    },
+    "Open book in the default reader" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Otevřít knihu ve výchozí čtečce"
+          }
+        }
+      }
+    },
+    "Page %lld" : {
+      "comment" : "Full-text PDF result location; the value is the page number.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Strana %lld"
+          }
+        }
+      }
+    },
+    "Refresh Index" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit index"
+          }
+        }
+      }
+    },
+    "Search EPUB, PDF, TXT, and HTML without leaving your Mac." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prohledávejte EPUB, PDF, TXT a HTML přímo na Macu."
+          }
+        }
+      }
+    },
+    "Search Index Unavailable" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vyhledávací index není dostupný"
+          }
+        }
+      }
+    },
+    "Search Inside Books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hledat uvnitř knih"
+          }
+        }
+      }
+    },
+    "Search Inside Books…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hledat uvnitř knih…"
+          }
+        }
+      }
+    },
+    "Search for a word or phrase" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hledejte slovo nebo frázi"
+          }
+        }
+      }
+    },
+    "Search inside EPUB, PDF, TXT, and HTML books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prohledat text knih EPUB, PDF, TXT a HTML"
+          }
+        }
+      }
+    },
+    "Searching chapters and pages…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prohledávají se kapitoly a stránky…"
+          }
+        }
+      }
+    },
+    "Searching…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hledá se…"
+          }
+        }
+      }
+    },
+    "The local search index couldn’t be prepared." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Místní vyhledávací index se nepodařilo připravit."
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

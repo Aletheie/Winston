@@ -15,6 +15,7 @@ enum LibrarySheet: Identifiable {
     case editionReview
     case bookDoctor(BookDoctorRequest)
     case readingHistory(Book)
+    case fullTextSearch
 
     var id: String {
         switch self {
@@ -29,6 +30,7 @@ enum LibrarySheet: Identifiable {
         case .editionReview:  "editionReview"
         case .bookDoctor(let request): "bookDoctor-\(request.id.uuidString)"
         case .readingHistory(let book): "readingHistory-\(book.uuid.uuidString)"
+        case .fullTextSearch: "fullTextSearch"
         }
     }
 }
@@ -183,6 +185,7 @@ struct LibraryView: View {
                     sortOrder: $sortOrder,
                     showInspector: $showInspector,
                     transmitEnabled: deviceMonitor.isConnected && selection.hasSelection && !transferQueue.isTransferring,
+                    onSearchInsideBooks: { activeSheet = .fullTextSearch },
                     onImport: { isImporting = true },
                     onTransmit: transmitSelected
                 )
@@ -237,6 +240,12 @@ struct LibraryView: View {
                     }
                 case .readingHistory(let book):
                     ReadingHistorySheet(book: book, viewModel: viewModel)
+                case .fullTextSearch:
+                    FullTextSearchSheet(
+                        books: books,
+                        onOpen: openFullTextResult,
+                        onShowInLibrary: showFullTextResultInLibrary
+                    )
                 }
             }
             .alert("Delete \(selection.count) books?",
@@ -422,6 +431,8 @@ struct LibraryView: View {
             activeSheet = .highlights
         case .showSeries:
             activeSheet = .series(name: nil)
+        case .searchInsideBooks:
+            activeSheet = .fullTextSearch
         case .exportLibrary:
             Task { await LibraryExternalActions.exportLibrary(via: viewModel) }
         case .saveSearchAsCollection:
@@ -457,6 +468,16 @@ struct LibraryView: View {
             await Task.yield()
             scrollTarget = pick.id
         }
+    }
+
+    private func openFullTextResult(_ bookID: UUID) {
+        guard let book = books.first(where: { $0.uuid == bookID }) else { return }
+        LibraryExternalActions.openInReader(book)
+    }
+
+    private func showFullTextResultInLibrary(_ bookID: UUID) {
+        guard let book = books.first(where: { $0.uuid == bookID }) else { return }
+        showInLibrary(book)
     }
 
     private func handleBookClick(book: Book) {

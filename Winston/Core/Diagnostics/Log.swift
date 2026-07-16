@@ -8,6 +8,7 @@ nonisolated enum Log {
     static let metadata = Logger(subsystem: subsystem, category: "metadata")
     static let persistence = Logger(subsystem: subsystem, category: "persistence")
     static let plugins = Logger(subsystem: subsystem, category: "plugins")
+    static let search = Logger(subsystem: subsystem, category: "search")
 
     static let ui = Logger(subsystem: subsystem, category: "ui")
 
