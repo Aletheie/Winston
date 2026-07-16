@@ -52,6 +52,23 @@ struct ModelRoundTripTests {
         #expect(try context.fetchCount(FetchDescriptor<Book>()) == 1)
     }
 
+    @Test func smartShelfRulesRoundTripThroughPersistence() throws {
+        let (container, context) = makeContext()
+        _ = container
+        let definition = SmartShelfDefinition(rules: [
+            SmartShelfRule(field: .language, comparison: .isEqual, value: "cs"),
+            SmartShelfRule(field: .pageCount, comparison: .lessThan, value: "300"),
+        ])
+        let shelf = BookCollection(name: "Short Czech Books")
+        shelf.smartShelfDefinition = definition
+        context.insert(shelf)
+        try context.save()
+
+        let fetched = try #require(try context.fetch(FetchDescriptor<BookCollection>()).first)
+        #expect(fetched.smartShelfDefinition == definition)
+        #expect(fetched.isSmart)
+    }
+
     @Test func deletingBookCascadesItsHighlights() throws {
         let (container, context) = makeContext()
         _ = container

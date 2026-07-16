@@ -44,6 +44,7 @@ struct SidebarView: View {
     @State private var showTags = false
     @State private var showCreateCollection = false
     @State private var newCollectionName = ""
+    @State private var smartShelfRequest: SmartShelfEditorRequest?
     @State private var renameTarget: BookCollection?
     @State private var renameText = ""
     @State private var browseRename: BrowseRename?
@@ -117,7 +118,9 @@ struct SidebarView: View {
                 collections: collections,
                 smartCounts: facets.smartCounts,
                 wishlistCount: viewModel.wishlist.count,
-                onNew: { newCollectionName = ""; showCreateCollection = true },
+                onNewCollection: { newCollectionName = ""; showCreateCollection = true },
+                onNewSmartShelf: { smartShelfRequest = .create() },
+                onEditSmartShelf: { smartShelfRequest = SmartShelfEditorRequest.edit($0) },
                 onRename: { renameText = $0.name; renameTarget = $0 },
                 onDelete: { viewModel.deleteCollection($0) }
             )
@@ -170,7 +173,9 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .task(id: FacetRevision(
             revision: LibraryMutationLog.shared.revision,
-            bookCount: books.count
+            bookCount: books.count,
+            deviceFileNames: deviceMonitor.deviceFileNames,
+            deviceIsConnected: deviceMonitor.isConnected
         )) {
             await refreshFacets()
         }
@@ -212,6 +217,17 @@ struct SidebarView: View {
                     .padding(.vertical, 8)
             }
             .background(.ultraThinMaterial)
+        }
+        .sheet(item: $smartShelfRequest) { request in
+            SmartShelfEditorSheet(
+                request: request,
+                books: books,
+                formats: facets.formatKeys,
+                deviceFileNames: deviceMonitor.deviceFileNames,
+                deviceIsConnected: deviceMonitor.isConnected
+            ) { name, definition in
+                saveSmartShelf(request: request, name: name, definition: definition)
+            }
         }
         .alert(theme.usesTerminalCopy ? "// new_collection" : "New Collection", isPresented: $showCreateCollection) {
             TextField("Name", text: $newCollectionName)
@@ -257,6 +273,21 @@ struct SidebarView: View {
             .font(theme.label(size: 10, weight: .semibold))
     }
 
+    private func saveSmartShelf(
+        request: SmartShelfEditorRequest,
+        name: String,
+        definition: SmartShelfDefinition
+    ) {
+        if let id = request.collectionID,
+           let collection = collections.first(where: { $0.id == id }) {
+            viewModel.updateSmartShelf(collection, name: name, definition: definition)
+            selection = .collection(collection.id)
+        } else {
+            let collection = viewModel.createSmartShelf(named: name, definition: definition)
+            selection = .collection(collection.id)
+        }
+    }
+
     // MARK: - Author tip
 
     private var authorTip: (original: String, suggestion: String)? {
@@ -272,6 +303,8 @@ struct SidebarView: View {
     private struct FacetRevision: Hashable {
         let revision: Int
         let bookCount: Int
+        let deviceFileNames: Set<String>
+        let deviceIsConnected: Bool
     }
 
     private nonisolated struct FacetBook: Sendable {
@@ -314,19 +347,27 @@ struct SidebarView: View {
     }
 
     private func refreshFacets() async {
-        let searches = collections.compactMap { collection -> (UUID, String)? in
-            guard collection.isSmart, !collection.isWishlist,
-                  let search = collection.savedSearch else { return nil }
-            return (collection.id, search)
+        var searches: [(UUID, String)] = []
+        var shelves: [(UUID, SmartShelfDefinition)] = []
+        for collection in collections where collection.isSmart && !collection.isWishlist {
+            if let definition = collection.smartShelfDefinition {
+                shelves.append((collection.id, definition))
+            } else if let search = collection.savedSearch {
+                searches.append((collection.id, search))
+            }
         }
         var facetBooks: [FacetBook] = []
         var searchBooks: [LibraryQuery.SearchSnapshot] = []
+        var shelfBooks: [SmartShelfBookSnapshot] = []
         let includesSearch = !searches.isEmpty
+        let includesShelves = !shelves.isEmpty
         facetBooks.reserveCapacity(books.count)
         if includesSearch { searchBooks.reserveCapacity(books.count) }
+        if includesShelves { shelfBooks.reserveCapacity(books.count) }
         for (index, book) in books.enumerated() {
             facetBooks.append(FacetBook(book))
             if includesSearch { searchBooks.append(LibraryQuery.SearchSnapshot(book)) }
+            if includesShelves { shelfBooks.append(SmartShelfBookSnapshot(book)) }
             if (index + 1).isMultiple(of: 512) {
                 await Task.yield()
                 guard !Task.isCancelled else { return }
@@ -335,7 +376,11 @@ struct SidebarView: View {
         let updated = await Self.makeFacets(
             books: facetBooks,
             searchBooks: searchBooks,
-            searches: searches
+            searches: searches,
+            shelfBooks: shelfBooks,
+            shelves: shelves,
+            deviceFileNames: deviceMonitor.deviceFileNames,
+            deviceIsConnected: deviceMonitor.isConnected
         )
         guard !Task.isCancelled else { return }
         facets = updated
@@ -346,7 +391,11 @@ struct SidebarView: View {
     private static func makeFacets(
         books: [FacetBook],
         searchBooks: [LibraryQuery.SearchSnapshot],
-        searches: [(UUID, String)]
+        searches: [(UUID, String)],
+        shelfBooks: [SmartShelfBookSnapshot],
+        shelves: [(UUID, SmartShelfDefinition)],
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool
     ) async -> Facets {
         var facets = Facets()
         let recentCutoff = Date.now.addingTimeInterval(-14 * 24 * 3600)
@@ -375,6 +424,13 @@ struct SidebarView: View {
         }
         facets.seriesTips = SeriesSuggestions.unificationTips(counts: facets.series)
         facets.smartCounts = LibraryQuery.smartCounts(for: searchBooks, searches: searches)
+        let structuredCounts = LibraryQuery.smartShelfCounts(
+            for: shelfBooks,
+            shelves: shelves,
+            deviceFileNames: deviceFileNames,
+            deviceIsConnected: deviceIsConnected
+        )
+        facets.smartCounts.merge(structuredCounts) { _, structured in structured }
         return facets
     }
 }

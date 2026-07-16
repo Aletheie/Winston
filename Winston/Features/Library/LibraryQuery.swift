@@ -13,6 +13,23 @@ enum LibraryQuery {
         return sorted(result, by: sort)
     }
 
+    static func applySmartShelf(
+        to books: [Book],
+        definition: SmartShelfDefinition,
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool,
+        sort: [KeyPathComparator<Book>]
+    ) -> [Book] {
+        let matching = books.filter {
+            definition.matches(
+                SmartShelfBookSnapshot($0),
+                deviceFileNames: deviceFileNames,
+                deviceIsConnected: deviceIsConnected
+            )
+        }
+        return sorted(matching, by: sort)
+    }
+
     // MARK: - Filter
 
     private static func filtered(_ books: [Book], by filter: LibraryFilter) -> [Book] {
@@ -55,6 +72,42 @@ enum LibraryQuery {
             return count == 0 ? [:] : [id: count]
         }
         return smartCounts(for: books.map(SearchSnapshot.init), queries: queries)
+    }
+
+    static func smartShelfCounts(
+        for books: [Book],
+        shelves: [(UUID, SmartShelfDefinition)],
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool
+    ) -> [UUID: Int] {
+        smartShelfCounts(
+            for: books.map(SmartShelfBookSnapshot.init),
+            shelves: shelves,
+            deviceFileNames: deviceFileNames,
+            deviceIsConnected: deviceIsConnected
+        )
+    }
+
+    nonisolated static func smartShelfCounts(
+        for books: [SmartShelfBookSnapshot],
+        shelves: [(UUID, SmartShelfDefinition)],
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool
+    ) -> [UUID: Int] {
+        guard !shelves.isEmpty else { return [:] }
+        var counts: [UUID: Int] = [:]
+        for book in books {
+            guard !Task.isCancelled else { return counts }
+            for (id, definition) in shelves
+            where definition.matches(
+                book,
+                deviceFileNames: deviceFileNames,
+                deviceIsConnected: deviceIsConnected
+            ) {
+                counts[id, default: 0] += 1
+            }
+        }
+        return counts
     }
 
     nonisolated static func smartCounts(

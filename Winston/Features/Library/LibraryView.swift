@@ -73,9 +73,37 @@ struct LibraryView: View {
 
     private func recomputeDisplayed() {
         if case .collection(let id) = filter,
-           let smart = collections.first(where: { $0.id == id && $0.isSmart }),
-           let search = smart.savedSearch {
-            displayed = LibraryQuery.apply(to: books, filter: .all, searchText: search, sort: sortOrder)
+           let smart = collections.first(where: { $0.id == id && $0.isSmart }) {
+            if let definition = smart.smartShelfDefinition {
+                let shelfBooks = LibraryQuery.applySmartShelf(
+                    to: books,
+                    definition: definition,
+                    deviceFileNames: deviceMonitor.deviceFileNames,
+                    deviceIsConnected: deviceMonitor.isConnected,
+                    sort: sortOrder
+                )
+                displayed = LibraryQuery.apply(
+                    to: shelfBooks,
+                    filter: .all,
+                    searchText: debouncedSearch,
+                    sort: sortOrder
+                )
+            } else if let search = smart.savedSearch {
+                let shelfBooks = LibraryQuery.apply(
+                    to: books,
+                    filter: .all,
+                    searchText: search,
+                    sort: sortOrder
+                )
+                displayed = LibraryQuery.apply(
+                    to: shelfBooks,
+                    filter: .all,
+                    searchText: debouncedSearch,
+                    sort: sortOrder
+                )
+            } else {
+                displayed = []
+            }
         } else {
             displayed = LibraryQuery.apply(to: books, filter: filter, searchText: debouncedSearch, sort: sortOrder)
         }
@@ -244,6 +272,8 @@ struct LibraryView: View {
             .onChange(of: filter) { recomputeDisplayed() }
             .onChange(of: debouncedSearch) { recomputeDisplayed() }
             .onChange(of: sortOrder) { recomputeDisplayed() }
+            .onChange(of: deviceMonitor.deviceFileNames) { recomputeDisplayed() }
+            .onChange(of: deviceMonitor.isConnected) { recomputeDisplayed() }
     }
 
     private func showInLibrary(_ book: Book) {

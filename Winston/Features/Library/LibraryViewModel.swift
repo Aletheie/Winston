@@ -431,6 +431,27 @@ final class LibraryViewModel {
         return collection
     }
 
+    @discardableResult
+    func createSmartShelf(named name: String, definition: SmartShelfDefinition) -> BookCollection {
+        let collection = BookCollection(name: name)
+        collection.smartShelfDefinition = definition
+        modelContext.insert(collection)
+        modelContext.saveQuietly()
+        return collection
+    }
+
+    func updateSmartShelf(
+        _ collection: BookCollection,
+        name: String,
+        definition: SmartShelfDefinition
+    ) {
+        guard !collection.isSystem else { return }
+        collection.name = name
+        collection.savedSearch = nil
+        collection.smartShelfDefinition = definition
+        modelContext.saveQuietly()
+    }
+
     func renameCollection(_ collection: BookCollection, to name: String) {
         guard !collection.isSystem else { return }
         collection.name = name

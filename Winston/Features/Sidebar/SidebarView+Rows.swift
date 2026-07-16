@@ -55,7 +55,9 @@ struct CollectionsSection: View {
     let collections: [BookCollection]
     let smartCounts: [UUID: Int]
     let wishlistCount: Int
-    let onNew: () -> Void
+    let onNewCollection: () -> Void
+    let onNewSmartShelf: () -> Void
+    let onEditSmartShelf: (BookCollection) -> Void
     let onRename: (BookCollection) -> Void
     let onDelete: (BookCollection) -> Void
 
@@ -78,6 +80,10 @@ struct CollectionsSection: View {
                     .tag(SidebarItem.collection(collection.id))
                     .contextMenu {
                         if !collection.isSystem {
+                            if collection.smartShelfDefinition != nil {
+                                Button("Edit Smart Shelf\u{2026}") { onEditSmartShelf(collection) }
+                                Divider()
+                            }
                             Button("Rename\u{2026}") { onRename(collection) }
                             Button("Delete", role: .destructive) { onDelete(collection) }
                         }
@@ -88,12 +94,16 @@ struct CollectionsSection: View {
                 theme.styledText(terminal: "COLLECTIONS", native: "Collections")
                     .font(theme.label(size: 10, weight: .semibold))
                 Spacer()
-                Button(action: onNew) {
+                Menu {
+                    Button("New Collection\u{2026}", action: onNewCollection)
+                    Button("New Smart Shelf\u{2026}", action: onNewSmartShelf)
+                } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 10, weight: .semibold))
                 }
-                .buttonStyle(.borderless)
-                .help("New Collection")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("New Collection or Smart Shelf")
             }
         }
     }
