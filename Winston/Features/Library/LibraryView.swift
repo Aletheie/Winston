@@ -17,6 +17,7 @@ enum LibrarySheet: Identifiable {
     case readingHistory(Book)
     case fullTextSearch
     case readingRecommendation
+    case readingHistoryImport(URL)
 
     var id: String {
         switch self {
@@ -33,6 +34,7 @@ enum LibrarySheet: Identifiable {
         case .readingHistory(let book): "readingHistory-\(book.uuid.uuidString)"
         case .fullTextSearch: "fullTextSearch"
         case .readingRecommendation: "readingRecommendation"
+        case .readingHistoryImport(let url): "readingHistoryImport-\(url.path(percentEncoded: false))"
         }
     }
 }
@@ -255,6 +257,8 @@ struct LibraryView: View {
                         onOpen: openBook,
                         onShowInLibrary: showBookInLibrary
                     )
+                case .readingHistoryImport(let url):
+                    ReadingHistoryImportSheet(fileURL: url)
                 }
             }
             .alert("Delete \(selection.count) books?",
@@ -401,6 +405,11 @@ struct LibraryView: View {
             isImporting = true
         case .importCalibre:
             Task { await LibraryExternalActions.importFromCalibre(via: viewModel) }
+        case .importReadingHistory:
+            Task {
+                guard let url = await LibraryExternalActions.chooseReadingHistoryExport() else { return }
+                activeSheet = .readingHistoryImport(url)
+            }
         case .openInReader:
             if let book = primarySelectedBook { LibraryExternalActions.openInReader(book) }
         case .quickLook:

@@ -5,6 +5,7 @@ import SwiftUI
 enum LibraryCommand: Equatable {
     case importBooks
     case importCalibre
+    case importReadingHistory
     case openInReader
     case quickLook
     case showInFinder
@@ -82,6 +83,9 @@ struct AppCommands: Commands {
 
             Button("Import from Calibre Library\u{2026}") { library?.perform(.importCalibre) }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
+                .disabled(library == nil)
+
+            Button("Import Reading History\u{2026}") { library?.perform(.importReadingHistory) }
                 .disabled(library == nil)
         }
 

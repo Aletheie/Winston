@@ -10127,6 +10127,710 @@
           }
         }
       }
+    },
+    "%@ · %@" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · %2$@"
+          }
+        }
+      }
+    },
+    "%@ – %@" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ – %2$@"
+          }
+        }
+      }
+    },
+    "%lld new reading cycles" : {
+      "localizations" : {
+        "cs" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld nové čtenářské cykly"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld nový čtenářský cyklus"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld nových čtenářských cyklů"
+                }
+              }
+            }
+          }
+        },
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld new reading cycle"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld new reading cycles"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "%lld ratings" : {
+      "localizations" : {
+        "cs" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld hodnocení"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld hodnocení"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld hodnocení"
+                }
+              }
+            }
+          }
+        },
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld rating"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld ratings"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Already imported" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Již importováno"
+          }
+        }
+      }
+    },
+    "Changes to Import" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Změny k importu"
+          }
+        }
+      }
+    },
+    "Choose a Goodreads, StoryGraph, or Hardcover CSV export." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vyberte CSV export z Goodreads, StoryGraphu nebo Hardcoveru."
+          }
+        }
+      }
+    },
+    "Choose a library match to preview its changes." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pro náhled změn vyberte odpovídající knihu v knihovně."
+          }
+        }
+      }
+    },
+    "Couldn’t Read Export" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Export nelze přečíst"
+          }
+        }
+      }
+    },
+    "Deselect All" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zrušit celý výběr"
+          }
+        }
+      }
+    },
+    "Export row %lld" : {
+      "comment" : "Detail label; the number is the source CSV row.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Řádek exportu %lld"
+          }
+        }
+      }
+    },
+    "Exported Data" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Data z exportu"
+          }
+        }
+      }
+    },
+    "Goodreads" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Goodreads"
+          }
+        }
+      }
+    },
+    "Goodreads, StoryGraph, or Hardcover CSV" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CSV z Goodreads, StoryGraphu nebo Hardcoveru"
+          }
+        }
+      }
+    },
+    "ISBN Match" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Shoda ISBN"
+          }
+        }
+      }
+    },
+    "Import Reading History" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Importovat čtenářskou historii"
+          }
+        }
+      }
+    },
+    "Import Reading History…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Importovat čtenářskou historii…"
+          }
+        }
+      }
+    },
+    "Import complete" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import dokončen"
+          }
+        }
+      }
+    },
+    "Import filter" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Filtr importu"
+          }
+        }
+      }
+    },
+    "Importing…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Importuji…"
+          }
+        }
+      }
+    },
+    "Include %@" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zahrnout: %@"
+          }
+        }
+      }
+    },
+    "Library Match" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Shoda s knihovnou"
+          }
+        }
+      }
+    },
+    "Matched library book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Spárovaná kniha v knihovně"
+          }
+        }
+      }
+    },
+    "Multiple Matches" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Více shod"
+          }
+        }
+      }
+    },
+    "No Match" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bez shody"
+          }
+        }
+      }
+    },
+    "No Matching Rows" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Žádné odpovídající řádky"
+          }
+        }
+      }
+    },
+    "No book in this library matched. This row will be skipped; import the book file first." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Žádná kniha v této knihovně neodpovídá. Řádek se přeskočí; nejdříve importujte soubor knihy."
+          }
+        }
+      }
+    },
+    "No books were found in that export." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "V exportu nebyly nalezeny žádné knihy."
+          }
+        }
+      }
+    },
+    "Not provided" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Neuvedeno"
+          }
+        }
+      }
+    },
+    "Only the title matched. Review the book, then select its checkbox if it is correct." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Shoduje se pouze název. Knihu zkontrolujte a pokud je správná, zaškrtněte její políčko."
+          }
+        }
+      }
+    },
+    "Processed only on this Mac. Existing reading cycles are never deleted." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zpracuje se jen na tomto Macu. Existující čtenářské cykly se nikdy nemažou."
+          }
+        }
+      }
+    },
+    "Read count" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Počet přečtení"
+          }
+        }
+      }
+    },
+    "Reading Cycles" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Čtenářské cykly"
+          }
+        }
+      }
+    },
+    "Reading Export" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Export historie čtení"
+          }
+        }
+      }
+    },
+    "Reading export" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Export historie čtení"
+          }
+        }
+      }
+    },
+    "Review its library match and the exact history changes before importing." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Před importem zkontrolujte shodu s knihovnou a přesné změny historie."
+          }
+        }
+      }
+    },
+    "Search exported books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hledat v exportovaných knihách"
+          }
+        }
+      }
+    },
+    "Select Safe Matches" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vybrat jisté shody"
+          }
+        }
+      }
+    },
+    "Select an Exported Book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vyberte exportovanou knihu"
+          }
+        }
+      }
+    },
+    "Selected Match" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vybraná shoda"
+          }
+        }
+      }
+    },
+    "Selection" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Výběr"
+          }
+        }
+      }
+    },
+    "Several library books matched this export row. Choose the correct edition before importing." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tomuto řádku exportu odpovídá několik knih v knihovně. Před importem vyberte správné vydání."
+          }
+        }
+      }
+    },
+    "Skip — no match" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přeskočit — bez shody"
+          }
+        }
+      }
+    },
+    "StoryGraph" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "StoryGraph"
+          }
+        }
+      }
+    },
+    "That export is too large to import safely." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tento export je příliš velký pro bezpečný import."
+          }
+        }
+      }
+    },
+    "That file isn’t a valid CSV export." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tento soubor není platný CSV export."
+          }
+        }
+      }
+    },
+    "The export contains a status but no dated reading cycle." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Export obsahuje stav, ale žádný čtenářský cyklus s datem."
+          }
+        }
+      }
+    },
+    "The export is missing its book title column." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "V exportu chybí sloupec s názvem knihy."
+          }
+        }
+      }
+    },
+    "The export reports %lld reads, but only %lld dated cycles can be restored." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Počet čtení v exportu: %1$lld. Obnovit lze jen %2$lld datovaných cyklů."
+          }
+        }
+      }
+    },
+    "This history is already in Winston." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato historie už ve Winstonu je."
+          }
+        }
+      }
+    },
+    "Title & Author Match" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Shoda názvu a autora"
+          }
+        }
+      }
+    },
+    "Title Match — Review" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Shoda názvu — zkontrolovat"
+          }
+        }
+      }
+    },
+    "Try another filter or clear the search field." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zkuste jiný filtr nebo vymažte hledání."
+          }
+        }
+      }
+    },
+    "Unmatched" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bez shody"
+          }
+        }
+      }
+    },
+    "Update personal rating" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aktualizovat vlastní hodnocení"
+          }
+        }
+      }
+    },
+    "Update reading status" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aktualizovat stav čtení"
+          }
+        }
+      }
+    },
+    "Winston couldn’t read that export file." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Winston tento soubor exportu nedokázal přečíst."
+          }
+        }
+      }
+    },
+    "Winston couldn’t recognize this Goodreads, StoryGraph, or Hardcover export." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Winston tento export z Goodreads, StoryGraphu ani Hardcoveru nerozpoznal."
+          }
+        }
+      }
+    },
+    "ready" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "připraveno"
+          }
+        }
+      }
+    },
+    "review" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ke kontrole"
+          }
+        }
+      }
+    },
+    "unmatched" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "bez shody"
+          }
+        }
+      }
+    },
+    "·" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "·"
+          }
+        }
+      }
+    },
+    "→ %lld in Winston" : {
+      "comment" : "Rating conversion; the number is Winston’s whole-star value.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "→ %lld ve Winstonu"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

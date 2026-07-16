@@ -47,6 +47,13 @@ enum LibraryExternalActions {
         viewModel.importCalibreLibrary(at: folder)
     }
 
+    static func chooseReadingHistoryExport() async -> URL? {
+        await FilePanel.chooseFile(
+            message: String(localized: "Choose a Goodreads, StoryGraph, or Hardcover CSV export."),
+            allowedContentTypes: [.commaSeparatedText, .plainText]
+        )
+    }
+
     static func handleDrop(providers: [NSItemProvider], viewModel: LibraryViewModel) {
         for provider in providers {
             _ = provider.loadObject(ofClass: NSURL.self) { reading, _ in
