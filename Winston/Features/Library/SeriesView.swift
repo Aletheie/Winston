@@ -3,6 +3,7 @@ import SwiftUI
 struct SeriesView: View {
     let books: [Book]
     let onOpen: (Book) -> Void
+    let onShowInLibrary: (String) -> Void
     let seriesName: String?
 
     @Environment(\.dismiss) private var dismiss
@@ -17,11 +18,13 @@ struct SeriesView: View {
     init(
         books: [Book],
         onOpen: @escaping (Book) -> Void,
+        onShowInLibrary: @escaping (String) -> Void,
         seriesName: String? = nil,
         catalogService: any SeriesCatalogFetching = HardcoverSeriesService.shared
     ) {
         self.books = books
         self.onOpen = onOpen
+        self.onShowInLibrary = onShowInLibrary
         self.seriesName = seriesName
         self.completionModel = SeriesCompletionViewModel(service: catalogService)
     }
@@ -54,7 +57,8 @@ struct SeriesView: View {
                                 completion: completionModel.completions[group.lookup.id],
                                 catalogPhase: completionModel.phase,
                                 isFocused: seriesName != nil,
-                                onOpen: onOpen
+                                onOpen: onOpen,
+                                onShowInLibrary: onShowInLibrary
                             )
                         }
                     }
@@ -256,6 +260,7 @@ private struct SeriesSection: View {
     let catalogPhase: SeriesCompletionViewModel.Phase
     let isFocused: Bool
     let onOpen: (Book) -> Void
+    let onShowInLibrary: (String) -> Void
 
     @Environment(\.theme) private var theme
 
@@ -264,7 +269,13 @@ private struct SeriesSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SeriesSectionHeader(name: name, books: books, nextUnread: nextUnread, onOpen: onOpen)
+            SeriesSectionHeader(
+                name: name,
+                books: books,
+                nextUnread: nextUnread,
+                onOpen: onOpen,
+                onShowInLibrary: onShowInLibrary
+            )
             LocalReadingProgress(readCount: readCount, totalCount: books.count)
 
             if let completion {
@@ -302,6 +313,7 @@ private struct SeriesSectionHeader: View {
     let books: [Book]
     let nextUnread: Book?
     let onOpen: (Book) -> Void
+    let onShowInLibrary: (String) -> Void
 
     @Environment(\.theme) private var theme
 
@@ -312,6 +324,11 @@ private struct SeriesSectionHeader: View {
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
             Spacer()
+            Button { onShowInLibrary(name) } label: {
+                Label("Show in Library", systemImage: "rectangle.stack")
+            }
+            .controlSize(.small)
+            .help("Show in Library")
             SendSeriesButton(books: books)
                 .controlSize(.small)
             if let nextUnread {

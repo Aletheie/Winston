@@ -37,6 +37,7 @@ struct LibraryView: View {
     var viewModel: LibraryViewModel
     let filter: LibraryFilter
     let onShowAll: () -> Void
+    let onShowSeries: (String) -> Void
     @Binding var columnVisibility: NavigationSplitViewVisibility
     @Binding var activeSheet: LibrarySheet?
 
@@ -220,6 +221,7 @@ struct LibraryView: View {
                     SeriesView(
                         books: books,
                         onOpen: { LibraryExternalActions.openInReader($0) },
+                        onShowInLibrary: showSeriesInLibrary,
                         seriesName: name
                     )
                 case .work(let work):
@@ -288,6 +290,14 @@ struct LibraryView: View {
             await Task.yield()
             scrollTarget = book.id
         }
+    }
+
+    private func showSeriesInLibrary(_ name: String) {
+        activeSheet = nil
+        searchText = ""
+        debouncedSearch = ""
+        selection.clear()
+        onShowSeries(name)
     }
 
     // MARK: - Top bar (drop zone + transfer status)
@@ -505,6 +515,7 @@ struct LibraryView: View {
             viewModel: LibraryViewModel(modelContext: container.mainContext, settings: AppSettings(), toasts: ToastCenter()),
             filter: .all,
             onShowAll: {},
+            onShowSeries: { _ in },
             columnVisibility: .constant(.all),
             activeSheet: .constant(nil)
         )
