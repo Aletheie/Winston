@@ -189,8 +189,6 @@ struct LibraryView: View {
                     sortOrder: $sortOrder,
                     showInspector: $showInspector,
                     transmitEnabled: deviceMonitor.isConnected && selection.hasSelection && !transferQueue.isTransferring,
-                    onRecommend: { activeSheet = .readingRecommendation },
-                    onSearchInsideBooks: { activeSheet = .fullTextSearch },
                     onImport: { isImporting = true },
                     onTransmit: transmitSelected
                 )
