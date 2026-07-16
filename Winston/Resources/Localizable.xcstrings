@@ -7953,6 +7953,488 @@
           }
         }
       }
+    },
+    "%lld changes" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Změny: %lld"
+          }
+        }
+      }
+    },
+    "%lld changes selected" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vybrané změny: %lld"
+          }
+        }
+      }
+    },
+    "%lld planned items" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Položky v plánu: %lld"
+          }
+        }
+      }
+    },
+    "A different Kindle format is now preferred; the old variant will be replaced." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nyní je upřednostněn jiný formát pro Kindle; stará varianta bude nahrazena."
+          }
+        }
+      }
+    },
+    "Add" : {
+      "comment" : "Action in a Kindle sync plan that adds a book to the device.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat"
+          }
+        }
+      }
+    },
+    "Already matches this profile; it will be left untouched." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Již odpovídá tomuto profilu a zůstane beze změny."
+          }
+        }
+      }
+    },
+    "An extra format for the same title. Removal is optional and off by default." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Další formát stejné knihy. Odebrání je volitelné a ve výchozím nastavení vypnuté."
+          }
+        }
+      }
+    },
+    "Applied %lld Kindle sync changes." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Použité změny synchronizace Kindlu: %lld."
+          }
+        }
+      }
+    },
+    "Apply %lld Changes" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Použít změny (%lld)"
+          }
+        }
+      }
+    },
+    "Applying changes…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Provádím změny…"
+          }
+        }
+      }
+    },
+    "Building sync plan…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sestavuji plán synchronizace…"
+          }
+        }
+      }
+    },
+    "Couldn’t repair the Kindle cover for “%@”." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obálku knihy „%@“ se na Kindlu nepodařilo opravit."
+          }
+        }
+      }
+    },
+    "DRM-protected books cannot be sent over USB." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Knihy chráněné DRM nelze odeslat přes USB."
+          }
+        }
+      }
+    },
+    "Each profile remembers what was last sent to one Kindle." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Každý profil si pamatuje, co bylo naposledy odesláno do jednoho Kindlu."
+          }
+        }
+      }
+    },
+    "Kindle" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kindle"
+          }
+        }
+      }
+    },
+    "Kindle Sync Plan" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Plán synchronizace Kindlu"
+          }
+        }
+      }
+    },
+    "Kindle sync finished with %lld failed changes." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Synchronizace Kindlu skončila; nezdařené změny: %lld."
+          }
+        }
+      }
+    },
+    "Needs Attention" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vyžaduje pozornost"
+          }
+        }
+      }
+    },
+    "New Kindle Profile" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nový profil Kindlu"
+          }
+        }
+      }
+    },
+    "New Profile…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nový profil…"
+          }
+        }
+      }
+    },
+    "Not on this Kindle yet." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Na tomto Kindlu zatím není."
+          }
+        }
+      }
+    },
+    "Nothing to Sync" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Není co synchronizovat"
+          }
+        }
+      }
+    },
+    "Only on the Kindle. Removal is optional and off by default." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Je pouze na Kindlu. Odebrání je volitelné a ve výchozím nastavení vypnuté."
+          }
+        }
+      }
+    },
+    "Only the selected device copies will be removed. Your Winston library is unchanged." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Odeberou se pouze vybrané kopie v zařízení. Knihovna ve Winstonu se nezmění."
+          }
+        }
+      }
+    },
+    "Optional Removal" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Volitelné odebrání"
+          }
+        }
+      }
+    },
+    "Optional removals" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Volitelná odebrání"
+          }
+        }
+      }
+    },
+    "Preview additions, updates, cover repairs, unchanged books, and optional removals before changing the Kindle." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Před změnou Kindlu si zobrazte náhled přidání, aktualizací, oprav obálek, ponechaných knih a volitelných odebrání."
+          }
+        }
+      }
+    },
+    "Profile" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Profil"
+          }
+        }
+      }
+    },
+    "Profile Name" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Název profilu"
+          }
+        }
+      }
+    },
+    "Refresh Plan" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovit plán"
+          }
+        }
+      }
+    },
+    "Remove %lld books from Kindle?" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Odebrat z Kindlu tento počet knih: %lld?"
+          }
+        }
+      }
+    },
+    "Remove and Apply" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Odebrat a použít"
+          }
+        }
+      }
+    },
+    "Rename Current Profile…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přejmenovat aktuální profil…"
+          }
+        }
+      }
+    },
+    "Rename Kindle Profile" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přejmenovat profil Kindlu"
+          }
+        }
+      }
+    },
+    "Repair Covers" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Opravit obálky"
+          }
+        }
+      }
+    },
+    "Repaired the Kindle cover for “%@”." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obálka knihy „%@“ byla na Kindlu opravena."
+          }
+        }
+      }
+    },
+    "Review exactly what will change on %@." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zkontrolujte, co přesně se na zařízení %@ změní."
+          }
+        }
+      }
+    },
+    "Review Sync Plan" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zkontrolovat plán synchronizace"
+          }
+        }
+      }
+    },
+    "The Kindle conversion is older than its source file and will be regenerated." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Konverze pro Kindle je starší než zdrojový soubor a vytvoří se znovu."
+          }
+        }
+      }
+    },
+    "The library cover changed since the last transfer." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obálka v knihovně se od posledního přenosu změnila."
+          }
+        }
+      }
+    },
+    "The library file changed since the last transfer." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Soubor v knihovně se od posledního přenosu změnil."
+          }
+        }
+      }
+    },
+    "The local book file is missing or damaged." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Místní soubor knihy chybí nebo je poškozený."
+          }
+        }
+      }
+    },
+    "This Kindle and the current library profile are both empty." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tento Kindle i aktuální profil knihovny jsou prázdné."
+          }
+        }
+      }
+    },
+    "Update" : {
+      "comment" : "Action in a Kindle sync plan that replaces an outdated device copy.",
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aktualizovat"
+          }
+        }
+      }
+    },
+    "Use a separate sync history for each Kindle." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pro každý Kindle používejte samostatnou historii synchronizace."
+          }
+        }
+      }
+    },
+    "Cancel Sync" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zrušit synchronizaci"
+          }
+        }
+      }
+    },
+    "Kindle sync cancelled." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Synchronizace Kindlu byla zrušena."
+          }
+        }
+      }
+    },
+    "Multiple library books would use the same Kindle filename. Re-import one with a different filename before syncing." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Více knih z knihovny by v Kindlu použilo stejný název souboru. Před synchronizací jednu znovu importujte pod jiným názvem."
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

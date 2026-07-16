@@ -134,6 +134,11 @@ actor MTPDeviceConnection: KindleDeviceConnection {
             model = String(cString: modelName)
             free(modelName)
         }
+        var serial = ""
+        if let serialNumber = LIBMTP_Get_Serialnumber(device) {
+            serial = String(cString: serialNumber)
+            free(serialNumber)
+        }
         if name.isEmpty { name = model.isEmpty ? "Kindle" : model }
 
         var total: UInt64 = 0
@@ -145,7 +150,14 @@ actor MTPDeviceConnection: KindleDeviceConnection {
             storage = node.pointee.next
         }
 
-        return DeviceInfo(name: name, model: model, kind: .mtp, totalBytes: total, freeBytes: freeBytes)
+        return DeviceInfo(
+            name: name,
+            model: model,
+            kind: .mtp,
+            totalBytes: total,
+            freeBytes: freeBytes,
+            identifier: serial.isEmpty ? nil : "mtp:\(serial)"
+        )
     }
 
     // MARK: - Files

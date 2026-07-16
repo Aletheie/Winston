@@ -44,6 +44,7 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
     func info() throws -> DeviceInfo {
         let values = try? volumeURL.resourceValues(forKeys: [
             .volumeNameKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey,
+            .volumeUUIDStringKey,
         ])
         let name = values?.volumeName ?? "Kindle"
         return DeviceInfo(
@@ -51,7 +52,8 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
             model: name,
             kind: .massStorage,
             totalBytes: UInt64(values?.volumeTotalCapacity ?? 0),
-            freeBytes: UInt64(values?.volumeAvailableCapacity ?? 0)
+            freeBytes: UInt64(values?.volumeAvailableCapacity ?? 0),
+            identifier: values?.volumeUUIDString.map { "usb:\($0)" }
         )
     }
 

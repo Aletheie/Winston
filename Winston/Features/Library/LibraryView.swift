@@ -527,6 +527,7 @@ struct LibraryView: View {
     }
     .modelContainer(container)
     .environment(DeviceMonitor())
+    .environment(KindleSyncProfileStore())
     .environment(TransferQueue(toasts: ToastCenter()))
     .environment(ToastCenter())
     .environment(AppSettings())

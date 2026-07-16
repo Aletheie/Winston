@@ -55,6 +55,28 @@ struct TransferQueueTests {
         #expect(queue.failedCount == 0)
     }
 
+    @Test func successfulSendRecordsReceiptForTheConnectedKindleProfile() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Receipt Book")
+        let suiteName = "TransferQueueReceipt-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profiles = KindleSyncProfileStore(defaults: defaults, storageKey: "profiles")
+        let fake = FakeKindleConnection()
+        let monitor = makeMonitor(fake)
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { profiles.record($0) }
+        )
+
+        await queue.send(books: [book], via: monitor)
+
+        let profile = try #require(profiles.profile(for: FakeKindleConnection.fakeInfo))
+        let receipt = try #require(profiles.receipts(for: profile.id)[book.uuid])
+        #expect(receipt.sentFileName == "Receipt Book.mobi")
+        #expect(receipt.coverVersion == book.coverVersion)
+    }
+
     @Test(.enabled(if: !EbookConverter.prefersAZW3ForKindle))
     func convertsEPUBBeforeSending() async throws {
         let lib = try await TestLibrary()

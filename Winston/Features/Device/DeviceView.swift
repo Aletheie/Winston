@@ -14,11 +14,7 @@ struct DeviceView: View {
     @State private var sidecarSummary: String?
     @State private var deviceRows: [DeviceBookRow] = []
     @State private var deviceAuthors: [String] = []
-
-    private var missingBooks: [Book] {
-        let onDevice = monitor.deviceFileNames
-        return books.filter { !onDevice.contains($0.deviceMatchKey) }
-    }
+    @State private var showsSyncPlan = false
 
     private var deviceOnlyBooks: [DeviceBook] {
         let libraryKeys = Set(books.map(\.deviceMatchKey))
@@ -44,6 +40,9 @@ struct DeviceView: View {
         .navigationTitle(monitor.info.map { "On \($0.name)" } ?? "Device")
         .onChange(of: LibraryMutationLog.shared.revision, initial: true) { rebuildRows() }
         .onChange(of: monitor.books) { rebuildRows() }
+        .sheet(isPresented: $showsSyncPlan) {
+            KindleSyncPlanSheet(books: books)
+        }
     }
 
     private func rebuildRows() {
@@ -58,12 +57,11 @@ struct DeviceView: View {
             DeviceHeader(
                 info: info,
                 bookCount: monitor.books.count,
-                missingCount: missingBooks.count,
                 deviceOnlyCount: deviceOnlyBooks.count,
                 isBusy: transferQueue.isTransferring,
                 isImportingHighlights: viewModel.isImportingHighlights,
                 isCleaningSidecars: isCleaningSidecars,
-                onSend: syncLibrary,
+                onPlan: { showsSyncPlan = true },
                 onImport: importAllFromDevice,
                 onRefresh: { Task { await monitor.refreshBooks(); await monitor.refreshInfo() } },
                 onImportHighlights: { viewModel.importHighlights(via: monitor) },
@@ -101,12 +99,6 @@ struct DeviceView: View {
     }
 
     // MARK: - Actions
-
-    private func syncLibrary() {
-        let toSend = missingBooks
-        guard !toSend.isEmpty else { return }
-        transferQueue.beginSend(books: toSend, via: monitor)
-    }
 
     private func importAllFromDevice() {
         copyToLibrary(Set(deviceOnlyBooks.map(\.id)))
@@ -174,12 +166,11 @@ struct DeviceView: View {
 private struct DeviceHeader: View {
     let info: DeviceInfo
     let bookCount: Int
-    let missingCount: Int
     let deviceOnlyCount: Int
     let isBusy: Bool
     let isImportingHighlights: Bool
     let isCleaningSidecars: Bool
-    let onSend: () -> Void
+    let onPlan: () -> Void
     let onImport: () -> Void
     let onRefresh: () -> Void
     let onImportHighlights: () -> Void
@@ -216,13 +207,13 @@ private struct DeviceHeader: View {
             Spacer()
 
             HStack(spacing: 8) {
-                Button(action: onSend) {
-                    Label("Send \(missingCount) to Kindle", systemImage: "arrow.up.circle")
+                Button(action: onPlan) {
+                    Label("Review Sync Plan", systemImage: "list.bullet.clipboard")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .disabled(missingCount == 0 || isBusy)
-                .help("Copies books in your library that aren\u{2019}t on the Kindle yet. Your library is unchanged.")
+                .disabled(isBusy)
+                .help("Preview additions, updates, cover repairs, unchanged books, and optional removals before changing the Kindle.")
 
                 Button(action: onImport) {
                     Label("Import \(deviceOnlyCount) to Library", systemImage: "arrow.down.circle")

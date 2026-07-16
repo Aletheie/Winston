@@ -6,13 +6,48 @@ nonisolated enum DeviceConnectionKind: String, Sendable {
 }
 
 nonisolated struct DeviceInfo: Sendable, Equatable {
+    var identifier: String
     var name: String
     var model: String
     var kind: DeviceConnectionKind
     var totalBytes: UInt64
     var freeBytes: UInt64
 
+    init(
+        name: String,
+        model: String,
+        kind: DeviceConnectionKind,
+        totalBytes: UInt64,
+        freeBytes: UInt64,
+        identifier: String? = nil
+    ) {
+        self.name = name
+        self.model = model
+        self.kind = kind
+        self.totalBytes = totalBytes
+        self.freeBytes = freeBytes
+        self.identifier = identifier ?? Self.fallbackIdentifier(
+            name: name,
+            model: model,
+            kind: kind,
+            totalBytes: totalBytes
+        )
+    }
+
     var usedBytes: UInt64 { totalBytes > freeBytes ? totalBytes - freeBytes : 0 }
+
+    private static func fallbackIdentifier(
+        name: String,
+        model: String,
+        kind: DeviceConnectionKind,
+        totalBytes: UInt64
+    ) -> String {
+        let parts = [kind.rawValue, model, name, String(totalBytes)]
+        return parts
+            .joined(separator: "|")
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+    }
 }
 
 nonisolated struct DeviceBook: Identifiable, Sendable, Hashable {

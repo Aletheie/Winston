@@ -9,6 +9,7 @@ struct WinstonApp: App {
     @State private var toastCenter: ToastCenter
     @State private var viewModel: LibraryViewModel
     @State private var deviceMonitor = DeviceMonitor()
+    @State private var kindleSyncProfiles: KindleSyncProfileStore
     @State private var transferQueue: TransferQueue
     @State private var updater: SoftwareUpdater
     @State private var pluginService: PluginService
@@ -35,10 +36,15 @@ struct WinstonApp: App {
         _toastCenter = State(initialValue: toastCenter)
         let viewModel = LibraryViewModel(modelContext: context, settings: settings, toasts: toastCenter)
         _viewModel = State(initialValue: viewModel)
+        let kindleSyncProfiles = KindleSyncProfileStore()
+        _kindleSyncProfiles = State(initialValue: kindleSyncProfiles)
         _transferQueue = State(initialValue: TransferQueue(
             toasts: toastCenter,
             onConversionArtifact: { bookUUID, url in
                 await viewModel.adoptConversionArtifact(for: bookUUID, from: url)
+            },
+            onTransferCompleted: { record in
+                kindleSyncProfiles.record(record)
             }
         ))
         _updater = State(initialValue: SoftwareUpdater())
@@ -52,6 +58,7 @@ struct WinstonApp: App {
                 .environment(themeManager)
                 .environment(settings)
                 .environment(deviceMonitor)
+                .environment(kindleSyncProfiles)
                 .environment(transferQueue)
                 .environment(toastCenter)
                 .environment(pluginService)

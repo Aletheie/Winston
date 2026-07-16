@@ -18,12 +18,13 @@
     <h2>Odesílání a import</h2>
     <ul>
         <li>Chcete-li poslat konkrétní knihy, vyberte je v knihovně a v panelu nástrojů klikněte na <span class="badge">Odeslat do zařízení</span>.</li>
-        <li>Nebo použijte dvě tlačítka v záhlaví zobrazení zařízení, která jasně ukazují směr:
+        <li>Nebo použijte dvě tlačítka v záhlaví zobrazení zařízení:
             <ul>
-                <li><b>⬆ Odeslat N do Kindlu</b> zkopíruje knihy, které máte v knihovně, ale zatím ne v Kindlu. Vaše knihovna se nezmění.</li>
+                <li><b>Zkontrolovat plán synchronizace</b> předem ukáže každou změnu: přidání, aktualizaci zastaralé konverze, opravu obálky, ponechání beze změny nebo volitelné odebrání kopie pouze z Kindlu. Odebrání jsou ve výchozím stavu vypnutá a vyžadují potvrzení.</li>
                 <li><b>⬇ Importovat N do knihovny</b> zkopíruje do knihovny knihy, které jsou v Kindlu, ale zatím ne ve Winstonu.</li>
             </ul>
         </li>
+        <li>Každý Kindle dostane vlastní místní profil synchronizace. V nabídce profilu můžete profily přepínat, vytvářet nebo přejmenovat; Winston si pro každý pamatuje naposledy odeslaný zdrojový soubor a obálku.</li>
         <li>Přenosy probíhají po jednom. Průběh včetně převodu se zobrazuje ve stavovém oznámení v pravém dolním rohu; tlačítkem <b>Zrušit</b> zastavíte frontu.</li>
         <li>Knihy, které už jsou v zařízení, mají v knihovně odznak.</li>
     </ul>
@@ -43,9 +44,9 @@
 
     <h2>Převod pro Kindle</h2>
     <ul>
-        <li>Kindle neumí číst EPUB nahraný přes kabel, proto jej Winston při odesílání automaticky převede do formátu <b>AZW3</b>.</li>
-        <li>Knihy můžete převést i předem: vyberte je a zvolte <b>Převést do AZW3</b> v kontextové nabídce, nabídce Kniha nebo inspektoru. Převod nahradí soubor knihy a zachová obálku.</li>
-        <li>Převod vyžaduje nainstalované <a href="https://calibre-ebook.com">Calibre</a>, protože Winston používá nástroj <code>ebook-convert</code>. Bez Calibre je akce Převést vypnutá.</li>
+        <li>Kindle neumí číst EPUB nahraný přes kabel, proto Winston při odesílání automaticky vytvoří kopii ve formátu MOBI nebo AZW3.</li>
+        <li>Knihy můžete převést i předem z kontextové nabídky, nabídky Kniha nebo inspektoru. Vygenerovaný formát zůstane vedle zdroje, takže Winston pozná, kdy zastará.</li>
+        <li>Běžné formáty Winston převádí do MOBI nativně. Ostatní převody používají <a href="https://calibre-ebook.com">Calibre</a> a jeho nástroj <code>ebook-convert</code>.</li>
         <li>Winston se také pokusí odeslat náhled obálky, aby knihy nahrané přes kabel zobrazovaly grafiku. Výsledek závisí na firmwaru zařízení.</li>
     </ul>
 
