@@ -219,6 +219,8 @@ struct DetailStatusRow: View {
 
     @Environment(\.theme) private var theme
 
+    private static let primaryStatuses: [ReadingStatus] = [.unread, .reading, .finished]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -226,22 +228,37 @@ struct DetailStatusRow: View {
                     get: { book.readingStatus },
                     set: { actions.setStatus(book, $0) }
                 )) {
-                    ForEach(ReadingStatus.allCases) { status in
-                        Label(
-                            theme.usesTerminalCopy ? status.terminalLabel : status.label,
-                            systemImage: status.systemImage
-                        )
-                        .tag(status)
+                    ForEach(Self.primaryStatuses) { status in
+                        Text(theme.usesTerminalCopy ? status.terminalLabel : status.label)
+                            .tag(status)
                     }
                 }
-                .pickerStyle(.menu)
+                .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity)
 
-                Button { actions.readingHistory(book) } label: {
-                    Label("History", systemImage: "clock.arrow.circlepath")
+                Menu {
+                    secondaryStatusButton(.paused)
+                    secondaryStatusButton(.didNotFinish)
+                } label: {
+                    Image(systemName: secondaryStatus?.systemImage ?? "ellipsis.circle")
+                        .foregroundStyle(secondaryStatusColor)
+                        .frame(width: 18, height: 18)
                 }
-                .help("Show reading history")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("More reading statuses")
+                .accessibilityLabel("More reading statuses")
+            }
+
+            if let secondaryStatus {
+                Label(
+                    theme.usesTerminalCopy ? secondaryStatus.terminalLabel : secondaryStatus.label,
+                    systemImage: secondaryStatus.systemImage
+                )
+                .font(theme.label(size: 9, weight: .semibold))
+                .foregroundStyle(secondaryStatusColor)
+                .accessibilityIdentifier("bookDetail.secondaryReadingStatus")
             }
 
             if let active = book.activeReadingSession {
@@ -267,6 +284,33 @@ struct DetailStatusRow: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func secondaryStatusButton(_ status: ReadingStatus) -> some View {
+        Button {
+            actions.setStatus(book, status)
+        } label: {
+            Label(
+                theme.usesTerminalCopy ? status.terminalLabel : status.label,
+                systemImage: book.readingStatus == status ? "checkmark" : status.systemImage
+            )
+        }
+    }
+
+    private var secondaryStatus: ReadingStatus? {
+        switch book.readingStatus {
+        case .paused, .didNotFinish: book.readingStatus
+        case .unread, .reading, .finished: nil
+        }
+    }
+
+    private var secondaryStatusColor: Color {
+        switch secondaryStatus {
+        case .paused: theme.highlight
+        case .didNotFinish: theme.destructive
+        case nil, .unread, .reading, .finished: theme.textSecondary
         }
     }
 
@@ -331,6 +375,15 @@ struct DetailActions: View {
                                                                           : "Install calibre to convert books")
                 }
             }
+            DetailActionButton(
+                title: theme.styledText(terminal: "HISTORY", native: "Reading History"),
+                icon: "clock.arrow.circlepath",
+                color: theme.accentTertiary
+            ) {
+                actions.readingHistory(book)
+            }
+            .help("Show reading history")
+            .accessibilityIdentifier("bookDetail.readingHistory")
         }
         .padding(.vertical, 4)
     }
