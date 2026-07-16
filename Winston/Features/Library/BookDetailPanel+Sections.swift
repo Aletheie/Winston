@@ -223,34 +223,14 @@ struct DetailStatusRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Picker("Reading Status", selection: Binding(
-                get: { book.readingStatus },
-                set: { actions.setStatus(book, $0) }
-            )) {
-                ForEach(Self.primaryStatuses) { status in
-                    Text(theme.usesTerminalCopy ? status.terminalLabel : status.label)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                        .tag(status)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
-            .frame(minWidth: 0, maxWidth: .infinity)
-
             HStack(spacing: 6) {
-                if let secondaryStatus {
-                    Label(
-                        theme.usesTerminalCopy ? secondaryStatus.terminalLabel : secondaryStatus.label,
-                        systemImage: secondaryStatus.systemImage
+                DetailPrimaryStatusPicker(
+                    statuses: Self.primaryStatuses,
+                    selection: Binding(
+                        get: { book.readingStatus },
+                        set: { actions.setStatus(book, $0) }
                     )
-                    .font(theme.label(size: 9, weight: .semibold))
-                    .foregroundStyle(secondaryStatusColor)
-                    .accessibilityIdentifier("bookDetail.secondaryReadingStatus")
-                }
-
-                Spacer(minLength: 0)
+                )
 
                 Menu {
                     secondaryStatusButton(.paused)
@@ -264,8 +244,20 @@ struct DetailStatusRow: View {
                 .fixedSize()
                 .help("More reading statuses")
                 .accessibilityLabel("More reading statuses")
+
+                Spacer(minLength: 0)
             }
             .controlSize(.small)
+
+            if let secondaryStatus {
+                Label(
+                    theme.usesTerminalCopy ? secondaryStatus.terminalLabel : secondaryStatus.label,
+                    systemImage: secondaryStatus.systemImage
+                )
+                .font(theme.label(size: 9, weight: .semibold))
+                .foregroundStyle(secondaryStatusColor)
+                .accessibilityIdentifier("bookDetail.secondaryReadingStatus")
+            }
 
             if let active = book.activeReadingSession {
                 HStack(spacing: 7) {
@@ -329,6 +321,44 @@ struct DetailStatusRow: View {
                 .font(theme.label(size: 9))
                 .foregroundStyle(theme.textSecondary)
         }
+    }
+}
+
+private struct DetailPrimaryStatusPicker: View {
+    let statuses: [ReadingStatus]
+    @Binding var selection: ReadingStatus
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            statusPicker(iconOnly: false)
+            statusPicker(iconOnly: true)
+        }
+    }
+
+    private func statusPicker(iconOnly: Bool) -> some View {
+        Picker("Reading Status", selection: $selection) {
+            ForEach(statuses) { status in
+                if iconOnly {
+                    Image(systemName: status.systemImage)
+                        .accessibilityLabel(displayLabel(for: status))
+                        .tag(status)
+                } else {
+                    Text(verbatim: displayLabel(for: status))
+                        .tag(status)
+                }
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.mini)
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityLabel("Reading Status")
+    }
+
+    private func displayLabel(for status: ReadingStatus) -> String {
+        theme.usesTerminalCopy ? status.terminalLabel : status.label
     }
 }
 
