@@ -61,6 +61,60 @@ struct ReadingRecommendationTests {
         #expect(first.reasons.contains(.fitsQuickRead(pageCount: 210)))
     }
 
+    @Test func explicitTimeChoiceCanOutrankAnInProgressMismatch() throws {
+        let short = candidate(title: "Short Match", pages: 180)
+        let longInProgress = candidate(
+            title: "Long In Progress",
+            status: .reading,
+            progress: 0.2,
+            pages: 900
+        )
+        var preferences = ReadingRecommendationPreferences.default
+        preferences.timeBudget = .quick
+        preferences.preferHighlyRated = false
+        preferences.preferWaitingLongest = false
+
+        let result = ReadingRecommendationService.rank(
+            [longInProgress, short],
+            preferences: preferences,
+            now: now
+        )
+
+        #expect(try #require(result.first).bookID == short.id)
+    }
+
+    @Test func eachTimeBudgetCanProduceADifferentWinner() {
+        let short = candidate(title: "Short", pages: 140)
+        let weekend = candidate(title: "Weekend", pages: 300)
+        let long = candidate(title: "Long", pages: 700)
+        var preferences = ReadingRecommendationPreferences.default
+        preferences.preferHighlyRated = false
+        preferences.preferWaitingLongest = false
+
+        preferences.timeBudget = .quick
+        let quickWinner = ReadingRecommendationService.rank(
+            [long, weekend, short],
+            preferences: preferences,
+            now: now
+        ).first?.bookID
+        preferences.timeBudget = .weekend
+        let weekendWinner = ReadingRecommendationService.rank(
+            [long, weekend, short],
+            preferences: preferences,
+            now: now
+        ).first?.bookID
+        preferences.timeBudget = .long
+        let longWinner = ReadingRecommendationService.rank(
+            [long, weekend, short],
+            preferences: preferences,
+            now: now
+        ).first?.bookID
+
+        #expect(quickWinner == short.id)
+        #expect(weekendWinner == weekend.id)
+        #expect(longWinner == long.id)
+    }
+
     @Test func moodAndLanguageAreHardFiltersEvenAgainstAHigherRating() throws {
         let match = candidate(
             title: "Duna",
@@ -221,6 +275,26 @@ struct ReadingRecommendationTests {
         #expect(result.map(\.bookID) == [available.id])
     }
 
+    @Test func reopeningRotatesOnlyNearEqualTopMatches() {
+        let firstID = UUID()
+        let secondID = UUID()
+        let thirdID = UUID()
+        let weakID = UUID()
+        let ranked = [
+            ReadingRecommendation(bookID: firstID, score: 100, reasons: [.readyNow]),
+            ReadingRecommendation(bookID: secondID, score: 96, reasons: [.readyNow]),
+            ReadingRecommendation(bookID: thirdID, score: 91, reasons: [.readyNow]),
+            ReadingRecommendation(bookID: weakID, score: 60, reasons: [.readyNow]),
+        ]
+
+        let rotated = ReadingRecommendationService.rotatingStrongMatches(
+            ranked,
+            after: firstID
+        )
+
+        #expect(rotated.map(\.bookID) == [secondID, thirdID, firstID, weakID])
+    }
+
     @Test func rankingScalesToALargeLibrary() {
         var books = (0..<4_000).map { index in
             candidate(title: "Book \(index)", series: "Long Series")
@@ -245,5 +319,6 @@ struct ReadingRecommendationTests {
 
         print("Reading recommendation ranking benchmark: \(elapsed)")
         #expect(result.count == 4_000)
+        #expect(elapsed < .seconds(2))
     }
 }

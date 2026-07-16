@@ -169,12 +169,7 @@ nonisolated enum ReadingRecommendationService {
         calendar: Calendar = .current
     ) -> [ReadingRecommendation] {
         let candidatesByID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
-        let startedSeries = Set(candidates.compactMap { candidate -> String? in
-            guard candidate.readingStatus == .finished
-                    || candidate.readingStatus == .reading
-                    || candidate.readingStatus == .paused else { return nil }
-            return normalized(candidate.series)
-        })
+        let seriesContext = SeriesContext(candidates: candidates)
 
         var eligible = candidates.filter { candidate in
             guard candidate.isAvailable else { return false }
@@ -205,7 +200,7 @@ nonisolated enum ReadingRecommendationService {
         case .continueSeries:
             eligible = eligible.filter { candidate in
                 guard let key = normalized(candidate.series) else { return false }
-                return startedSeries.contains(key)
+                return seriesContext.startedSeries.contains(key)
             }
         case .standalone:
             eligible = eligible.filter { normalized($0.series) == nil }
@@ -213,14 +208,13 @@ nonisolated enum ReadingRecommendationService {
 
         eligible = removeLaterUnreadVolumes(
             from: eligible,
-            considering: candidates
+            earliestUnreadIndexBySeries: seriesContext.earliestUnreadIndexBySeries
         )
 
         return eligible.map { candidate in
             score(
                 candidate,
-                allCandidates: candidates,
-                startedSeries: startedSeries,
+                seriesContext: seriesContext,
                 preferences: preferences,
                 now: now,
                 calendar: calendar
@@ -239,15 +233,81 @@ nonisolated enum ReadingRecommendationService {
         }
     }
 
+    /// Keeps ranking meaningful while avoiding the same first card every time the sheet reopens.
+    /// Only near-equal top matches rotate; a weak match never jumps ahead of a strong one.
+    static func rotatingStrongMatches(
+        _ recommendations: [ReadingRecommendation],
+        after previousBookID: UUID?,
+        maximumPoolSize: Int = 5,
+        scoreWindow: Double = 20
+    ) -> [ReadingRecommendation] {
+        guard let previousBookID,
+              recommendations.count > 1,
+              maximumPoolSize > 1,
+              let topScore = recommendations.first?.score else {
+            return recommendations
+        }
+
+        let pool = Array(recommendations.prefix(maximumPoolSize).prefix { recommendation in
+            topScore - recommendation.score <= scoreWindow
+        })
+        guard pool.count > 1,
+              let previousIndex = pool.firstIndex(where: { $0.bookID == previousBookID }) else {
+            return recommendations
+        }
+
+        let startIndex = pool.index(after: previousIndex) == pool.endIndex
+            ? pool.startIndex
+            : pool.index(after: previousIndex)
+        let rotatedPool = Array(pool[startIndex...]) + Array(pool[..<startIndex])
+        return rotatedPool + recommendations.dropFirst(pool.count)
+    }
+
     private struct WeightedReason {
         let weight: Double
         let reason: ReadingRecommendationReason
     }
 
+    private struct SeriesContext {
+        var startedSeries: Set<String> = []
+        var minimumStartedIndexBySeries: [String: Double] = [:]
+        var seriesWithUnindexedStartedBook: Set<String> = []
+        var earliestUnreadIndexBySeries: [String: Double] = [:]
+
+        init(candidates: [ReadingRecommendationCandidate]) {
+            for candidate in candidates {
+                guard let key = ReadingRecommendationService.normalized(candidate.series) else {
+                    continue
+                }
+
+                if candidate.readingStatus == .unread, let index = candidate.seriesIndex {
+                    earliestUnreadIndexBySeries[key] = min(
+                        earliestUnreadIndexBySeries[key] ?? index,
+                        index
+                    )
+                }
+
+                guard candidate.readingStatus == .finished
+                        || candidate.readingStatus == .reading
+                        || candidate.readingStatus == .paused else {
+                    continue
+                }
+                startedSeries.insert(key)
+                if let index = candidate.seriesIndex {
+                    minimumStartedIndexBySeries[key] = min(
+                        minimumStartedIndexBySeries[key] ?? index,
+                        index
+                    )
+                } else {
+                    seriesWithUnindexedStartedBook.insert(key)
+                }
+            }
+        }
+    }
+
     private static func score(
         _ candidate: ReadingRecommendationCandidate,
-        allCandidates: [ReadingRecommendationCandidate],
-        startedSeries: Set<String>,
+        seriesContext: SeriesContext,
         preferences: ReadingRecommendationPreferences,
         now: Date,
         calendar: Calendar
@@ -260,11 +320,13 @@ nonisolated enum ReadingRecommendationService {
         }
         switch candidate.readingStatus {
         case .reading:
-            score += 48
-            reasons.append(WeightedReason(weight: 48, reason: .currentlyReading(progress: progress)))
+            let weight = preferences.mode == .continueReading ? 30.0 : 12.0
+            score += weight
+            reasons.append(WeightedReason(weight: weight, reason: .currentlyReading(progress: progress)))
         case .paused:
-            score += 30
-            reasons.append(WeightedReason(weight: 30, reason: .paused(progress: progress)))
+            let weight = preferences.mode == .continueReading ? 22.0 : 8.0
+            score += weight
+            reasons.append(WeightedReason(weight: weight, reason: .paused(progress: progress)))
         case .unread, .finished, .didNotFinish:
             break
         }
@@ -279,26 +341,24 @@ nonisolated enum ReadingRecommendationService {
 
         if let requestedTag = preferences.moodTag,
            candidate.tags.contains(where: { normalized($0) == normalized(requestedTag) }) {
-            score += 42
-            reasons.append(WeightedReason(weight: 42, reason: .matchesMood(requestedTag)))
+            reasons.append(WeightedReason(weight: 14, reason: .matchesMood(requestedTag)))
         }
 
         if let requestedLanguage = preferences.language,
            normalized(candidate.language) == normalized(requestedLanguage) {
-            score += 18
-            reasons.append(WeightedReason(weight: 18, reason: .matchesLanguage(requestedLanguage)))
+            reasons.append(WeightedReason(weight: 10, reason: .matchesLanguage(requestedLanguage)))
         }
 
         if let series = candidate.series,
            let seriesKey = normalized(series),
-           startedSeries.contains(seriesKey),
-           isContinuation(candidate, among: allCandidates) {
-            score += 32
-            reasons.append(WeightedReason(weight: 32, reason: .continuesSeries(series)))
+           seriesContext.startedSeries.contains(seriesKey),
+           isContinuation(candidate, seriesKey: seriesKey, context: seriesContext) {
+            score += 18
+            reasons.append(WeightedReason(weight: 18, reason: .continuesSeries(series)))
         }
 
         if preferences.preferHighlyRated, let rating = effectiveRating(candidate) {
-            let ratingScore = max(0, min(22, (rating - 2.5) * 8.8))
+            let ratingScore = max(0, min(10, (rating - 2.5) * 4))
             score += ratingScore
             if rating >= 3.5 {
                 reasons.append(WeightedReason(weight: ratingScore, reason: .highlyRated(rating)))
@@ -307,7 +367,7 @@ nonisolated enum ReadingRecommendationService {
 
         if preferences.preferWaitingLongest, candidate.readingStatus == .unread {
             let days = max(0, calendar.dateComponents([.day], from: candidate.dateAdded, to: now).day ?? 0)
-            let waitingScore = min(24, Double(days) / 45)
+            let waitingScore = min(10, Double(days) / 90)
             score += waitingScore
             if days >= 90 {
                 reasons.append(WeightedReason(weight: waitingScore, reason: .waitingSince(candidate.dateAdded)))
@@ -337,17 +397,19 @@ nonisolated enum ReadingRecommendationService {
         case .any:
             return (0, nil)
         case .quick:
-            if pageCount <= 220 { return (28, .fitsQuickRead(pageCount: pageCount)) }
-            if pageCount <= 320 { return (10, nil) }
-            return (0, nil)
+            if pageCount <= 220 { return (36, .fitsQuickRead(pageCount: pageCount)) }
+            if pageCount <= 320 { return (12, nil) }
+            if pageCount <= 450 { return (-12, nil) }
+            return (-28, nil)
         case .weekend:
-            if (180 ... 420).contains(pageCount) { return (25, .fitsWeekend(pageCount: pageCount)) }
+            if (180 ... 420).contains(pageCount) { return (32, .fitsWeekend(pageCount: pageCount)) }
             if (120 ... 560).contains(pageCount) { return (10, nil) }
-            return (0, nil)
+            return (-18, nil)
         case .long:
-            if pageCount >= 400 { return (24, .suitsLongRead(pageCount: pageCount)) }
-            if pageCount >= 280 { return (9, nil) }
-            return (0, nil)
+            if pageCount >= 400 { return (32, .suitsLongRead(pageCount: pageCount)) }
+            if pageCount >= 280 { return (10, nil) }
+            if pageCount < 180 { return (-24, nil) }
+            return (-10, nil)
         }
     }
 
@@ -361,19 +423,8 @@ nonisolated enum ReadingRecommendationService {
 
     private static func removeLaterUnreadVolumes(
         from candidates: [ReadingRecommendationCandidate],
-        considering allCandidates: [ReadingRecommendationCandidate]
+        earliestUnreadIndexBySeries: [String: Double]
     ) -> [ReadingRecommendationCandidate] {
-        let earliestUnreadIndexBySeries = Dictionary(
-            grouping: allCandidates.filter { candidate in
-                candidate.readingStatus == .unread
-                    && normalized(candidate.series) != nil
-                    && candidate.seriesIndex != nil
-            },
-            by: { normalized($0.series)! }
-        ).compactMapValues { group in
-            group.compactMap(\.seriesIndex).min()
-        }
-
         return candidates.filter { candidate in
             guard candidate.readingStatus == .unread,
                   let seriesKey = normalized(candidate.series),
@@ -387,22 +438,17 @@ nonisolated enum ReadingRecommendationService {
 
     private static func isContinuation(
         _ candidate: ReadingRecommendationCandidate,
-        among candidates: [ReadingRecommendationCandidate]
+        seriesKey: String,
+        context: SeriesContext
     ) -> Bool {
         if candidate.readingStatus == .reading || candidate.readingStatus == .paused { return true }
-        guard candidate.readingStatus == .unread,
-              let key = normalized(candidate.series) else { return false }
-
-        return candidates.contains { other in
-            guard other.id != candidate.id,
-                  normalized(other.series) == key,
-                  other.readingStatus == .finished
-                    || other.readingStatus == .reading
-                    || other.readingStatus == .paused else { return false }
-            guard let candidateIndex = candidate.seriesIndex,
-                  let otherIndex = other.seriesIndex else { return true }
-            return otherIndex < candidateIndex
+        guard candidate.readingStatus == .unread else { return false }
+        guard let candidateIndex = candidate.seriesIndex else { return true }
+        if context.seriesWithUnindexedStartedBook.contains(seriesKey) { return true }
+        guard let earliestStartedIndex = context.minimumStartedIndexBySeries[seriesKey] else {
+            return false
         }
+        return earliestStartedIndex < candidateIndex
     }
 
     private static func normalized(_ value: String?) -> String? {

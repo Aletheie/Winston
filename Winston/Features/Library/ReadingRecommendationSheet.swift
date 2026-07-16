@@ -1,6 +1,105 @@
 import Observation
 import SwiftUI
 
+nonisolated private struct ReadingRecommendationCandidateSource: Sendable {
+    let id: UUID
+    let title: String
+    let author: String?
+    let readingStatus: ReadingStatus
+    let activeProgress: Double?
+    let pageCount: Int?
+    let tags: [String]
+    let language: String?
+    let series: String?
+    let seriesIndex: Double?
+    let personalRating: Int?
+    let communityRating: Double?
+    let dateAdded: Date
+    let fileURL: URL
+    let validationAllowsReading: Bool
+
+    func candidate(fileExists: Bool) -> ReadingRecommendationCandidate {
+        ReadingRecommendationCandidate(
+            id: id,
+            title: title,
+            author: author,
+            readingStatus: readingStatus,
+            activeProgress: activeProgress,
+            pageCount: pageCount,
+            tags: tags,
+            language: language,
+            series: series,
+            seriesIndex: seriesIndex,
+            personalRating: personalRating,
+            communityRating: communityRating,
+            dateAdded: dateAdded,
+            isAvailable: fileExists && validationAllowsReading
+        )
+    }
+}
+
+nonisolated private struct PreparedReadingRecommendations: Sendable {
+    let candidates: [ReadingRecommendationCandidate]
+    let sourceBookCount: Int
+    let availableTags: [String]
+    let availableLanguages: [String]
+}
+
+nonisolated private enum ReadingRecommendationPreparer {
+    static func prepare(_ sources: [ReadingRecommendationCandidateSource]) -> PreparedReadingRecommendations {
+        var candidates: [ReadingRecommendationCandidate] = []
+        candidates.reserveCapacity(sources.count)
+
+        for source in sources {
+            if Task.isCancelled { break }
+            candidates.append(source.candidate(
+                fileExists: FileManager.default.fileExists(
+                    atPath: source.fileURL.path(percentEncoded: false)
+                )
+            ))
+        }
+
+        return PreparedReadingRecommendations(
+            candidates: candidates,
+            sourceBookCount: candidates.count {
+                $0.isAvailable
+                    && ($0.readingStatus == .unread
+                        || $0.readingStatus == .reading
+                        || $0.readingStatus == .paused)
+            },
+            availableTags: uniqueSorted(candidates.flatMap(\.tags)),
+            availableLanguages: uniqueSorted(candidates.compactMap(\.language))
+        )
+    }
+
+    private static func uniqueSorted(_ values: [String]) -> [String] {
+        var displayValueByKey: [String: String] = [:]
+        for value in values {
+            guard let display = nonempty(value) else { continue }
+            let key = normalized(display)
+            if displayValueByKey[key] == nil {
+                displayValueByKey[key] = display
+            }
+        }
+        return displayValueByKey.values.sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        ).lowercased()
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+}
+
 @MainActor
 @Observable
 final class ReadingRecommendationViewModel {
@@ -12,30 +111,48 @@ final class ReadingRecommendationViewModel {
     }
 
     private(set) var currentRecommendation: ReadingRecommendation?
+    private(set) var currentBook: Book?
     private(set) var recommendationCount = 0
     private(set) var currentOrdinal = 0
     private(set) var availableTags: [String] = []
     private(set) var availableLanguages: [String] = []
     private(set) var sourceBookCount = 0
+    private(set) var isPreparing = false
 
     @ObservationIgnored private var candidates: [ReadingRecommendationCandidate] = []
     @ObservationIgnored private var rankedRecommendations: [ReadingRecommendation] = []
+    @ObservationIgnored private var booksByID: [UUID: Book] = [:]
+    @ObservationIgnored private var rotationAnchorID: UUID?
+    @ObservationIgnored private var activePreparationID: UUID?
     @ObservationIgnored private var selectedIndex = 0
 
     var hasCustomPreferences: Bool {
         preferences != .default
     }
 
-    func prepare(books: [Book]) {
-        candidates = books.map(Self.candidate)
-        sourceBookCount = candidates.count {
-            $0.isAvailable
-                && ($0.readingStatus == .unread
-                    || $0.readingStatus == .reading
-                    || $0.readingStatus == .paused)
+    func prepare(books: [Book], after previousBookID: UUID?) async {
+        let preparationID = UUID()
+        activePreparationID = preparationID
+        isPreparing = true
+        booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
+        rotationAnchorID = previousBookID
+
+        let sources = books.map(Self.candidateSource)
+        let preparationTask = Task.detached(priority: .userInitiated) {
+            ReadingRecommendationPreparer.prepare(sources)
         }
-        availableTags = Self.uniqueSorted(candidates.flatMap(\.tags))
-        availableLanguages = Self.uniqueSorted(candidates.compactMap(\.language))
+        let prepared = await withTaskCancellationHandler {
+            await preparationTask.value
+        } onCancel: {
+            preparationTask.cancel()
+        }
+
+        guard !Task.isCancelled, activePreparationID == preparationID else { return }
+        isPreparing = false
+        candidates = prepared.candidates
+        sourceBookCount = prepared.sourceBookCount
+        availableTags = prepared.availableTags
+        availableLanguages = prepared.availableLanguages
 
         var updated = preferences
         if let tag = updated.moodTag,
@@ -70,9 +187,13 @@ final class ReadingRecommendationViewModel {
     }
 
     private func recompute() {
-        rankedRecommendations = ReadingRecommendationService.rank(
+        let ranked = ReadingRecommendationService.rank(
             candidates,
             preferences: preferences
+        )
+        rankedRecommendations = ReadingRecommendationService.rotatingStrongMatches(
+            ranked,
+            after: rotationAnchorID
         )
         selectedIndex = 0
         updateCurrentRecommendation()
@@ -82,22 +203,22 @@ final class ReadingRecommendationViewModel {
         recommendationCount = rankedRecommendations.count
         guard rankedRecommendations.indices.contains(selectedIndex) else {
             currentRecommendation = nil
+            currentBook = nil
             currentOrdinal = 0
             return
         }
-        currentRecommendation = rankedRecommendations[selectedIndex]
+        let recommendation = rankedRecommendations[selectedIndex]
+        currentRecommendation = recommendation
+        currentBook = booksByID[recommendation.bookID]
+        rotationAnchorID = recommendation.bookID
         currentOrdinal = selectedIndex + 1
     }
 
-    private static func candidate(from book: Book) -> ReadingRecommendationCandidate {
+    private static func candidateSource(from book: Book) -> ReadingRecommendationCandidateSource {
         let primaryAsset = book.assets.first { $0.fileName == book.fileName }
-        let fileExists = FileManager.default.fileExists(
-            atPath: book.fileURL.path(percentEncoded: false)
-        )
         let validationAllowsReading = primaryAsset?.validationStatus != .missing
             && primaryAsset?.validationStatus != .corrupt
-        let isAvailable = fileExists && validationAllowsReading
-        return ReadingRecommendationCandidate(
+        return ReadingRecommendationCandidateSource(
             id: book.uuid,
             title: book.displayTitle,
             author: book.displayAuthor,
@@ -111,22 +232,9 @@ final class ReadingRecommendationViewModel {
             personalRating: book.rating,
             communityRating: book.communityRating,
             dateAdded: book.dateAdded,
-            isAvailable: isAvailable
+            fileURL: book.fileURL,
+            validationAllowsReading: validationAllowsReading
         )
-    }
-
-    private static func uniqueSorted(_ values: [String]) -> [String] {
-        var displayValueByKey: [String: String] = [:]
-        for value in values {
-            guard let display = nonempty(value) else { continue }
-            let key = normalized(display)
-            if displayValueByKey[key] == nil {
-                displayValueByKey[key] = display
-            }
-        }
-        return displayValueByKey.values.sorted {
-            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
-        }
     }
 
     private static func sameText(_ lhs: String, _ rhs: String) -> Bool {
@@ -154,6 +262,7 @@ struct ReadingRecommendationSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
+    @AppStorage("readingRecommendation.lastBookID") private var lastRecommendationBookID = ""
     @State private var model = ReadingRecommendationViewModel()
 
     var body: some View {
@@ -171,11 +280,12 @@ struct ReadingRecommendationSheet: View {
                 .frame(minWidth: 380, idealWidth: 400, maxWidth: 420)
 
                 ReadingRecommendationResultPane(
-                    book: currentBook,
+                    book: model.currentBook,
                     recommendation: model.currentRecommendation,
                     recommendationCount: model.recommendationCount,
                     currentOrdinal: model.currentOrdinal,
                     hasSourceBooks: model.sourceBookCount > 0,
+                    isPreparing: model.isPreparing,
                     onChooseAnother: model.chooseAnother,
                     onReset: model.resetPreferences,
                     onOpen: onOpen,
@@ -194,13 +304,16 @@ struct ReadingRecommendationSheet: View {
                minHeight: 600, idealHeight: 700, maxHeight: 900)
         .background(theme.background)
         .task(id: LibraryMutationLog.shared.revision) {
-            model.prepare(books: books)
+            await model.prepare(
+                books: books,
+                after: UUID(uuidString: lastRecommendationBookID)
+            )
         }
-    }
-
-    private var currentBook: Book? {
-        guard let bookID = model.currentRecommendation?.bookID else { return nil }
-        return books.first { $0.uuid == bookID }
+        .onChange(of: model.currentRecommendation?.bookID) { _, bookID in
+            if let bookID {
+                lastRecommendationBookID = bookID.uuidString
+            }
+        }
     }
 }
 
@@ -419,6 +532,7 @@ private struct ReadingRecommendationResultPane: View {
     let recommendationCount: Int
     let currentOrdinal: Int
     let hasSourceBooks: Bool
+    let isPreparing: Bool
     let onChooseAnother: () -> Void
     let onReset: () -> Void
     let onOpen: (UUID) -> Void
@@ -427,7 +541,11 @@ private struct ReadingRecommendationResultPane: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        if let book, let recommendation {
+        if isPreparing {
+            ProgressView("Checking your library…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(theme.background)
+        } else if let book, let recommendation {
             ScrollView {
                 ReadingRecommendationResult(
                     book: book,
