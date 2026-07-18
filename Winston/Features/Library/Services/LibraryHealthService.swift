@@ -58,7 +58,7 @@ final class LibraryHealthService {
 
     private func metadataAnalysis() async -> MetadataFixAnalysis {
         while true {
-            let revision = LibraryMutationLog.shared.revision
+            let revision = LibraryMutationLog.shared.catalogRevision
             if cachedMetadataAnalysisRevision == revision, let cachedMetadataAnalysis {
                 return cachedMetadataAnalysis
             }
@@ -67,17 +67,23 @@ final class LibraryHealthService {
             if let inFlight = metadataAnalysisTask, inFlight.revision == revision {
                 task = inFlight.task
             } else {
-                let rows = modelContext.allBooks().map {
-                    MetadataFixRow(
-                        bookID: $0.uuid,
-                        title: $0.displayTitle,
-                        originalFileName: $0.originalFileName,
-                        author: $0.displayAuthor,
-                        series: $0.series,
-                        seriesIndex: $0.seriesIndex
-                    )
+                let books = modelContext.allBooks()
+                var rows: [MetadataFixRow] = []
+                rows.reserveCapacity(books.count)
+                for (index, book) in books.enumerated() {
+                    guard !Task.isCancelled else { return MetadataFixAnalysis(fixes: [], seriesSuggestions: []) }
+                    rows.append(MetadataFixRow(
+                        bookID: book.uuid,
+                        title: book.displayTitle,
+                        originalFileName: book.originalFileName,
+                        author: book.displayAuthor,
+                        series: book.series,
+                        seriesIndex: book.seriesIndex
+                    ))
+                    if index > 0, index.isMultiple(of: 128) { await Task.yield() }
                 }
-                task = Task { await Self.computeMetadataAnalysis(rows: rows) }
+                let snapshotRows = rows
+                task = Task { await Self.computeMetadataAnalysis(rows: snapshotRows) }
                 metadataAnalysisTask = (revision, task)
             }
 
@@ -85,7 +91,7 @@ final class LibraryHealthService {
             if metadataAnalysisTask?.revision == revision {
                 metadataAnalysisTask = nil
             }
-            guard LibraryMutationLog.shared.revision == revision else { continue }
+            guard LibraryMutationLog.shared.catalogRevision == revision else { continue }
 
             cachedMetadataAnalysis = analysis
             cachedMetadataAnalysisRevision = revision
@@ -101,9 +107,21 @@ final class LibraryHealthService {
     @discardableResult
     func scanForMissingFiles() async -> Int {
         let books = modelContext.allBooks()
-        let primaryEntries = books.map { (uuid: $0.uuid, fileName: $0.fileName) }
-        let assets = books.flatMap(\.assets)
-        let assetEntries = assets.map { (uuid: $0.uuid, fileName: $0.fileName) }
+        let assets = (try? modelContext.fetch(FetchDescriptor<BookAsset>())) ?? []
+        var primaryEntries: [(uuid: UUID, fileName: String)] = []
+        primaryEntries.reserveCapacity(books.count)
+        for (index, book) in books.enumerated() {
+            guard !Task.isCancelled else { return 0 }
+            primaryEntries.append((book.uuid, book.fileName))
+            if index > 0, index.isMultiple(of: 256) { await Task.yield() }
+        }
+        var assetEntries: [(uuid: UUID, fileName: String)] = []
+        assetEntries.reserveCapacity(assets.count)
+        for (index, asset) in assets.enumerated() {
+            guard !Task.isCancelled else { return 0 }
+            assetEntries.append((asset.uuid, asset.fileName))
+            if index > 0, index.isMultiple(of: 256) { await Task.yield() }
+        }
         let result = await Task.detached(priority: .utility) {
             var missingBooks: Set<UUID> = []
             var assetStatus: [UUID: AssetValidation] = [:]
@@ -119,8 +137,9 @@ final class LibraryHealthService {
         }.value
         missingFileUUIDs = result.0
         var changed = false
-        for asset in assets {
-            guard let status = result.1[asset.uuid] else { continue }
+        for (index, asset) in assets.enumerated() {
+            // The yields below let deletions interleave; a removed asset must not be written to.
+            guard asset.modelContext != nil, let status = result.1[asset.uuid] else { continue }
             if status == .missing {
                 if asset.validationStatus != .missing {
                     asset.validationStatus = .missing
@@ -130,6 +149,7 @@ final class LibraryHealthService {
                 asset.validationStatus = .ok
                 changed = true
             }
+            if index > 0, index.isMultiple(of: 256) { await Task.yield() }
         }
         if changed { modelContext.saveQuietly() }
         return result.0.count
@@ -140,12 +160,28 @@ final class LibraryHealthService {
         let oldFileName = book.fileName
         let asset = book.assets.first { $0.fileName == oldFileName }
             ?? book.assets.first { $0.uuid == book.uuid }
-        guard let fileName = try? BookFileStore.replacementCopy(
-            of: url, replacing: oldFileName, uuid: asset?.uuid ?? book.uuid
-        ) else { return }
+        let replacementUUID = asset?.uuid ?? book.uuid
+        let replacement: (fileName: String, size: Int64)? = await Task.detached(priority: .userInitiated) {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            guard let fileName = try? BookFileStore.replacementCopy(
+                of: url,
+                replacing: oldFileName,
+                uuid: replacementUUID
+            ) else { return nil }
+            return (fileName, BookFileStore.size(of: fileName))
+        }.value
+        guard let replacement else { return }
+        let fileName = replacement.fileName
+        guard book.modelContext != nil, book.fileName == oldFileName else {
+            Task.detached(priority: .utility) {
+                BookFileStore.delete(fileName: fileName)
+            }
+            return
+        }
         let replacementDate = Date()
         book.fileName = fileName
-        book.fileSizeBytes = BookFileStore.size(of: fileName)
+        book.fileSizeBytes = replacement.size
         book.drmProtected = nil
         book.coverVersion += 1
 
@@ -173,11 +209,17 @@ final class LibraryHealthService {
             updatedAsset = asset
         }
         guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-            BookFileStore.delete(fileName: fileName)
+            Task.detached(priority: .utility) {
+                BookFileStore.delete(fileName: fileName)
+            }
             return
         }
         missingFileUUIDs.remove(book.uuid)
-        if fileName != oldFileName { BookFileStore.delete(fileName: oldFileName) }
+        if fileName != oldFileName {
+            Task.detached(priority: .utility) {
+                BookFileStore.delete(fileName: oldFileName)
+            }
+        }
 
         let managedURL = BookFileStore.url(for: fileName)
         let analysis = await Task.detached(priority: .utility) {
@@ -223,8 +265,17 @@ final class LibraryHealthService {
     }
 
     func duplicateGroups() async -> [DuplicateGroup] {
-        let books = modelContext.allBooks()
-        let candidates = books.map { book in
+        var descriptor = FetchDescriptor<Book>()
+        descriptor.relationshipKeyPathsForPrefetching = [\Book.assets]
+        let books = (try? modelContext.fetch(descriptor)) ?? []
+        let byUUID = Dictionary(
+            books.lazy.map { ($0.uuid, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var candidates: [DupeCandidate] = []
+        candidates.reserveCapacity(books.count)
+        for (index, book) in books.enumerated() {
+            guard !Task.isCancelled else { return [] }
             let retainedAssets = book.assets.filter {
                 $0.validationStatus != .missing && $0.validationStatus != .corrupt
             }
@@ -251,20 +302,23 @@ final class LibraryHealthService {
                     : retainedAssets.isEmpty,
                 dateAdded: book.dateAdded
             )
-            return DupeCandidate(
+            candidates.append(DupeCandidate(
                 uuid: book.uuid,
                 storedTitle: book.title,
                 originalFileName: book.originalFileName,
                 author: book.displayAuthor,
                 fileSizeBytes: book.fileSizeBytes,
                 quality: quality
-            )
+            ))
+            if index > 0, index.isMultiple(of: 128) { await Task.yield() }
         }
         let rankedGroups = await Self.groupedDuplicates(candidates)
-        let currentBooks = modelContext.allBooks()
-        let byUUID = Dictionary(currentBooks.map { ($0.uuid, $0) }, uniquingKeysWith: { first, _ in first })
+        guard !Task.isCancelled else { return [] }
         return rankedGroups.compactMap { ranked in
-            let liveBooks = ranked.orderedUUIDs.compactMap { byUUID[$0] }
+            let liveBooks: [Book] = ranked.orderedUUIDs.compactMap { id -> Book? in
+                guard let book = byUUID[id], book.modelContext != nil else { return nil }
+                return book
+            }
             guard liveBooks.count > 1,
                   byUUID[ranked.recommendation.bookUUID] != nil else { return nil }
             return DuplicateGroup(books: liveBooks, recommendation: ranked.recommendation)
