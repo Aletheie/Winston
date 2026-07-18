@@ -275,10 +275,24 @@ nonisolated enum EditionMatcher {
     }
 
     static func proposalPrecedes(_ lhs: EditionMatchProposal, _ rhs: EditionMatchProposal) -> Bool {
-        let confidenceRank: [MatchConfidence: Int] = [.high: 0, .likely: 1, .uncertain: 2]
-        let verdictRank: [EditionVerdict: Int] = [.duplicateFile: 0, .sameEditionOtherFormat: 1, .sameWorkOtherEdition: 2]
-        let left = (confidenceRank[lhs.confidence] ?? 3, verdictRank[lhs.verdict] ?? 3, lhs.pairKey)
-        let right = (confidenceRank[rhs.confidence] ?? 3, verdictRank[rhs.verdict] ?? 3, rhs.pairKey)
+        let left = (confidenceRank(lhs.confidence), verdictRank(lhs.verdict), lhs.pairKey)
+        let right = (confidenceRank(rhs.confidence), verdictRank(rhs.verdict), rhs.pairKey)
         return left < right
+    }
+
+    private static func confidenceRank(_ confidence: MatchConfidence) -> Int {
+        switch confidence {
+        case .high: 0
+        case .likely: 1
+        case .uncertain: 2
+        }
+    }
+
+    private static func verdictRank(_ verdict: EditionVerdict) -> Int {
+        switch verdict {
+        case .duplicateFile: 0
+        case .sameEditionOtherFormat: 1
+        case .sameWorkOtherEdition: 2
+        }
     }
 }
