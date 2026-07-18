@@ -5,6 +5,7 @@ enum MainDestination: Hashable {
     case library
     case device
     case discover
+    case catalogs
     case updates
 }
 
@@ -29,6 +30,7 @@ struct ContentView: View {
         switch sidebarSelection {
         case .device:   .device
         case .discover: .discover
+        case .catalogs: .catalogs
         case .updates:  .updates
         default:        .library
         }
@@ -72,6 +74,8 @@ struct ContentView: View {
                 DeviceView(books: books, viewModel: viewModel)
             case .discover:
                 DiscoveryView(wishlist: viewModel.wishlist)
+            case .catalogs:
+                OPDSCatalogView(library: viewModel)
             case .updates:
                 NoticesView(
                     notices: viewModel.notices,
@@ -107,6 +111,12 @@ struct ContentView: View {
         }
         .onChange(of: settings.watchFolderEnabled) { _, _ in restartWatcher() }
         .onChange(of: settings.watchFolderPath) { _, _ in restartWatcher() }
+        .onChange(of: settings.showDiscoverInSidebar) { _, isVisible in
+            if !isVisible, sidebarSelection == .discover { sidebarSelection = .all }
+        }
+        .onChange(of: settings.showCatalogsInSidebar) { _, isVisible in
+            if !isVisible, sidebarSelection == .catalogs { sidebarSelection = .all }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .watchFolderChanged)) { _ in
             scheduleWatchScan()
         }
@@ -203,6 +213,7 @@ struct ContentView: View {
         .environment(ToastCenter())
         .environment(AppSettings())
         .environment(DiscoveryViewModel(settings: AppSettings()))
+        .environment(OPDSViewModel(settings: AppSettings(), toasts: ToastCenter()))
         .environment(\.theme, .purple)
         .frame(width: 1100, height: 700)
 }
@@ -218,6 +229,7 @@ struct ContentView: View {
         .environment(ToastCenter())
         .environment(AppSettings())
         .environment(DiscoveryViewModel(settings: AppSettings()))
+        .environment(OPDSViewModel(settings: AppSettings(), toasts: ToastCenter()))
         .environment(\.theme, .white)
         .frame(width: 1100, height: 700)
 }

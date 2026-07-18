@@ -108,6 +108,8 @@ final class AppSettings {
         static let lastReleaseCheckAt = "lastReleaseCheckAt"
         static let readingGoal = "readingGoal"
         static let gridZoom = "gridZoom"
+        static let showDiscoverInSidebar = "showDiscoverInSidebar"
+        static let showCatalogsInSidebar = "showCatalogsInSidebar"
         static let enabledPlugins = "enabledPluginIDs"
         static let pluginGrants = "pluginGrants"
     }
@@ -176,6 +178,14 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(readingGoal, forKey: Keys.readingGoal) }
     }
 
+    var showDiscoverInSidebar: Bool {
+        didSet { UserDefaults.standard.set(showDiscoverInSidebar, forKey: Keys.showDiscoverInSidebar) }
+    }
+
+    var showCatalogsInSidebar: Bool {
+        didSet { UserDefaults.standard.set(showCatalogsInSidebar, forKey: Keys.showCatalogsInSidebar) }
+    }
+
     var enabledPluginIDs: Set<String> {
         didSet { UserDefaults.standard.set(Array(enabledPluginIDs).sorted(), forKey: Keys.enabledPlugins) }
     }
@@ -206,6 +216,8 @@ final class AppSettings {
         readingGoal = goal > 0 ? goal : 12
         let storedZoom = UserDefaults.standard.object(forKey: Keys.gridZoom) as? Double ?? Self.defaultGridZoom
         gridZoom = min(1, max(0, storedZoom))
+        showDiscoverInSidebar = UserDefaults.standard.object(forKey: Keys.showDiscoverInSidebar) as? Bool ?? true
+        showCatalogsInSidebar = UserDefaults.standard.object(forKey: Keys.showCatalogsInSidebar) as? Bool ?? true
         enabledPluginIDs = Set(UserDefaults.standard.stringArray(forKey: Keys.enabledPlugins) ?? [])
         pluginGrants = (UserDefaults.standard.dictionary(forKey: Keys.pluginGrants) as? [String: [String]]) ?? [:]
         hardcoverToken = UserDefaults.standard.string(forKey: Keys.hardcoverToken) ?? ""

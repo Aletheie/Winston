@@ -14,6 +14,7 @@ struct WinstonApp: App {
     @State private var updater: SoftwareUpdater
     @State private var pluginService: PluginService
     @State private var discoveryViewModel: DiscoveryViewModel
+    @State private var opdsViewModel: OPDSViewModel
     @State private var showStoreRecoveryNotice: Bool
 
     init() {
@@ -50,6 +51,7 @@ struct WinstonApp: App {
         _updater = State(initialValue: SoftwareUpdater())
         _pluginService = State(initialValue: PluginService(modelContext: context, settings: settings, toasts: toastCenter))
         _discoveryViewModel = State(initialValue: DiscoveryViewModel(settings: settings))
+        _opdsViewModel = State(initialValue: OPDSViewModel(settings: settings, toasts: toastCenter))
     }
 
     var body: some Scene {
@@ -63,6 +65,7 @@ struct WinstonApp: App {
                 .environment(toastCenter)
                 .environment(pluginService)
                 .environment(discoveryViewModel)
+                .environment(opdsViewModel)
                 .environment(\.theme, themeManager.theme)
                 .font(themeManager.defaultFont)
                 .preferredColorScheme(themeManager.theme.colorScheme)

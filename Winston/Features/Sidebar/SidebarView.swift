@@ -13,11 +13,12 @@ enum SidebarItem: Hashable {
     case tag(String)
     case device
     case discover
+    case catalogs
     case updates
 
     var libraryFilter: LibraryFilter {
         switch self {
-        case .all, .device, .discover, .updates: .all
+        case .all, .device, .discover, .catalogs, .updates: .all
         case .recentlyAdded:   .recentlyAdded
         case .status(let s):   .status(s)
         case .collection(let id): .collection(id)
@@ -38,6 +39,7 @@ struct SidebarView: View {
     let onReviewEditions: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(AppSettings.self) private var settings
     @Environment(DeviceMonitor.self) private var deviceMonitor
     @State private var showAuthors = false
     @State private var showSeries = false
@@ -76,14 +78,28 @@ struct SidebarView: View {
                 SidebarRow(title: theme.styledText(terminal: "ALL BOOKS", native: "All Books"),
                            systemImage: "books.vertical", count: books.count)
                     .tag(SidebarItem.all)
-                Label {
-                    theme.styledText(terminal: "DISCOVER", native: "Discover")
-                } icon: {
-                    Image(systemName: "sparkles")
+                if settings.showDiscoverInSidebar {
+                    Label {
+                        theme.styledText(terminal: "DISCOVER", native: "Discover")
+                    } icon: {
+                        Image(systemName: "sparkles")
+                    }
+                    .font(theme.label(size: 12))
+                    .lineLimit(1)
+                    .tag(SidebarItem.discover)
+                    .accessibilityIdentifier("sidebar.discover")
                 }
-                .font(theme.label(size: 12))
-                .lineLimit(1)
-                .tag(SidebarItem.discover)
+                if settings.showCatalogsInSidebar {
+                    Label {
+                        theme.styledText(terminal: "CATALOGS", native: "Catalogs")
+                    } icon: {
+                        Image(systemName: "globe")
+                    }
+                    .font(theme.label(size: 12))
+                    .lineLimit(1)
+                    .tag(SidebarItem.catalogs)
+                    .accessibilityIdentifier("sidebar.catalogs")
+                }
                 SidebarRow(
                     title: theme.styledText(terminal: "UPDATES", native: "Updates"),
                     systemImage: "bell",

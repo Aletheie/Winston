@@ -87,6 +87,7 @@ struct SettingsView: View {
 
     private var viewTab: some View {
         @Bindable var themeManager = themeManager
+        @Bindable var settings = settings
 
         return Form {
             Section("Appearance") {
@@ -127,6 +128,11 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            SidebarVisibilitySettingsSection(
+                showDiscover: $settings.showDiscoverInSidebar,
+                showCatalogs: $settings.showCatalogsInSidebar
+            )
         }
         .formStyle(.grouped)
     }
@@ -264,6 +270,21 @@ struct SettingsView: View {
             ) else { return }
             settings.backupFolderPath = url.path
             settings.autoBackupEnabled = true
+        }
+    }
+}
+
+private struct SidebarVisibilitySettingsSection: View {
+    @Binding var showDiscover: Bool
+    @Binding var showCatalogs: Bool
+
+    var body: some View {
+        Section("Sidebar") {
+            Toggle("Show Discover", isOn: $showDiscover)
+            Toggle("Show Catalogs", isOn: $showCatalogs)
+            Text("Choose which online browsing destinations appear in the library sidebar.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

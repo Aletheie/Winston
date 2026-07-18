@@ -10827,6 +10827,416 @@
         }
       }
     },
+    "A huge open library with classics in many languages, including Czech." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Rozsáhlá otevřená knihovna klasik v mnoha jazycích včetně češtiny."
+          }
+        }
+      }
+    },
+    "Add %@" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat %@"
+          }
+        }
+      }
+    },
+    "Added “%@” to your library." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidáno do knihovny: „%@“."
+          }
+        }
+      }
+    },
+    "Adding…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidávání…"
+          }
+        }
+      }
+    },
+    "All books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Všechny knihy"
+          }
+        }
+      }
+    },
+    "Back" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zpět"
+          }
+        }
+      }
+    },
+    "Browse free books, add them to your library, and prepare them for Kindle automatically." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Procházejte knihy zdarma, přidávejte je do knihovny a automaticky je připravte pro Kindle."
+          }
+        }
+      }
+    },
+    "Browse the complete Project Gutenberg catalog" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Procházet celý katalog Project Gutenberg"
+          }
+        }
+      }
+    },
+    "Carefully proofread and beautifully produced editions of public-domain books." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pečlivě korigovaná a krásně zpracovaná vydání volných děl."
+          }
+        }
+      }
+    },
+    "Catalogs" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Katalogy"
+          }
+        }
+      }
+    },
+    "Catalogs are offline" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Katalogy jsou offline"
+          }
+        }
+      }
+    },
+    "Choose format" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vybrat formát"
+          }
+        }
+      }
+    },
+    "Choose which online browsing destinations appear in the library sidebar." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zvolte, které cíle pro online procházení se zobrazí v bočním panelu knihovny."
+          }
+        }
+      }
+    },
+    "Couldn’t add “%@” to the library." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "„%@“ se nepodařilo přidat do knihovny."
+          }
+        }
+      }
+    },
+    "Couldn’t open catalog" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Katalog se nepodařilo otevřít"
+          }
+        }
+      }
+    },
+    "Czech books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "České knihy"
+          }
+        }
+      }
+    },
+    "Free public-domain books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Volná díla zdarma"
+          }
+        }
+      }
+    },
+    "In Library" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "V knihovně"
+          }
+        }
+      }
+    },
+    "Load More" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Načíst další"
+          }
+        }
+      }
+    },
+    "No Books Here" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nejsou tu žádné knihy"
+          }
+        }
+      }
+    },
+    "No Search Results" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Žádné výsledky hledání"
+          }
+        }
+      }
+    },
+    "Open Catalogs" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Otevřené katalogy"
+          }
+        }
+      }
+    },
+    "Opening catalog…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Otevírání katalogu…"
+          }
+        }
+      }
+    },
+    "Project Gutenberg books in Czech" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "České knihy z Project Gutenberg"
+          }
+        }
+      }
+    },
+    "Search catalog" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hledat v katalogu"
+          }
+        }
+      }
+    },
+    "Show Catalogs" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zobrazit katalogy"
+          }
+        }
+      }
+    },
+    "Show Discover" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zobrazit sekci Objevovat"
+          }
+        }
+      }
+    },
+    "Sidebar" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Boční panel"
+          }
+        }
+      }
+    },
+    "The book couldn’t be downloaded." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Knihu se nepodařilo stáhnout."
+          }
+        }
+      }
+    },
+    "The catalog couldn’t be reached. Check your connection and try again." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Katalog není dostupný. Zkontrolujte připojení a zkuste to znovu."
+          }
+        }
+      }
+    },
+    "The catalog response is too large to open safely." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Odpověď katalogu je příliš velká pro bezpečné otevření."
+          }
+        }
+      }
+    },
+    "The catalog returned an invalid book file." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Katalog vrátil neplatný soubor knihy."
+          }
+        }
+      }
+    },
+    "The catalog server returned error %lld." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Server katalogu vrátil chybu %lld."
+          }
+        }
+      }
+    },
+    "This address didn’t return a supported OPDS catalog." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato adresa nevrátila podporovaný katalog OPDS."
+          }
+        }
+      }
+    },
+    "This book is too large to download safely." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kniha je příliš velká pro bezpečné stažení."
+          }
+        }
+      }
+    },
+    "This catalog currently requires feed access from its provider." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přístup k feedu tohoto katalogu nyní vyžaduje schválení poskytovatele."
+          }
+        }
+      }
+    },
+    "This catalog requires download access from its provider." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stahování z tohoto katalogu vyžaduje přístup od jeho poskytovatele."
+          }
+        }
+      }
+    },
+    "Go back to choose another section, or search this catalog." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vraťte se a vyberte jinou sekci nebo prohledejte tento katalog."
+          }
+        }
+      }
+    },
+    "Try a different search." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zkuste hledat jinak."
+          }
+        }
+      }
+    },
+    "Turn on online metadata in Settings to browse and download from OPDS catalogs." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chcete-li procházet katalogy OPDS a stahovat z nich, zapněte v Nastavení online metadata."
+          }
+        }
+      }
+    },
+    "Turn on online metadata to download catalog books." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pro stahování knih z katalogů zapněte online metadata."
+          }
+        }
+      }
+    },
     "Zoom In" : {
       "localizations" : {
         "cs" : {
