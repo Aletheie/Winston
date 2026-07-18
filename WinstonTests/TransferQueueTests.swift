@@ -32,6 +32,29 @@ struct TransferQueueTests {
         return book
     }
 
+    @Test func deviceMonitorCachesMatchKeysAndPublishesACheapRevision() async {
+        let fake = FakeKindleConnection()
+        let monitor = makeMonitor(fake)
+        let books = [
+            DeviceBook(path: "/documents/First.epub", fileName: "First.epub", sizeBytes: 10),
+            DeviceBook(path: "/documents/Second.azw3", fileName: "Second.azw3", sizeBytes: 20),
+        ]
+        await fake.setBooks(books)
+        let before = monitor.booksRevision
+
+        await monitor.refreshBooks()
+
+        #expect(monitor.booksRevision == before + 1)
+        #expect(monitor.deviceFileNames == ["first", "second"])
+
+        await monitor.refreshBooks()
+        #expect(monitor.booksRevision == before + 1)
+
+        monitor.removeBooksLocally([books[0].id])
+        #expect(monitor.booksRevision == before + 2)
+        #expect(monitor.deviceFileNames == ["second"])
+    }
+
     @Test func sendsMOBIAsIsWithThumbnailAndStaleVariantCleanup() async throws {
         let lib = try await TestLibrary()
         let book = try makeMOBIBook(in: lib, title: "Fox Book")
@@ -53,6 +76,8 @@ struct TransferQueueTests {
 
         #expect(queue.items.allSatisfy { $0.stage == .done })
         #expect(queue.failedCount == 0)
+        #expect(queue.completedCount == 1)
+        #expect(queue.overallProgress == 1)
     }
 
     @Test func successfulSendRecordsReceiptForTheConnectedKindleProfile() async throws {
@@ -155,6 +180,7 @@ struct TransferQueueTests {
         #expect(await fake.sentFiles.isEmpty)
         #expect(queue.items.allSatisfy { $0.stage == .failed })
         #expect(queue.failedCount == 2)
+        #expect(queue.completedCount == 0)
         #expect(queue.lastError != nil)
         #expect(await fake.staleVariantCalls.isEmpty)
         #expect(await fake.pushedThumbnails.isEmpty)

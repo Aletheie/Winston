@@ -2,6 +2,26 @@ import Foundation
 import Observation
 import OSLog
 
+private nonisolated final class TransferProgressGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastFraction = -1.0
+    private var lastUpdate = 0.0
+
+    func shouldPublish(_ rawFraction: Double) -> Bool {
+        let fraction = min(1, max(0, rawFraction))
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        defer { lock.unlock() }
+        let isEndpoint = fraction <= 0 || fraction >= 1
+        guard isEndpoint
+                || fraction - lastFraction >= 0.005
+                || now - lastUpdate >= 0.05 else { return false }
+        lastFraction = fraction
+        lastUpdate = now
+        return true
+    }
+}
+
 @MainActor
 @Observable
 final class TransferQueue {
@@ -47,6 +67,11 @@ final class TransferQueue {
     private let onTransferCompleted: (@MainActor @Sendable (KindleSyncTransferRecord) -> Void)?
     private var sendTask: Task<Void, Never>?
     private var clearTask: Task<Void, Never>?
+    @ObservationIgnored private var itemIndexByID: [UUID: Int] = [:]
+    private var activeItemID: UUID?
+    private var failedItemCount = 0
+    private var completedItemCount = 0
+    private var totalProgress = 0.0
 
     init(
         toasts: ToastCenter,
@@ -77,22 +102,30 @@ final class TransferQueue {
     func cancel() {
         guard isTransferring else { return }
         sendTask?.cancel()
-        for index in items.indices where items[index].stage != .done {
-            items[index].stage = .failed
+        let unfinished = items.compactMap { item in
+            item.stage == .done || item.stage == .failed ? nil : item.id
         }
+        for id in unfinished { markFailed(id) }
     }
 
     var activeItem: Item? {
-        items.first { $0.stage == .waiting || $0.stage == .converting || $0.stage == .transferring }
+        guard let activeItemID,
+              let index = itemIndexByID[activeItemID],
+              items.indices.contains(index) else { return nil }
+        return items[index]
     }
 
     var failedCount: Int {
-        items.filter { $0.stage == .failed }.count
+        failedItemCount
+    }
+
+    var completedCount: Int {
+        completedItemCount
     }
 
     var overallProgress: Double {
         guard !items.isEmpty else { return 0 }
-        return items.reduce(0) { $0 + $1.progress } / Double(items.count)
+        return totalProgress / Double(items.count)
     }
 
     // MARK: - Sending
@@ -141,7 +174,7 @@ final class TransferQueue {
         lastError = nil
         monitor.suspendPolling()
         pollingSuspended = true
-        items = requests.map { Item(displayName: $0.displayName, direction: .toDevice) }
+        replaceItems(requests.map { Item(displayName: $0.displayName, direction: .toDevice) })
 
         for (index, request) in requests.enumerated() {
             if Task.isCancelled { break }
@@ -164,7 +197,7 @@ final class TransferQueue {
         if Task.isCancelled {
             for item in items where item.stage != .done { markFailed(item.id) }
         }
-        let sent = items.filter { $0.stage == .done }.count
+        let sent = completedItemCount
         Log.device.notice("Send queue finished: \(sent) sent, \(self.failedCount) failed")
         if announcesResult, !Task.isCancelled, failedCount > 0 {
             toasts.error(String(localized: "Some transfers failed (\(failedCount))."))
@@ -226,10 +259,12 @@ final class TransferQueue {
 
         do {
             Log.device.info("Transferring \(fileName, privacy: .public)")
+            let progressGate = TransferProgressGate()
             try await connection.send(
                 fileURL: sourceURL,
                 fileName: fileName,
                 progress: { [weak self] fraction in
+                    guard progressGate.shouldPublish(fraction) else { return }
                     Task { @MainActor [weak self] in
                         self?.updateProgress(fraction, for: itemID)
                     }
@@ -321,7 +356,7 @@ final class TransferQueue {
         clearTask = nil
         isTransferring = true
         let item = Item(displayName: book.displayName, direction: .fromDevice)
-        items = [item]
+        replaceItems([item])
 
         let tempDir = FileManager.default.temporaryDirectory
             .appending(path: "WinstonImports", directoryHint: .isDirectory)
@@ -335,7 +370,9 @@ final class TransferQueue {
 
         setStage(.transferring, for: item.id)
         do {
+            let progressGate = TransferProgressGate()
             try await connection.copyBook(book, to: destination, progress: { [weak self] fraction in
+                guard progressGate.shouldPublish(fraction) else { return }
                 Task { @MainActor [weak self] in
                     self?.updateProgress(fraction, for: item.id)
                 }
@@ -375,7 +412,7 @@ final class TransferQueue {
         clearTask = nil
         isTransferring = true
         let item = Item(displayName: book.displayTitle, direction: .toDevice)
-        items = [item]
+        replaceItems([item])
         setStage(.transferring, for: item.id)
         monitor.suspendPolling()
         defer {
@@ -441,25 +478,61 @@ final class TransferQueue {
 
     // MARK: - Bookkeeping
 
+    private func replaceItems(_ newItems: [Item]) {
+        items = newItems
+        itemIndexByID = Dictionary(
+            uniqueKeysWithValues: newItems.indices.map { (newItems[$0].id, $0) }
+        )
+        failedItemCount = newItems.count { $0.stage == .failed }
+        completedItemCount = newItems.count { $0.stage == .done }
+        totalProgress = newItems.reduce(0) { $0 + $1.progress }
+        activeItemID = newItems.first {
+            $0.stage == .waiting || $0.stage == .converting || $0.stage == .transferring
+        }?.id
+    }
+
     private func updateProgress(_ fraction: Double, for id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        items[index].progress = fraction
+        guard let index = itemIndexByID[id], items.indices.contains(index) else { return }
+        guard items[index].stage != .done, items[index].stage != .failed else { return }
+        let clamped = max(items[index].progress, min(1, max(0, fraction)))
+        totalProgress += clamped - items[index].progress
+        items[index].progress = clamped
     }
 
     private func setStage(_ stage: Stage, for id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = itemIndexByID[id], items.indices.contains(index) else { return }
         items[index].stage = stage
+        if stage == .waiting || stage == .converting || stage == .transferring {
+            activeItemID = id
+        }
     }
 
     private func markDone(_ id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = itemIndexByID[id], items.indices.contains(index) else { return }
+        guard items[index].stage != .done else { return }
+        totalProgress += 1 - items[index].progress
         items[index].progress = 1
         items[index].stage = .done
+        completedItemCount += 1
+        advanceActiveItem(after: index, completedID: id)
     }
 
     private func markFailed(_ id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = itemIndexByID[id], items.indices.contains(index) else { return }
+        guard items[index].stage != .failed else { return }
+        if items[index].stage == .done {
+            completedItemCount = max(0, completedItemCount - 1)
+        }
         items[index].stage = .failed
+        failedItemCount += 1
+        advanceActiveItem(after: index, completedID: id)
+    }
+
+    private func advanceActiveItem(after index: Int, completedID: UUID) {
+        guard activeItemID == completedID else { return }
+        activeItemID = items.dropFirst(index + 1).first {
+            $0.stage == .waiting || $0.stage == .converting || $0.stage == .transferring
+        }?.id
     }
 
     private func scheduleClear() {
@@ -467,7 +540,7 @@ final class TransferQueue {
         clearTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled, let self, !isTransferring else { return }
-            items = []
+            replaceItems([])
             clearTask = nil
         }
     }

@@ -12,7 +12,14 @@ final class DeviceMonitor {
     }
 
     private(set) var state: State = .disconnected
-    private(set) var books: [DeviceBook] = []
+    private(set) var books: [DeviceBook] = [] {
+        didSet {
+            deviceFileNames = Set(books.lazy.map(\.matchKey))
+            booksRevision &+= 1
+        }
+    }
+    private(set) var deviceFileNames: Set<String> = []
+    private(set) var booksRevision = 0
     private(set) var connection: (any KindleDeviceConnection)?
     private(set) var lastError: String?
 
@@ -77,12 +84,17 @@ final class DeviceMonitor {
     }
 
     private func deviceStillPresent() async -> Bool {
-        if MassStorageDeviceConnection.detectKindleVolume() != nil { return true }
-        return await Task.detached(priority: .utility) { MTPDeviceConnection.kindlePresent() }.value
+        await Task.detached(priority: .utility) {
+            if MassStorageDeviceConnection.detectKindleVolume() != nil { return true }
+            return MTPDeviceConnection.kindlePresent()
+        }.value
     }
 
     private func scanAndConnect() async {
-        if let volume = MassStorageDeviceConnection.detectKindleVolume() {
+        let volume = await Task.detached(priority: .utility) {
+            MassStorageDeviceConnection.detectKindleVolume()
+        }.value
+        if let volume {
             await connect(MassStorageDeviceConnection(volumeURL: volume))
             return
         }
@@ -135,7 +147,9 @@ final class DeviceMonitor {
     func refreshBooks() async {
         guard let connection else { return }
         do {
-            books = try await connection.listBooks()
+            let refreshed = try await connection.listBooks()
+            guard refreshed != books else { return }
+            books = refreshed
         } catch {
             lastError = error.localizedDescription
         }
@@ -144,16 +158,13 @@ final class DeviceMonitor {
     func refreshInfo() async {
         guard let connection else { return }
         if let info = try? await connection.info() {
-            state = .connected(info)
+            let refreshed: State = .connected(info)
+            if state != refreshed { state = refreshed }
         }
     }
 
     func removeBooksLocally(_ ids: Set<DeviceBook.ID>) {
         books.removeAll { ids.contains($0.id) }
-    }
-
-    var deviceFileNames: Set<String> {
-        Set(books.map(\.matchKey))
     }
 
     @discardableResult
