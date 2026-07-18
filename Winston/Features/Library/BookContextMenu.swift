@@ -15,6 +15,7 @@ struct BookActions {
     var addToCollection: (Book, BookCollection) -> Void
     var newCollection: (Book) -> Void
     var setCover: (Book, URL) -> Void
+    var setCoverData: (Book, Data) -> Void
     var resetCover: (Book) -> Void
     var relink: (Book) -> Void
     var inspect: (Book) -> Void

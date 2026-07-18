@@ -183,6 +183,7 @@ final class LibraryViewModel {
     func importHighlights(via monitor: DeviceMonitor) { highlights.importHighlights(via: monitor) }
     func exportLibrary(to folder: URL) { exporter.exportLibrary(to: folder) }
     func setCustomCover(for book: Book, from url: URL) { covers.setCustomCover(for: book, from: url) }
+    func setCustomCover(for book: Book, from data: Data) { covers.setCustomCover(for: book, from: data) }
     func resetCover(for book: Book) { covers.resetCover(for: book) }
     func duplicateGroups() async -> [DuplicateGroup] { await health.duplicateGroups() }
     func metadataFixes() async -> [MetadataFix] { await health.metadataFixes() }

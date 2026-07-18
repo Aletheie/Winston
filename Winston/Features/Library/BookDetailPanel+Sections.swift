@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import AppKit
+import CoreTransferable
 import UniformTypeIdentifiers
 
 // MARK: - Empty / multi
@@ -145,30 +146,22 @@ struct DetailCover: View {
     let book: Book
     let actions: BookActions
 
-    @State private var isDropTargeted = false
-
     var body: some View {
         BookCoverImageView(book: book)
             .frame(maxWidth: .infinity)
             .aspectRatio(WinstonLayout.coverAspect, contentMode: .fill)
             .clipped()
             .clipShape(RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous))
-            .overlay {
-                if isDropTargeted {
-                    RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
-                        .strokeBorder(Color.accentColor, lineWidth: 3)
-                }
-            }
             .shadow(color: Color.black.opacity(0.20), radius: 6, y: 3)
             .padding(14)
             .contextMenu {
                 Button("Choose Cover\u{2026}") { chooseCover() }
                 Button("Reset Cover") { actions.resetCover(book) }
             }
-            .onDrop(of: [.image, .fileURL], isTargeted: $isDropTargeted) { providers in
-                handleImageDrop(providers)
+            .dropDestination(for: DroppedCoverImage.self) { images, _ in
+                guard let image = images.first else { return }
+                actions.setCoverData(book, image.data)
             }
-            .help("Drop an image, or right-click to change the cover")
     }
 
     private func chooseCover() {
@@ -180,15 +173,24 @@ struct DetailCover: View {
             actions.setCover(book, url)
         }
     }
+}
 
-    private func handleImageDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        _ = provider.loadObject(ofClass: NSURL.self) { reading, _ in
-            guard let url = reading as? URL else { return }
-            Task { @MainActor in actions.setCover(book, url) }
+struct DroppedCoverImage: Transferable {
+    let data: Data
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(importedContentType: .image) { data in
+            DroppedCoverImage(data: data)
         }
-        return true
+        ProxyRepresentation(importing: { (url: URL) in
+            guard url.isFileURL else { throw DroppedCoverError.unsupportedURL }
+            return DroppedCoverImage(data: try Data(contentsOf: url, options: .mappedIfSafe))
+        })
     }
+}
+
+private enum DroppedCoverError: Error {
+    case unsupportedURL
 }
 
 struct DetailIdentity: View {

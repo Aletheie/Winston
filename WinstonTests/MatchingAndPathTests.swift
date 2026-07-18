@@ -1,5 +1,8 @@
 import Testing
 import Foundation
+import AppKit
+import CoreTransferable
+import UniformTypeIdentifiers
 @testable import Winston
 
 // MARK: - Title matching
@@ -66,6 +69,81 @@ struct CoverPathTests {
     ))
     func resolvesRelativeHrefs(_ input: (href: String, dir: String), _ expected: String) {
         #expect(CoverExtractor.resolve(input.href, dir: input.dir) == expected)
+    }
+}
+
+// MARK: - Custom covers
+
+@MainActor
+@Suite(.serialized)
+struct CoverServiceTests {
+
+    @Test func finderImageLoadsAsDroppedCoverData() async throws {
+        let library = try await TestLibrary()
+        let data = EPUBFixture.jpegData()
+        let url = library.root.appending(path: "dropped-cover.jpg")
+        try data.write(to: url)
+        let provider = try #require(NSItemProvider(contentsOf: url))
+
+        let dropped = try await loadDroppedCover(from: provider)
+
+        #expect(NSImage(data: dropped.data) != nil)
+    }
+
+    @Test func rawImageLoadsAsDroppedCoverData() async throws {
+        let data = EPUBFixture.jpegData()
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(
+            forTypeIdentifier: UTType.jpeg.identifier,
+            visibility: .all
+        ) { completion in
+            completion(data, nil)
+            return nil
+        }
+
+        let dropped = try await loadDroppedCover(from: provider)
+
+        #expect(NSImage(data: dropped.data) != nil)
+    }
+
+    @Test func droppedImageDataBecomesTheCustomCover() async throws {
+        let library = try await TestLibrary()
+        let book = Book(fileName: "cover.epub", originalFileName: "Cover.epub")
+        library.context.insert(book)
+        try library.context.save()
+
+        let service = CoverService(modelContext: library.context)
+        service.setCustomCover(for: book, from: EPUBFixture.jpegData())
+
+        let deadline = Date.now.addingTimeInterval(2)
+        while book.coverVersion == 0, Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(book.coverVersion == 1)
+        #expect(CoverStore.load(for: book.uuid) != nil)
+    }
+
+    @Test func invalidDroppedDataDoesNotReplaceTheCover() async throws {
+        let library = try await TestLibrary()
+        let book = Book(fileName: "cover.epub", originalFileName: "Cover.epub")
+        library.context.insert(book)
+        try library.context.save()
+
+        let service = CoverService(modelContext: library.context)
+        service.setCustomCover(for: book, from: Data("not an image".utf8))
+        try? await Task.sleep(for: .milliseconds(100))
+
+        #expect(book.coverVersion == 0)
+        #expect(!CoverStore.exists(for: book.uuid))
+    }
+
+    private func loadDroppedCover(from provider: NSItemProvider) async throws -> DroppedCoverImage {
+        try await withCheckedThrowingContinuation { continuation in
+            _ = provider.loadTransferable(type: DroppedCoverImage.self) { result in
+                continuation.resume(with: result)
+            }
+        }
     }
 }
 

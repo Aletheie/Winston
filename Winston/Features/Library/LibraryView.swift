@@ -138,6 +138,7 @@ struct LibraryView: View {
                 showNewCollectionAlert = true
             },
             setCover: { book, url in viewModel.setCustomCover(for: book, from: url) },
+            setCoverData: { book, data in viewModel.setCustomCover(for: book, from: data) },
             resetCover: { book in viewModel.resetCover(for: book) },
             relink: { book in Task { await LibraryExternalActions.relink(book, via: viewModel) } },
             inspect: { book in presentBookDoctor(for: [book], purpose: .review) },
