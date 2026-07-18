@@ -52,7 +52,7 @@ enum BookAssetMaintenance {
     static func backfillMissingHashes(
         context: ModelContext,
         hashFile: @escaping @Sendable (URL) async -> String? = { url in
-            await Task.detached(priority: .utility) {
+            await Task.detached(priority: .background) {
                 try? ContentHasher.sha256(of: url)
             }.value
         }
@@ -63,22 +63,62 @@ enum BookAssetMaintenance {
         }
         guard !snapshots.isEmpty else { return 0 }
 
+        let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.uuid, $0) })
         var processed = 0
-        for snapshot in snapshots {
+        // Hash and persist in chunks so quitting mid-backfill keeps the work done so far.
+        for chunkStart in stride(from: 0, to: snapshots.count, by: 50) {
             guard !Task.isCancelled else { break }
-            let result = await hashFile(BookFileStore.url(for: snapshot.fileName))
-            guard let result else { continue }
-            let uuid = snapshot.uuid
-            let descriptor = FetchDescriptor<BookAsset>(predicate: #Predicate { $0.uuid == uuid })
-            guard let asset = try? context.fetch(descriptor).first,
-                  asset.contentHash == nil,
-                  asset.fileName == snapshot.fileName,
-                  asset.dateAdded == snapshot.dateAdded else { continue }
-            asset.contentHash = result
-            processed += 1
-            if processed.isMultiple(of: 50) { context.saveQuietly() }
+            let chunk = Array(snapshots[chunkStart ..< min(chunkStart + 50, snapshots.count)])
+            let results = await hashSnapshots(chunk, hashFile: hashFile)
+            var chunkProcessed = 0
+            for result in results {
+                let snapshot = result.snapshot
+                guard let asset = assetsByID[snapshot.uuid],
+                      asset.modelContext != nil,
+                      asset.contentHash == nil,
+                      asset.fileName == snapshot.fileName,
+                      asset.dateAdded == snapshot.dateAdded else { continue }
+                asset.contentHash = result.hash
+                chunkProcessed += 1
+            }
+            if chunkProcessed > 0 { context.saveQuietly() }
+            processed += chunkProcessed
         }
-        if processed > 0 { context.saveQuietly() }
         return processed
+    }
+
+    @concurrent
+    private static func hashSnapshots(
+        _ snapshots: [HashSnapshot],
+        hashFile: @escaping @Sendable (URL) async -> String?
+    ) async -> [(snapshot: HashSnapshot, hash: String)] {
+        let concurrency = min(2, snapshots.count)
+        guard concurrency > 0 else { return [] }
+        return await withTaskGroup(
+            of: (HashSnapshot, String?).self,
+            returning: [(snapshot: HashSnapshot, hash: String)].self
+        ) { group in
+            var nextIndex = 0
+            var results: [(snapshot: HashSnapshot, hash: String)] = []
+            results.reserveCapacity(snapshots.count)
+
+            while nextIndex < concurrency {
+                let snapshot = snapshots[nextIndex]
+                group.addTask(priority: .background) {
+                    (snapshot, await hashFile(BookFileStore.url(for: snapshot.fileName)))
+                }
+                nextIndex += 1
+            }
+            while let (snapshot, hash) = await group.next() {
+                if let hash { results.append((snapshot, hash)) }
+                guard nextIndex < snapshots.count, !Task.isCancelled else { continue }
+                let pending = snapshots[nextIndex]
+                group.addTask(priority: .background) {
+                    (pending, await hashFile(BookFileStore.url(for: pending.fileName)))
+                }
+                nextIndex += 1
+            }
+            return results
+        }
     }
 }
