@@ -29,9 +29,27 @@ struct LibraryMutationTests {
     @Test func saveQuietlyBumpsTheRevision() async throws {
         let lib = try await TestLibrary()
         let before = LibraryMutationLog.shared.revision
+        let catalogBefore = LibraryMutationLog.shared.catalogRevision
         lib.context.insert(Book(fileName: "a.epub", originalFileName: "A.epub"))
         lib.context.saveQuietly()
         #expect(LibraryMutationLog.shared.revision == before + 1)
+        #expect(LibraryMutationLog.shared.catalogRevision == catalogBefore + 1)
+    }
+
+    @Test func nonCatalogSaveDoesNotInvalidateTheLibraryUI() async throws {
+        let lib = try await TestLibrary()
+        let before = LibraryMutationLog.shared.revision
+        let catalogBefore = LibraryMutationLog.shared.catalogRevision
+        lib.context.insert(LibraryNotice(
+            dedupeKey: "performance-test",
+            kind: .ratingPrompt,
+            bookTitle: "Test"
+        ))
+
+        lib.context.saveQuietly(catalogChanged: false)
+
+        #expect(LibraryMutationLog.shared.revision == before + 1)
+        #expect(LibraryMutationLog.shared.catalogRevision == catalogBefore)
     }
 
     @Test func facadeWritesBumpTheRevision() async throws {

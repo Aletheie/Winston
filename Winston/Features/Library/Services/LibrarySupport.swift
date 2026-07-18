@@ -9,10 +9,10 @@ extension ModelContext {
     }
 
     @discardableResult
-    func saveQuietly(rollbackOnFailure: Bool = false) -> Bool {
+    func saveQuietly(rollbackOnFailure: Bool = false, catalogChanged: Bool = true) -> Bool {
         do {
             try save()
-            LibraryMutationLog.shared.bump()
+            LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
             return true
         } catch {
             if rollbackOnFailure {
