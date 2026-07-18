@@ -67,13 +67,25 @@ nonisolated struct KindleSyncPlan: Equatable, Sendable {
     let profileID: UUID
     let profileName: String
     let items: [KindleSyncPlanItem]
+    private let selectedByDefaultIDs: Set<KindleSyncPlanItem.ID>
+    private let actionCounts: [KindleSyncAction: Int]
+
+    init(profileID: UUID, profileName: String, items: [KindleSyncPlanItem]) {
+        self.profileID = profileID
+        self.profileName = profileName
+        self.items = items
+        self.selectedByDefaultIDs = Set(items.lazy.filter(\.selectedByDefault).map(\.id))
+        self.actionCounts = items.reduce(into: [:]) { counts, item in
+            counts[item.action, default: 0] += 1
+        }
+    }
 
     var selectedByDefault: Set<KindleSyncPlanItem.ID> {
-        Set(items.filter(\.selectedByDefault).map(\.id))
+        selectedByDefaultIDs
     }
 
     func count(for action: KindleSyncAction) -> Int {
-        items.count { $0.action == action }
+        actionCounts[action, default: 0]
     }
 }
 
@@ -280,14 +292,22 @@ nonisolated enum KindleSyncPlanner {
     }
 
     private static func itemPrecedes(_ lhs: KindleSyncPlanItem, _ rhs: KindleSyncPlanItem) -> Bool {
-        let rank: [KindleSyncAction: Int] = [
-            .update: 0, .add: 1, .repairCover: 2, .remove: 3, .blocked: 4, .keep: 5,
-        ]
-        let leftRank = rank[lhs.action, default: 99]
-        let rightRank = rank[rhs.action, default: 99]
+        let leftRank = actionRank(lhs.action)
+        let rightRank = actionRank(rhs.action)
         if leftRank != rightRank { return leftRank < rightRank }
         let titleOrder = lhs.title.localizedStandardCompare(rhs.title)
         if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
         return lhs.id < rhs.id
+    }
+
+    private static func actionRank(_ action: KindleSyncAction) -> Int {
+        switch action {
+        case .update: 0
+        case .add: 1
+        case .repairCover: 2
+        case .remove: 3
+        case .blocked: 4
+        case .keep: 5
+        }
     }
 }

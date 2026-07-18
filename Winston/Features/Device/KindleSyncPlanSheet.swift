@@ -44,6 +44,8 @@ struct KindleSyncPlanSheet: View {
     @State private var plan: KindleSyncPlan?
     @State private var sections: [KindleSyncPlanSectionData] = []
     @State private var selection = KindleSyncPlanSelection()
+    @State private var planBuildTask: Task<Void, Never>?
+    @State private var planBuildGeneration = 0
     @State private var isApplying = false
     @State private var applyTask: Task<Void, Never>?
     @State private var showsRemovalConfirmation = false
@@ -101,8 +103,9 @@ struct KindleSyncPlanSheet: View {
         .background(theme.background)
         .interactiveDismissDisabled(isApplying)
         .task { rebuildPlan(resetSelection: true) }
-        .onChange(of: monitor.books) { rebuildPlan(resetSelection: false) }
+        .onChange(of: monitor.booksRevision) { rebuildPlan(resetSelection: false) }
         .onChange(of: monitor.info) { rebuildPlan(resetSelection: true) }
+        .onDisappear { planBuildTask?.cancel() }
         .alert(profileEditorTitle, isPresented: $showsProfileEditor) {
             TextField("Profile Name", text: $profileName)
             if profileEditorMode.isCreate {
@@ -138,29 +141,82 @@ struct KindleSyncPlanSheet: View {
     }
 
     private func rebuildPlan(resetSelection: Bool) {
+        planBuildTask?.cancel()
+        planBuildGeneration &+= 1
+        let generation = planBuildGeneration
+
         guard let info = monitor.info else {
             plan = nil
             sections = []
             selection.selectedIDs = []
             selection.removalIDs = []
+            planBuildTask = nil
             return
         }
         let profile = profileStore.ensureProfile(for: info)
-        let candidates = books.map(KindleSendPreparation.candidate)
-        let newPlan = KindleSyncPlanner.makePlan(
+        if resetSelection {
+            plan = nil
+            sections = []
+            selection.selectedIDs = []
+            selection.removalIDs = []
+        }
+
+        let sourceBooks = books
+        let deviceBooks = monitor.books
+        planBuildTask = Task { @MainActor in
+            defer {
+                if planBuildGeneration == generation { planBuildTask = nil }
+            }
+
+            var snapshots: [KindleSendBookSnapshot] = []
+            snapshots.reserveCapacity(sourceBooks.count)
+            for (index, book) in sourceBooks.enumerated() {
+                guard !Task.isCancelled else { return }
+                snapshots.append(KindleSendPreparation.snapshot(for: book))
+                if index > 0, index.isMultiple(of: 128) {
+                    await Task.yield()
+                }
+            }
+
+            guard let newPlan = await Self.buildPlan(
+                snapshots: snapshots,
+                deviceBooks: deviceBooks,
+                profile: profile
+            ), !Task.isCancelled,
+               planBuildGeneration == generation,
+               monitor.info?.identifier == info.identifier,
+               profileStore.profile(for: info)?.id == profile.id else { return }
+
+            plan = newPlan
+            sections = Self.makeSections(from: newPlan.items)
+            selection.removalIDs = Set(newPlan.items.lazy.filter { $0.action == .remove }.map(\.id))
+            if resetSelection {
+                selection.selectedIDs = newPlan.selectedByDefault
+            } else {
+                let validIDs = Set(newPlan.items.lazy.filter(\.isSelectable).map(\.id))
+                selection.selectedIDs.formIntersection(validIDs)
+            }
+        }
+    }
+
+    @concurrent
+    private static func buildPlan(
+        snapshots: [KindleSendBookSnapshot],
+        deviceBooks: [DeviceBook],
+        profile: KindleSyncProfile
+    ) async -> KindleSyncPlan? {
+        var candidates: [KindleSyncCandidate] = []
+        candidates.reserveCapacity(snapshots.count)
+        for snapshot in snapshots {
+            guard !Task.isCancelled else { return nil }
+            candidates.append(KindleSendPreparation.candidate(for: snapshot))
+        }
+        guard !Task.isCancelled else { return nil }
+        return KindleSyncPlanner.makePlan(
             candidates: candidates,
-            deviceBooks: monitor.books,
+            deviceBooks: deviceBooks,
             profile: profile
         )
-        plan = newPlan
-        sections = Self.makeSections(from: newPlan.items)
-        selection.removalIDs = Set(newPlan.items.filter { $0.action == .remove }.map(\.id))
-        if resetSelection {
-            selection.selectedIDs = newPlan.selectedByDefault
-        } else {
-            let validIDs = Set(newPlan.items.filter(\.isSelectable).map(\.id))
-            selection.selectedIDs.formIntersection(validIDs)
-        }
     }
 
     private static func makeSections(from items: [KindleSyncPlanItem]) -> [KindleSyncPlanSectionData] {
