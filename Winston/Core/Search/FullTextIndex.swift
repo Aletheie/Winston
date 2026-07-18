@@ -60,7 +60,15 @@ private nonisolated struct StoredFullTextIndex: Codable, Sendable {
     let schemaVersion: Int
     let contentHash: String
     let format: String
+    let sourceFilePath: String?
+    let sourceFileSize: Int?
+    let sourceModificationDate: Date?
     let sections: [StoredFullTextSection]
+}
+
+private nonisolated struct FullTextSourceMetadata: Equatable, Sendable {
+    let fileSize: Int?
+    let modificationDate: Date?
 }
 
 private nonisolated struct StoredFullTextSection: Codable, Sendable {
@@ -88,6 +96,7 @@ actor FullTextIndexService {
 
     private let indexDirectory: URL
     private var documents: [UUID: LoadedFullTextBook] = [:]
+    private var orderedDocuments: [(UUID, LoadedFullTextBook)] = []
 
     init(indexDirectory: URL = AppPaths.fullTextIndexDirectory) {
         self.indexDirectory = indexDirectory
@@ -114,27 +123,46 @@ actor FullTextIndexService {
             }
 
             do {
-                let contentHash = try resolvedHash(for: source)
+                let metadata = sourceMetadata(for: source.fileURL)
+                let cached = loadIndex(for: snapshot.bookID)
                 let stored: StoredFullTextIndex
-                if let cached = loadIndex(for: snapshot.bookID),
-                   cached.schemaVersion == Self.schemaVersion,
-                   cached.contentHash == contentHash,
-                   cached.format == source.format {
+                if let cached, canReuseWithoutHashing(cached, source: source, metadata: metadata) {
                     stored = cached
                     reusedBooks += 1
                 } else {
-                    let sections = try FullTextDocumentExtractor.extract(
-                        source.fileURL,
-                        format: source.format
-                    )
-                    stored = StoredFullTextIndex(
-                        schemaVersion: Self.schemaVersion,
-                        contentHash: contentHash,
-                        format: source.format,
-                        sections: sections
-                    )
-                    try save(stored, for: snapshot.bookID)
-                    indexedBooks += 1
+                    let contentHash = try resolvedHash(for: source)
+                    if let cached,
+                       cached.schemaVersion == Self.schemaVersion,
+                       cached.contentHash.caseInsensitiveCompare(contentHash) == .orderedSame,
+                       cached.format == source.format {
+                        stored = StoredFullTextIndex(
+                            schemaVersion: cached.schemaVersion,
+                            contentHash: cached.contentHash,
+                            format: cached.format,
+                            sourceFilePath: sourcePath(for: source.fileURL),
+                            sourceFileSize: metadata.fileSize,
+                            sourceModificationDate: metadata.modificationDate,
+                            sections: cached.sections
+                        )
+                        try save(stored, for: snapshot.bookID)
+                        reusedBooks += 1
+                    } else {
+                        let sections = try FullTextDocumentExtractor.extract(
+                            source.fileURL,
+                            format: source.format
+                        )
+                        stored = StoredFullTextIndex(
+                            schemaVersion: Self.schemaVersion,
+                            contentHash: contentHash,
+                            format: source.format,
+                            sourceFilePath: sourcePath(for: source.fileURL),
+                            sourceFileSize: metadata.fileSize,
+                            sourceModificationDate: metadata.modificationDate,
+                            sections: sections
+                        )
+                        try save(stored, for: snapshot.bookID)
+                        indexedBooks += 1
+                    }
                 }
                 loaded[snapshot.bookID] = LoadedFullTextBook(
                     title: snapshot.title,
@@ -154,6 +182,9 @@ actor FullTextIndexService {
 
         try Task.checkCancellation()
         documents = loaded
+        orderedDocuments = loaded.sorted {
+            $0.value.title.localizedCaseInsensitiveCompare($1.value.title) == .orderedAscending
+        }
         return FullTextIndexSummary(
             searchableBooks: loaded.count,
             indexedBooks: indexedBooks,
@@ -167,13 +198,10 @@ actor FullTextIndexService {
         let query = Self.collapsedWhitespace(rawQuery)
         guard query.count >= 2 else { return [] }
 
-        let sortedDocuments = documents.sorted {
-            $0.value.title.localizedCaseInsensitiveCompare($1.value.title) == .orderedAscending
-        }
         var results: [FullTextBookResult] = []
         var excerptCount = 0
 
-        for (bookID, document) in sortedDocuments {
+        for (bookID, document) in orderedDocuments {
             guard excerptCount < Self.maximumExcerpts else { break }
             var chapters: [FullTextChapterResult] = []
 
@@ -225,6 +253,39 @@ actor FullTextIndexService {
             )
         }
         return actual
+    }
+
+    private func sourceMetadata(for url: URL) -> FullTextSourceMetadata {
+        let attributes = try? FileManager.default.attributesOfItem(
+            atPath: url.path(percentEncoded: false)
+        )
+        return FullTextSourceMetadata(
+            fileSize: (attributes?[.size] as? NSNumber)?.intValue,
+            modificationDate: attributes?[.modificationDate] as? Date
+        )
+    }
+
+    private func sourcePath(for url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
+    }
+
+    private func canReuseWithoutHashing(
+        _ cached: StoredFullTextIndex,
+        source: FullTextBookSnapshot.Source,
+        metadata: FullTextSourceMetadata
+    ) -> Bool {
+        guard cached.schemaVersion == Self.schemaVersion,
+              cached.format == source.format,
+              cached.sourceFilePath == sourcePath(for: source.fileURL),
+              let cachedSize = cached.sourceFileSize,
+              let currentSize = metadata.fileSize,
+              cachedSize == currentSize,
+              let cachedDate = cached.sourceModificationDate,
+              let currentDate = metadata.modificationDate,
+              cachedDate == currentDate else {
+            return false
+        }
+        return true
     }
 
     private func indexURL(for bookID: UUID) -> URL {
