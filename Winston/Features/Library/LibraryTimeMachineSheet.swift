@@ -2,6 +2,19 @@ import Observation
 import SwiftData
 import SwiftUI
 
+@MainActor
+private func libraryTimeMachineBooks(in context: ModelContext) -> [Book] {
+    var descriptor = FetchDescriptor<Book>()
+    descriptor.relationshipKeyPathsForPrefetching = [
+        \Book.readingSessions,
+        \Book.highlights,
+        \Book.collections,
+        \Book.assets,
+        \Book.work,
+    ]
+    return (try? context.fetch(descriptor)) ?? []
+}
+
 nonisolated enum LibraryTimeMachineBookFilter: String, CaseIterable, Identifiable, Sendable {
     case changed
     case restorable
@@ -53,13 +66,13 @@ final class LibraryTimeMachineViewModel {
     var filter: LibraryTimeMachineBookFilter = .changed {
         didSet {
             guard filter != oldValue else { return }
-            recomputeVisibleDiffs()
+            scheduleVisibleDiffRecompute(immediately: true)
         }
     }
     var searchText = "" {
         didSet {
             guard searchText != oldValue else { return }
-            recomputeVisibleDiffs()
+            scheduleVisibleDiffRecompute()
         }
     }
     var isConfirmingRestore = false
@@ -76,10 +89,14 @@ final class LibraryTimeMachineViewModel {
 
     @ObservationIgnored private var loadedSnapshot: LibraryTimeMachineSnapshot?
     @ObservationIgnored private var allDiffs: [LibraryTimeMachineBookDiff] = []
+    @ObservationIgnored private var diffsByID: [UUID: LibraryTimeMachineBookDiff] = [:]
+    @ObservationIgnored private var activeDiffBuildID: UUID?
+    @ObservationIgnored private var visibleDiffTask: Task<Void, Never>?
+    @ObservationIgnored private var diffRevision = 0
 
     var selectedDiff: LibraryTimeMachineBookDiff? {
         guard let selectedBookID else { return nil }
-        return allDiffs.first { $0.id == selectedBookID }
+        return diffsByID[selectedBookID]
     }
 
     func reloadBackups(in folder: URL) {
@@ -93,8 +110,11 @@ final class LibraryTimeMachineViewModel {
             selectedBackupID = backups.first?.id
         }
         if backups.isEmpty {
+            visibleDiffTask?.cancel()
             loadedSnapshot = nil
             allDiffs = []
+            diffsByID = [:]
+            activeDiffBuildID = nil
             visibleDiffs = []
             selectedBookID = nil
             changedCount = 0
@@ -111,15 +131,23 @@ final class LibraryTimeMachineViewModel {
         await Task.yield()
 
         do {
-            let snapshot = try LibraryTimeMachineReader.load(backupURL)
+            let snapshot = try await Task.detached(priority: .userInitiated) {
+                try LibraryTimeMachineReader.load(backupURL)
+            }.value
             guard selectedBackupID == backupURL, !Task.isCancelled else { return }
             loadedSnapshot = snapshot
-            rebuildDiff(currentBooks: currentBooks)
+            await rebuildDiff(currentBooks: currentBooks)
+            guard selectedBackupID == backupURL,
+                  loadedSnapshot?.backupURL == backupURL,
+                  !Task.isCancelled else { return }
             phase = .loaded
         } catch {
             guard selectedBackupID == backupURL, !Task.isCancelled else { return }
             loadedSnapshot = nil
             allDiffs = []
+            diffsByID = [:]
+            activeDiffBuildID = nil
+            visibleDiffTask?.cancel()
             visibleDiffs = []
             selectedBookID = nil
             changedCount = 0
@@ -128,15 +156,42 @@ final class LibraryTimeMachineViewModel {
         }
     }
 
-    func rebuildDiff(currentBooks: [Book]) {
+    func rebuildDiff(currentBooks: [Book]) async {
         guard let loadedSnapshot else { return }
-        allDiffs = LibraryTimeMachineDiffBuilder.compare(
-            backup: loadedSnapshot,
+        let buildID = UUID()
+        activeDiffBuildID = buildID
+        let currentSnapshots = await LibraryTimeMachineDiffBuilder.snapshotCurrentBooks(currentBooks)
+        guard !Task.isCancelled, activeDiffBuildID == buildID else { return }
+        let diffs = await Self.compare(
+            backupBooks: loadedSnapshot.books,
+            currentBooks: currentSnapshots
+        )
+        guard !Task.isCancelled, activeDiffBuildID == buildID,
+              self.loadedSnapshot?.backupURL == loadedSnapshot.backupURL else { return }
+        activeDiffBuildID = nil
+        allDiffs = diffs
+        diffsByID = Dictionary(uniqueKeysWithValues: diffs.lazy.map { ($0.id, $0) })
+        diffRevision &+= 1
+        var changed = 0
+        var restorable = 0
+        for diff in diffs {
+            if diff.kind != .unchanged { changed += 1 }
+            if diff.canRestore { restorable += 1 }
+        }
+        changedCount = changed
+        restorableCount = restorable
+        scheduleVisibleDiffRecompute(immediately: true)
+    }
+
+    @concurrent
+    private static func compare(
+        backupBooks: [LibraryTimeMachineBookSnapshot],
+        currentBooks: [LibraryTimeMachineBookSnapshot]
+    ) async -> [LibraryTimeMachineBookDiff] {
+        LibraryTimeMachineDiffBuilder.compare(
+            backupBooks: backupBooks,
             currentBooks: currentBooks
         )
-        changedCount = allDiffs.count { $0.kind != .unchanged }
-        restorableCount = allDiffs.count(where: \.canRestore)
-        recomputeVisibleDiffs()
     }
 
     func requestRestore(
@@ -180,7 +235,7 @@ final class LibraryTimeMachineViewModel {
                 result: result,
                 bookTitle: pendingRestore.snapshot.displayTitle
             )
-            rebuildDiff(currentBooks: modelContext.allBooks())
+            await rebuildDiff(currentBooks: libraryTimeMachineBooks(in: modelContext))
             reloadBackups(in: backupFolder)
             onBackupsChanged()
         } catch {
@@ -193,9 +248,38 @@ final class LibraryTimeMachineViewModel {
         restoreError = nil
     }
 
-    private func recomputeVisibleDiffs() {
+    private func scheduleVisibleDiffRecompute(immediately: Bool = false) {
+        visibleDiffTask?.cancel()
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        visibleDiffs = allDiffs.filter { diff in
+        let filter = filter
+        let diffs = allDiffs
+        let revision = diffRevision
+        visibleDiffTask = Task { [weak self] in
+            if !immediately {
+                do {
+                    try await Task.sleep(for: .milliseconds(140))
+                } catch {
+                    return
+                }
+            }
+            let visible = await Self.filterDiffs(diffs, filter: filter, query: query)
+            guard !Task.isCancelled, let self,
+                  self.diffRevision == revision,
+                  self.filter == filter,
+                  self.searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            self.visibleDiffs = visible
+            self.updateVisibleSelection()
+            self.visibleDiffTask = nil
+        }
+    }
+
+    @concurrent
+    private static func filterDiffs(
+        _ diffs: [LibraryTimeMachineBookDiff],
+        filter: LibraryTimeMachineBookFilter,
+        query: String
+    ) async -> [LibraryTimeMachineBookDiff] {
+        diffs.filter { diff in
             let matchesFilter = switch filter {
             case .changed: diff.kind != .unchanged
             case .restorable: diff.canRestore
@@ -206,7 +290,9 @@ final class LibraryTimeMachineViewModel {
             return diff.displayTitle.localizedCaseInsensitiveContains(query)
                 || diff.displayAuthor?.localizedCaseInsensitiveContains(query) == true
         }
+    }
 
+    private func updateVisibleSelection() {
         if let selectedBookID, visibleDiffs.contains(where: { $0.id == selectedBookID }) {
             return
         }
@@ -220,7 +306,6 @@ struct LibraryTimeMachineSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \Book.dateAdded, order: .reverse) private var books: [Book]
     @State private var model = LibraryTimeMachineViewModel()
 
     var body: some View {
@@ -248,7 +333,7 @@ struct LibraryTimeMachineSheet: View {
                     selection: $model.selectedBookID,
                     resultCount: model.visibleDiffs.count,
                     onRetry: {
-                        Task { await model.loadSelectedBackup(currentBooks: books) }
+                        Task { await loadSelectedBackup() }
                     }
                 )
                 .frame(minWidth: 285, idealWidth: 320, maxWidth: 390)
@@ -278,10 +363,12 @@ struct LibraryTimeMachineSheet: View {
             model.reloadBackups(in: backupFolder)
         }
         .task(id: model.selectedBackupID) {
-            await model.loadSelectedBackup(currentBooks: books)
+            await loadSelectedBackup()
         }
-        .onChange(of: LibraryMutationLog.shared.revision) {
-            model.rebuildDiff(currentBooks: books)
+        .onChange(of: LibraryMutationLog.shared.catalogRevision) {
+            Task {
+                await model.rebuildDiff(currentBooks: libraryTimeMachineBooks(in: modelContext))
+            }
         }
         .confirmationDialog(
             model.pendingRestore?.scope.confirmationTitle ?? "Restore from Backup?",
@@ -302,6 +389,12 @@ struct LibraryTimeMachineSheet: View {
             Text(pending.scope.confirmationMessage)
         }
         .accessibilityIdentifier("libraryTimeMachine.sheet")
+    }
+
+    private func loadSelectedBackup() async {
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+        await model.loadSelectedBackup(currentBooks: libraryTimeMachineBooks(in: modelContext))
     }
 }
 

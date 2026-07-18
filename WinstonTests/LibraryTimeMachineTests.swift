@@ -16,13 +16,13 @@ struct LibraryTimeMachineTests {
             id: modifiedID,
             title: "Older Title",
             coverURL: URL(filePath: "/tmp/backup-cover.jpg"),
-            coverHash: "backup-cover"
+            coverVersion: 1
         )
         let currentModified = snapshot(
             id: modifiedID,
             title: "Current Title",
             coverURL: URL(filePath: "/tmp/current-cover.jpg"),
-            coverHash: "current-cover"
+            coverVersion: 2
         )
         let unchanged = snapshot(id: unchangedID, title: "Same")
         let added = snapshot(id: addedID, title: "Added")
@@ -56,6 +56,71 @@ struct LibraryTimeMachineTests {
         #expect(diff?.kind == .modified)
         #expect(diff?.changeGroups == [.fileRecord])
         #expect(diff?.canRestore == false)
+    }
+
+    @Test func coverVersionOnlyMattersWhenBothSnapshotsHaveACover() {
+        let id = UUID()
+        let withoutCover = snapshot(id: id, title: "Book", coverVersion: 1)
+        let newerWithoutCover = snapshot(id: id, title: "Book", coverVersion: 2)
+
+        let unchanged = LibraryTimeMachineDiffBuilder.compare(
+            backupBooks: [withoutCover],
+            currentBooks: [newerWithoutCover]
+        ).first
+
+        #expect(unchanged?.kind == .unchanged)
+    }
+
+    @Test func diffScalesToLargeLibraries() {
+        let ids = (0..<10_000).map { _ in UUID() }
+        let backup = ids.enumerated().map { index, id in
+            snapshot(id: id, title: "Book \(index)")
+        }
+        var current = backup
+        current[5_000].metadata.title = "Changed Book"
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let result = LibraryTimeMachineDiffBuilder.compare(
+            backupBooks: backup,
+            currentBooks: current
+        )
+        let elapsed = startedAt.duration(to: clock.now)
+
+        print("Library Time Machine diff benchmark: \(elapsed)")
+        #expect(result.count == 10_000)
+        #expect(result.count { $0.kind == .modified } == 1)
+        #expect(elapsed < .seconds(2))
+    }
+
+    @Test func currentSnapshotResolvesFilesAndCoversWithoutChangingModelData() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "WinstonTimeMachineSnapshot-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let booksDirectory = root.appending(path: "books", directoryHint: .isDirectory)
+        let coversDirectory = root.appending(path: "covers", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: booksDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: coversDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let book = Book(fileName: "present.epub", originalFileName: "Present.epub")
+        book.title = "Present"
+        try Data("book".utf8).write(to: booksDirectory.appending(path: book.fileName))
+        try Data("cover".utf8).write(
+            to: coversDirectory.appending(path: "\(book.uuid.uuidString).jpg")
+        )
+
+        let snapshots = await LibraryTimeMachineDiffBuilder.snapshotCurrentBooks(
+            [book],
+            currentCoversDirectory: coversDirectory,
+            currentBooksDirectory: booksDirectory
+        )
+        let snapshot = try #require(snapshots.first)
+
+        #expect(snapshot.metadata.title == "Present")
+        #expect(snapshot.bookFileExists)
+        #expect(snapshot.hasCover)
     }
 
     @Test func technicalLookupStateIsIgnoredButVisibleRatingDataIsCompared() {
@@ -164,9 +229,6 @@ struct LibraryTimeMachineTests {
         #expect(archived.work?.title == "Archived Work")
         #expect(archived.assets.map(\.contentHash) == ["content-hash"])
         #expect(archived.hasCover)
-        #expect(archived.coverHash == (try ContentHasher.sha256(
-            of: try #require(archived.coverURL)
-        )))
     }
 
     @Test func metadataRestoreLeavesReadingHistoryAndCoverUntouched() async throws {
@@ -257,8 +319,7 @@ struct LibraryTimeMachineTests {
         var backup = snapshot(
             id: id,
             title: "Ignored Backup Title",
-            coverURL: backupCover,
-            coverHash: "restored"
+            coverURL: backupCover
         )
         backup.coverVersion = 2
         let restorer = LibraryTimeMachineRestorer(
@@ -399,17 +460,17 @@ struct LibraryTimeMachineTests {
         author: String? = nil,
         fileName: String = "book.epub",
         coverURL: URL? = nil,
-        coverHash: String? = nil,
+        coverVersion: Int = 0,
         reading: LibraryTimeMachineReadingSnapshot = .init()
     ) -> LibraryTimeMachineBookSnapshot {
         LibraryTimeMachineBookSnapshot(
             id: id,
             fileName: fileName,
             originalFileName: fileName,
+            coverVersion: coverVersion,
             metadata: LibraryTimeMachineMetadataSnapshot(title: title, author: author),
             reading: reading,
-            coverURL: coverURL,
-            coverHash: coverHash
+            coverURL: coverURL
         )
     }
 

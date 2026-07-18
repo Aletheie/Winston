@@ -159,7 +159,6 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
     var work: LibraryTimeMachineWorkSnapshot?
     var assets: [LibraryTimeMachineAssetSnapshot]
     var coverURL: URL?
-    var coverHash: String?
     var bookFileExists: Bool
 
     init(
@@ -176,7 +175,6 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
         work: LibraryTimeMachineWorkSnapshot? = nil,
         assets: [LibraryTimeMachineAssetSnapshot] = [],
         coverURL: URL? = nil,
-        coverHash: String? = nil,
         bookFileExists: Bool = false
     ) {
         self.id = id
@@ -192,7 +190,6 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
         self.work = work
         self.assets = assets
         self.coverURL = coverURL
-        self.coverHash = coverHash
         self.bookFileExists = bookFileExists
     }
 
@@ -387,7 +384,7 @@ enum LibraryTimeMachineError: LocalizedError {
     }
 }
 
-enum LibraryTimeMachineReader {
+nonisolated enum LibraryTimeMachineReader {
     static func load(_ backupURL: URL) throws -> LibraryTimeMachineSnapshot {
         guard let sourceStore = LibraryBackup.catalogURL(in: backupURL) else {
             throw LibraryTimeMachineError.missingCatalog
@@ -436,24 +433,73 @@ enum LibraryTimeMachineReader {
         )
         let context = ModelContext(container)
         context.autosaveEnabled = false
-        let books = try context.fetch(FetchDescriptor<Book>())
-        return books
-            .map {
-                LibraryTimeMachineSnapshotBuilder.makeBook(
-                    $0,
-                    coverURL: LibraryBackup.coverURL(for: $0.uuid, in: backupURL),
-                    booksDirectory: liveBooksDirectory
-                )
-            }
-            .sorted { lhs, rhs in
-                let order = lhs.displayTitle.localizedStandardCompare(rhs.displayTitle)
-                if order == .orderedSame { return lhs.id.uuidString < rhs.id.uuidString }
-                return order == .orderedAscending
-            }
+        var descriptor = FetchDescriptor<Book>()
+        descriptor.relationshipKeyPathsForPrefetching = [
+            \Book.readingSessions,
+            \Book.highlights,
+            \Book.collections,
+            \Book.assets,
+            \Book.work,
+        ]
+        let books = try context.fetch(descriptor)
+        return books.map {
+            LibraryTimeMachineSnapshotBuilder.makeBook(
+                $0,
+                coverURL: LibraryBackup.coverURL(for: $0.uuid, in: backupURL),
+                booksDirectory: liveBooksDirectory
+            )
+        }
     }
 }
 
 enum LibraryTimeMachineDiffBuilder {
+    @MainActor
+    static func snapshotCurrentBooks(
+        _ books: [Book],
+        currentCoversDirectory: URL = AppPaths.coversDirectory,
+        currentBooksDirectory: URL = AppPaths.booksDirectory
+    ) async -> [LibraryTimeMachineBookSnapshot] {
+        var snapshots: [LibraryTimeMachineBookSnapshot] = []
+        snapshots.reserveCapacity(books.count)
+        for (index, book) in books.enumerated() {
+            guard !Task.isCancelled else { return [] }
+            snapshots.append(LibraryTimeMachineSnapshotBuilder.makeBook(
+                book,
+                coverURL: nil,
+                booksDirectory: currentBooksDirectory,
+                bookFileExists: false
+            ))
+            if index > 0, index.isMultiple(of: 64) { await Task.yield() }
+        }
+
+        return await resolveAvailability(
+            snapshots,
+            coversDirectory: currentCoversDirectory,
+            booksDirectory: currentBooksDirectory
+        )
+    }
+
+    @concurrent
+    private static func resolveAvailability(
+        _ snapshots: [LibraryTimeMachineBookSnapshot],
+        coversDirectory: URL,
+        booksDirectory: URL
+    ) async -> [LibraryTimeMachineBookSnapshot] {
+        var resolved = snapshots
+        for index in resolved.indices {
+            guard !Task.isCancelled else { return [] }
+            let cover = coversDirectory.appending(path: "\(resolved[index].id.uuidString).jpg")
+            if FileManager.default.fileExists(atPath: cover.path(percentEncoded: false)) {
+                resolved[index].coverURL = cover
+            }
+            let bookFile = booksDirectory.appending(path: resolved[index].fileName)
+            resolved[index].bookFileExists = FileManager.default.fileExists(
+                atPath: bookFile.path(percentEncoded: false)
+            )
+        }
+        return resolved
+    }
+
     static func compare(
         backup: LibraryTimeMachineSnapshot,
         currentBooks: [Book],
@@ -476,14 +522,23 @@ enum LibraryTimeMachineDiffBuilder {
         backupBooks: [LibraryTimeMachineBookSnapshot],
         currentBooks: [LibraryTimeMachineBookSnapshot]
     ) -> [LibraryTimeMachineBookDiff] {
-        let backupByID = Dictionary(backupBooks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let currentByID = Dictionary(currentBooks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let allIDs = Set(backupByID.keys).union(currentByID.keys)
-
-        return allIDs.map { id in
-            makeDiff(id: id, backup: backupByID[id], current: currentByID[id])
+        let backupByID = Dictionary(
+            backupBooks.lazy.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let currentByID = Dictionary(
+            currentBooks.lazy.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var diffs: [LibraryTimeMachineBookDiff] = []
+        diffs.reserveCapacity(backupByID.count + currentByID.count)
+        for (id, backup) in backupByID {
+            diffs.append(makeDiff(id: id, backup: backup, current: currentByID[id]))
         }
-        .sorted { lhs, rhs in
+        for (id, current) in currentByID where backupByID[id] == nil {
+            diffs.append(makeDiff(id: id, backup: nil, current: current))
+        }
+        return diffs.sorted { lhs, rhs in
             if lhs.kind.rawValue != rhs.kind.rawValue { return lhs.kind.rawValue < rhs.kind.rawValue }
             let order = lhs.displayTitle.localizedStandardCompare(rhs.displayTitle)
             if order == .orderedSame { return lhs.id.uuidString < rhs.id.uuidString }
@@ -522,7 +577,10 @@ enum LibraryTimeMachineDiffBuilder {
         if backup.reading != current.reading { groups.append(.readingHistory) }
         if backup.highlights != current.highlights { groups.append(.highlights) }
         if backup.collections.map(\.id) != current.collections.map(\.id) { groups.append(.collections) }
-        if backup.hasCover != current.hasCover || backup.coverHash != current.coverHash { groups.append(.cover) }
+        if backup.hasCover != current.hasCover
+            || (backup.hasCover && backup.coverVersion != current.coverVersion) {
+            groups.append(.cover)
+        }
         if backup.fileName != current.fileName
             || backup.originalFileName != current.originalFileName
             || backup.fileSizeBytes != current.fileSizeBytes
@@ -531,13 +589,14 @@ enum LibraryTimeMachineDiffBuilder {
             groups.append(.fileRecord)
         }
 
+        let hasFieldChanges = groups.contains(.metadata) || groups.contains(.readingHistory)
         return LibraryTimeMachineBookDiff(
             id: id,
             kind: groups.isEmpty ? .unchanged : .modified,
             backup: backup,
             current: current,
             changeGroups: groups,
-            fieldChanges: fieldChanges(backup: backup, current: current)
+            fieldChanges: hasFieldChanges ? fieldChanges(backup: backup, current: current) : []
         )
     }
 
@@ -619,11 +678,12 @@ enum LibraryTimeMachineDiffBuilder {
     }
 }
 
-private enum LibraryTimeMachineSnapshotBuilder {
+private nonisolated enum LibraryTimeMachineSnapshotBuilder {
     static func makeBook(
         _ book: Book,
         coverURL: URL?,
-        booksDirectory: URL
+        booksDirectory: URL,
+        bookFileExists: Bool? = nil
     ) -> LibraryTimeMachineBookSnapshot {
         let sessions = book.readingSessions.map {
             LibraryTimeMachineReadingSessionSnapshot(
@@ -754,8 +814,7 @@ private enum LibraryTimeMachineSnapshotBuilder {
             work: work,
             assets: assets,
             coverURL: coverURL,
-            coverHash: coverURL.flatMap { try? ContentHasher.sha256(of: $0) },
-            bookFileExists: FileManager.default.fileExists(
+            bookFileExists: bookFileExists ?? FileManager.default.fileExists(
                 atPath: primaryFile.path(percentEncoded: false)
             )
         )
