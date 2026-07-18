@@ -77,8 +77,18 @@ final class Book {
         BookFileStore.url(for: fileName)
     }
 
+    nonisolated(unsafe) private static let formats: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 16_384
+        return cache
+    }()
+
     var format: String {
-        (fileName as NSString).pathExtension.uppercased()
+        let key = fileName as NSString
+        if let cached = Self.formats.object(forKey: key) { return cached as String }
+        let value = key.pathExtension.uppercased()
+        Self.formats.setObject(value as NSString, forKey: key)
+        return value
     }
 
     var assetFormats: [String] {
@@ -105,13 +115,33 @@ final class Book {
     var sortAuthor: String { displayAuthor ?? "" }
     var sortRating: Int { rating ?? 0 }
 
+    nonisolated(unsafe) private static let deviceMatchKeys: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 16_384
+        return cache
+    }()
+
     var deviceMatchKey: String {
-        (originalFileName as NSString).deletingPathExtension.lowercased()
+        let key = originalFileName as NSString
+        if let cached = Self.deviceMatchKeys.object(forKey: key) { return cached as String }
+        let value = key.deletingPathExtension.lowercased()
+        Self.deviceMatchKeys.setObject(value as NSString, forKey: key)
+        return value
     }
+
+    nonisolated(unsafe) private static let fileSizes: NSCache<NSNumber, NSString> = {
+        let cache = NSCache<NSNumber, NSString>()
+        cache.countLimit = 8_192
+        return cache
+    }()
 
     var fileSizeDisplay: String {
         guard fileSizeBytes > 0 else { return "\u{2014}" }
-        return ByteCountFormatter.string(fromByteCount: fileSizeBytes, countStyle: .file)
+        let key = NSNumber(value: fileSizeBytes)
+        if let cached = Self.fileSizes.object(forKey: key) { return cached as String }
+        let value = ByteCountFormatter.string(fromByteCount: fileSizeBytes, countStyle: .file)
+        Self.fileSizes.setObject(value as NSString, forKey: key)
+        return value
     }
 
     var readingStatus: ReadingStatus {
@@ -134,9 +164,12 @@ final class Book {
     }
 
     var activeReadingSession: ReadingSession? {
-        readingSessionsChronological.last {
-            $0.endedAt == nil && $0.status.isActive
-        }
+        readingSessions.lazy
+            .filter { $0.endedAt == nil && $0.status.isActive }
+            .max { lhs, rhs in
+                if lhs.startedAt != rhs.startedAt { return lhs.startedAt < rhs.startedAt }
+                return lhs.uuid.uuidString < rhs.uuid.uuidString
+            }
     }
 
     var finishedReadingCount: Int {
