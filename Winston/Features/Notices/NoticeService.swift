@@ -2,6 +2,40 @@ import Foundation
 import Observation
 import SwiftData
 
+nonisolated private struct NoticeSeriesSource: Sendable {
+    let id: UUID
+    let series: String
+    let title: String
+    let author: String?
+    let position: Double?
+}
+
+nonisolated private enum NoticeSeriesLookupPreparer {
+    static func prepare(_ sources: [NoticeSeriesSource]) -> [SeriesLookup] {
+        Dictionary(grouping: sources, by: \.series).map { series, members in
+            let ordered = members.sorted {
+                let lhs = $0.position ?? .greatestFiniteMagnitude
+                let rhs = $1.position ?? .greatestFiniteMagnitude
+                if lhs != rhs { return lhs < rhs }
+                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+            return SeriesLookup(
+                name: series,
+                authors: Array(Set(ordered.compactMap(\.author))).sorted(),
+                books: ordered.map {
+                    SeriesLocalBookSnapshot(
+                        id: $0.id,
+                        title: $0.title,
+                        author: $0.author,
+                        position: $0.position
+                    )
+                }
+            )
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
+
 @MainActor
 @Observable
 final class NoticeService {
@@ -65,23 +99,35 @@ final class NoticeService {
 
     private func performReleaseCheck(announce: Bool) async {
         guard releaseCheckAvailable, !isChecking else { return }
+        isChecking = true
+        defer { isChecking = false }
         let token = settings.hardcoverToken
         let books = modelContext.allBooks()
         prune(existingBookUUIDs: Set(books.map(\.uuid)))
-        let lookups = SeriesLookupBuilder.groups(from: books).map(\.lookup)
+        let seriesSources = books.compactMap { book -> NoticeSeriesSource? in
+            guard let series = book.series, !series.isEmpty else { return nil }
+            return NoticeSeriesSource(
+                id: book.uuid,
+                series: series,
+                title: book.displayTitle,
+                author: book.displayAuthor,
+                position: book.seriesIndex.flatMap(Double.init)
+            )
+        }
+        let lookups = await Task.detached(priority: .utility) {
+            NoticeSeriesLookupPreparer.prepare(seriesSources)
+        }.value
+        guard !Task.isCancelled else { return }
         guard !lookups.isEmpty else {
             settings.lastReleaseCheckAt = .now
             lastCheckFailed = false
             if announce { toasts.info(String(localized: "No series to check yet.")) }
             return
         }
-
-        isChecking = true
-        defer { isChecking = false }
         do {
             let catalogs = try await catalogService.refreshCatalogs(matching: lookups, token: token)
             let inserted = applyCatalogs(catalogs, lookups: lookups)
-            modelContext.saveQuietly()
+            modelContext.saveQuietly(catalogChanged: false)
             reload()
             settings.lastReleaseCheckAt = .now
             lastCheckFailed = false
@@ -104,11 +150,20 @@ final class NoticeService {
     ) -> Int {
         var inserted = 0
         let cutoff = Self.releaseWindowCutoff()
+        var snapshotsByKey = Dictionary(
+            (try? modelContext.fetch(FetchDescriptor<SeriesCatalogSnapshot>()))?.map {
+                ($0.seriesKey, $0)
+            } ?? [],
+            uniquingKeysWith: { first, _ in first }
+        )
+        var knownNoticeKeys = Set(notices.map(\.dedupeKey))
         for lookup in lookups {
             guard let catalog = catalogs[lookup.id] else { continue }
             let currentIDs = Set(catalog.books.map(\.id))
-            guard let snapshot = snapshot(forSeriesKey: lookup.id) else {
-                modelContext.insert(SeriesCatalogSnapshot(seriesKey: lookup.id, knownBookIDs: currentIDs))
+            guard let snapshot = snapshotsByKey[lookup.id] else {
+                let snapshot = SeriesCatalogSnapshot(seriesKey: lookup.id, knownBookIDs: currentIDs)
+                modelContext.insert(snapshot)
+                snapshotsByKey[lookup.id] = snapshot
                 continue
             }
             let newIDs = currentIDs.subtracting(snapshot.knownBookIDs)
@@ -117,7 +172,7 @@ final class NoticeService {
                 for book in completion.missingBooks where newIDs.contains(book.id) {
                     guard Self.isWithinReleaseWindow(book.releaseDate, cutoff: cutoff) else { continue }
                     let key = "release:\(book.id)"
-                    guard !noticeExists(dedupeKey: key) else { continue }
+                    guard knownNoticeKeys.insert(key).inserted else { continue }
                     insertReleaseNotice(for: book, in: catalog, dedupeKey: key)
                     inserted += 1
                 }
@@ -178,7 +233,7 @@ final class NoticeService {
             }
         }
         guard changed else { return }
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
         reload()
     }
 
@@ -225,7 +280,7 @@ final class NoticeService {
 
     func book(for notice: LibraryNotice) -> Book? {
         guard let uuid = notice.bookUUID else { return nil }
-        let revision = LibraryMutationLog.shared.revision
+        let revision = LibraryMutationLog.shared.catalogRevision
         if cachedBooksRevision != revision {
             cachedBooksByID = Dictionary(
                 modelContext.allBooks().map { ($0.uuid, $0) },
@@ -265,37 +320,29 @@ final class NoticeService {
     func markRead(_ notice: LibraryNotice) {
         guard notice.readAt == nil else { return }
         notice.readAt = .now
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
     }
 
     func markUnread(_ notice: LibraryNotice) {
         guard notice.readAt != nil else { return }
         notice.readAt = nil
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
     }
 
     func markAllRead() {
         let unread = notices.filter { $0.readAt == nil }
         guard !unread.isEmpty else { return }
         for notice in unread { notice.readAt = .now }
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
     }
 
     func delete(_ notice: LibraryNotice) {
         notices.removeAll { $0.id == notice.id }
         modelContext.delete(notice)
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
     }
 
     // MARK: - Support
-
-    private func snapshot(forSeriesKey key: String) -> SeriesCatalogSnapshot? {
-        var descriptor = FetchDescriptor<SeriesCatalogSnapshot>(
-            predicate: #Predicate { $0.seriesKey == key }
-        )
-        descriptor.fetchLimit = 1
-        return ((try? modelContext.fetch(descriptor)) ?? []).first
-    }
 
     private func noticeExists(dedupeKey key: String) -> Bool {
         let descriptor = FetchDescriptor<LibraryNotice>(
@@ -313,7 +360,7 @@ final class NoticeService {
         }
         guard !stale.isEmpty else { return }
         for notice in stale { modelContext.delete(notice) }
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
         reload()
     }
 
