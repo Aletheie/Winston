@@ -5,6 +5,11 @@ import ImageIO
 import UniformTypeIdentifiers
 @testable import Winston
 
+private actor CoverLoadCounter {
+    private(set) var value = 0
+    func increment() { value += 1 }
+}
+
 @MainActor
 struct ImageTranscoderTests {
 
@@ -63,5 +68,26 @@ struct ImageTranscoderTests {
         let fittedTall = ImageTranscoder.scaledToFit(tall, maxWidth: 330, maxHeight: 470)
         #expect(fittedTall.width <= 330)
         #expect(fittedTall.height <= 470)
+    }
+
+    @Test func concurrentCoverRequestsShareOneLoad() async {
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "cover-cache-\(UUID().uuidString).epub")
+        let counter = CoverLoadCounter()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    _ = await CoverCache.shared.resolve(for: url, tier: .display) {
+                        await counter.increment()
+                        try? await Task.sleep(for: .milliseconds(40))
+                        return nil
+                    }
+                }
+            }
+        }
+
+        let loadCount = await counter.value
+        #expect(loadCount == 1)
     }
 }

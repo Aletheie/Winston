@@ -3,7 +3,7 @@ import PDFKit
 
 // MARK: - Cover Cache
 
-private nonisolated final class CoverBox {
+private nonisolated final class CoverBox: @unchecked Sendable {
     let image: NSImage?
     init(_ image: NSImage?) { self.image = image }
 }
@@ -29,6 +29,11 @@ actor CoverCache {
         cache.totalCostLimit = 96 * 1024 * 1024
         return cache
     }()
+    private struct PendingLoad {
+        let id: UUID
+        let task: Task<CoverBox, Never>
+    }
+    private var pendingLoads: [NSString: PendingLoad] = [:]
 
     private init() {}
 
@@ -41,6 +46,31 @@ actor CoverCache {
         return .some(box.image)
     }
 
+    func resolve(
+        for url: URL,
+        tier: Tier,
+        loader: @escaping @Sendable () async -> NSImage?
+    ) async -> NSImage? {
+        let cacheKey = key(url, tier)
+        if let cached = cache.object(forKey: cacheKey) { return cached.image }
+
+        let pending: PendingLoad
+        if let existing = pendingLoads[cacheKey] {
+            pending = existing
+        } else {
+            let id = UUID()
+            let task = Task { CoverBox(await loader()) }
+            pending = PendingLoad(id: id, task: task)
+            pendingLoads[cacheKey] = pending
+        }
+
+        let loaded = await pending.task.value
+        if let cached = cache.object(forKey: cacheKey) { return cached.image }
+        guard pendingLoads[cacheKey]?.id == pending.id else { return loaded.image }
+        pendingLoads.removeValue(forKey: cacheKey)
+        return insert(loaded.image, for: url, tier: tier)
+    }
+
     @discardableResult
     func insert(_ image: NSImage?, for url: URL, tier: Tier) -> NSImage? {
         let scaled = image.map { CoverCache.downscaled($0, maxDimension: tier.maxDimension) }
@@ -51,7 +81,10 @@ actor CoverCache {
 
     // Drops every tier — a tier-scoped insert would leave stale renditions.
     func replace(_ image: NSImage?, for url: URL) {
+        pendingLoads.removeValue(forKey: key(url, .thumb))?.task.cancel()
+        pendingLoads.removeValue(forKey: key(url, .display))?.task.cancel()
         cache.removeObject(forKey: key(url, .thumb))
+        cache.removeObject(forKey: key(url, .display))
         insert(image, for: url, tier: .display)
     }
 

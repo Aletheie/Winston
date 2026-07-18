@@ -21,24 +21,25 @@ struct BookCoverImageView: View {
             .clipped()
             .task(id: "\(book.fileName)#\(book.coverVersion)") {
                 coverImage = nil
-                coverImage = await resolvedCover(for: book.fileURL, uuid: book.uuid)
+                let resolved = await resolvedCover(for: book.fileURL, uuid: book.uuid)
+                guard !Task.isCancelled else { return }
+                coverImage = resolved
             }
     }
 
     private func resolvedCover(for url: URL, uuid: UUID) async -> NSImage? {
-        if let cached = await CoverCache.shared.image(for: url, tier: tier) { return cached }
-
-        let maxPixel = Int(tier.maxDimension)
-        let image: NSImage? = await Task.detached(priority: .background) {
-            if let data = CoverStore.loadData(for: uuid),
-               let decoded = ImageTranscoder.decodedImage(from: data, maxPixel: maxPixel) {
-                return NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height))
-            }
-            guard let extracted = CoverExtractor.extractCover(from: url) else { return nil }
-            CoverStore.save(extracted, for: uuid)
-            return extracted
-        }.value
-
-        return await CoverCache.shared.insert(image, for: url, tier: tier)
+        let maxDimension = tier.maxDimension
+        let maxPixel = Int(maxDimension)
+        return await CoverCache.shared.resolve(for: url, tier: tier) {
+            await Task.detached(priority: .background) {
+                if let data = CoverStore.loadData(for: uuid),
+                   let decoded = ImageTranscoder.decodedImage(from: data, maxPixel: maxPixel) {
+                    return NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height))
+                }
+                guard let extracted = CoverExtractor.extractCover(from: url) else { return nil }
+                CoverStore.save(extracted, for: uuid)
+                return CoverCache.downscaled(extracted, maxDimension: maxDimension)
+            }.value
+        }
     }
 }
