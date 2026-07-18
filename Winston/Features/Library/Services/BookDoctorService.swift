@@ -132,7 +132,9 @@ nonisolated enum BookDoctorService {
     }
 
     static func makeRepairedCopy(of source: URL, at destination: URL) throws {
-        guard source.standardizedFileURL != destination.standardizedFileURL else {
+        let resolvedSource = source.standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedDestination = destination.standardizedFileURL.resolvingSymlinksInPath()
+        guard resolvedSource != resolvedDestination else {
             throw RepairError.destinationMatchesSource
         }
         guard source.pathExtension.lowercased() == "epub" else { throw RepairError.notRepairable }

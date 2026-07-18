@@ -55,6 +55,32 @@ struct BookDoctorTests {
         #expect(parsed.spine.count == 1)
     }
 
+    @Test func repairNeverOverwritesTheOriginal() throws {
+        let original = try damagedEPUB()
+        defer { try? FileManager.default.removeItem(at: original.deletingLastPathComponent()) }
+        let originalHash = try ContentHasher.sha256(of: original)
+
+        #expect(throws: BookDoctorService.RepairError.self) {
+            try BookDoctorService.makeRepairedCopy(of: original, at: original)
+        }
+
+        #expect(try ContentHasher.sha256(of: original) == originalHash)
+    }
+
+    @Test func repairRejectsASymlinkBackToTheOriginal() throws {
+        let original = try damagedEPUB()
+        defer { try? FileManager.default.removeItem(at: original.deletingLastPathComponent()) }
+        let symlink = original.deletingLastPathComponent().appending(path: "repair.epub")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: original)
+        let originalHash = try ContentHasher.sha256(of: original)
+
+        #expect(throws: BookDoctorService.RepairError.self) {
+            try BookDoctorService.makeRepairedCopy(of: original, at: symlink)
+        }
+
+        #expect(try ContentHasher.sha256(of: original) == originalHash)
+    }
+
     @Test func unreadableFileIsBlocked() throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "WinstonBookDoctor-\(UUID().uuidString)", directoryHint: .isDirectory)
