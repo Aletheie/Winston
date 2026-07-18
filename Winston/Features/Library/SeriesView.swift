@@ -11,7 +11,8 @@ struct SeriesView: View {
     @Environment(AppSettings.self) private var settings
 
     @State private var displayedGroups: [SeriesGroup] = []
-    @State private var groupFingerprint = ""
+    @State private var isBuildingGroups = true
+    @State private var groupRevision = 0
     @State private var completionModel: SeriesCompletionViewModel
     @State private var retryGeneration = 0
 
@@ -40,7 +41,11 @@ struct SeriesView: View {
                     .padding(.top, 12)
             }
 
-            if displayedGroups.isEmpty {
+            if isBuildingGroups && displayedGroups.isEmpty {
+                ProgressView()
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if displayedGroups.isEmpty {
                 ContentUnavailableView {
                     Label(String(localized: "No series yet"), systemImage: "books.vertical")
                 } description: {
@@ -73,7 +78,7 @@ struct SeriesView: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
-            .background(.ultraThinMaterial)
+            .background(theme.backgroundAlt.opacity(0.98))
         }
         .background(ThemedBackground())
         .frame(
@@ -84,7 +89,9 @@ struct SeriesView: View {
             idealHeight: 780,
             maxHeight: .infinity
         )
-        .onAppear { rebuildGroups() }
+        .task(id: LibraryMutationLog.shared.catalogRevision) {
+            await rebuildGroups()
+        }
         .task(id: catalogTaskID) {
             let token = settings.hardcoverToken.trimmingCharacters(in: .whitespacesAndNewlines)
             guard settings.onlineMetadataEnabled, !token.isEmpty else {
@@ -115,7 +122,7 @@ struct SeriesView: View {
         CatalogTaskID(
             onlineEnabled: settings.onlineMetadataEnabled,
             tokenHash: settings.hardcoverToken.hashValue,
-            groupFingerprint: groupFingerprint,
+            groupRevision: groupRevision,
             retryGeneration: retryGeneration
         )
     }
@@ -123,7 +130,7 @@ struct SeriesView: View {
     private struct CatalogTaskID: Hashable {
         let onlineEnabled: Bool
         let tokenHash: Int
-        let groupFingerprint: String
+        let groupRevision: Int
         let retryGeneration: Int
     }
 
@@ -134,25 +141,34 @@ struct SeriesView: View {
         let lookup: SeriesLookup
     }
 
-    private func makeGroups() -> [SeriesGroup] {
-        SeriesLookupBuilder.groups(from: books).map {
-            SeriesGroup(id: $0.id, name: $0.name, books: $0.books, lookup: $0.lookup)
+    private func rebuildGroups() async {
+        isBuildingGroups = true
+        var booksByID: [UUID: Book] = [:]
+        booksByID.reserveCapacity(books.count)
+        for (index, book) in books.enumerated() {
+            guard !Task.isCancelled else { return }
+            booksByID[book.uuid] = book
+            if index > 0, index.isMultiple(of: 128) { await Task.yield() }
         }
-    }
-
-    private func rebuildGroups() {
-        let groups = makeGroups()
+        let sources = await SeriesLookupBuilder.sources(from: books)
+        guard !Task.isCancelled else { return }
+        let snapshots = await SeriesLookupBuilder.groups(from: sources)
+        guard !Task.isCancelled else { return }
+        let groups = snapshots.map { snapshot in
+            SeriesGroup(
+                id: snapshot.id,
+                name: snapshot.name,
+                books: snapshot.bookIDs.compactMap { booksByID[$0] },
+                lookup: snapshot.lookup
+            )
+        }
         if let seriesName {
             displayedGroups = groups.filter { $0.name == seriesName }
         } else {
             displayedGroups = groups
         }
-        groupFingerprint = displayedGroups.map { group in
-            let books = group.books.map {
-                "\($0.uuid.uuidString):\($0.displayTitle):\($0.seriesIndex ?? "-")"
-            }.joined(separator: ",")
-            return "\(group.id):\(books)"
-        }.joined(separator: "|")
+        isBuildingGroups = false
+        groupRevision &+= 1
     }
 }
 

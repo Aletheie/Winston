@@ -1,44 +1,66 @@
 import Foundation
 
-@MainActor
+nonisolated struct SeriesLookupSource: Sendable {
+    let id: UUID
+    let series: String?
+    let title: String
+    let author: String?
+    let position: Double?
+}
+
+nonisolated struct SeriesLookupGroupSnapshot: Sendable {
+    let id: String
+    let name: String
+    let bookIDs: [UUID]
+    let lookup: SeriesLookup
+}
+
 enum SeriesLookupBuilder {
-    struct Group: Identifiable {
-        let id: String
-        let name: String
-        let books: [Book]
-        let lookup: SeriesLookup
+    @MainActor
+    static func sources(from books: [Book]) async -> [SeriesLookupSource] {
+        var sources: [SeriesLookupSource] = []
+        sources.reserveCapacity(books.count)
+        for (index, book) in books.enumerated() {
+            guard !Task.isCancelled else { return [] }
+            sources.append(SeriesLookupSource(
+                id: book.uuid,
+                series: book.series,
+                title: book.displayTitle,
+                author: book.displayAuthor,
+                position: book.seriesIndex.flatMap(Double.init)
+            ))
+            if index > 0, index.isMultiple(of: 128) { await Task.yield() }
+        }
+        return sources
     }
 
-    static func groups(from books: [Book]) -> [Group] {
-        let withSeries = books.filter { !($0.series ?? "").isEmpty }
+    @concurrent
+    static func groups(from sources: [SeriesLookupSource]) async -> [SeriesLookupGroupSnapshot] {
+        let withSeries = sources.filter { !($0.series ?? "").isEmpty }
         return Dictionary(grouping: withSeries, by: { $0.series ?? "" })
-            .map { name, groupBooks in
-                let sortedBooks = groupBooks.sorted { lhs, rhs in
-                    let left = position(of: lhs)
-                    let right = position(of: rhs)
+            .map { name, groupSources in
+                let sortedSources = groupSources.sorted { lhs, rhs in
+                    let left = lhs.position ?? .greatestFiniteMagnitude
+                    let right = rhs.position ?? .greatestFiniteMagnitude
                     if left != right { return left < right }
-                    return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
+                    return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
                 }
-                let authors = Array(Set(sortedBooks.compactMap(\.displayAuthor))).sorted()
-                let snapshots = sortedBooks.map {
+                let authors = Array(Set(sortedSources.compactMap(\.author))).sorted()
+                let snapshots = sortedSources.map {
                     SeriesLocalBookSnapshot(
-                        id: $0.uuid,
-                        title: $0.displayTitle,
-                        author: $0.displayAuthor,
-                        position: $0.seriesIndex.flatMap(Double.init)
+                        id: $0.id,
+                        title: $0.title,
+                        author: $0.author,
+                        position: $0.position
                     )
                 }
-                return Group(
+                return SeriesLookupGroupSnapshot(
                     id: name,
                     name: name,
-                    books: sortedBooks,
+                    bookIDs: sortedSources.map(\.id),
                     lookup: SeriesLookup(name: name, authors: authors, books: snapshots)
                 )
             }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    static func position(of book: Book) -> Double {
-        book.seriesIndex.flatMap(Double.init) ?? .greatestFiniteMagnitude
     }
 }
