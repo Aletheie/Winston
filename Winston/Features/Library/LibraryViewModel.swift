@@ -83,7 +83,12 @@ final class LibraryViewModel {
 
     // MARK: - Add / Remove
 
-    func addBooks(from urls: [URL]) { importer.addBooks(from: urls) }
+    func addBooks(
+        from urls: [URL],
+        completion: ImportService.ImportCompletion? = nil
+    ) {
+        importer.addBooks(from: urls, completion: completion)
+    }
     func addEditions(from urls: [URL], to work: Work) { importer.addBooks(from: urls, assigningTo: work) }
     func importCalibreLibrary(at root: URL) { calibreImporter.importLibrary(at: root) }
 

@@ -9,6 +9,8 @@ struct ImportBookAnalysis: Sendable {
 @MainActor
 @Observable
 final class ImportService {
+    typealias ImportCompletion = @MainActor ([Book]) -> Void
+
     private struct MatchBatch {
         let books: [Book]
         var remaining: Set<UUID>
@@ -58,11 +60,15 @@ final class ImportService {
     var isExtracting: Bool { !pendingMetadataUUIDs.isEmpty }
     var pendingMetadataCount: Int { pendingMetadataUUIDs.count }
 
-    func addBooks(from urls: [URL]) {
-        addBooks(from: urls, assigningTo: nil)
+    func addBooks(from urls: [URL], completion: ImportCompletion? = nil) {
+        addBooks(from: urls, assigningTo: nil, completion: completion)
     }
 
-    func addBooks(from urls: [URL], assigningTo targetWork: Work?) {
+    func addBooks(
+        from urls: [URL],
+        assigningTo targetWork: Work?,
+        completion: ImportCompletion? = nil
+    ) {
         var requests: [CopyRequest] = []
         var failed = 0
         for url in urls {
@@ -76,12 +82,16 @@ final class ImportService {
 
         guard !requests.isEmpty else {
             reportImportFailures(failed)
+            completion?([])
             return
         }
 
         let validationFailures = failed
         Task { [weak self, requests] in
-            guard let self else { return }
+            guard let self else {
+                completion?([])
+                return
+            }
             let results = await Task.detached(priority: .userInitiated) {
                 requests.map(Self.copyToManagedStore)
             }.value
@@ -94,10 +104,12 @@ final class ImportService {
                         BookFileStore.delete(fileName: fileName)
                     }
                 }
+                completion?([])
                 return
             }
 
             var imported: [Book] = []
+            var successfulImports: [Book] = []
             var failureCount = validationFailures
             var knownHashes: Set<String> = targetWork == nil ? [] : Set(
                 ((try? modelContext.fetch(FetchDescriptor<BookAsset>())) ?? [])
@@ -158,12 +170,14 @@ final class ImportService {
                             matchBatchID: batchID
                         )
                     }
+                    successfulImports = imported
                 } else {
                     imported.forEach { BookFileStore.delete(fileName: $0.fileName) }
                     failureCount += imported.count
                 }
             }
             reportImportFailures(failureCount)
+            completion?(successfulImports)
         }
     }
 

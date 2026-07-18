@@ -150,6 +150,168 @@ struct OPDSServiceTests {
         }
     }
 }
+
+@MainActor
+@Suite(.serialized)
+struct OPDSViewModelTests {
+    @Test func `Offline gate performs no catalog request`() async {
+        let settings = AppSettings()
+        let oldValue = settings.onlineMetadataEnabled
+        settings.onlineMetadataEnabled = false
+        defer { settings.onlineMetadataEnabled = oldValue }
+        let client = FakeOPDSClient()
+        let viewModel = OPDSViewModel(settings: settings, toasts: ToastCenter(), service: client)
+
+        await viewModel.open(OPDSCatalog.builtIn[0])
+
+        #expect(viewModel.phase == .disabledOnline)
+        #expect(await client.feedCalls == 0)
+    }
+
+    @Test func `Pagination appends unique catalog results`() async throws {
+        let settings = AppSettings()
+        let oldValue = settings.onlineMetadataEnabled
+        settings.onlineMetadataEnabled = true
+        defer { settings.onlineMetadataEnabled = oldValue }
+        let catalog = OPDSCatalog.builtIn[1]
+        let nextURL = URL(string: "https://example.com/page/2")!
+        let first = OPDSFeed(
+            title: "Catalog",
+            subtitle: nil,
+            navigation: [OPDSNavigationItem(
+                title: "First",
+                subtitle: nil,
+                url: URL(string: "https://example.com/first")!,
+                coverURL: nil
+            )],
+            publications: [],
+            nextURL: nextURL,
+            searchTemplate: nil
+        )
+        let second = OPDSFeed(
+            title: "Catalog",
+            subtitle: nil,
+            navigation: [
+                first.navigation[0],
+                OPDSNavigationItem(
+                    title: "Second",
+                    subtitle: nil,
+                    url: URL(string: "https://example.com/second")!,
+                    coverURL: nil
+                ),
+            ],
+            publications: [],
+            nextURL: nil,
+            searchTemplate: nil
+        )
+        let client = FakeOPDSClient(feeds: [catalog.rootURL: first, nextURL: second])
+        let viewModel = OPDSViewModel(settings: settings, toasts: ToastCenter(), service: client)
+
+        await viewModel.open(catalog)
+        await viewModel.loadNextPage()
+
+        #expect(viewModel.phase == .loaded)
+        #expect(viewModel.feed?.navigation.map(\.title) == ["First", "Second"])
+        #expect(viewModel.feed?.nextURL == nil)
+    }
+
+    @Test func `Downloaded EPUB is imported and prepared for Kindle automatically`() async throws {
+        let testLibrary = try await TestLibrary()
+        let settings = AppSettings()
+        let oldOnline = settings.onlineMetadataEnabled
+        let oldKindlePreference = UserDefaults.standard.bool(forKey: "preferKindleAZW3")
+        settings.onlineMetadataEnabled = true
+        UserDefaults.standard.set(false, forKey: "preferKindleAZW3")
+        defer {
+            settings.onlineMetadataEnabled = oldOnline
+            UserDefaults.standard.set(oldKindlePreference, forKey: "preferKindleAZW3")
+        }
+
+        let source = try EPUBFixture.make(title: "Catalog Fixture", author: "OPDS Author")
+        let acquisition = try #require(OPDSAcquisition.make(
+            url: URL(string: "https://example.com/catalog-fixture.epub")!,
+            mediaType: "application/epub+zip",
+            title: "EPUB"
+        ))
+        let publication = OPDSPublication(
+            id: "fixture",
+            title: "Catalog Fixture",
+            authors: ["OPDS Author"],
+            summary: nil,
+            language: "en",
+            coverURL: nil,
+            acquisitions: [acquisition]
+        )
+        let client = FakeOPDSClient(downloadURL: source)
+        let toasts = ToastCenter()
+        let library = LibraryViewModel(
+            modelContext: testLibrary.context,
+            settings: settings,
+            toasts: toasts,
+            online: OfflineMetadataClient()
+        )
+        let viewModel = OPDSViewModel(settings: settings, toasts: toasts, service: client)
+
+        viewModel.addToLibrary(publication, acquisition: acquisition, library: library)
+
+        let target = EbookConverter.kindleTarget(forFormat: "epub").ext
+        let deadline = Date.now.addingTimeInterval(8)
+        while Date.now < deadline {
+            if let book = testLibrary.context.allBooks().first,
+               book.assets.contains(where: { $0.format.lowercased() == target }) {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+
+        let book = try #require(testLibrary.context.allBooks().first)
+        #expect(viewModel.isDownloaded(publication))
+        #expect(book.format.lowercased() == "epub")
+        #expect(book.assets.contains(where: {
+            $0.format.lowercased() == target && $0.origin == .generated
+        }))
+        #expect(await client.downloadCalls == 1)
+    }
+}
+
+private actor FakeOPDSClient: OPDSFetching {
+    private let feeds: [URL: OPDSFeed]
+    private let downloadURL: URL?
+    private(set) var feedCalls = 0
+    private(set) var downloadCalls = 0
+
+    init(feeds: [URL: OPDSFeed] = [:], downloadURL: URL? = nil) {
+        self.feeds = feeds
+        self.downloadURL = downloadURL
+    }
+
+    func feed(at url: URL) async throws -> OPDSFeed {
+        feedCalls += 1
+        guard let feed = feeds[url] else { throw OPDSServiceError.network }
+        return feed
+    }
+
+    func download(_ acquisition: OPDSAcquisition, title: String) async throws -> URL {
+        downloadCalls += 1
+        guard let downloadURL else { throw OPDSServiceError.network }
+        return downloadURL
+    }
+}
+
+private actor OfflineMetadataClient: OnlineMetadataFetching {
+    func fetch(
+        isbn: String?,
+        title: String,
+        author: String?,
+        language: MetadataLanguage,
+        hardcoverToken: String?
+    ) async -> OnlineMetadataFetchResult {
+        OnlineMetadataFetchResult(metadata: nil, reachedNetwork: false)
+    }
+
+    func downloadCover(_ url: URL) async -> Data? { nil }
+}
+
 private final class OPDSTestURLProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var responseStatus = 200
