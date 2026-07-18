@@ -5,8 +5,10 @@ enum ReadingHistoryBackfill {
     @discardableResult
     static func run(context: ModelContext) -> Int {
         var inserted = 0
+        var descriptor = FetchDescriptor<Book>()
+        descriptor.relationshipKeyPathsForPrefetching = [\.readingSessions]
 
-        for book in context.allBooks() where book.readingSessions.isEmpty {
+        for book in ((try? context.fetch(descriptor)) ?? []) where book.readingSessions.isEmpty {
             let status = book.readingStatus
             let startedAt = book.dateStarted ?? book.dateFinished ?? book.dateAdded
             let sessionStatus: ReadingSessionStatus

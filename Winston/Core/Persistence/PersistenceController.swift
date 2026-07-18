@@ -12,12 +12,15 @@ enum PersistenceController {
     }
 
     private(set) static var lastRecovery: Recovery?
+    private(set) static var restoreAppliedAtLaunch = false
 
     static let shared: ModelContainer = {
         RenameMigration.runIfNeeded()
         try? AppPaths.ensureRequiredDirectories()
-        LibraryBackup.applyPendingRestoreIfNeeded(storeURL: storeURL,
-                                                  coversDirectory: AppPaths.coversDirectory)
+        restoreAppliedAtLaunch = LibraryBackup.applyPendingRestoreIfNeeded(
+            storeURL: storeURL,
+            coversDirectory: AppPaths.coversDirectory
+        )
         let (container, recovery) = makeContainer(storeURL: storeURL)
         lastRecovery = recovery
         return container

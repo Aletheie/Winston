@@ -1,6 +1,28 @@
 import SwiftUI
 import SwiftData
 
+private enum StartupMigrationCheckpoint {
+    private static let catalogV2Key = "migration.catalog-assets-reading-history.v2"
+
+    @MainActor
+    static func runIfNeeded(
+        context: ModelContext,
+        defaults: UserDefaults = .standard,
+        restoreApplied: Bool = PersistenceController.restoreAppliedAtLaunch
+    ) {
+        // A restored backup may predate these backfills; the swapped-in store must earn the checkpoint again.
+        if restoreApplied {
+            defaults.removeObject(forKey: catalogV2Key)
+        }
+        guard !defaults.bool(forKey: catalogV2Key) else { return }
+        EditionsBackfill.run(context: context)
+        ReadingHistoryBackfill.run(context: context)
+        EditionsBackfill.pruneOrphanWorks(context: context)
+        guard !context.hasChanges else { return }
+        defaults.set(true, forKey: catalogV2Key)
+    }
+}
+
 @main
 struct WinstonApp: App {
     private let container: ModelContainer
@@ -27,9 +49,7 @@ struct WinstonApp: App {
         let context = container.mainContext
         if !isRunningUnitTests {
             LegacyLibraryMigrator.migrateIfNeeded(context: context)
-            EditionsBackfill.run(context: context)
-            ReadingHistoryBackfill.run(context: context)
-            EditionsBackfill.pruneOrphanWorks(context: context)
+            StartupMigrationCheckpoint.runIfNeeded(context: context)
         }
         let settings = AppSettings()
         let toastCenter = ToastCenter()
