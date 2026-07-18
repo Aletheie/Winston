@@ -147,4 +147,115 @@ struct LibraryQueryTests {
         let result = LibraryQuery.apply(to: books, filter: .series("S"), searchText: "", sort: [])
         #expect(result.map(\.title) == ["One", "Two"])
     }
+
+    @Test func displaySnapshotsPreserveFilteringSearchAndSortSemantics() {
+        let dune = makeBook("Dune", author: "Frank Herbert", tags: ["sci-fi"], status: .reading)
+        let dispossessed = makeBook(
+            "The Dispossessed",
+            author: "Ursula Le Guin",
+            tags: ["sci-fi"],
+            status: .reading
+        )
+        let emma = makeBook("Emma", author: "Jane Austen", tags: ["classic"], status: .reading)
+        let books = [dispossessed, emma, dune]
+        let snapshots = books.enumerated().map {
+            LibraryDisplaySnapshot(
+                $0.element,
+                sourceOrdinal: $0.offset,
+                includeCollections: false,
+                includeHighlights: false
+            )
+        }
+
+        let ids = LibraryQuery.displayIDs(
+            for: snapshots,
+            filter: .status(.reading),
+            searchText: "tag:sci-fi",
+            sort: LibraryDisplaySort(field: .title, ascending: true),
+            savedSearch: nil,
+            smartShelf: nil,
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+
+        #expect(ids == [dune.uuid, dispossessed.uuid])
+    }
+
+    @Test func displaySnapshotsComposeSavedAndStructuredShelvesWithVisibleSearch() {
+        let dune = makeBook("Dune", tags: ["sci-fi"])
+        let foundation = makeBook("Foundation", tags: ["sci-fi"])
+        let emma = makeBook("Emma", tags: ["classic"])
+        let books = [foundation, emma, dune]
+        let snapshots = books.enumerated().map {
+            LibraryDisplaySnapshot(
+                $0.element,
+                sourceOrdinal: $0.offset,
+                includeCollections: false,
+                includeHighlights: false
+            )
+        }
+        let shelf = SmartShelfDefinition(rules: [
+            SmartShelfRule(field: .tag, comparison: .contains, value: "sci-fi"),
+        ])
+
+        let savedIDs = LibraryQuery.displayIDs(
+            for: snapshots,
+            filter: .all,
+            searchText: "title:dune",
+            sort: .sourceOrder,
+            savedSearch: "tag:sci-fi",
+            smartShelf: nil,
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+        let structuredIDs = LibraryQuery.displayIDs(
+            for: snapshots,
+            filter: .all,
+            searchText: "title:dune",
+            sort: .sourceOrder,
+            savedSearch: nil,
+            smartShelf: shelf,
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+
+        #expect(savedIDs == [dune.uuid])
+        #expect(structuredIDs == savedIDs)
+    }
+
+    @Test func displaySnapshotQueryScalesToLargeLibraries() {
+        let books = (0..<10_000).map { index in
+            makeBook(
+                String(format: "Book %05d", 10_000 - index),
+                author: "Writer \(index % 100)",
+                tags: index.isMultiple(of: 4) ? ["target"] : ["other"],
+                status: index.isMultiple(of: 2) ? .reading : .unread
+            )
+        }
+        let snapshots = books.enumerated().map {
+            LibraryDisplaySnapshot(
+                $0.element,
+                sourceOrdinal: $0.offset,
+                includeCollections: false,
+                includeHighlights: false
+            )
+        }
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let ids = LibraryQuery.displayIDs(
+            for: snapshots,
+            filter: .status(.reading),
+            searchText: "tag:target",
+            sort: LibraryDisplaySort(field: .title, ascending: true),
+            savedSearch: nil,
+            smartShelf: nil,
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+        let elapsed = startedAt.duration(to: clock.now)
+
+        #expect(ids.count == 2_500)
+        #expect(elapsed < .seconds(1))
+    }
 }

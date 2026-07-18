@@ -1,6 +1,6 @@
 import Foundation
 
-enum LibraryFilter: Hashable {
+nonisolated enum LibraryFilter: Hashable, Sendable {
     case all
     case recentlyAdded
     case status(ReadingStatus)

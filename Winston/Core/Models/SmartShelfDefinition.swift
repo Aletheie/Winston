@@ -27,6 +27,10 @@ nonisolated struct SmartShelfDefinition: Codable, Hashable, Sendable {
         !rules.isEmpty && rules.allSatisfy(\.isValid)
     }
 
+    var requiresHighlights: Bool {
+        rules.contains { $0.field == .highlights }
+    }
+
     func matches(
         _ book: SmartShelfBookSnapshot,
         deviceFileNames: Set<String>,
@@ -367,6 +371,10 @@ nonisolated struct SmartShelfBookSnapshot: Sendable {
     let hasMissingMetadata: Bool
 
     @MainActor init(_ book: Book) {
+        self.init(book, includeHighlights: true)
+    }
+
+    @MainActor init(_ book: Book, includeHighlights: Bool) {
         id = book.uuid
         title = book.title
         author = book.displayAuthor
@@ -379,7 +387,7 @@ nonisolated struct SmartShelfBookSnapshot: Sendable {
         format = book.format
         rating = book.rating
         readingStatusRaw = book.readingStatus.rawValue
-        hasHighlights = !book.highlights.isEmpty
+        hasHighlights = includeHighlights && !book.highlights.isEmpty
         drmProtected = book.drmProtected == true
         deviceMatchKey = book.deviceMatchKey
         hasMissingMetadata = Self.isBlank(book.title)

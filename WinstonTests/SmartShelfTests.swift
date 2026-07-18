@@ -132,6 +132,32 @@ struct SmartShelfTests {
         #expect(counts[czechID] == 1)
     }
 
+    @Test func previewCountsAllMatchesButKeepsOnlyLeadingBooks() {
+        let books = (0..<25).map { index in
+            makeBook("Book \(index)", fileName: "book-\(index).epub")
+        }
+
+        let result = LibraryQuery.smartShelfPreview(
+            for: books.map(SmartShelfBookSnapshot.init),
+            definition: SmartShelfPreset.unread.definition,
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+
+        #expect(result.matchCount == 25)
+        #expect(result.leadingBookIDs == Array(books.prefix(10).map(\.uuid)))
+
+        let countOnly = LibraryQuery.smartShelfPreview(
+            for: books.map(SmartShelfBookSnapshot.init),
+            definition: SmartShelfPreset.unread.definition,
+            deviceFileNames: [],
+            deviceIsConnected: false,
+            maximumBookCount: -1
+        )
+        #expect(countOnly.matchCount == 25)
+        #expect(countOnly.leadingBookIDs.isEmpty)
+    }
+
     @Test func definitionRoundTripsThroughCollectionStorage() throws {
         let definition = SmartShelfDefinition(matchMode: .any, rules: [
             SmartShelfRule(field: .tag, comparison: .contains, value: "essay"),

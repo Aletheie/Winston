@@ -1,5 +1,66 @@
 import Foundation
 
+nonisolated struct SmartShelfPreviewResult: Equatable, Sendable {
+    let matchCount: Int
+    let leadingBookIDs: [UUID]
+}
+
+nonisolated struct LibraryDisplaySort: Hashable, Sendable {
+    enum Field: Hashable, Sendable {
+        case source
+        case title
+        case author
+        case dateAdded
+        case rating
+    }
+
+    let field: Field
+    let ascending: Bool
+
+    static let sourceOrder = LibraryDisplaySort(field: .source, ascending: true)
+}
+
+/// Immutable data used by interactive library filtering. SwiftData models remain on the
+/// main actor while the O(n) filtering and O(n log n) sorting work can run concurrently.
+nonisolated struct LibraryDisplaySnapshot: Sendable {
+    let id: UUID
+    let sourceOrdinal: Int
+    let displayTitle: String
+    let displayAuthor: String
+    let dateAdded: Date
+    let rating: Int
+    let readingStatus: ReadingStatus
+    let format: String
+    let tags: [String]
+    let series: String?
+    let seriesIndex: Double
+    let collectionIDs: [UUID]
+    let search: LibraryQuery.SearchSnapshot
+    let smartShelf: SmartShelfBookSnapshot
+
+    @MainActor init(
+        _ book: Book,
+        sourceOrdinal: Int,
+        includeCollections: Bool,
+        includeHighlights: Bool
+    ) {
+        id = book.uuid
+        self.sourceOrdinal = sourceOrdinal
+        displayTitle = book.displayTitle
+        displayAuthor = book.sortAuthor
+        dateAdded = book.dateAdded
+        rating = book.sortRating
+        readingStatus = book.readingStatus
+        format = book.format
+        tags = book.tags
+        series = book.series
+        seriesIndex = book.seriesIndex.flatMap(Double.init) ?? .greatestFiniteMagnitude
+        collectionIDs = includeCollections ? book.collections.map(\.id) : []
+        search = LibraryQuery.SearchSnapshot(book)
+        smartShelf = SmartShelfBookSnapshot(book, includeHighlights: includeHighlights)
+    }
+}
+
 enum LibraryQuery {
     static func apply(to books: [Book],
                       filter: LibraryFilter,
@@ -20,14 +81,175 @@ enum LibraryQuery {
         deviceIsConnected: Bool,
         sort: [KeyPathComparator<Book>]
     ) -> [Book] {
+        let includeHighlights = definition.requiresHighlights
         let matching = books.filter {
             definition.matches(
-                SmartShelfBookSnapshot($0),
+                SmartShelfBookSnapshot($0, includeHighlights: includeHighlights),
                 deviceFileNames: deviceFileNames,
                 deviceIsConnected: deviceIsConnected
             )
         }
         return sorted(matching, by: sort)
+    }
+
+    nonisolated static func smartShelfPreview(
+        for books: [SmartShelfBookSnapshot],
+        definition: SmartShelfDefinition,
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool,
+        maximumBookCount: Int = 10
+    ) -> SmartShelfPreviewResult {
+        let limit = max(0, maximumBookCount)
+        var matchCount = 0
+        var leadingBookIDs: [UUID] = []
+        leadingBookIDs.reserveCapacity(min(limit, books.count))
+
+        for book in books {
+            guard !Task.isCancelled else { break }
+            guard definition.matches(
+                book,
+                deviceFileNames: deviceFileNames,
+                deviceIsConnected: deviceIsConnected
+            ) else { continue }
+
+            matchCount += 1
+            if leadingBookIDs.count < limit {
+                leadingBookIDs.append(book.id)
+            }
+        }
+
+        return SmartShelfPreviewResult(
+            matchCount: matchCount,
+            leadingBookIDs: leadingBookIDs
+        )
+    }
+
+    @MainActor
+    static func displaySort(
+        for comparators: [KeyPathComparator<Book>]
+    ) -> LibraryDisplaySort {
+        guard let first = comparators.first else { return .sourceOrder }
+        let ascending = first.order == .forward
+        if first == BookSort.title.comparator(ascending: ascending) {
+            return LibraryDisplaySort(field: .title, ascending: ascending)
+        }
+        if first == BookSort.author.comparator(ascending: ascending) {
+            return LibraryDisplaySort(field: .author, ascending: ascending)
+        }
+        if first == BookSort.dateAdded.comparator(ascending: ascending) {
+            return LibraryDisplaySort(field: .dateAdded, ascending: ascending)
+        }
+        if first == BookSort.rating.comparator(ascending: ascending) {
+            return LibraryDisplaySort(field: .rating, ascending: ascending)
+        }
+        return .sourceOrder
+    }
+
+    nonisolated static func displayIDs(
+        for books: [LibraryDisplaySnapshot],
+        filter: LibraryFilter,
+        searchText: String,
+        sort: LibraryDisplaySort,
+        savedSearch: String?,
+        smartShelf: SmartShelfDefinition?,
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool
+    ) -> [UUID] {
+        let savedQuery = savedSearch.map { NormalizedQuery(SearchQuery.parse($0)) }
+        let visibleQuery = NormalizedQuery(SearchQuery.parse(searchText))
+        let recentCutoff = Date.now.addingTimeInterval(-14 * 24 * 3600)
+        var matching: [LibraryDisplaySnapshot] = []
+        matching.reserveCapacity(books.count)
+
+        for book in books {
+            guard !Task.isCancelled else { return [] }
+            let belongs: Bool
+            if let smartShelf {
+                belongs = smartShelf.matches(
+                    book.smartShelf,
+                    deviceFileNames: deviceFileNames,
+                    deviceIsConnected: deviceIsConnected
+                )
+            } else if let savedQuery {
+                belongs = book.search.matches(savedQuery)
+            } else {
+                belongs = matches(book, filter: filter, recentCutoff: recentCutoff)
+            }
+
+            guard belongs, book.search.matches(visibleQuery) else { continue }
+            matching.append(book)
+        }
+
+        guard !Task.isCancelled else { return [] }
+        if case .series = filter {
+            matching.sort {
+                if $0.seriesIndex == $1.seriesIndex {
+                    return $0.sourceOrdinal < $1.sourceOrdinal
+                }
+                return $0.seriesIndex < $1.seriesIndex
+            }
+        } else if sort.field != .source {
+            matching.sort { ordered($0, before: $1, by: sort) }
+        }
+        return matching.map(\.id)
+    }
+
+    private nonisolated static func matches(
+        _ book: LibraryDisplaySnapshot,
+        filter: LibraryFilter,
+        recentCutoff: Date
+    ) -> Bool {
+        switch filter {
+        case .all:
+            true
+        case .recentlyAdded:
+            book.dateAdded > recentCutoff
+        case .status(let status):
+            book.readingStatus == status
+        case .collection(let id):
+            book.collectionIDs.contains(id)
+        case .format(let format):
+            book.format == format
+        case .author(let author):
+            book.displayAuthor == author
+        case .series(let series):
+            book.series == series
+        case .tag(let tag):
+            book.tags.contains(tag)
+        case .rated:
+            book.rating > 0
+        }
+    }
+
+    private nonisolated static func ordered(
+        _ lhs: LibraryDisplaySnapshot,
+        before rhs: LibraryDisplaySnapshot,
+        by sort: LibraryDisplaySort
+    ) -> Bool {
+        let comparison: ComparisonResult
+        switch sort.field {
+        case .source:
+            comparison = lhs.sourceOrdinal == rhs.sourceOrdinal
+                ? .orderedSame
+                : (lhs.sourceOrdinal < rhs.sourceOrdinal ? .orderedAscending : .orderedDescending)
+        case .title:
+            comparison = lhs.displayTitle.compare(rhs.displayTitle)
+        case .author:
+            comparison = lhs.displayAuthor.compare(rhs.displayAuthor)
+        case .dateAdded:
+            comparison = lhs.dateAdded == rhs.dateAdded
+                ? .orderedSame
+                : (lhs.dateAdded < rhs.dateAdded ? .orderedAscending : .orderedDescending)
+        case .rating:
+            comparison = lhs.rating == rhs.rating
+                ? .orderedSame
+                : (lhs.rating < rhs.rating ? .orderedAscending : .orderedDescending)
+        }
+
+        if comparison == .orderedSame {
+            return lhs.sourceOrdinal < rhs.sourceOrdinal
+        }
+        return sort.ascending ? comparison == .orderedAscending : comparison == .orderedDescending
     }
 
     // MARK: - Filter
@@ -80,8 +302,11 @@ enum LibraryQuery {
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) -> [UUID: Int] {
-        smartShelfCounts(
-            for: books.map(SmartShelfBookSnapshot.init),
+        let includeHighlights = shelves.contains { $0.1.requiresHighlights }
+        return smartShelfCounts(
+            for: books.map {
+                SmartShelfBookSnapshot($0, includeHighlights: includeHighlights)
+            },
             shelves: shelves,
             deviceFileNames: deviceFileNames,
             deviceIsConnected: deviceIsConnected
@@ -253,7 +478,23 @@ enum LibraryQuery {
         if first == BookSort.author.comparator(ascending: ascending) {
             return decorated(books, key: { $0.sortAuthor }, ascending: ascending)
         }
+        if first == BookSort.dateAdded.comparator(ascending: ascending),
+           isOrderedByDateAdded(books, ascending: ascending) {
+            // The root SwiftData query already supplies newest-first order. Filtering
+            // preserves it, so the common path does not need another O(n log n) sort.
+            return books
+        }
         return books.sorted(using: comparators)
+    }
+
+    private static func isOrderedByDateAdded(_ books: [Book], ascending: Bool) -> Bool {
+        guard books.count > 1 else { return true }
+        for index in 1 ..< books.count {
+            let previous = books[index - 1].dateAdded
+            let current = books[index].dateAdded
+            if ascending ? previous > current : previous < current { return false }
+        }
+        return true
     }
 
     private static func decorated(_ books: [Book], key: (Book) -> String, ascending: Bool) -> [Book] {
