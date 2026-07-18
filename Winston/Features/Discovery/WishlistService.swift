@@ -9,6 +9,8 @@ final class WishlistService {
     private let toasts: ToastCenter
 
     private(set) var items: [WishlistItem]
+    @ObservationIgnored private var cachedLibraryKeys: Set<BookMatchKey> = []
+    @ObservationIgnored private var cachedLibraryRevision = -1
 
     init(modelContext: ModelContext, toasts: ToastCenter) {
         self.modelContext = modelContext
@@ -39,10 +41,7 @@ final class WishlistService {
         guard matchingItem(for: book) == nil else { return false }
 
         let key = BookMatchKey(title: book.title, author: book.author)
-        if key.isComplete,
-           modelContext.allBooks().contains(where: {
-               BookMatchKey(title: $0.displayTitle, author: $0.displayAuthor) == key
-           }) {
+        if key.isComplete, libraryKeys().contains(key) {
             toasts.info(String(localized: "This book is already in your library."))
             return false
         }
@@ -57,7 +56,7 @@ final class WishlistService {
         )
         modelContext.insert(item)
         items.insert(item, at: 0)
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
         toasts.success(String(localized: "Added to Wishlist."))
         return true
     }
@@ -66,7 +65,7 @@ final class WishlistService {
         guard items.contains(where: { $0.id == item.id }) else { return }
         items.removeAll { $0.id == item.id }
         modelContext.delete(item)
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
         toasts.info(String(localized: "Removed from Wishlist."))
     }
 
@@ -88,7 +87,7 @@ final class WishlistService {
         let fulfilledBookCount = Set(fulfilledItems.map(\.matchKey)).count
         items.removeAll { fulfilledIDs.contains($0.id) }
         for item in fulfilledItems { modelContext.delete(item) }
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
 
         if fulfilledBookCount == 1 {
             toasts.success(String(localized: "A book from your Wishlist is now in your library."))
@@ -105,10 +104,22 @@ final class WishlistService {
         return items.first { $0.matchKey == key }
     }
 
+    private func libraryKeys() -> Set<BookMatchKey> {
+        let revision = LibraryMutationLog.shared.catalogRevision
+        if cachedLibraryRevision != revision {
+            cachedLibraryKeys = Set(modelContext.allBooks().compactMap { book in
+                let key = BookMatchKey(title: book.displayTitle, author: book.displayAuthor)
+                return key.isComplete ? key : nil
+            })
+            cachedLibraryRevision = revision
+        }
+        return cachedLibraryKeys
+    }
+
     private func ensureSystemCollection() {
         let collections = (try? modelContext.fetch(FetchDescriptor<BookCollection>())) ?? []
         guard !collections.contains(where: { $0.isWishlist }) else { return }
         modelContext.insert(BookCollection(name: "Wishlist", systemKind: .wishlist))
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(catalogChanged: false)
     }
 }
