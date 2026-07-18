@@ -27,6 +27,11 @@ final class ImportService {
         case failed(originalName: String)
     }
 
+    nonisolated private struct MaintenanceCandidate: Sendable {
+        let uuid: UUID
+        let fileName: String
+    }
+
     private let modelContext: ModelContext
     private let settings: AppSettings
     private let metadata: MetadataService
@@ -92,17 +97,17 @@ final class ImportService {
                 completion?([])
                 return
             }
-            let results = await Task.detached(priority: .userInitiated) {
-                requests.map(Self.copyToManagedStore)
-            }.value
+            let results = await Self.copyToManagedStore(requests)
             for request in requests {
                 pendingSourcePaths.remove(request.source.standardizedFileURL.path(percentEncoded: false))
             }
             if let targetWork, targetWork.modelContext == nil {
-                for result in results {
-                    if case .copied(_, _, let fileName, _, _) = result {
-                        BookFileStore.delete(fileName: fileName)
-                    }
+                let fileNames = results.compactMap { result -> String? in
+                    if case .copied(_, _, let fileName, _, _) = result { return fileName }
+                    return nil
+                }
+                Task.detached(priority: .utility) {
+                    for fileName in fileNames { BookFileStore.delete(fileName: fileName) }
                 }
                 completion?([])
                 return
@@ -110,18 +115,19 @@ final class ImportService {
 
             var imported: [Book] = []
             var successfulImports: [Book] = []
+            var redundantFileNames: [String] = []
             var failureCount = validationFailures
             var knownHashes: Set<String> = targetWork == nil ? [] : Set(
                 ((try? modelContext.fetch(FetchDescriptor<BookAsset>())) ?? [])
                     .compactMap(\.contentHash)
             )
-            for result in results {
+            for (index, result) in results.enumerated() {
                 switch result {
                 case .copied(let uuid, let originalName, let fileName, let size, let contentHash):
                     if targetWork != nil,
                        let contentHash,
                        knownHashes.contains(contentHash) {
-                        BookFileStore.delete(fileName: fileName)
+                        redundantFileNames.append(fileName)
                         continue
                     }
                     let book = Book(uuid: uuid, fileName: fileName, originalFileName: originalName)
@@ -146,6 +152,16 @@ final class ImportService {
                     if let contentHash { knownHashes.insert(contentHash) }
                 case .failed:
                     failureCount += 1
+                }
+                if (index + 1).isMultiple(of: 128) {
+                    await Task.yield()
+                }
+            }
+            if !redundantFileNames.isEmpty {
+                Task.detached(priority: .utility) {
+                    for fileName in redundantFileNames {
+                        BookFileStore.delete(fileName: fileName)
+                    }
                 }
             }
 
@@ -172,7 +188,10 @@ final class ImportService {
                     }
                     successfulImports = imported
                 } else {
-                    imported.forEach { BookFileStore.delete(fileName: $0.fileName) }
+                    let fileNames = imported.map(\.fileName)
+                    Task.detached(priority: .utility) {
+                        for fileName in fileNames { BookFileStore.delete(fileName: fileName) }
+                    }
                     failureCount += imported.count
                 }
             }
@@ -185,51 +204,80 @@ final class ImportService {
 
     // MARK: - Maintenance
 
-    func backfillMissingSizes() {
+    func backfillMissingSizes() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.fileSizeBytes == 0 })
         guard let books = try? modelContext.fetch(descriptor), !books.isEmpty else { return }
-        let candidates = books.map { (book: $0, fileName: $0.fileName) }
-        Task {
-            for candidate in candidates {
-                let fileName = candidate.fileName
-                let size = await Task.detached(priority: .utility) {
-                    BookFileStore.size(of: fileName)
-                }.value
-                guard candidate.book.modelContext != nil else { continue }
-                if size > 0 {
-                    candidate.book.fileSizeBytes = size
-                    candidate.book.assets.first(where: { $0.fileName == candidate.book.fileName })?.sizeBytes = size
-                }
+        let candidates = books.map { MaintenanceCandidate(uuid: $0.uuid, fileName: $0.fileName) }
+        let sizes = await Task.detached(priority: .background) {
+            Dictionary(uniqueKeysWithValues: candidates.map { candidate in
+                (candidate.uuid, BookFileStore.size(of: candidate.fileName))
+            })
+        }.value
+        guard !Task.isCancelled else { return }
+
+        var changed = false
+        for book in books where book.modelContext != nil {
+            guard let size = sizes[book.uuid], size > 0 else { continue }
+            if book.fileSizeBytes != size {
+                book.fileSizeBytes = size
+                changed = true
             }
-            modelContext.saveQuietly()
+            if let primary = book.assets.first(where: { $0.fileName == book.fileName }),
+               primary.sizeBytes != size {
+                primary.sizeBytes = size
+                changed = true
+            }
         }
+        if changed { modelContext.saveQuietly() }
     }
 
-    func detectMissingDRM() {
+    func detectMissingDRM() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.drmProtected == nil })
         guard let books = try? modelContext.fetch(descriptor), !books.isEmpty else { return }
-        let candidates = books.map { (book: $0, url: $0.fileURL) }
-        Task {
-            var processed = 0
-            for candidate in candidates {
-                let url = candidate.url
-                let drmProtected = await Task.detached(priority: .utility) {
-                    DRMDetector.isProtected(url: url)
-                }.value
-                guard candidate.book.modelContext != nil else { continue }
-                candidate.book.drmProtected = drmProtected
-                processed += 1
-                if processed % 50 == 0 { modelContext.saveQuietly() }
-            }
-            modelContext.saveQuietly()
+        let candidates = books.map { MaintenanceCandidate(uuid: $0.uuid, fileName: $0.fileName) }
+        let results = await Task.detached(priority: .background) {
+            Dictionary(uniqueKeysWithValues: candidates.map { candidate in
+                let url = BookFileStore.url(for: candidate.fileName)
+                return (candidate.uuid, DRMDetector.isProtected(url: url))
+            })
+        }.value
+        guard !Task.isCancelled else { return }
+
+        var changed = false
+        for book in books where book.modelContext != nil && book.drmProtected == nil {
+            guard let protected = results[book.uuid] else { continue }
+            book.drmProtected = protected
+            changed = true
         }
+        if changed { modelContext.saveQuietly() }
     }
 
-    func rescanMissingMetadata() {
+    func rescanMissingMetadata() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.title == nil })
-        guard let books = try? modelContext.fetch(descriptor), !books.isEmpty else { return }
+        guard let fetched = try? modelContext.fetch(descriptor) else { return }
+        let books = fetched.filter { !pendingMetadataUUIDs.contains($0.uuid) }
+        guard !books.isEmpty else { return }
+
+        let batchID: UUID?
+        if editions != nil {
+            let id = UUID()
+            matchBatches[id] = MatchBatch(books: books, remaining: Set(books.map(\.uuid)))
+            batchID = id
+        } else {
+            batchID = nil
+        }
+
         for book in books {
-            extractMetadata(for: book)
+            guard !Task.isCancelled else {
+                if let batchID { matchBatches.removeValue(forKey: batchID) }
+                return
+            }
+            await performMetadataExtraction(
+                for: book,
+                evaluateMatch: false,
+                matchBatchID: batchID
+            )
+            await Task.yield()
         }
     }
 
@@ -240,43 +288,55 @@ final class ImportService {
         evaluateMatch: Bool = true,
         matchBatchID: UUID? = nil
     ) {
+        Task {
+            await performMetadataExtraction(
+                for: book,
+                evaluateMatch: evaluateMatch,
+                matchBatchID: matchBatchID
+            )
+        }
+    }
+
+    private func performMetadataExtraction(
+        for book: Book,
+        evaluateMatch: Bool,
+        matchBatchID: UUID?
+    ) async {
         let url = book.fileURL
         let uuid = book.uuid
         pendingMetadataUUIDs.insert(uuid)
-        Task {
-            defer {
-                pendingMetadataUUIDs.remove(uuid)
-                if let matchBatchID { finishMatchBatch(matchBatchID, completed: uuid) }
-            }
-            let result = await analyzeBook(url)
-            guard book.modelContext != nil else { return }
-            book.apply(result.metadata)
-            book.drmProtected = result.drmProtected
-            refreshWorkIdentity(for: book, allowDisplayTitleFallback: !settings.onlineMetadataEnabled)
+        defer {
+            pendingMetadataUUIDs.remove(uuid)
+            if let matchBatchID { finishMatchBatch(matchBatchID, completed: uuid) }
+        }
+        let result = await analyzeBook(url)
+        guard !Task.isCancelled, book.modelContext != nil else { return }
+        book.apply(result.metadata)
+        book.drmProtected = result.drmProtected
+        refreshWorkIdentity(for: book, allowDisplayTitleFallback: !settings.onlineMetadataEnabled)
+        modelContext.saveQuietly()
+        wishlist.fulfil(with: [book])
+        if settings.onlineMetadataEnabled {
+            await metadata.performEnrich(book, replaceCover: false)
+            guard !Task.isCancelled, book.modelContext != nil else { return }
+            refreshWorkIdentity(for: book, allowDisplayTitleFallback: true)
             modelContext.saveQuietly()
             wishlist.fulfil(with: [book])
-            if settings.onlineMetadataEnabled {
-                await metadata.performEnrich(book, replaceCover: false)
-                guard book.modelContext != nil else { return }
-                refreshWorkIdentity(for: book, allowDisplayTitleFallback: true)
-                modelContext.saveQuietly()
-                wishlist.fulfil(with: [book])
-            }
-            if evaluateMatch, let editions {
-                if let undo = editions.evaluate(book) {
-                    let title = book.work?.displayTitle ?? book.displayTitle
-                    toasts.post(
-                        String(localized: "Grouped with “\(title)”"),
-                        style: .success,
-                        action: .undoEditionAssignment(undo)
-                    )
-                } else if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(book.uuid) }) {
-                    toasts.post(
-                        String(localized: "Edition suggestions are ready to review."),
-                        style: .info,
-                        action: .reviewEditionProposals
-                    )
-                }
+        }
+        if evaluateMatch, let editions {
+            if let undo = editions.evaluate(book) {
+                let title = book.work?.displayTitle ?? book.displayTitle
+                toasts.post(
+                    String(localized: "Grouped with “\(title)”"),
+                    style: .success,
+                    action: .undoEditionAssignment(undo)
+                )
+            } else if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(book.uuid) }) {
+                toasts.post(
+                    String(localized: "Edition suggestions are ready to review."),
+                    style: .info,
+                    action: .reviewEditionProposals
+                )
             }
         }
     }
@@ -353,6 +413,35 @@ final class ImportService {
             )
         } catch {
             return .failed(originalName: request.originalName)
+        }
+    }
+
+    @concurrent
+    private static func copyToManagedStore(_ requests: [CopyRequest]) async -> [CopyResult] {
+        guard !requests.isEmpty else { return [] }
+        let concurrency = min(3, requests.count)
+        var results = Array<CopyResult?>(repeating: nil, count: requests.count)
+        await withTaskGroup(of: (Int, CopyResult).self) { group in
+            var nextIndex = 0
+            while nextIndex < concurrency {
+                let index = nextIndex
+                group.addTask(priority: .userInitiated) {
+                    (index, copyToManagedStore(requests[index]))
+                }
+                nextIndex += 1
+            }
+            while let (index, result) = await group.next() {
+                results[index] = result
+                guard nextIndex < requests.count, !Task.isCancelled else { continue }
+                let pendingIndex = nextIndex
+                group.addTask(priority: .userInitiated) {
+                    (pendingIndex, copyToManagedStore(requests[pendingIndex]))
+                }
+                nextIndex += 1
+            }
+        }
+        return results.enumerated().map { index, result in
+            result ?? .failed(originalName: requests[index].originalName)
         }
     }
 

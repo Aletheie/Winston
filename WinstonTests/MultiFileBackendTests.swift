@@ -83,6 +83,61 @@ struct MultiFileBackendTests {
         #expect(corrupt.validationStatus == .corrupt)
     }
 
+    @Test func startupMaintenanceAppliesSizeAndDRMResultsInBatches() async throws {
+        let library = try await TestLibrary()
+        let source = try EPUBFixture.make(title: "Maintenance", author: "A")
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+        let fileName = try BookFileStore.importCopy(of: source, uuid: UUID())
+        let book = Book(fileName: fileName, originalFileName: "Maintenance.epub")
+        let asset = BookAsset(uuid: book.uuid, fileName: fileName, book: book)
+        library.context.insert(book)
+        library.context.insert(asset)
+        try library.context.save()
+
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: library.context, settings: settings),
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
+            toasts: ToastCenter()
+        )
+
+        await importer.backfillMissingSizes()
+        await importer.detectMissingDRM()
+
+        #expect(book.fileSizeBytes > 0)
+        #expect(asset.sizeBytes == book.fileSizeBytes)
+        #expect(book.drmProtected == false)
+    }
+
+    @Test func missingMetadataRescanLimitsAnalysisConcurrency() async throws {
+        let library = try await TestLibrary()
+        let books = (0..<4).map { index in
+            Book(fileName: "rescan-\(index).epub", originalFileName: "Rescan \(index).epub")
+        }
+        books.forEach(library.context.insert)
+        try library.context.save()
+
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let probe = MetadataRescanProbe()
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: library.context, settings: settings),
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
+            toasts: ToastCenter(),
+            analyzeBook: { url in await probe.analyze(url) }
+        )
+
+        await importer.rescanMissingMetadata()
+
+        #expect(await probe.maximumConcurrency() == 1)
+        #expect(books.allSatisfy { $0.title != nil })
+    }
+
     @Test func relinkAfterMakePrimaryUpdatesTheCurrentPrimaryAsset() async throws {
         let library = try await TestLibrary()
         let epubSource = library.root.appending(path: "a.epub")
@@ -333,4 +388,22 @@ private actor AssetHashGate {
         continuation?.resume(returning: "hash-from-old-file")
         continuation = nil
     }
+}
+
+private actor MetadataRescanProbe {
+    private var activeCount = 0
+    private var maximumActiveCount = 0
+
+    func analyze(_ url: URL) async -> ImportBookAnalysis {
+        activeCount += 1
+        maximumActiveCount = max(maximumActiveCount, activeCount)
+        try? await Task.sleep(for: .milliseconds(20))
+        activeCount -= 1
+
+        var metadata = BookMetadata()
+        metadata.title = url.deletingPathExtension().lastPathComponent
+        return ImportBookAnalysis(metadata: metadata, drmProtected: false)
+    }
+
+    func maximumConcurrency() -> Int { maximumActiveCount }
 }

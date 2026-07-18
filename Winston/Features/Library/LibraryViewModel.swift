@@ -190,9 +190,9 @@ final class LibraryViewModel {
 
     // MARK: - Maintenance (forwarded)
 
-    func backfillMissingSizes() { importer.backfillMissingSizes() }
-    func rescanMissingMetadata() { importer.rescanMissingMetadata() }
-    func detectMissingDRM() { importer.detectMissingDRM() }
+    func backfillMissingSizes() async { await importer.backfillMissingSizes() }
+    func rescanMissingMetadata() async { await importer.rescanMissingMetadata() }
+    func detectMissingDRM() async { await importer.detectMissingDRM() }
     func backfillMissingAssetHashes() async {
         await BookAssetMaintenance.backfillMissingHashes(context: modelContext)
     }

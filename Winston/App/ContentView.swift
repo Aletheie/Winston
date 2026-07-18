@@ -90,18 +90,27 @@ struct ContentView: View {
         .tint(theme.accent)
         .task {
             deviceMonitor.start()
-            viewModel.backfillMissingSizes()
-            viewModel.rescanMissingMetadata()
-            viewModel.detectMissingDRM()
-            await viewModel.backfillMissingAssetHashes()
-            await viewModel.editions.scanLibrary()
             restartWatcher()
-            await checkIntegrityAndBackup()
             await viewModel.notices.checkForNewReleasesIfDue()
         }
-        .task(id: metadataBackfillConfiguration) {
+        .task(priority: .background) {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await checkIntegrityAndBackup()
+            guard !Task.isCancelled else { return }
+            await viewModel.backfillMissingSizes()
+            guard !Task.isCancelled else { return }
+            await viewModel.detectMissingDRM()
+            guard !Task.isCancelled else { return }
+            await viewModel.backfillMissingAssetHashes()
+            guard !Task.isCancelled else { return }
+            await viewModel.editions.scanLibrary()
+            guard !Task.isCancelled else { return }
+            await viewModel.rescanMissingMetadata()
+        }
+        .task(id: metadataBackfillConfiguration, priority: .background) {
             guard settings.onlineMetadataEnabled else { return }
-            try? await Task.sleep(for: .milliseconds(500))
+            try? await Task.sleep(for: .seconds(8))
             guard !Task.isCancelled else { return }
             viewModel.backfillOnlineMetadata()
             await viewModel.notices.checkForNewReleasesIfDue()
