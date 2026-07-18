@@ -23,7 +23,7 @@ nonisolated struct OPDSCatalog: Identifiable, Hashable, Sendable {
         OPDSCatalog(
             kind: .standardEbooks,
             name: "Standard Ebooks",
-            rootURL: URL(string: "https://standardebooks.org/feeds/opds")!,
+            rootURL: URL(string: "https://standardebooks.org/feeds/atom/new-releases")!,
             searchTemplate: nil
         ),
     ]
@@ -74,13 +74,21 @@ nonisolated struct OPDSFeed: Equatable, Sendable {
     func appending(_ page: OPDSFeed) -> OPDSFeed {
         var navigationIDs = Set(navigation.map(\.id))
         let newNavigation = page.navigation.filter { navigationIDs.insert($0.id).inserted }
-        var publicationIDs = Set(publications.map(\.id))
-        let newPublications = page.publications.filter { publicationIDs.insert($0.id).inserted }
+        var combinedPublications: [OPDSPublication] = []
+        var publicationIndexes: [String: Int] = [:]
+        for publication in publications + page.publications {
+            if let index = publicationIndexes[publication.id] {
+                combinedPublications[index] = combinedPublications[index].merging(publication)
+            } else {
+                publicationIndexes[publication.id] = combinedPublications.count
+                combinedPublications.append(publication)
+            }
+        }
         return OPDSFeed(
             title: title,
             subtitle: subtitle ?? page.subtitle,
             navigation: navigation + newNavigation,
-            publications: publications + newPublications,
+            publications: combinedPublications,
             nextURL: page.nextURL,
             searchTemplate: searchTemplate ?? page.searchTemplate
         )
@@ -111,12 +119,47 @@ nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
     }
 
     var preferredAcquisition: OPDSAcquisition? {
-        acquisitions.min { lhs, rhs in
+        acquisitionOptions.first
+    }
+
+    var acquisitionOptions: [OPDSAcquisition] {
+        acquisitions.sorted { lhs, rhs in
             if lhs.preferenceRank != rhs.preferenceRank {
                 return lhs.preferenceRank < rhs.preferenceRank
             }
             return lhs.url.absoluteString < rhs.url.absoluteString
         }
+    }
+
+    func merging(_ other: OPDSPublication, id mergedID: String? = nil) -> OPDSPublication {
+        var seenAuthors = Set(authors)
+        let mergedAuthors = authors + other.authors.filter { seenAuthors.insert($0).inserted }
+        var seenAcquisitions = Set(acquisitions.map(\.id))
+        let mergedAcquisitions = acquisitions + other.acquisitions.filter {
+            seenAcquisitions.insert($0.id).inserted
+        }
+        let summaries = [summary, other.summary].compactMap { $0 }
+        return OPDSPublication(
+            id: mergedID ?? id,
+            title: title,
+            authors: mergedAuthors,
+            summary: summaries.max(by: { $0.count < $1.count }),
+            language: language ?? other.language,
+            coverURL: coverURL ?? other.coverURL,
+            acquisitions: mergedAcquisitions
+        )
+    }
+
+    func identified(as newID: String) -> OPDSPublication {
+        OPDSPublication(
+            id: newID,
+            title: title,
+            authors: authors,
+            summary: summary,
+            language: language,
+            coverURL: coverURL,
+            acquisitions: acquisitions
+        )
     }
 }
 
@@ -128,16 +171,31 @@ nonisolated struct OPDSAcquisition: Identifiable, Hashable, Sendable {
 
     var id: String { "\(url.absoluteString)|\(mediaType)" }
     var formatLabel: String { fileExtension.uppercased() }
+    var optionLabel: String { title ?? formatLabel }
 
     fileprivate var preferenceRank: Int {
-        switch fileExtension {
+        let formatRank = switch fileExtension {
         case "epub": 0
-        case "mobi", "azw", "azw3": 1
-        case "pdf": 2
-        case "txt": 3
-        case "html", "htm": 4
-        default: 10
+        case "mobi", "azw", "azw3": 100
+        case "pdf": 200
+        case "txt": 300
+        case "html", "htm": 400
+        default: 1_000
         }
+        let normalizedTitle = title?.lowercased() ?? ""
+        let variantRank: Int
+        if normalizedTitle.contains("recommended") {
+            variantRank = 0
+        } else if normalizedTitle.contains("epub3") {
+            variantRank = 1
+        } else if normalizedTitle.contains("advanced") {
+            variantRank = 2
+        } else if normalizedTitle.contains("no images") {
+            variantRank = 9
+        } else {
+            variantRank = 3
+        }
+        return formatRank + variantRank
     }
 
     static func make(
@@ -155,7 +213,10 @@ nonisolated struct OPDSAcquisition: Identifiable, Hashable, Sendable {
         let resolvedExtension: String?
         switch mediaType {
         case "application/epub+zip": resolvedExtension = "epub"
-        case "application/x-mobipocket-ebook": resolvedExtension = "mobi"
+        case "application/x-mobipocket-ebook":
+            resolvedExtension = ["mobi", "azw", "azw3"].contains(pathExtension)
+                ? pathExtension
+                : "mobi"
         case "application/vnd.amazon.ebook": resolvedExtension = pathExtension == "azw" ? "azw" : "azw3"
         case "application/pdf": resolvedExtension = "pdf"
         case "text/plain": resolvedExtension = "txt"

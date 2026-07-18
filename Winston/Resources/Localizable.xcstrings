@@ -11,6 +11,16 @@
         }
       }
     },
+    "15 latest public releases" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "15 nejnovějších veřejných vydání"
+          }
+        }
+      }
+    },
     "—" : {
       "localizations" : {
         "cs" : {
@@ -10907,12 +10917,12 @@
         }
       }
     },
-    "Carefully proofread and beautifully produced editions of public-domain books." : {
+    "The 15 newest carefully proofread editions, available from the public releases feed." : {
       "localizations" : {
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Pečlivě korigovaná a krásně zpracovaná vydání volných děl."
+            "value" : "Patnáct nejnovějších pečlivě zkorigovaných vydání z veřejného feedu novinek."
           }
         }
       }

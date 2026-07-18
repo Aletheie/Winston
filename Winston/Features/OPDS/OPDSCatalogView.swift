@@ -198,8 +198,8 @@ private struct OPDSCatalogHeader: View {
                     }
                 }
                 Spacer(minLength: 12)
-                if catalog != nil {
-                    Text(verbatim: "OPDS 1.2 + 2.0")
+                if let catalog {
+                    Text(verbatim: protocolLabel(for: catalog))
                         .font(theme.label(size: 9, weight: .semibold))
                         .foregroundStyle(theme.textTertiary)
                         .padding(.horizontal, 8)
@@ -220,6 +220,13 @@ private struct OPDSCatalogHeader: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
+    }
+
+    private func protocolLabel(for catalog: OPDSCatalog) -> String {
+        switch catalog.kind {
+        case .projectGutenberg: "OPDS 1.2"
+        case .standardEbooks: "ATOM 1.0"
+        }
     }
 }
 
@@ -311,7 +318,7 @@ private struct OPDSProviderCard: View {
 
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.seal.fill")
-                    Text("Free public-domain books")
+                    Text(availabilityLabel)
                 }
                 .font(theme.label(size: 9, weight: .semibold))
                 .foregroundStyle(theme.accent)
@@ -342,7 +349,14 @@ private struct OPDSProviderCard: View {
         case .projectGutenberg:
             "A huge open library with classics in many languages, including Czech."
         case .standardEbooks:
-            "Carefully proofread and beautifully produced editions of public-domain books."
+            "The 15 newest carefully proofread editions, available from the public releases feed."
+        }
+    }
+
+    private var availabilityLabel: LocalizedStringKey {
+        switch catalog.kind {
+        case .projectGutenberg: "Free public-domain books"
+        case .standardEbooks: "15 latest public releases"
         }
     }
 }
@@ -525,8 +539,8 @@ private struct OPDSPublicationCard: View {
 
                 if publication.acquisitions.count > 1 {
                     Menu {
-                        ForEach(publication.acquisitions) { acquisition in
-                            Button(acquisition.formatLabel) { onAdd(acquisition) }
+                        ForEach(publication.acquisitionOptions) { acquisition in
+                            Button(acquisition.optionLabel) { onAdd(acquisition) }
                         }
                     } label: {
                         Image(systemName: "chevron.down")

@@ -61,12 +61,12 @@ nonisolated enum OPDSParser {
         )
 
         let groupPublications = document.groups.flatMap(\.publications)
-        let publications = unique(
+        let publications = mergeProviderVariants(unique(
             (document.publications + groupPublications).compactMap { publication in
                 makePublication(publication, baseURL: baseURL)
             },
             by: { $0.id }
-        )
+        ))
 
         let nextURL = document.links.first(where: { $0.relations.contains("next") })
             .flatMap { resolveURL($0.href, baseURL: baseURL) }
@@ -89,6 +89,7 @@ nonisolated enum OPDSParser {
         let acquisitionLinks = wire.links.filter { link in
             link.relations.contains { relation in
                 relation == "download"
+                    || relation == "enclosure"
                     || relation == "acquisition"
                     || relation.hasPrefix("http://opds-spec.org/acquisition")
                     || relation.hasPrefix("https://opds-spec.org/acquisition")
@@ -163,6 +164,35 @@ nonisolated enum OPDSParser {
         var seen: Set<Key> = []
         return values.filter { seen.insert(key($0)).inserted }
     }
+
+    fileprivate static func mergeProviderVariants(
+        _ publications: [OPDSPublication]
+    ) -> [OPDSPublication] {
+        var merged: [OPDSPublication] = []
+        var indexes: [String: Int] = [:]
+        for publication in publications {
+            guard let workID = gutenbergWorkID(publication.id) else {
+                merged.append(publication)
+                continue
+            }
+            if let index = indexes[workID] {
+                merged[index] = merged[index].merging(publication, id: workID)
+            } else {
+                indexes[workID] = merged.count
+                merged.append(publication.identified(as: workID))
+            }
+        }
+        return merged
+    }
+
+    private static func gutenbergWorkID(_ id: String) -> String? {
+        let parts = id.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count >= 4,
+              parts[0].lowercased() == "urn",
+              parts[1].lowercased() == "gutenberg",
+              Int(parts[2]) != nil else { return nil }
+        return parts.prefix(3).joined(separator: ":")
+    }
 }
 
 // MARK: - Atom parser
@@ -227,7 +257,9 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
             title: feedTitle?.opdsNonEmpty ?? "Catalog",
             subtitle: feedSubtitle?.strippedHTML.opdsNonEmpty,
             navigation: OPDSParser.unique(navigation, by: \.id),
-            publications: OPDSParser.unique(publications, by: \.id),
+            publications: OPDSParser.mergeProviderVariants(
+                OPDSParser.unique(publications, by: \.id)
+            ),
             nextURL: nextURL,
             searchTemplate: searchTemplate
         )
@@ -265,6 +297,14 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
             } else {
                 feedLinks.append(link)
             }
+        case "thumbnail" where currentEntry != nil:
+            guard let href = attributeDict["url"]?.opdsNonEmpty else { return }
+            currentEntry?.links.append(Link(
+                relations: ["cover"],
+                type: attributeDict["type"]?.lowercased(),
+                title: nil,
+                href: href
+            ))
         case "title":
             beginCapture(currentEntry == nil ? .feedTitle : .entryTitle)
         case "subtitle" where currentEntry == nil:
@@ -330,6 +370,7 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
         let acquisitionLinks = entry.links.filter { link in
             link.relations.contains { relation in
                 relation == "acquisition"
+                    || relation == "enclosure"
                     || relation.hasPrefix("http://opds-spec.org/acquisition")
                     || relation.hasPrefix("https://opds-spec.org/acquisition")
             }

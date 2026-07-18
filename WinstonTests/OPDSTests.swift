@@ -55,6 +55,78 @@ struct OPDSParserTests {
         #expect(publication.preferredAcquisition?.fileExtension == "epub")
     }
 
+    @Test func `Gutenberg image variants merge into one publication`() throws {
+        let xml = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom" xmlns:dcterms="http://purl.org/dc/terms/">
+          <title>Gutenberg detail</title>
+          <entry>
+            <id>urn:gutenberg:37525:2</id>
+            <title>Dvojník</title>
+            <author><name>Dostoyevsky, Fyodor</name></author>
+            <dcterms:language>cs</dcterms:language>
+            <link rel="http://opds-spec.org/acquisition" href="/37525.epub.noimages" type="application/epub+zip" title="EPUB (no images)"/>
+          </entry>
+          <entry>
+            <id>urn:gutenberg:37525:3</id>
+            <title>Dvojník</title>
+            <author><name>Dostoyevsky, Fyodor</name></author>
+            <dcterms:language>cs</dcterms:language>
+            <link rel="http://opds-spec.org/acquisition" href="/37525.epub3.images" type="application/epub+zip" title="EPUB3 (E-readers incl. Send-to-Kindle)"/>
+            <link rel="http://opds-spec.org/acquisition" href="/37525.epub.images" type="application/epub+zip" title="EPUB (older E-readers)"/>
+          </entry>
+        </feed>
+        """
+
+        let feed = try OPDSParser.parse(
+            Data(xml.utf8),
+            baseURL: URL(string: "https://www.gutenberg.org/ebooks/37525.opds")!
+        )
+
+        let publication = try #require(feed.publications.first)
+        #expect(feed.publications.count == 1)
+        #expect(publication.id == "urn:gutenberg:37525")
+        #expect(publication.acquisitions.count == 3)
+        #expect(publication.preferredAcquisition?.title == "EPUB3 (E-readers incl. Send-to-Kindle)")
+        #expect(publication.acquisitionOptions.map(\.title) == [
+            "EPUB3 (E-readers incl. Send-to-Kindle)",
+            "EPUB (older E-readers)",
+            "EPUB (no images)",
+        ])
+    }
+
+    @Test func `Standard Ebooks public Atom feed decodes covers and downloads`() throws {
+        let xml = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">
+          <title>Standard Ebooks - Newest Ebooks</title>
+          <subtitle>The 15 latest Standard Ebooks.</subtitle>
+          <entry>
+            <id>https://standardebooks.org/ebooks/example/book</id>
+            <title>A Public Book</title>
+            <author><name>Ada Author</name></author>
+            <summary type="text">A carefully produced edition.</summary>
+            <media:thumbnail url="https://standardebooks.org/ebooks/example/book/downloads/cover-thumbnail.jpg"/>
+            <link rel="enclosure" href="https://standardebooks.org/ebooks/example/book/downloads/book.epub?source=feed" type="application/epub+zip" title="Recommended compatible epub"/>
+            <link rel="enclosure" href="https://standardebooks.org/ebooks/example/book/downloads/book.azw3?source=feed" type="application/x-mobipocket-ebook" title="Amazon Kindle azw3"/>
+          </entry>
+        </feed>
+        """
+
+        let feed = try OPDSParser.parse(
+            Data(xml.utf8),
+            baseURL: URL(string: "https://standardebooks.org/feeds/atom/new-releases")!
+        )
+
+        let publication = try #require(feed.publications.first)
+        #expect(OPDSCatalog.builtIn[1].rootURL.absoluteString ==
+            "https://standardebooks.org/feeds/atom/new-releases")
+        #expect(publication.coverURL?.absoluteString ==
+            "https://standardebooks.org/ebooks/example/book/downloads/cover-thumbnail.jpg")
+        #expect(publication.acquisitions.map(\.fileExtension) == ["epub", "azw3"])
+        #expect(publication.preferredAcquisition?.title == "Recommended compatible epub")
+    }
+
     @Test func `OPDS 2 feed decodes flexible metadata, groups, and search templates`() throws {
         let json = """
         {
