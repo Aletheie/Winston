@@ -14,18 +14,14 @@ struct DeviceView: View {
     @State private var sidecarSummary: String?
     @State private var deviceRows: [DeviceBookRow] = []
     @State private var deviceAuthors: [String] = []
+    @State private var deviceOnlyBooks: [DeviceBook] = []
+    @State private var authorByDeviceKey: [String: String] = [:]
+    @State private var hasBuiltRows = false
     @State private var showsSyncPlan = false
 
-    private var deviceOnlyBooks: [DeviceBook] {
-        let libraryKeys = Set(books.map(\.deviceMatchKey))
-        return monitor.books.filter { !libraryKeys.contains($0.matchKey) }
-    }
-
-    private func authorByDeviceKey() -> [String: String] {
-        Dictionary(
-            books.compactMap { book in book.displayAuthor.map { (book.deviceMatchKey, $0) } },
-            uniquingKeysWith: { first, _ in first }
-        )
+    private struct RowsRevision: Hashable {
+        let catalog: Int
+        let device: Int
     }
 
     var body: some View {
@@ -38,17 +34,41 @@ struct DeviceView: View {
         }
         .background { ThemedBackground() }
         .navigationTitle(monitor.info.map { "On \($0.name)" } ?? "Device")
-        .onChange(of: LibraryMutationLog.shared.revision, initial: true) { rebuildRows() }
-        .onChange(of: monitor.books) { rebuildRows() }
+        .task(id: RowsRevision(
+            catalog: LibraryMutationLog.shared.catalogRevision,
+            device: monitor.booksRevision
+        )) {
+            if hasBuiltRows {
+                try? await Task.sleep(for: .milliseconds(80))
+                guard !Task.isCancelled else { return }
+            }
+            rebuildRows()
+        }
         .sheet(isPresented: $showsSyncPlan) {
             KindleSyncPlanSheet(books: books)
         }
     }
 
     private func rebuildRows() {
-        let rows = DeviceTableQuery.rows(books: monitor.books, authorByMatchKey: authorByDeviceKey())
+        guard !monitor.books.isEmpty else {
+            authorByDeviceKey = [:]
+            deviceOnlyBooks = []
+            deviceRows = []
+            deviceAuthors = []
+            hasBuiltRows = true
+            return
+        }
+        let authorMap = Dictionary(
+            books.compactMap { book in book.displayAuthor.map { (book.deviceMatchKey, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let libraryKeys = Set(books.lazy.map(\.deviceMatchKey))
+        let rows = DeviceTableQuery.rows(books: monitor.books, authorByMatchKey: authorMap)
+        authorByDeviceKey = authorMap
+        deviceOnlyBooks = monitor.books.filter { !libraryKeys.contains($0.matchKey) }
         deviceRows = rows
         deviceAuthors = DeviceTableQuery.authors(in: rows)
+        hasBuiltRows = true
     }
 
     @ViewBuilder
@@ -105,8 +125,7 @@ struct DeviceView: View {
     }
 
     private func deleteByAuthor(_ author: String) {
-        let authorByKey = authorByDeviceKey()
-        let ids = Set(monitor.books.filter { authorByKey[$0.matchKey] == author }.map(\.id))
+        let ids = Set(monitor.books.filter { authorByDeviceKey[$0.matchKey] == author }.map(\.id))
         deleteFromDevice(ids)
     }
 

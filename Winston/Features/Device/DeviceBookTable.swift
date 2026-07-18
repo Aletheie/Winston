@@ -9,29 +9,28 @@ struct DeviceLibrarySection: View {
     let onDeleteByAuthor: (String) -> Void
 
     @State private var searchText = ""
+    @State private var debouncedSearchText = ""
     @State private var authorFilter: String?
     @State private var sortOrder = DeviceTableQuery.recentFirst
+    @State private var displayedRows: [DeviceBookRow] = []
 
     @Environment(\.theme) private var theme
 
     var body: some View {
-        let displayed = DeviceTableQuery.apply(
-            to: rows, searchText: searchText, author: authorFilter, sort: sortOrder
-        )
         VStack(spacing: 0) {
             DeviceFilterBar(
                 searchText: $searchText,
                 authorFilter: $authorFilter,
                 authors: authors,
-                shownCount: displayed.count,
+                shownCount: displayedRows.count,
                 totalCount: rows.count
             )
             Divider()
-            if displayed.isEmpty {
+            if displayedRows.isEmpty {
                 noMatchesState
             } else {
                 DeviceBookTable(
-                    rows: displayed,
+                    rows: displayedRows,
                     selection: $selection,
                     sortOrder: $sortOrder,
                     onCopy: onCopy,
@@ -40,6 +39,26 @@ struct DeviceLibrarySection: View {
                 )
             }
         }
+        .onChange(of: rows, initial: true) { recomputeDisplayedRows() }
+        .onChange(of: authorFilter) { recomputeDisplayedRows() }
+        .onChange(of: sortOrder) { recomputeDisplayedRows() }
+        .onChange(of: debouncedSearchText) { recomputeDisplayedRows() }
+        .task(id: searchText) {
+            if !searchText.isEmpty {
+                try? await Task.sleep(for: .milliseconds(160))
+                guard !Task.isCancelled else { return }
+            }
+            debouncedSearchText = searchText
+        }
+    }
+
+    private func recomputeDisplayedRows() {
+        displayedRows = DeviceTableQuery.apply(
+            to: rows,
+            searchText: debouncedSearchText,
+            author: authorFilter,
+            sort: sortOrder
+        )
     }
 
     private var noMatchesState: some View {
