@@ -174,8 +174,10 @@ struct AppCommands: Commands {
                 .disabled(library == nil)
             Divider()
             Button("Statistics\u{2026}") { library?.perform(.showStatistics) }
+                .keyboardShortcut("1", modifiers: [.command, .option])
                 .disabled(library == nil)
             Button("Find Duplicates\u{2026}") { library?.perform(.findDuplicates) }
+                .keyboardShortcut("d", modifiers: [.command, .option])
                 .disabled(library == nil)
             Button("Metadata Fixes\u{2026}") { library?.perform(.showMetadataFixes) }
                 .disabled(library == nil)
