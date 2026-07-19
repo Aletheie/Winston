@@ -1,4 +1,5 @@
 import Observation
+import SwiftData
 import SwiftUI
 
 nonisolated private struct ReadingRecommendationCandidateSource: Sendable {
@@ -106,7 +107,7 @@ final class ReadingRecommendationViewModel {
     var preferences = ReadingRecommendationPreferences.default {
         didSet {
             guard preferences != oldValue else { return }
-            recompute()
+            scheduleRecompute()
         }
     }
 
@@ -124,6 +125,7 @@ final class ReadingRecommendationViewModel {
     @ObservationIgnored private var booksByID: [UUID: Book] = [:]
     @ObservationIgnored private var rotationAnchorID: UUID?
     @ObservationIgnored private var activePreparationID: UUID?
+    @ObservationIgnored private var rankingTask: Task<Void, Never>?
     @ObservationIgnored private var selectedIndex = 0
 
     var hasCustomPreferences: Bool {
@@ -134,10 +136,18 @@ final class ReadingRecommendationViewModel {
         let preparationID = UUID()
         activePreparationID = preparationID
         isPreparing = true
-        booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
         rotationAnchorID = previousBookID
 
-        let sources = books.map(Self.candidateSource)
+        var sourceBooksByID: [UUID: Book] = [:]
+        sourceBooksByID.reserveCapacity(books.count)
+        var sources: [ReadingRecommendationCandidateSource] = []
+        sources.reserveCapacity(books.count)
+        for (index, book) in books.enumerated() {
+            guard !Task.isCancelled, activePreparationID == preparationID else { return }
+            sourceBooksByID[book.uuid] = book
+            sources.append(Self.candidateSource(from: book))
+            if index > 0, index.isMultiple(of: 128) { await Task.yield() }
+        }
         let preparationTask = Task.detached(priority: .userInitiated) {
             ReadingRecommendationPreparer.prepare(sources)
         }
@@ -149,6 +159,7 @@ final class ReadingRecommendationViewModel {
 
         guard !Task.isCancelled, activePreparationID == preparationID else { return }
         isPreparing = false
+        booksByID = sourceBooksByID
         candidates = prepared.candidates
         sourceBookCount = prepared.sourceBookCount
         availableTags = prepared.availableTags
@@ -167,7 +178,7 @@ final class ReadingRecommendationViewModel {
         if updated != preferences {
             preferences = updated
         } else {
-            recompute()
+            scheduleRecompute(immediately: true)
         }
     }
 
@@ -180,23 +191,55 @@ final class ReadingRecommendationViewModel {
     func resetPreferences() {
         if preferences == .default {
             selectedIndex = 0
-            recompute()
+            scheduleRecompute(immediately: true)
         } else {
             preferences = .default
         }
     }
 
-    private func recompute() {
+    private func scheduleRecompute(immediately: Bool = false) {
+        rankingTask?.cancel()
+        let candidates = candidates
+        let preferences = preferences
+        let anchor = rotationAnchorID
+        rankingTask = Task { [weak self] in
+            if !immediately {
+                do {
+                    try await Task.sleep(for: .milliseconds(35))
+                } catch {
+                    return
+                }
+            }
+            let ranked = await Self.rank(
+                candidates,
+                preferences: preferences,
+                after: anchor
+            )
+            guard !Task.isCancelled, let self,
+                  self.preferences == preferences,
+                  self.rotationAnchorID == anchor else { return }
+            self.rankedRecommendations = ranked
+            self.selectedIndex = 0
+            self.updateCurrentRecommendation()
+            self.rankingTask = nil
+        }
+    }
+
+    @concurrent
+    private static func rank(
+        _ candidates: [ReadingRecommendationCandidate],
+        preferences: ReadingRecommendationPreferences,
+        after anchor: UUID?
+    ) async -> [ReadingRecommendation] {
         let ranked = ReadingRecommendationService.rank(
             candidates,
             preferences: preferences
         )
-        rankedRecommendations = ReadingRecommendationService.rotatingStrongMatches(
+        guard !Task.isCancelled else { return [] }
+        return ReadingRecommendationService.rotatingStrongMatches(
             ranked,
-            after: rotationAnchorID
+            after: anchor
         )
-        selectedIndex = 0
-        updateCurrentRecommendation()
     }
 
     private func updateCurrentRecommendation() {
@@ -261,6 +304,7 @@ struct ReadingRecommendationSheet: View {
     let onShowInLibrary: (UUID) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.theme) private var theme
     @AppStorage("readingRecommendation.lastBookID") private var lastRecommendationBookID = ""
     @State private var model = ReadingRecommendationViewModel()
@@ -303,9 +347,16 @@ struct ReadingRecommendationSheet: View {
         .frame(minWidth: 900, idealWidth: 940, maxWidth: 1_160,
                minHeight: 600, idealHeight: 700, maxHeight: 900)
         .background(theme.background)
-        .task(id: LibraryMutationLog.shared.revision) {
+        .task(id: LibraryMutationLog.shared.catalogRevision) {
+            if model.currentRecommendation != nil || model.sourceBookCount > 0 {
+                try? await Task.sleep(for: .milliseconds(120))
+                guard !Task.isCancelled else { return }
+            }
+            var descriptor = FetchDescriptor<Book>()
+            descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.readingSessions]
+            let candidateBooks = (try? modelContext.fetch(descriptor)) ?? books
             await model.prepare(
-                books: books,
+                books: candidateBooks,
                 after: UUID(uuidString: lastRecommendationBookID)
             )
         }
@@ -825,6 +876,6 @@ private struct ReadingRecommendationFooter: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
+        .background(theme.backgroundAlt.opacity(0.98))
     }
 }
