@@ -244,6 +244,7 @@ private struct GoalRingSection: View {
 
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         @Bindable var settings = settings
@@ -257,7 +258,7 @@ private struct GoalRingSection: View {
                     .trim(from: 0, to: progress)
                     .stroke(theme.accent, style: StrokeStyle(lineWidth: 8, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-                    .animation(.easeOut(duration: 0.4), value: progress)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.4), value: progress)
                 VStack(spacing: 0) {
                     Text(verbatim: "\(finishedThisYear)")
                         .font(theme.display(size: 20, weight: .bold))

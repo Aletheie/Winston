@@ -5,6 +5,7 @@ struct LibraryStatusToasts: View {
     let onReviewEditions: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(ToastCenter.self) private var toastCenter
     @Environment(TransferQueue.self) private var transferQueue
 
@@ -14,18 +15,28 @@ struct LibraryStatusToasts: View {
                 TransferToastCard(title: transferTitle,
                                   progress: transferQueue.overallProgress,
                                   onCancel: { transferQueue.cancel() })
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .transition(toastTransition)
             }
             VStack(alignment: .trailing, spacing: 8) {
                 ForEach(activeToasts) { toast in
                     ToastCard(toast: toast, onAction: { handleAction(toast) })
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                        .transition(toastTransition)
                 }
             }
         }
         .padding(16)
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: activeToasts)
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: transferQueue.isTransferring)
+        .animation(toastAnimation, value: activeToasts.map(\.id))
+        .animation(toastAnimation, value: transferQueue.isTransferring)
+    }
+
+    private var toastTransition: AnyTransition {
+        reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity)
+    }
+
+    private var toastAnimation: Animation {
+        reduceMotion
+            ? .easeOut(duration: 0.15)
+            : .spring(response: 0.35, dampingFraction: 0.85)
     }
 
     private var transferTitle: String {
@@ -135,6 +146,7 @@ private struct ToastCard: View {
     let onAction: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         HStack(spacing: 10) {
@@ -158,7 +170,12 @@ private struct ToastCard: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: 280, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(
+            reduceTransparency
+                ? AnyShapeStyle(theme.surface)
+                : AnyShapeStyle(.regularMaterial),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(theme.borderSubtle, lineWidth: 1)
@@ -205,6 +222,7 @@ private struct TransferToastCard: View {
     let onCancel: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         HStack(spacing: 10) {
@@ -225,11 +243,17 @@ private struct TransferToastCard: View {
             }
             .buttonStyle(.plain)
             .help("Cancel")
+            .accessibilityLabel("Cancel")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: 280, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(
+            reduceTransparency
+                ? AnyShapeStyle(theme.surface)
+                : AnyShapeStyle(.regularMaterial),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(theme.borderSubtle, lineWidth: 1)
@@ -254,6 +278,6 @@ private struct ToastProgressBar: View {
             }
         }
         .frame(height: 3)
-        .animation(.easeOut(duration: 0.25), value: fraction)
+        .animation(.linear(duration: 0.1), value: fraction)
     }
 }
