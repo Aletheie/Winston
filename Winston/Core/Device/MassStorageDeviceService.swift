@@ -156,40 +156,34 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
         }
     }
 
-    func removeAppleDoubleSidecars() throws -> Int {
-        let root = volumeURL.path(percentEncoded: false)
+    func removeAppleDoubleSidecars() async throws -> Int {
+        let root = documentsURL.path(percentEncoded: false)
         guard FileManager.default.fileExists(atPath: root) else {
             throw DeviceError.notConnected
         }
-        let removed = Self.removeSidecars(inDirectory: root)
+        let removed = try await Self.removeSidecars(inDirectory: root)
         Log.device.info("Removed \(removed) AppleDouble sidecar file(s)")
         return removed
     }
 
-    private static func removeSidecars(inDirectory path: String) -> Int {
-        guard let dir = opendir(path) else { return 0 }
-        defer { closedir(dir) }
+    private static func removeSidecars(inDirectory path: String) async throws -> Int {
+        try Task.checkCancellation()
+        let entries = entryNames(inDirectory: path)
         var removed = 0
-        while let entry = readdir(dir) {
-            let name = withUnsafeBytes(of: entry.pointee.d_name) { raw in
-                String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
+        for (index, name) in entries.enumerated() {
+            if index.isMultiple(of: 128) {
+                try Task.checkCancellation()
+                await Task.yield()
             }
-            if name == "." || name == ".." { continue }
             let full = path + "/" + name
 
-            var isDirectory = Int32(entry.pointee.d_type) == DT_DIR
-            var isRegular = Int32(entry.pointee.d_type) == DT_REG
-            if Int32(entry.pointee.d_type) == DT_UNKNOWN {
-                var status = stat()
-                if lstat(full, &status) == 0 {
-                    isDirectory = (status.st_mode & S_IFMT) == S_IFDIR
-                    isRegular = (status.st_mode & S_IFMT) == S_IFREG
-                }
-            }
+            var status = stat()
+            guard lstat(full, &status) == 0 else { continue }
+            let kind = status.st_mode & S_IFMT
 
-            if isDirectory {
-                removed += removeSidecars(inDirectory: full)
-            } else if isRegular && name.hasPrefix("._") {
+            if kind == S_IFDIR {
+                removed += try await removeSidecars(inDirectory: full)
+            } else if kind == S_IFREG && name.hasPrefix("._") {
                 if unlink(full) == 0 {
                     removed += 1
                 } else {
@@ -197,7 +191,24 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
                 }
             }
         }
+        try Task.checkCancellation()
         return removed
+    }
+
+    private static func entryNames(inDirectory path: String) -> [String] {
+        guard let directory = opendir(path) else { return [] }
+        defer { closedir(directory) }
+        var names: [String] = []
+        while let entry = readdir(directory) {
+            if Task.isCancelled { break }
+            let name = withUnsafeBytes(of: entry.pointee.d_name) { raw in
+                String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
+            }
+            if name != "." && name != ".." {
+                names.append(name)
+            }
+        }
+        return names
     }
 
     func eject() async {

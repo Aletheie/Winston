@@ -270,7 +270,10 @@ struct SidecarCleanupTests {
         let sidecarTop = documents.appending(path: "._book.mobi")
         let sidecarNested = nested.appending(path: "._other.azw3")
         let sidecarFolder = documents.appending(path: "._Author, Some")
-        for url in [keep, sidecarTop, sidecarNested, sidecarFolder] {
+        let internalFolder = volume.appending(path: "system/cmm/home")
+        let internalSidecar = internalFolder.appending(path: "._internal-data")
+        try FileManager.default.createDirectory(at: internalFolder, withIntermediateDirectories: true)
+        for url in [keep, sidecarTop, sidecarNested, sidecarFolder, internalSidecar] {
             createFile(at: url)
         }
 
@@ -279,6 +282,7 @@ struct SidecarCleanupTests {
 
         #expect(removed == 3)
         #expect(exists(keep))
+        #expect(exists(internalSidecar))
         for gone in [sidecarTop, sidecarNested, sidecarFolder] {
             #expect(!exists(gone))
         }
