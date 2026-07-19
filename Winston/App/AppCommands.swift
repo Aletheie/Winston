@@ -237,7 +237,7 @@ struct AppCommands: Commands {
             Divider()
 
             Button("Delete") { library?.perform(.deleteSelected) }
-                .keyboardShortcut(.delete, modifiers: [])
+                .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(library?.availability.hasSelection != true)
         }
     }
