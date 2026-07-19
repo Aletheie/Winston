@@ -12,13 +12,8 @@ struct DiscoveryView: View {
         VStack(spacing: 0) {
             DiscoveryHeader(
                 selectedGenre: viewModel.selectedGenre,
-                isRefreshing: viewModel.isRefreshing,
                 refreshFailed: viewModel.refreshFailed,
-                canRefresh: viewModel.phase != .loading
-                    && viewModel.phase != .disabledOnline
-                    && viewModel.phase != .disabledToken,
-                onSelect: viewModel.select,
-                onRefresh: { Task { await viewModel.refresh() } }
+                onSelect: viewModel.select
             )
 
             Divider().opacity(0.3)
@@ -36,6 +31,9 @@ struct DiscoveryView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ThemedBackground())
+        .toolbar {
+            DiscoveryToolbar(viewModel: viewModel)
+        }
         .task(id: viewModel.selectedGenre) { await viewModel.load() }
         .onChange(of: settings.onlineMetadataEnabled) { _, _ in
             viewModel.onlineSettingDidChange()
@@ -50,51 +48,25 @@ struct DiscoveryView: View {
 
 private struct DiscoveryHeader: View {
     let selectedGenre: DiscoveryGenre
-    let isRefreshing: Bool
     let refreshFailed: Bool
-    let canRefresh: Bool
     let onSelect: (DiscoveryGenre) -> Void
-    let onRefresh: () -> Void
 
     @Environment(\.theme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
-                    theme.styledText(terminal: "// discover", native: "Discover")
-                        .font(theme.display(size: 22, weight: .heavy))
-                        .foregroundStyle(theme.textPrimary)
+            VStack(alignment: .leading, spacing: 4) {
+                theme.styledText(terminal: "// discover", native: "Discover")
+                    .font(theme.display(size: 22, weight: .heavy))
+                    .foregroundStyle(theme.textPrimary)
+                    .accessibilityIdentifier("discovery.title")
 
-                    theme.styledText(
-                        terminal: "newest released // cached 24h",
-                        native: "Newest released books with covers, updated at most once every 24 hours."
-                    )
-                    .font(theme.label(size: 10))
-                    .foregroundStyle(theme.textSecondary)
-                }
-
-                Spacer(minLength: 12)
-
-                Button(action: onRefresh) {
-                    HStack(spacing: 7) {
-                        if isRefreshing {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        theme.styledText(
-                            terminal: isRefreshing ? "refreshing" : "refresh",
-                            native: "Refresh"
-                        )
-                    }
-                    .font(theme.label(size: 11, weight: .semibold))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                }
-                .buttonStyle(.pressable)
-                .disabled(isRefreshing || !canRefresh)
-                .help("Refresh")
+                theme.styledText(
+                    terminal: "newest released // cached 24h",
+                    native: "Newest released books with covers, updated at most once every 24 hours."
+                )
+                .font(theme.label(size: 10))
+                .foregroundStyle(theme.textSecondary)
             }
 
             if refreshFailed {
@@ -118,6 +90,38 @@ private struct DiscoveryHeader: View {
         .padding(.horizontal, 20)
         .padding(.top, 18)
         .padding(.bottom, 12)
+    }
+}
+
+// MARK: - Toolbar
+
+private struct DiscoveryToolbar: ToolbarContent {
+    let viewModel: DiscoveryViewModel
+
+    @Environment(\.theme) private var theme
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                Task { await viewModel.refresh() }
+            } label: {
+                if viewModel.isRefreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+            }
+            .disabled(!canRefresh || viewModel.isRefreshing)
+            .help(theme.styledText(terminal: "refresh", native: "Refresh"))
+            .accessibilityIdentifier("discovery.refresh")
+        }
+    }
+
+    private var canRefresh: Bool {
+        viewModel.phase != .loading
+            && viewModel.phase != .disabledOnline
+            && viewModel.phase != .disabledToken
     }
 }
 

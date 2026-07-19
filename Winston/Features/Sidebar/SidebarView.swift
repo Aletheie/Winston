@@ -106,6 +106,7 @@ struct SidebarView: View {
                     count: viewModel.notices.unreadCount
                 )
                 .tag(SidebarItem.updates)
+                .accessibilityIdentifier("sidebar.updates")
                 if facets.recent > 0 {
                     SidebarRow(title: theme.styledText(terminal: "RECENTLY ADDED", native: "Recently Added"),
                                systemImage: "clock", count: facets.recent)

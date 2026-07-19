@@ -31,7 +31,12 @@ struct NoticesView: View {
                 )
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(
+            minWidth: 0,
+            maxWidth: .infinity,
+            minHeight: 0,
+            maxHeight: .infinity
+        )
         .navigationTitle(theme.usesTerminalCopy ? Text(verbatim: "") : Text("Updates"))
         .toolbar {
             NoticesToolbar(notices: notices)
@@ -92,8 +97,7 @@ private struct NoticesFeed: View {
             .padding(.horizontal, 20)
             .padding(.top, 18)
             .padding(.bottom, 24)
-            .frame(maxWidth: 860)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -139,6 +143,7 @@ private struct NoticesMasthead: View {
                 theme.styledText(terminal: "// updates", native: "Updates")
                     .font(theme.display(size: 30, weight: .heavy))
                     .foregroundStyle(theme.textPrimary)
+                    .accessibilityIdentifier("notices.title")
 
                 Spacer(minLength: 12)
 
@@ -305,18 +310,18 @@ private struct NoticesEmptyFeed: View {
     var body: some View {
         VStack(spacing: 0) {
             NoticesMasthead(unreadCount: 0)
-                .frame(maxWidth: 860, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20)
                 .padding(.top, 18)
                 .padding(.bottom, 16)
 
             if let gatingReason {
                 NoticesGatingBanner(reason: gatingReason)
-                    .frame(maxWidth: 860)
+                    .frame(maxWidth: .infinity)
                     .padding(.horizontal, 20)
             } else if lastCheckFailed {
                 NoticesFailureBanner(notices: notices)
-                    .frame(maxWidth: 860)
+                    .frame(maxWidth: .infinity)
                     .padding(.horizontal, 20)
             }
 
