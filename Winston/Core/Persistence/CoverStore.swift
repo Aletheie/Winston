@@ -24,6 +24,12 @@ enum CoverStore {
     }
 
     @discardableResult
+    nonisolated static func copy(from sourceUUID: UUID, to destinationUUID: UUID) -> Bool {
+        guard let data = loadData(for: sourceUUID) else { return false }
+        return write(data, for: destinationUUID)
+    }
+
+    @discardableResult
     nonisolated static func delete(for uuid: UUID) -> Bool {
         let url = coverURL(for: uuid)
         guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return true }

@@ -39,7 +39,9 @@ final class EditionService {
 
     func refreshEditionCounts() {
         var counts: [UUID: Int] = [:]
-        let works = (try? modelContext.fetch(FetchDescriptor<Work>())) ?? []
+        var descriptor = FetchDescriptor<Work>()
+        descriptor.relationshipKeyPathsForPrefetching = [\.editions]
+        let works = (try? modelContext.fetch(descriptor)) ?? []
         for work in works {
             let editions = work.editions
             guard editions.count > 1 else { continue }
@@ -62,8 +64,18 @@ final class EditionService {
     }
 
     func scanLibrary() async {
-        let candidates = modelContext.allBooks().map(Self.candidate)
+        var descriptor = FetchDescriptor<Book>()
+        descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
+        let books = (try? modelContext.fetch(descriptor)) ?? []
+        var candidates: [EditionCandidate] = []
+        candidates.reserveCapacity(books.count)
+        for (index, book) in books.enumerated() {
+            guard !Task.isCancelled else { return }
+            candidates.append(Self.candidate(book))
+            if index > 0, index.isMultiple(of: 128) { await Task.yield() }
+        }
         let proposals = await EditionMatcher.scan(candidates)
+        guard !Task.isCancelled else { return }
         pendingProposals = proposals.filter { !dismissedPairKeys.contains($0.pairKey) }
     }
 
@@ -222,7 +234,14 @@ final class EditionService {
     }
 
     func removeProposals(referencing bookUUID: UUID) {
-        pendingProposals.removeAll { $0.memberUUIDs.contains(bookUUID) }
+        removeProposals(referencing: [bookUUID])
+    }
+
+    func removeProposals(referencing bookUUIDs: Set<UUID>) {
+        guard !bookUUIDs.isEmpty else { return }
+        pendingProposals.removeAll { proposal in
+            proposal.memberUUIDs.contains { bookUUIDs.contains($0) }
+        }
     }
 
     @discardableResult
@@ -357,8 +376,7 @@ final class EditionService {
         mergeReadingHistory(into: winner, from: loser)
         let installedWinnerCover: Bool
         if !CoverStore.exists(for: winner.uuid),
-           let cover = CoverStore.load(for: loser.uuid),
-           CoverStore.save(cover, for: winner.uuid) {
+           CoverStore.copy(from: loser.uuid, to: winner.uuid) {
             winner.coverVersion += 1
             installedWinnerCover = true
         } else {
@@ -375,8 +393,13 @@ final class EditionService {
             return false
         }
 
-        discardedFileNames.forEach { BookFileStore.delete(fileName: $0) }
-        CoverStore.delete(for: loser.uuid)
+        let loserUUID = loser.uuid
+        Task.detached(priority: .utility) {
+            for fileName in discardedFileNames {
+                BookFileStore.delete(fileName: fileName)
+            }
+            CoverStore.delete(for: loserUUID)
+        }
         pendingProposals.removeAll { $0.memberUUIDs.contains(loser.uuid) }
         WorkService.pruneIfOrphaned(losingWork, context: modelContext)
         refreshEditionCounts()
@@ -518,19 +541,22 @@ final class EditionService {
         }
         if winner.refreshReadingSummaryFromHistory() { return }
 
-        let rank: [ReadingStatus: Int] = [
-            .unread: 0,
-            .didNotFinish: 1,
-            .paused: 2,
-            .reading: 3,
-            .finished: 4,
-        ]
-        if (rank[loser.readingStatus] ?? 0) > (rank[winner.readingStatus] ?? 0) {
+        if readingStatusRank(loser.readingStatus) > readingStatusRank(winner.readingStatus) {
             winner.readingStatusRaw = loser.readingStatusRaw
         }
         winner.dateStarted = [winner.dateStarted, loser.dateStarted].compactMap { $0 }.min()
         if winner.readingStatus == .finished {
             winner.dateFinished = [winner.dateFinished, loser.dateFinished].compactMap { $0 }.max()
+        }
+    }
+
+    private func readingStatusRank(_ status: ReadingStatus) -> Int {
+        switch status {
+        case .unread: 0
+        case .didNotFinish: 1
+        case .paused: 2
+        case .reading: 3
+        case .finished: 4
         }
     }
 
