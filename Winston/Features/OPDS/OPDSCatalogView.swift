@@ -289,6 +289,7 @@ private struct OPDSProviderCard: View {
     let action: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
 
     var body: some View {
@@ -334,7 +335,7 @@ private struct OPDSProviderCard: View {
                 .stroke(isHovered ? theme.accent.opacity(0.45) : theme.borderSubtle, lineWidth: 1)
         }
         .onHover { isHovered = $0 }
-        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovered)
     }
 
     private var icon: String {
@@ -472,6 +473,7 @@ private struct OPDSPublicationCard: View {
     let onAdd: (OPDSAcquisition) -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
 
     var body: some View {
@@ -508,7 +510,7 @@ private struct OPDSPublicationCard: View {
                 .stroke(isHovered ? theme.accent.opacity(0.4) : theme.borderSubtle, lineWidth: 1)
         }
         .onHover { isHovered = $0 }
-        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovered)
         .help(publication.summary ?? publication.title)
     }
 
