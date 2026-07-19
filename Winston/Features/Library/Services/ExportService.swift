@@ -15,10 +15,13 @@ final class ExportService {
 
     func exportLibrary(to folder: URL) {
         guard !isExporting else { return }
-        let rows = Self.rows(for: modelContext.allBooks())
-        guard !rows.isEmpty else { return }
         isExporting = true
         Task {
+            let rows = await Self.rowsYielding(for: modelContext.allBooks())
+            guard !rows.isEmpty else {
+                isExporting = false
+                return
+            }
             _ = await Task.detached(priority: .utility) { LibraryExporter.export(rows, to: folder) }.value
             isExporting = false
             NSWorkspace.shared.activateFileViewerSelecting([folder])
@@ -27,22 +30,36 @@ final class ExportService {
 
     static func rows(for books: [Book]) -> [ExportRow] {
         books.flatMap { book -> [ExportRow] in
-            guard !book.assets.isEmpty else {
-                return [row(
-                    for: book,
-                    fileName: book.fileName,
-                    format: book.format,
-                    sourceURL: book.fileURL
-                )]
-            }
-            return book.assets.map { asset in
-                row(
-                    for: book,
-                    fileName: asset.fileName,
-                    format: asset.format,
-                    sourceURL: asset.fileURL
-                )
-            }
+            rows(for: book)
+        }
+    }
+
+    private static func rowsYielding(for books: [Book]) async -> [ExportRow] {
+        var result: [ExportRow] = []
+        result.reserveCapacity(books.count)
+        for (index, book) in books.enumerated() {
+            result.append(contentsOf: rows(for: book))
+            if (index + 1).isMultiple(of: 128) { await Task.yield() }
+        }
+        return result
+    }
+
+    private static func rows(for book: Book) -> [ExportRow] {
+        guard !book.assets.isEmpty else {
+            return [row(
+                for: book,
+                fileName: book.fileName,
+                format: book.format,
+                sourceURL: book.fileURL
+            )]
+        }
+        return book.assets.map { asset in
+            row(
+                for: book,
+                fileName: asset.fileName,
+                format: asset.format,
+                sourceURL: asset.fileURL
+            )
         }
     }
 
