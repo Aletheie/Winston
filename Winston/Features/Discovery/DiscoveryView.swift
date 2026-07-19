@@ -131,22 +131,34 @@ private struct GenreChip: View {
     let action: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
     var body: some View {
         Button(action: action) {
-            theme.styledText(terminal: genre.terminal, native: genre.nativeLabel)
-                .font(theme.label(size: 12, weight: .semibold))
-                .foregroundStyle(isSelected ? Color.white : theme.textSecondary)
+            HStack(spacing: 5) {
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .accessibilityHidden(true)
+                }
+                theme.styledText(terminal: genre.terminal, native: genre.nativeLabel)
+            }
+                .font(theme.label(size: 12, weight: isSelected ? .bold : .semibold))
+                .foregroundStyle(isSelected ? theme.background : theme.textSecondary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
                 .background(
                     Capsule().fill(isSelected ? theme.accent : theme.surfaceGlass.opacity(0.5))
                 )
                 .overlay(
-                    Capsule().stroke(isSelected ? .clear : theme.borderSubtle, lineWidth: 1)
+                    Capsule().stroke(
+                        isSelected && differentiateWithoutColor ? theme.textPrimary : theme.borderSubtle,
+                        lineWidth: isSelected && differentiateWithoutColor ? 2 : 1
+                    )
                 )
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
