@@ -4,9 +4,10 @@ import SwiftUI
 
 struct ThemedBackground: View {
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
-        if theme.showsMeshBackground {
+        if theme.showsMeshBackground && !reduceTransparency {
             meshBackground
         } else {
             theme.background.ignoresSafeArea()
@@ -76,13 +77,17 @@ private struct NeonGlowModifier: ViewModifier {
 
 private struct GlassCardModifier: ViewModifier {
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
     let cornerRadius: CGFloat
     let tintOpacity: Double
 
     func body(content: Content) -> some View {
         content
             .background(
-                .ultraThinMaterial,
+                reduceTransparency
+                    ? AnyShapeStyle(theme.surface)
+                    : AnyShapeStyle(.ultraThinMaterial),
                 in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             )
             .background(
@@ -91,8 +96,25 @@ private struct GlassCardModifier: ViewModifier {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(theme.borderSubtle, lineWidth: 1)
+                    .stroke(
+                        contrast == .increased ? theme.textSecondary.opacity(0.55) : theme.borderSubtle,
+                        lineWidth: contrast == .increased ? 2 : 1
+                    )
             )
+    }
+}
+
+private struct AccessibleThemeModifier: ViewModifier {
+    let theme: Theme
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    func body(content: Content) -> some View {
+        var adapted = theme
+        if contrast == .increased {
+            adapted.textTertiary = theme.textSecondary
+            adapted.borderSubtle = theme.textSecondary.opacity(0.45)
+        }
+        return content.environment(\.theme, adapted)
     }
 }
 
@@ -180,5 +202,9 @@ extension View {
 
     func themedBorder(cornerRadius: CGFloat) -> some View {
         modifier(ThemedBorderModifier(cornerRadius: cornerRadius))
+    }
+
+    func accessibleTheme(_ theme: Theme) -> some View {
+        modifier(AccessibleThemeModifier(theme: theme))
     }
 }

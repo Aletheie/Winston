@@ -48,26 +48,55 @@ struct Theme: Equatable, Sendable {
     // MARK: Typography
 
     func display(size: CGFloat, weight: Font.Weight = .heavy) -> Font {
-        if let fontFamily { return .custom(fontFamily, size: size).weight(weight) }
+        let textStyle = Self.textStyle(for: size)
+        if let fontFamily {
+            return .custom(fontFamily, size: size, relativeTo: textStyle).weight(weight)
+        }
         switch fontStyle {
-        case .retro:  return .winstonDisplay(size: size, weight: weight)
-        case .native: return .system(size: size, weight: weight, design: .rounded)
+        case .retro:
+            return .winstonDisplay(size: size, weight: weight, relativeTo: textStyle)
+        case .native:
+            return .system(textStyle, design: .rounded, weight: weight)
         }
     }
 
     func body(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        if let fontFamily { return .custom(fontFamily, size: size).weight(weight) }
+        let textStyle = Self.textStyle(for: size)
+        if let fontFamily {
+            return .custom(fontFamily, size: size, relativeTo: textStyle).weight(weight)
+        }
         switch fontStyle {
-        case .retro:  return .winstonBody(size: size, weight: weight)
-        case .native: return .system(size: size, weight: weight)
+        case .retro:
+            return .winstonBody(size: size, weight: weight, relativeTo: textStyle)
+        case .native:
+            return .system(textStyle, design: .default, weight: weight)
         }
     }
 
     func label(size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        if let fontFamily { return .custom(fontFamily, size: size).weight(weight) }
+        let textStyle = Self.textStyle(for: size)
+        if let fontFamily {
+            return .custom(fontFamily, size: size, relativeTo: textStyle).weight(weight)
+        }
         switch fontStyle {
-        case .retro:  return .winstonMono(size: size, weight: weight)
-        case .native: return .system(size: size, weight: weight)
+        case .retro:
+            return .winstonMono(size: size, weight: weight, relativeTo: textStyle)
+        case .native:
+            return .system(textStyle, design: .default, weight: weight)
+        }
+    }
+
+    private static func textStyle(for size: CGFloat) -> Font.TextStyle {
+        switch size {
+        case ...9:  .caption2
+        case ...11: .caption
+        case ...13: .footnote
+        case ...15: .callout
+        case ...18: .body
+        case ...21: .title3
+        case ...24: .title2
+        case ...30: .title
+        default:    .largeTitle
         }
     }
 

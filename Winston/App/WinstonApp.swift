@@ -86,7 +86,7 @@ struct WinstonApp: App {
                 .environment(pluginService)
                 .environment(discoveryViewModel)
                 .environment(opdsViewModel)
-                .environment(\.theme, themeManager.theme)
+                .accessibleTheme(themeManager.theme)
                 .font(themeManager.defaultFont)
                 .preferredColorScheme(themeManager.theme.colorScheme)
                 .task { await pluginService.refresh() }
@@ -115,7 +115,7 @@ struct WinstonApp: App {
                 .environment(themeManager)
                 .environment(settings)
                 .environment(pluginService)
-                .environment(\.theme, themeManager.theme)
+                .accessibleTheme(themeManager.theme)
                 .font(themeManager.defaultFont)
                 .preferredColorScheme(themeManager.theme.colorScheme)
         }
