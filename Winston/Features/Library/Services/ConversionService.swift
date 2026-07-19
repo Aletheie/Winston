@@ -156,11 +156,20 @@ final class ConversionService {
         guard sourceSnapshotIsCurrent(request) else { return }
         var installedCoverVersion: Int?
         if let extractedCover,
-           book.coverVersion == request.coverVersion,
-           !CoverStore.exists(for: uuid),
-           CoverStore.save(extractedCover, for: uuid) {
-            book.coverVersion += 1
-            installedCoverVersion = book.coverVersion
+           book.coverVersion == request.coverVersion {
+            let installed = await Task.detached(priority: .utility) {
+                !CoverStore.exists(for: uuid) && CoverStore.save(extractedCover, for: uuid)
+            }.value
+            guard sourceSnapshotIsCurrent(request) else {
+                if installed, book.coverVersion == request.coverVersion {
+                    _ = await Task.detached(priority: .utility) { CoverStore.delete(for: uuid) }.value
+                }
+                return
+            }
+            if installed, book.coverVersion == request.coverVersion {
+                book.coverVersion += 1
+                installedCoverVersion = book.coverVersion
+            }
         }
 
         let converted: URL? = try? await EbookConverter.convert(sourceURL, to: request.format)
@@ -188,21 +197,37 @@ final class ConversionService {
             book.assets.first { $0.uuid == existingUUID }
         }
         let oldFileName = existingAsset?.fileName
-        let newFileName: String
-        do {
-            if let oldFileName {
-                newFileName = try BookFileStore.replacementCopy(
-                    of: converted, replacing: oldFileName, uuid: request.assetUUID
-                )
-            } else {
-                newFileName = try BookFileStore.importCopy(of: converted, uuid: request.assetUUID)
+        let storedFile: (name: String, size: Int64)? = await Task.detached(priority: .userInitiated) {
+            do {
+                let name: String
+                if let oldFileName {
+                    name = try BookFileStore.replacementCopy(
+                        of: converted,
+                        replacing: oldFileName,
+                        uuid: request.assetUUID
+                    )
+                } else {
+                    name = try BookFileStore.importCopy(of: converted, uuid: request.assetUUID)
+                }
+                return (name, BookFileStore.size(of: name))
+            } catch {
+                return nil
             }
-        } catch {
+        }.value
+        guard let storedFile else {
             await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
-        let size = BookFileStore.size(of: newFileName)
+        let newFileName = storedFile.name
+        let size = storedFile.size
+        guard sourceSnapshotIsCurrent(request) else {
+            Task.detached(priority: .utility) {
+                BookFileStore.delete(fileName: newFileName)
+            }
+            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
+            return
+        }
         if let asset = existingAsset {
             asset.fileName = newFileName
             asset.sizeBytes = size
@@ -224,7 +249,9 @@ final class ConversionService {
             modelContext.insert(asset)
         }
         guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-            BookFileStore.delete(fileName: newFileName)
+            Task.detached(priority: .utility) {
+                BookFileStore.delete(fileName: newFileName)
+            }
             await removeInstalledCover(
                 for: book, url: sourceURL, version: installedCoverVersion, force: true
             )
@@ -232,7 +259,9 @@ final class ConversionService {
             return
         }
         if let oldFileName, oldFileName != newFileName {
-            BookFileStore.delete(fileName: oldFileName)
+            Task.detached(priority: .utility) {
+                BookFileStore.delete(fileName: oldFileName)
+            }
         }
         toasts.success(String(localized: "Created \(request.format.label) copy."))
     }
@@ -243,8 +272,11 @@ final class ConversionService {
         version: Int?,
         force: Bool = false
     ) async {
-        guard let version, force || book.coverVersion == version,
-              CoverStore.delete(for: book.uuid) else { return }
+        guard let version, force || book.coverVersion == version else { return }
+        let uuid = book.uuid
+        guard await Task.detached(priority: .utility, operation: {
+            CoverStore.delete(for: uuid)
+        }).value else { return }
         await CoverCache.shared.replace(nil, for: url)
     }
 

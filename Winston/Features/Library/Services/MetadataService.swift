@@ -260,7 +260,7 @@ final class MetadataService {
         var downloadedCover: NSImage?
         if (replaceCover || !hasCover), let coverURL = fetched.coverURL,
            let data = await online.downloadCover(coverURL) {
-            downloadedCover = NSImage(data: data)
+            downloadedCover = await Task.detached(priority: .utility) { NSImage(data: data) }.value
         }
 
         guard book.modelContext != nil else { return false }
@@ -275,15 +275,21 @@ final class MetadataService {
         var installedCoverURL: URL?
         if let image = downloadedCover {
             let fileURL = book.fileURL
-            previousCoverData = CoverStore.loadData(for: uuid)
-            if CoverStore.save(image, for: uuid) {
+            let diskWrite = await Task.detached(priority: .utility) {
+                let previous = CoverStore.loadData(for: uuid)
+                return (previous: previous, saved: CoverStore.save(image, for: uuid))
+            }.value
+            previousCoverData = diskWrite.previous
+            if diskWrite.saved {
                 book.coverVersion += 1
                 installedCoverVersion = book.coverVersion
                 installedCoverURL = fileURL
                 await CoverCache.shared.replace(image, for: fileURL)
                 guard book.modelContext != nil else {
                     if book.coverVersion == installedCoverVersion {
-                        CoverStore.delete(for: uuid)
+                        _ = await Task.detached(priority: .utility) {
+                            CoverStore.delete(for: uuid)
+                        }.value
                         await CoverCache.shared.replace(nil, for: fileURL)
                     }
                     return false
@@ -312,7 +318,9 @@ final class MetadataService {
             let coverStillOurs = installedCoverVersion.map { $0 == book.coverVersion } ?? false
             guard modelContext.saveQuietly(rollbackOnFailure: true) else {
                 if coverStillOurs, let installedCoverURL,
-                   CoverStore.restore(previousCoverData, for: uuid) {
+                   await Task.detached(priority: .utility, operation: {
+                       CoverStore.restore(previousCoverData, for: uuid)
+                   }).value {
                     await CoverCache.shared.replace(
                         previousCoverData.flatMap(NSImage.init(data:)),
                         for: installedCoverURL

@@ -2,6 +2,26 @@ import Foundation
 import SwiftData
 import AppKit
 
+private nonisolated struct CalibreManagedFile: Sendable {
+    let fileName: String
+    let contentHash: String?
+    let sizeBytes: Int64
+}
+
+private nonisolated enum CalibreFileImporter {
+    static func copy(_ source: URL, uuid: UUID) -> CalibreManagedFile? {
+        guard let fileName = try? BookFileStore.importCopy(of: source, uuid: uuid) else {
+            return nil
+        }
+        let managedURL = BookFileStore.url(for: fileName)
+        return CalibreManagedFile(
+            fileName: fileName,
+            contentHash: try? ContentHasher.sha256(of: managedURL),
+            sizeBytes: BookFileStore.size(of: fileName)
+        )
+    }
+}
+
 @MainActor
 @Observable
 final class CalibreImportService {
@@ -90,25 +110,23 @@ final class CalibreImportService {
 
                 let uuid = UUID()
                 let source = cb.fileURL
-                guard let fileName = await Task.detached(priority: .userInitiated, operation: {
-                    try? BookFileStore.importCopy(of: source, uuid: uuid)
+                guard let managedFile = await Task.detached(priority: .userInitiated, operation: {
+                    CalibreFileImporter.copy(source, uuid: uuid)
                 }).value else { skipped += 1; continue }
+                let fileName = managedFile.fileName
 
                 let book = Book(uuid: uuid, fileName: fileName, originalFileName: source.lastPathComponent)
                 book.apply(Self.metadata(from: cb))
                 book.rating = cb.rating
                 if let dateAdded = cb.dateAdded { book.dateAdded = dateAdded }
-                book.fileSizeBytes = BookFileStore.size(of: fileName)
+                book.fileSizeBytes = managedFile.sizeBytes
                 let work = Work(title: book.title, author: book.author, dateCreated: book.dateAdded)
                 work.preferredEditionUUID = book.uuid
-                let primaryHash = await Task.detached(priority: .utility) {
-                    try? ContentHasher.sha256(of: BookFileStore.url(for: fileName))
-                }.value
                 let primaryAsset = BookAsset(
                     uuid: uuid,
                     fileName: fileName,
                     origin: .imported,
-                    contentHash: primaryHash,
+                    contentHash: managedFile.contentHash,
                     sizeBytes: book.fileSizeBytes,
                     dateAdded: book.dateAdded,
                     validationStatus: .ok,
@@ -121,18 +139,15 @@ final class CalibreImportService {
 
                 for siblingURL in cb.additionalFileURLs {
                     let assetUUID = UUID()
-                    guard let siblingName = await Task.detached(priority: .userInitiated, operation: {
-                        try? BookFileStore.importCopy(of: siblingURL, uuid: assetUUID)
+                    guard let siblingFile = await Task.detached(priority: .userInitiated, operation: {
+                        CalibreFileImporter.copy(siblingURL, uuid: assetUUID)
                     }).value else { continue }
-                    let siblingHash = await Task.detached(priority: .utility) {
-                        try? ContentHasher.sha256(of: BookFileStore.url(for: siblingName))
-                    }.value
                     let asset = BookAsset(
                         uuid: assetUUID,
-                        fileName: siblingName,
+                        fileName: siblingFile.fileName,
                         origin: .imported,
-                        contentHash: siblingHash,
-                        sizeBytes: BookFileStore.size(of: siblingName),
+                        contentHash: siblingFile.contentHash,
+                        sizeBytes: siblingFile.sizeBytes,
                         dateAdded: book.dateAdded,
                         validationStatus: .ok,
                         book: book
@@ -145,9 +160,12 @@ final class CalibreImportService {
                 seenKeys.insert(key)
 
                 if let coverURL = cb.coverURL {
-                    let image = await Task.detached(priority: .utility) { NSImage(contentsOf: coverURL) }.value
+                    let image = await Task.detached(priority: .utility) {
+                        guard let image = NSImage(contentsOf: coverURL),
+                              CoverStore.save(image, for: uuid) else { return nil as NSImage? }
+                        return image
+                    }.value
                     if let image {
-                        CoverStore.save(image, for: uuid)
                         await CoverCache.shared.replace(image, for: book.fileURL)
                     }
                 }
