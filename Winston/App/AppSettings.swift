@@ -110,6 +110,7 @@ final class AppSettings {
         static let gridZoom = "gridZoom"
         static let showDiscoverInSidebar = "showDiscoverInSidebar"
         static let showCatalogsInSidebar = "showCatalogsInSidebar"
+        static let inspectBeforeKindleTransfer = "inspectBeforeKindleTransfer"
         static let enabledPlugins = "enabledPluginIDs"
         static let pluginGrants = "pluginGrants"
     }
@@ -186,6 +187,15 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(showCatalogsInSidebar, forKey: Keys.showCatalogsInSidebar) }
     }
 
+    var inspectBeforeKindleTransfer: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                inspectBeforeKindleTransfer,
+                forKey: Keys.inspectBeforeKindleTransfer
+            )
+        }
+    }
+
     var enabledPluginIDs: Set<String> {
         didSet { UserDefaults.standard.set(Array(enabledPluginIDs).sorted(), forKey: Keys.enabledPlugins) }
     }
@@ -218,6 +228,9 @@ final class AppSettings {
         gridZoom = min(1, max(0, storedZoom))
         showDiscoverInSidebar = UserDefaults.standard.object(forKey: Keys.showDiscoverInSidebar) as? Bool ?? true
         showCatalogsInSidebar = UserDefaults.standard.object(forKey: Keys.showCatalogsInSidebar) as? Bool ?? true
+        inspectBeforeKindleTransfer = UserDefaults.standard.object(
+            forKey: Keys.inspectBeforeKindleTransfer
+        ) as? Bool ?? false
         enabledPluginIDs = Set(UserDefaults.standard.stringArray(forKey: Keys.enabledPlugins) ?? [])
         pluginGrants = (UserDefaults.standard.dictionary(forKey: Keys.pluginGrants) as? [String: [String]]) ?? [:]
         hardcoverToken = UserDefaults.standard.string(forKey: Keys.hardcoverToken) ?? ""

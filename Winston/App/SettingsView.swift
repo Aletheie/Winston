@@ -162,6 +162,10 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            KindleTransferSettingsSection(
+                inspectBeforeTransfer: $settings.inspectBeforeKindleTransfer
+            )
+
             Section("Community Ratings") {
                 TextField("Hardcover API token", text: $settings.hardcoverToken)
                     .textFieldStyle(.roundedBorder)
@@ -270,6 +274,22 @@ struct SettingsView: View {
             ) else { return }
             settings.backupFolderPath = url.path
             settings.autoBackupEnabled = true
+        }
+    }
+}
+
+private struct KindleTransferSettingsSection: View {
+    @Binding var inspectBeforeTransfer: Bool
+
+    var body: some View {
+        Section("Kindle Transfers") {
+            Toggle(
+                "Check books with Book Doctor before sending",
+                isOn: $inspectBeforeTransfer
+            )
+            Text("Off by default so transfers start immediately. Turn this on to inspect every selected book first; large batches take longer.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

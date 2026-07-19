@@ -2176,6 +2176,16 @@
         }
       }
     },
+    "Check books with Book Doctor before sending" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Před odesláním zkontrolovat knihy Knižním doktorem"
+          }
+        }
+      }
+    },
     "Check for new releases" : {
       "localizations" : {
         "cs" : {
@@ -5061,6 +5071,16 @@
         }
       }
     },
+    "Kindle Transfers" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přenosy do Kindlu"
+          }
+        }
+      }
+    },
     "Kindle-friendly %@" : {
       "localizations" : {
         "cs" : {
@@ -6503,6 +6523,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Číslo"
+          }
+        }
+      }
+    },
+    "Off by default so transfers start immediately. Turn this on to inspect every selected book first; large batches take longer." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ve výchozím nastavení je vypnuto, takže přenos začne okamžitě. Zapnutím se nejdřív zkontroluje každá vybraná kniha; velké dávky trvají déle."
           }
         }
       }

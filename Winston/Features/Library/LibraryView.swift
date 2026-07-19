@@ -50,6 +50,7 @@ struct LibraryView: View {
     @Binding var activeSheet: LibrarySheet?
 
     @Environment(\.theme) private var theme
+    @Environment(AppSettings.self) private var settings
     @Environment(DeviceMonitor.self) private var deviceMonitor
     @Environment(TransferQueue.self) private var transferQueue
     @Environment(ToastCenter.self) private var toasts
@@ -520,7 +521,11 @@ struct LibraryView: View {
     private func transmitSelected() {
         let toSend = books.filter { selection.selectedBookIDs.contains($0.id) }
         guard !toSend.isEmpty else { return }
-        presentBookDoctor(for: toSend, purpose: .sendToKindle)
+        if settings.inspectBeforeKindleTransfer {
+            presentBookDoctor(for: toSend, purpose: .sendToKindle)
+        } else {
+            transferQueue.beginSend(books: toSend, via: deviceMonitor)
+        }
     }
 
     private func presentBookDoctor(for books: [Book], purpose: BookDoctorRequest.Purpose) {
