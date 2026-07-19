@@ -153,7 +153,8 @@ enum LibraryQuery {
         savedSearch: String?,
         smartShelf: SmartShelfDefinition?,
         deviceFileNames: Set<String>,
-        deviceIsConnected: Bool
+        deviceIsConnected: Bool,
+        kindlePresenceFilter: KindlePresenceFilter = .all
     ) -> [UUID] {
         let savedQuery = savedSearch.map { NormalizedQuery(SearchQuery.parse($0)) }
         let visibleQuery = NormalizedQuery(SearchQuery.parse(searchText))
@@ -176,7 +177,13 @@ enum LibraryQuery {
                 belongs = matches(book, filter: filter, recentCutoff: recentCutoff)
             }
 
-            guard belongs, book.search.matches(visibleQuery) else { continue }
+            guard belongs,
+                  book.search.matches(visibleQuery),
+                  kindlePresenceFilter.includes(
+                    deviceMatchKey: book.smartShelf.deviceMatchKey,
+                    deviceFileNames: deviceFileNames,
+                    deviceIsConnected: deviceIsConnected
+                  ) else { continue }
             matching.append(book)
         }
 

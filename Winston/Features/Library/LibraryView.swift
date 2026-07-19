@@ -62,6 +62,7 @@ struct LibraryView: View {
     @State private var showInspector = true
     @State private var searchText = ""
     @State private var debouncedSearch = ""
+    @State private var kindlePresenceFilter: KindlePresenceFilter = .all
     @State private var displayed: [Book] = []
     @State private var sortOrder: [KeyPathComparator<Book>] = [BookSort.dateAdded.comparator(ascending: false)]
     @State private var showDeleteConfirm = false
@@ -91,12 +92,12 @@ struct LibraryView: View {
                     deviceIsConnected: deviceMonitor.isConnected,
                     sort: sortOrder
                 )
-                displayed = LibraryQuery.apply(
+                displayed = filterByKindlePresence(LibraryQuery.apply(
                     to: shelfBooks,
                     filter: .all,
                     searchText: debouncedSearch,
                     sort: sortOrder
-                )
+                ))
             } else if let search = smart.savedSearch {
                 let shelfBooks = LibraryQuery.apply(
                     to: books,
@@ -104,17 +105,34 @@ struct LibraryView: View {
                     searchText: search,
                     sort: sortOrder
                 )
-                displayed = LibraryQuery.apply(
+                displayed = filterByKindlePresence(LibraryQuery.apply(
                     to: shelfBooks,
                     filter: .all,
                     searchText: debouncedSearch,
                     sort: sortOrder
-                )
+                ))
             } else {
                 displayed = []
             }
         } else {
-            displayed = LibraryQuery.apply(to: books, filter: filter, searchText: debouncedSearch, sort: sortOrder)
+            displayed = filterByKindlePresence(
+                LibraryQuery.apply(
+                    to: books,
+                    filter: filter,
+                    searchText: debouncedSearch,
+                    sort: sortOrder
+                )
+            )
+        }
+    }
+
+    private func filterByKindlePresence(_ candidates: [Book]) -> [Book] {
+        candidates.filter {
+            kindlePresenceFilter.includes(
+                deviceMatchKey: $0.deviceMatchKey,
+                deviceFileNames: deviceMonitor.deviceFileNames,
+                deviceIsConnected: deviceMonitor.isConnected
+            )
         }
     }
 
@@ -300,13 +318,18 @@ struct LibraryView: View {
             .onChange(of: filter) { recomputeDisplayed() }
             .onChange(of: debouncedSearch) { recomputeDisplayed() }
             .onChange(of: sortOrder) { recomputeDisplayed() }
+            .onChange(of: kindlePresenceFilter) { recomputeDisplayed() }
             .onChange(of: deviceMonitor.deviceFileNames) { recomputeDisplayed() }
-            .onChange(of: deviceMonitor.isConnected) { recomputeDisplayed() }
+            .onChange(of: deviceMonitor.isConnected) { _, isConnected in
+                if !isConnected { kindlePresenceFilter = .all }
+                recomputeDisplayed()
+            }
     }
 
     private func showInLibrary(_ book: Book) {
         activeSheet = nil
         onShowAll()
+        kindlePresenceFilter = .all
         searchText = ""
         debouncedSearch = ""
         displayed = LibraryQuery.apply(to: books, filter: .all, searchText: "", sort: sortOrder)
@@ -337,6 +360,11 @@ struct LibraryView: View {
                 .padding(.top, 10)
                 .padding(.bottom, 6)
 
+            if deviceMonitor.isConnected {
+                KindlePresenceFilterControl(selection: $kindlePresenceFilter)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            }
         }
         .background(.ultraThinMaterial)
     }
@@ -382,7 +410,10 @@ struct LibraryView: View {
         } else if !searchText.isEmpty {
             .noSearchResults(query: searchText, onClear: { searchText = "" })
         } else {
-            .noFilterMatches(onShowAll: onShowAll)
+            .noFilterMatches(onShowAll: {
+                kindlePresenceFilter = .all
+                onShowAll()
+            })
         }
     }
 

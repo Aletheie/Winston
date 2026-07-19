@@ -223,6 +223,61 @@ struct LibraryQueryTests {
         #expect(structuredIDs == savedIDs)
     }
 
+    @Test func displaySnapshotQueryFiltersByKindlePresenceOnlyWhileConnected() {
+        let onKindle = makeBook("On Kindle")
+        onKindle.originalFileName = "on-kindle.epub"
+        let notOnKindle = makeBook("Not on Kindle")
+        notOnKindle.originalFileName = "not-on-kindle.epub"
+        let books = [onKindle, notOnKindle]
+        let snapshots = books.enumerated().map {
+            LibraryDisplaySnapshot(
+                $0.element,
+                sourceOrdinal: $0.offset,
+                includeCollections: false,
+                includeHighlights: false
+            )
+        }
+        let deviceFileNames = Set([onKindle.deviceMatchKey])
+
+        let onKindleIDs = LibraryQuery.displayIDs(
+            for: snapshots,
+            filter: .all,
+            searchText: "",
+            sort: .sourceOrder,
+            savedSearch: nil,
+            smartShelf: nil,
+            deviceFileNames: deviceFileNames,
+            deviceIsConnected: true,
+            kindlePresenceFilter: .onKindle
+        )
+        let notOnKindleIDs = LibraryQuery.displayIDs(
+            for: snapshots,
+            filter: .all,
+            searchText: "",
+            sort: .sourceOrder,
+            savedSearch: nil,
+            smartShelf: nil,
+            deviceFileNames: deviceFileNames,
+            deviceIsConnected: true,
+            kindlePresenceFilter: .notOnKindle
+        )
+        let disconnectedIDs = LibraryQuery.displayIDs(
+            for: snapshots,
+            filter: .all,
+            searchText: "",
+            sort: .sourceOrder,
+            savedSearch: nil,
+            smartShelf: nil,
+            deviceFileNames: deviceFileNames,
+            deviceIsConnected: false,
+            kindlePresenceFilter: .onKindle
+        )
+
+        #expect(onKindleIDs == [onKindle.uuid])
+        #expect(notOnKindleIDs == [notOnKindle.uuid])
+        #expect(disconnectedIDs == books.map(\.uuid))
+    }
+
     @Test func displaySnapshotQueryScalesToLargeLibraries() {
         let books = (0..<10_000).map { index in
             makeBook(
