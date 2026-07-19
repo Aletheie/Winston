@@ -1,5 +1,10 @@
 import SwiftUI
 
+extension Notification.Name {
+    static let showDiscoverDestination = Notification.Name("showDiscoverDestination")
+    static let showCatalogsDestination = Notification.Name("showCatalogsDestination")
+}
+
 // MARK: - Focused values
 
 enum LibraryCommand: Equatable {
@@ -138,6 +143,18 @@ struct AppCommands: Commands {
 
             Button("Toggle Theme") { themeManager.cycle() }
                 .keyboardShortcut("t", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button("Discover") {
+                settings.showDiscoverInSidebar = true
+                NotificationCenter.default.post(name: .showDiscoverDestination, object: nil)
+            }
+
+            Button("Catalogs") {
+                settings.showCatalogsInSidebar = true
+                NotificationCenter.default.post(name: .showCatalogsDestination, object: nil)
+            }
 
             Divider()
 

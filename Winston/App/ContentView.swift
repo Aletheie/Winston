@@ -19,6 +19,8 @@ struct ContentView: View {
     @Query(sort: \Book.dateAdded, order: .reverse) private var books: [Book]
     @Query(sort: \BookCollection.name) private var collections: [BookCollection]
 
+    @SceneStorage("main.sidebarSelection") private var restoredSidebarSelection = SidebarItem.all.rawValue
+    @SceneStorage("main.columnVisibility") private var restoredColumnVisibility = "all"
     @State private var sidebarSelection: SidebarItem? = .all
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var folderWatcher = FolderWatcher()
@@ -89,6 +91,8 @@ struct ContentView: View {
         }
         .tint(theme.accent)
         .task {
+            restoreSceneState()
+            normalizeRestoredDestination()
             deviceMonitor.start()
             restartWatcher()
             await viewModel.notices.checkForNewReleasesIfDue()
@@ -118,6 +122,12 @@ struct ContentView: View {
         .onChange(of: deviceMonitor.isConnected) { _, connected in
             if !connected, sidebarSelection == .device { sidebarSelection = .all }
         }
+        .onChange(of: sidebarSelection) { _, selection in
+            restoredSidebarSelection = selection?.rawValue ?? SidebarItem.all.rawValue
+        }
+        .onChange(of: columnVisibility) { _, visibility in
+            restoredColumnVisibility = Self.storageValue(for: visibility)
+        }
         .onChange(of: settings.watchFolderEnabled) { _, _ in restartWatcher() }
         .onChange(of: settings.watchFolderPath) { _, _ in restartWatcher() }
         .onChange(of: settings.showDiscoverInSidebar) { _, isVisible in
@@ -128,6 +138,12 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .watchFolderChanged)) { _ in
             scheduleWatchScan()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showDiscoverDestination)) { _ in
+            sidebarSelection = .discover
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showCatalogsDestination)) { _ in
+            sidebarSelection = .catalogs
         }
     }
 
@@ -146,6 +162,39 @@ struct ContentView: View {
     private var isWishlistSelected: Bool {
         guard case .collection(let id) = sidebarSelection else { return false }
         return collections.contains { $0.id == id && $0.isWishlist }
+    }
+
+    private func normalizeRestoredDestination() {
+        switch sidebarSelection {
+        case .discover where !settings.showDiscoverInSidebar,
+             .catalogs where !settings.showCatalogsInSidebar:
+            sidebarSelection = .all
+        case .collection(let id) where !collections.contains(where: { $0.id == id }):
+            sidebarSelection = .all
+        default:
+            break
+        }
+    }
+
+    private func restoreSceneState() {
+        sidebarSelection = SidebarItem(rawValue: restoredSidebarSelection) ?? .all
+        columnVisibility = Self.columnVisibility(for: restoredColumnVisibility)
+    }
+
+    private static func storageValue(for visibility: NavigationSplitViewVisibility) -> String {
+        if visibility == .detailOnly { return "detailOnly" }
+        if visibility == .doubleColumn { return "doubleColumn" }
+        if visibility == .automatic { return "automatic" }
+        return "all"
+    }
+
+    private static func columnVisibility(for value: String) -> NavigationSplitViewVisibility {
+        switch value {
+        case "detailOnly": .detailOnly
+        case "doubleColumn": .doubleColumn
+        case "automatic": .automatic
+        default: .all
+        }
     }
 
     // MARK: - Watch folder

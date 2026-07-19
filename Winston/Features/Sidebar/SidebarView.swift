@@ -1,7 +1,7 @@
 import SwiftUI
 import SwiftData
 
-enum SidebarItem: Hashable {
+enum SidebarItem: Hashable, RawRepresentable {
     case all
     case recentlyAdded
     case status(ReadingStatus)
@@ -15,6 +15,49 @@ enum SidebarItem: Hashable {
     case discover
     case catalogs
     case updates
+
+    init?(rawValue: String) {
+        let parts = rawValue.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        let value = parts.count == 2 ? String(parts[1]) : ""
+        switch String(parts[0]) {
+        case "all": self = .all
+        case "recentlyAdded": self = .recentlyAdded
+        case "rated": self = .rated
+        case "device": self = .device
+        case "discover": self = .discover
+        case "catalogs": self = .catalogs
+        case "updates": self = .updates
+        case "status":
+            guard let status = ReadingStatus(rawValue: value) else { return nil }
+            self = .status(status)
+        case "collection":
+            guard let id = UUID(uuidString: value) else { return nil }
+            self = .collection(id)
+        case "format": self = .format(value)
+        case "author": self = .author(value)
+        case "series": self = .series(value)
+        case "tag": self = .tag(value)
+        default: return nil
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .all: "all"
+        case .recentlyAdded: "recentlyAdded"
+        case .rated: "rated"
+        case .device: "device"
+        case .discover: "discover"
+        case .catalogs: "catalogs"
+        case .updates: "updates"
+        case .status(let status): "status:\(status.rawValue)"
+        case .collection(let id): "collection:\(id.uuidString)"
+        case .format(let value): "format:\(value)"
+        case .author(let value): "author:\(value)"
+        case .series(let value): "series:\(value)"
+        case .tag(let value): "tag:\(value)"
+        }
+    }
 
     var libraryFilter: LibraryFilter {
         switch self {
