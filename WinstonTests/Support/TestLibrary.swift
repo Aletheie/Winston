@@ -32,15 +32,19 @@ final class TestLibrary {
     let context: ModelContext
     let root: URL
     private let previousRoot: URL
+    private let previousTrashesRemovedBooks: Bool
 
     init() async throws {
         await TestLibraryAccess.shared.acquire()
         previousRoot = AppPaths.rootDirectory
+        previousTrashesRemovedBooks = BookFileStore.trashesRemovedBooks
+        BookFileStore.trashesRemovedBooks = false
         root = FileManager.default.temporaryDirectory
             .appending(path: "WinstonTestLibrary-\(UUID().uuidString)", directoryHint: .isDirectory)
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         } catch {
+            BookFileStore.trashesRemovedBooks = previousTrashesRemovedBooks
             await TestLibraryAccess.shared.release()
             throw error
         }
@@ -49,6 +53,7 @@ final class TestLibrary {
             try AppPaths.ensureRequiredDirectories()
         } catch {
             AppPaths.rootDirectory = previousRoot
+            BookFileStore.trashesRemovedBooks = previousTrashesRemovedBooks
             try? FileManager.default.removeItem(at: root)
             await TestLibraryAccess.shared.release()
             throw error
@@ -65,6 +70,7 @@ final class TestLibrary {
 
     deinit {
         AppPaths.rootDirectory = previousRoot
+        BookFileStore.trashesRemovedBooks = previousTrashesRemovedBooks
         try? FileManager.default.removeItem(at: root)
         Task { await TestLibraryAccess.shared.release() }
     }

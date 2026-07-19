@@ -136,7 +136,7 @@ final class LibraryViewModel {
     }
 
     private func finishRemoval(_ removed: RemovedBook) {
-        removed.fileNames.forEach { BookFileStore.delete(fileName: $0) }
+        removed.fileNames.forEach { BookFileStore.trash(fileName: $0) }
         CoverStore.delete(for: removed.uuid)
         importer.cancelPending(removed.uuid)
         editions.removeProposals(referencing: removed.uuid)

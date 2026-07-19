@@ -1,6 +1,11 @@
 import Foundation
+import OSLog
 
 enum BookFileStore {
+    // Trash is for user-initiated book removal only; artifact cleanup stays on delete(fileName:).
+    // Tests disable trashing so fixtures never land in the user's Trash (process-global, like AppPaths).
+    nonisolated(unsafe) static var trashesRemovedBooks = true
+
     nonisolated static func replacementCopy(
         of source: URL,
         replacing existingFileName: String,
@@ -59,6 +64,21 @@ enum BookFileStore {
 
     nonisolated static func delete(fileName: String) {
         try? FileManager.default.removeItem(at: url(for: fileName))
+    }
+
+    nonisolated static func trash(fileName: String) {
+        let target = url(for: fileName)
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: target.path(percentEncoded: false)) else { return }
+        if trashesRemovedBooks,
+           (try? fileManager.trashItem(at: target, resultingItemURL: nil)) != nil {
+            return
+        }
+        do {
+            try fileManager.removeItem(at: target)
+        } catch {
+            Log.persistence.error("Removing book file \(fileName, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 }
 
