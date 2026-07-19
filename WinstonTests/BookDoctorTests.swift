@@ -94,6 +94,40 @@ struct BookDoctorTests {
         #expect(report.hasErrors)
         #expect(!report.canImport)
         #expect(!report.canSend)
+        #expect(report.assetValidation == .corrupt)
+    }
+
+    @Test func batchInspectionPreservesInputOrderAndStreamsProgress() async throws {
+        let url = try EPUBFixture.make(title: "Batch", author: "A")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let sources = (0..<5).map { index in
+            BookDoctorSource(title: "Book \(index)", url: url)
+        }
+        let progress = BookDoctorProgressRecorder()
+
+        let reports = await BookDoctorService.inspect(
+            sources,
+            maximumConcurrency: 2
+        ) { completed, _ in
+            await progress.record(completed)
+        }
+        let progressCounts = await progress.counts
+
+        #expect(reports.map(\.source.title) == sources.map(\.title))
+        #expect(progressCounts == [1, 2, 3, 4, 5])
+    }
+
+    @Test func importAnalysisPersistsTheBookDoctorVerdict() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonImportDoctor-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "broken.epub")
+        try Data("not an epub".utf8).write(to: url)
+
+        let analysis = await ImportService.defaultAnalysis(for: url)
+
+        #expect(analysis.validation == .corrupt)
     }
 
     @Test func drmEPUBCanBeArchivedButNotSent() throws {
@@ -119,6 +153,7 @@ struct BookDoctorTests {
         #expect(report.issues.contains { $0.kind == .drm && $0.severity == .error })
         #expect(report.canImport)
         #expect(!report.canSend)
+        #expect(report.assetValidation == .ok)
     }
 
     private func damagedEPUB() throws -> URL {
@@ -142,5 +177,13 @@ struct BookDoctorTests {
             </package>
             """
         )
+    }
+}
+
+private actor BookDoctorProgressRecorder {
+    private(set) var counts: [Int] = []
+
+    func record(_ completed: Int) {
+        counts.append(completed)
     }
 }

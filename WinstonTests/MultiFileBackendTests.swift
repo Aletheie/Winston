@@ -138,6 +138,37 @@ struct MultiFileBackendTests {
         #expect(books.allSatisfy { $0.title != nil })
     }
 
+    @Test func bulkImportBoundsBackgroundAnalysisConcurrency() async throws {
+        let library = try await TestLibrary()
+        let sources = try (0..<8).map { index in
+            let url = library.root.appending(path: "bulk-\(index).epub")
+            try Data("book \(index)".utf8).write(to: url)
+            return url
+        }
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let probe = MetadataRescanProbe()
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: library.context, settings: settings),
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
+            toasts: ToastCenter(),
+            analyzeBook: { url in await probe.analyze(url) }
+        )
+
+        importer.addBooks(from: sources)
+        let deadline = Date.now.addingTimeInterval(3)
+        while (library.context.allBooks().count < sources.count || importer.isExtracting), Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let maximumConcurrency = await probe.maximumConcurrency()
+
+        #expect(library.context.allBooks().count == sources.count)
+        #expect(maximumConcurrency > 1)
+        #expect(maximumConcurrency <= BookDoctorService.defaultMaximumConcurrentInspections)
+    }
+
     @Test func relinkAfterMakePrimaryUpdatesTheCurrentPrimaryAsset() async throws {
         let library = try await TestLibrary()
         let epubSource = library.root.appending(path: "a.epub")

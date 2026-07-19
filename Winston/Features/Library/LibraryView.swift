@@ -222,8 +222,7 @@ struct LibraryView: View {
                 allowsMultipleSelection: true
             ) { result in
                 if case .success(let urls) = result, !urls.isEmpty {
-                    let sources = urls.map { BookDoctorSource(title: $0.lastPathComponent, url: $0) }
-                    activeSheet = .bookDoctor(BookDoctorRequest(sources: sources, purpose: .importFiles))
+                    viewModel.addBooks(from: urls)
                 }
             }
             .sheet(item: $activeSheet) { sheet in
@@ -535,8 +534,6 @@ struct LibraryView: View {
     private func handleBookDoctorProceed(_ request: BookDoctorRequest, urls: [URL]) {
         guard !urls.isEmpty else { return }
         switch request.purpose {
-        case .importFiles:
-            viewModel.addBooks(from: urls)
         case .sendToKindle:
             let paths = Set(urls.map { $0.standardizedFileURL.path(percentEncoded: false) })
             let ready = books.filter { paths.contains($0.fileURL.standardizedFileURL.path(percentEncoded: false)) }

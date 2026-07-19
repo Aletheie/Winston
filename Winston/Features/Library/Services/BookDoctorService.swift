@@ -62,9 +62,16 @@ nonisolated struct BookDoctorReport: Identifiable, Sendable, Equatable {
         !issues.contains { [.missingFile, .unreadable, .unsupportedFormat, .unsafeArchive].contains($0.kind) }
     }
     var canSend: Bool { !hasErrors }
+    var assetValidation: AssetValidation {
+        if issues.contains(where: { $0.kind == .missingFile }) { return .missing }
+        if issues.contains(where: { $0.severity == .error && $0.kind != .drm }) { return .corrupt }
+        return .ok
+    }
 }
 
 nonisolated enum BookDoctorService {
+    static let defaultMaximumConcurrentInspections = 3
+
     enum RepairError: Error, LocalizedError {
         case notRepairable
         case destinationMatchesSource
@@ -129,6 +136,47 @@ nonisolated enum BookDoctorService {
                 "Book Doctor currently checks EPUB, PDF, MOBI, AZW, and AZW3 files."
             )])
         }
+    }
+
+    static func inspect(
+        _ sources: [BookDoctorSource],
+        maximumConcurrency: Int = defaultMaximumConcurrentInspections,
+        progress: (@Sendable (_ completed: Int, _ report: BookDoctorReport) async -> Void)? = nil
+    ) async -> [BookDoctorReport] {
+        guard !sources.isEmpty else { return [] }
+        let concurrency = min(max(1, maximumConcurrency), sources.count)
+        var reports = Array<BookDoctorReport?>(repeating: nil, count: sources.count)
+
+        await withTaskGroup(of: (Int, BookDoctorReport).self) { group in
+            var nextIndex = 0
+            var completed = 0
+
+            while nextIndex < concurrency {
+                let index = nextIndex
+                group.addTask(priority: .userInitiated) {
+                    (index, inspect(sources[index]))
+                }
+                nextIndex += 1
+            }
+
+            while let (index, report) = await group.next() {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    break
+                }
+                reports[index] = report
+                completed += 1
+                await progress?(completed, report)
+
+                guard nextIndex < sources.count else { continue }
+                let pendingIndex = nextIndex
+                group.addTask(priority: .userInitiated) {
+                    (pendingIndex, inspect(sources[pendingIndex]))
+                }
+                nextIndex += 1
+            }
+        }
+        return reports.compactMap { $0 }
     }
 
     static func makeRepairedCopy(of source: URL, at destination: URL) throws {

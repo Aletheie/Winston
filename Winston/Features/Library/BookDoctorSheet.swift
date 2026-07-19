@@ -3,7 +3,6 @@ import UniformTypeIdentifiers
 
 nonisolated struct BookDoctorRequest: Identifiable, Sendable {
     enum Purpose: Sendable, Equatable {
-        case importFiles
         case sendToKindle
         case review
     }
@@ -21,6 +20,7 @@ struct BookDoctorSheet: View {
     @Environment(\.theme) private var theme
     @State private var reports: [BookDoctorReport] = []
     @State private var isInspecting = true
+    @State private var completedInspectionCount = 0
     @State private var repairingIDs: Set<UUID> = []
     @State private var savedRepairNames: [UUID: String] = [:]
     @State private var repairError: String?
@@ -70,26 +70,32 @@ struct BookDoctorSheet: View {
 
     @ViewBuilder
     private var content: some View {
-        if isInspecting {
-            VStack(spacing: 12) {
-                ProgressView()
-                    .controlSize(.large)
-                Text("Checking structure, content, cover, encoding, and DRM…")
+        VStack(spacing: 0) {
+            if isInspecting {
+                BookDoctorInspectionProgress(
+                    completed: completedInspectionCount,
+                    total: request.sources.count
+                )
+                Divider()
+            }
+
+            if reports.isEmpty {
+                Text("Results appear as each book finishes.")
                     .font(theme.body(size: 12))
                     .foregroundStyle(theme.textSecondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(reports) { report in
+                    BookDoctorReportSection(
+                        report: report,
+                        isRepairing: repairingIDs.contains(report.id),
+                        savedRepairName: savedRepairNames[report.id],
+                        onRepair: { repair(report) }
+                    )
+                }
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            List(reports) { report in
-                BookDoctorReportSection(
-                    report: report,
-                    isRepairing: repairingIDs.contains(report.id),
-                    savedRepairName: savedRepairNames[report.id],
-                    onRepair: { repair(report) }
-                )
-            }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
         }
     }
 
@@ -141,8 +147,6 @@ struct BookDoctorSheet: View {
 
     private var headerDetail: LocalizedStringKey {
         switch request.purpose {
-        case .importFiles:
-            "Review files before adding them to your library."
         case .sendToKindle:
             "Review the selected books before sending them to Kindle."
         case .review:
@@ -156,7 +160,6 @@ struct BookDoctorSheet: View {
 
     private func isEligible(_ report: BookDoctorReport) -> Bool {
         switch request.purpose {
-        case .importFiles: report.canImport
         case .sendToKindle: report.canSend
         case .review: !report.hasErrors
         }
@@ -169,8 +172,6 @@ struct BookDoctorSheet: View {
     private var proceedButtonTitle: LocalizedStringKey {
         let count = eligibleReports.count
         return switch request.purpose {
-        case .importFiles:
-            count == request.sources.count ? "Import \(count) Books" : "Import \(count) Usable Books"
         case .sendToKindle:
             count == request.sources.count ? "Send \(count) to Kindle" : "Send \(count) Ready Books"
         case .review:
@@ -187,22 +188,18 @@ struct BookDoctorSheet: View {
 
     private func inspect() async {
         isInspecting = true
+        completedInspectionCount = 0
+        reports = []
         let sources = request.sources
-        let inspectionTask = Task.detached(priority: .userInitiated) {
-            var results: [BookDoctorReport] = []
-            for source in sources {
-                guard !Task.isCancelled else { break }
-                results.append(BookDoctorService.inspect(source))
+        let results = await BookDoctorService.inspect(sources) { completed, report in
+            await MainActor.run {
+                reports.append(report)
+                completedInspectionCount = completed
             }
-            return results
-        }
-        let results = await withTaskCancellationHandler {
-            await inspectionTask.value
-        } onCancel: {
-            inspectionTask.cancel()
         }
         guard !Task.isCancelled else { return }
         reports = results
+        completedInspectionCount = results.count
         isInspecting = false
     }
 
@@ -226,6 +223,42 @@ struct BookDoctorSheet: View {
                 repairError = error.localizedDescription
             }
         }
+    }
+}
+
+private struct BookDoctorInspectionProgress: View {
+    let completed: Int
+    let total: Int
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Checking books…")
+                    .font(theme.body(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.textPrimary)
+                Spacer()
+                Text(
+                    "Checked \(completed) of \(total)",
+                    comment: "Book Doctor progress; the first value is completed books and the second is the total."
+                )
+                .font(theme.label(size: 11, weight: .semibold))
+                .foregroundStyle(theme.textSecondary)
+                .monospacedDigit()
+            }
+
+            ProgressView(value: Double(completed), total: Double(max(total, 1)))
+                .progressViewStyle(.linear)
+                .accessibilityLabel("Book Doctor progress")
+                .accessibilityValue("\(completed) of \(total) books checked")
+
+            Text("Checking structure, content, cover, encoding, and DRM…")
+                .font(theme.body(size: 11))
+                .foregroundStyle(theme.textSecondary)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
     }
 }
 

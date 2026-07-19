@@ -1,9 +1,54 @@
 import Foundation
 import SwiftData
 
-struct ImportBookAnalysis: Sendable {
+nonisolated struct ImportBookAnalysis: Sendable {
     let metadata: BookMetadata
     let drmProtected: Bool
+    let validation: AssetValidation
+
+    init(
+        metadata: BookMetadata,
+        drmProtected: Bool,
+        validation: AssetValidation = .ok
+    ) {
+        self.metadata = metadata
+        self.drmProtected = drmProtected
+        self.validation = validation
+    }
+}
+
+private actor ImportAnalysisLimiter {
+    private var availablePermits: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) {
+        availablePermits = max(1, limit)
+    }
+
+    func run<T: Sendable>(_ operation: @Sendable () async -> T) async -> T {
+        await acquire()
+        let result = await operation()
+        release()
+        return result
+    }
+
+    private func acquire() async {
+        if availablePermits > 0 {
+            availablePermits -= 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    private func release() {
+        guard !waiters.isEmpty else {
+            availablePermits += 1
+            return
+        }
+        waiters.removeFirst().resume()
+    }
 }
 
 @MainActor
@@ -39,6 +84,9 @@ final class ImportService {
     private let toasts: ToastCenter
     private let editions: EditionService?
     private let analyzeBook: @Sendable (URL) async -> ImportBookAnalysis
+    private let analysisLimiter = ImportAnalysisLimiter(
+        limit: BookDoctorService.defaultMaximumConcurrentInspections
+    )
 
     private(set) var pendingMetadataUUIDs: Set<UUID> = []
     private var pendingSourcePaths: Set<String> = []
@@ -140,7 +188,7 @@ final class ImportService {
                         contentHash: contentHash,
                         sizeBytes: size,
                         dateAdded: book.dateAdded,
-                        validationStatus: .ok,
+                        validationStatus: nil,
                         book: book
                     )
                     if targetWork == nil { modelContext.insert(work) }
@@ -309,10 +357,14 @@ final class ImportService {
             pendingMetadataUUIDs.remove(uuid)
             if let matchBatchID { finishMatchBatch(matchBatchID, completed: uuid) }
         }
-        let result = await analyzeBook(url)
+        let analyzer = analyzeBook
+        let result = await analysisLimiter.run {
+            await analyzer(url)
+        }
         guard !Task.isCancelled, book.modelContext != nil else { return }
         book.apply(result.metadata)
         book.drmProtected = result.drmProtected
+        book.assets.first(where: { $0.fileName == book.fileName })?.validationStatus = result.validation
         refreshWorkIdentity(for: book, allowDisplayTitleFallback: !settings.onlineMetadataEnabled)
         modelContext.saveQuietly()
         wishlist.fulfil(with: [book])
@@ -376,10 +428,14 @@ final class ImportService {
     }
 
     nonisolated static func defaultAnalysis(for url: URL) async -> ImportBookAnalysis {
-        await Task.detached(priority: .userInitiated) {
-            ImportBookAnalysis(
+        await Task.detached(priority: .utility) {
+            let report = BookDoctorService.inspect(
+                BookDoctorSource(title: url.lastPathComponent, url: url)
+            )
+            return ImportBookAnalysis(
                 metadata: MetadataExtractor.extractMetadata(from: url),
-                drmProtected: DRMDetector.isProtected(url: url)
+                drmProtected: report.issues.contains { $0.kind == .drm },
+                validation: report.assetValidation
             )
         }.value
     }
