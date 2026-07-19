@@ -100,7 +100,7 @@ let project = Project(
                 // Tuist's default plist hardcodes 1.0; route it through the build settings
                 "CFBundleShortVersionString": "$(MARKETING_VERSION)",
                 "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
-                "NSHumanReadableCopyright": "",
+                "NSHumanReadableCopyright": "Copyright © 2026 Anna Jungmannová. All rights reserved.",
                 "CFBundleHelpBookFolder": "WinstonHelp.help",
                 "CFBundleHelpBookName": "cz.annajung.Winston.helpbook",
                 "CFBundleDevelopmentRegion": "en",
