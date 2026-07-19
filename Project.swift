@@ -33,6 +33,8 @@ private let appSettings: SettingsDictionary = [
     "OTHER_LDFLAGS": "$(inherited) -lmtp",
     "ENABLE_APP_SANDBOX": "NO",
     "ENABLE_HARDENED_RUNTIME": "YES",
+    // Sparkle's binary XCFramework and bundled Homebrew libraries do not ship arm64e.
+    "ENABLE_POINTER_AUTHENTICATION": "NO",
     "ENABLE_USER_SCRIPT_SANDBOXING": "NO",
     "LD_RUNPATH_SEARCH_PATHS": "$(inherited) @executable_path/../Frameworks",
     "CODE_SIGN_STYLE": "Automatic",
@@ -48,6 +50,8 @@ private let testSettings: SettingsDictionary = [
     "SWIFT_VERSION": "6.0",
     // @testable import Winston transitively needs the C module
     "SWIFT_INCLUDE_PATHS": "$(SRCROOT)/CLibMTP",
+    // Test bundles must use the same architecture as their Winston host.
+    "ENABLE_POINTER_AUTHENTICATION": "NO",
     "CODE_SIGN_STYLE": "Automatic",
     "DEVELOPMENT_TEAM": "4F4YMTN4C5",
 ]
@@ -59,6 +63,8 @@ private let quickLookSettings: SettingsDictionary = [
     "ENABLE_APP_SANDBOX": "YES",
     "ENABLE_USER_SELECTED_FILES": "readonly",
     "ENABLE_HARDENED_RUNTIME": "YES",
+    // Keep the embedded extension architecture aligned with its Winston host.
+    "ENABLE_POINTER_AUTHENTICATION": "NO",
     "CODE_SIGN_STYLE": "Automatic",
     "DEVELOPMENT_TEAM": "4F4YMTN4C5",
     "SKIP_INSTALL": "YES",
@@ -78,6 +84,7 @@ let project = Project(
     settings: .settings(base: [
         "MACOSX_DEPLOYMENT_TARGET": "26.4",
         "ARCHS": "arm64",
+        "ENABLE_ENHANCED_SECURITY": "YES",
         // single source of truth for the app + QuickLook extension versions
         "MARKETING_VERSION": "0.1",
         "CURRENT_PROJECT_VERSION": "1",
@@ -114,6 +121,13 @@ let project = Project(
                 "Winston/Resources/Localizable.xcstrings",
                 .folderReference(path: "Winston/Help/WinstonHelp.help"),
             ],
+            entitlements: .dictionary([
+                "com.apple.security.hardened-process": true,
+                "com.apple.security.hardened-process.enhanced-security-version-string": "2",
+                "com.apple.security.hardened-process.hardened-heap": true,
+                "com.apple.security.hardened-process.dyld-ro": true,
+                "com.apple.security.hardened-process.platform-restrictions-string": "2",
+            ]),
             scripts: [
                 .post(
                     path: "Scripts/bundle-libmtp.sh",
