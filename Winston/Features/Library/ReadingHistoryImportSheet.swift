@@ -50,28 +50,28 @@ final class ReadingHistoryImportViewModel {
     private(set) var rows: [ReadingHistoryImportPreviewRow] = []
     private(set) var visibleRows: [ReadingHistoryImportPreviewRow] = []
     private(set) var phase: Phase = .idle
+    private(set) var selectedCount = 0
+    private(set) var readyCount = 0
+    private(set) var reviewCount = 0
+    private(set) var unmatchedCount = 0
 
     @ObservationIgnored private var booksByID: [UUID: Book] = [:]
+    @ObservationIgnored private var rowIndexByID: [String: Int] = [:]
 
     var selectedRow: ReadingHistoryImportPreviewRow? {
-        guard let selectedRowID else { return nil }
-        return rows.first { $0.id == selectedRowID }
+        guard let selectedRowID, let index = rowIndexByID[selectedRowID] else { return nil }
+        return rows[index]
     }
 
-    var selectedCount: Int { rows.count { $0.isIncluded } }
-    var readyCount: Int {
-        rows.count {
-            $0.matchedBookID != nil && $0.impact?.hasChanges == true && !$0.matchKind.needsReview
-        }
-    }
-    var reviewCount: Int { rows.count { $0.matchKind == .titleOnly || $0.matchKind == .ambiguous } }
-    var unmatchedCount: Int { rows.count { $0.matchKind == .unmatched } }
     var canImport: Bool { selectedCount > 0 && phase != .importing }
 
     subscript(included rowID: String) -> Bool {
-        get { rows.first { $0.id == rowID }?.isIncluded ?? false }
+        get {
+            guard let index = rowIndexByID[rowID] else { return false }
+            return rows[index].isIncluded
+        }
         set {
-            guard let index = rows.firstIndex(where: { $0.id == rowID }) else { return }
+            guard let index = rowIndexByID[rowID] else { return }
             if newValue {
                 guard rows[index].matchedBookID != nil, rows[index].impact?.hasChanges == true else { return }
             }
@@ -81,9 +81,12 @@ final class ReadingHistoryImportViewModel {
     }
 
     subscript(matchFor rowID: String) -> UUID? {
-        get { rows.first { $0.id == rowID }?.matchedBookID }
+        get {
+            guard let index = rowIndexByID[rowID] else { return nil }
+            return rows[index].matchedBookID
+        }
         set {
-            guard let index = rows.firstIndex(where: { $0.id == rowID }) else { return }
+            guard let index = rowIndexByID[rowID] else { return }
             rows[index].matchedBookID = newValue
             if let newValue, let book = booksByID[newValue] {
                 rows[index].matchKind = .manual
@@ -107,6 +110,11 @@ final class ReadingHistoryImportViewModel {
         rows = []
         visibleRows = []
         selectedRowID = nil
+        rowIndexByID = [:]
+        selectedCount = 0
+        readyCount = 0
+        reviewCount = 0
+        unmatchedCount = 0
         booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
 
         do {
@@ -116,6 +124,7 @@ final class ReadingHistoryImportViewModel {
             guard !Task.isCancelled else { return }
             document = loaded
             rows = ReadingHistoryImportMatcher.match(records: loaded.records, books: books)
+            rebuildRowIndex()
             recomputeVisibleRows()
             phase = .loaded
         } catch {
@@ -161,26 +170,57 @@ final class ReadingHistoryImportViewModel {
 
     private func recomputeVisibleRows() {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        visibleRows = rows.filter { row in
+        var visible: [ReadingHistoryImportPreviewRow] = []
+        visible.reserveCapacity(rows.count)
+        var selected = 0
+        var ready = 0
+        var review = 0
+        var unmatched = 0
+
+        for row in rows {
+            if row.isIncluded { selected += 1 }
+            let isReady = row.matchedBookID != nil
+                && row.impact?.hasChanges == true
+                && !row.matchKind.needsReview
+            if isReady { ready += 1 }
+            let needsReview = row.matchKind == .titleOnly || row.matchKind == .ambiguous
+            if needsReview { review += 1 }
+            let isUnmatched = row.matchKind == .unmatched
+            if isUnmatched { unmatched += 1 }
+
             let matchesFilter = switch filter {
             case .all:
                 true
             case .ready:
-                row.matchedBookID != nil && row.impact?.hasChanges == true && !row.matchKind.needsReview
+                isReady
             case .review:
-                row.matchKind == .titleOnly || row.matchKind == .ambiguous
+                needsReview
             case .unmatched:
-                row.matchKind == .unmatched
+                isUnmatched
             }
-            guard matchesFilter else { return false }
-            guard !query.isEmpty else { return true }
-            return row.record.title.localizedCaseInsensitiveContains(query)
+            guard matchesFilter else { continue }
+            let matchesQuery = query.isEmpty
+                || row.record.title.localizedCaseInsensitiveContains(query)
                 || row.record.author?.localizedCaseInsensitiveContains(query) == true
                 || row.record.isbn?.localizedCaseInsensitiveContains(query) == true
+            if matchesQuery { visible.append(row) }
         }
+
+        selectedCount = selected
+        readyCount = ready
+        reviewCount = review
+        unmatchedCount = unmatched
+        visibleRows = visible
 
         if let selectedRowID, visibleRows.contains(where: { $0.id == selectedRowID }) { return }
         selectedRowID = visibleRows.first?.id
+    }
+
+    private func rebuildRowIndex() {
+        rowIndexByID = Dictionary(
+            rows.indices.map { (rows[$0].id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 }
 
