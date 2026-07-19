@@ -44,7 +44,8 @@ final class HighlightsService {
                 return
             }
             let clippings = await Task.detached(priority: .userInitiated) { KindleClippings.parse(text) }.value
-            let snapshots = modelContext.allBooks().map { book in
+            let libraryBooks = modelContext.allBooks()
+            let snapshots = libraryBooks.map { book in
                 BookSnapshot(
                     uuid: book.uuid,
                     title: book.displayTitle,
@@ -53,7 +54,7 @@ final class HighlightsService {
             }
             let matches = await Self.match(clippings: clippings, books: snapshots)
             let currentBooks = Dictionary(
-                modelContext.allBooks().map { ($0.uuid, $0) },
+                libraryBooks.map { ($0.uuid, $0) },
                 uniquingKeysWith: { first, _ in first }
             )
             var added = 0
