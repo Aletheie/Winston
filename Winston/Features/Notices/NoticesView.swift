@@ -62,6 +62,26 @@ private struct NoticesFeed: View {
     let gatingReason: NoticesGatingBanner.Reason?
     let lastCheckFailed: Bool
     let onOpenSeries: (String) -> Void
+    @State private var archiveSections: [NoticeDateBucket.Section] = []
+
+    private struct ArchiveRevision: Hashable {
+        struct Item: Hashable {
+            let id: UUID
+            let dateCreated: Date
+        }
+
+        let items: [Item]
+        let day: Date
+    }
+
+    private var archiveRevision: ArchiveRevision {
+        ArchiveRevision(
+            items: items.dropFirst().map {
+                ArchiveRevision.Item(id: $0.id, dateCreated: $0.dateCreated)
+            },
+            day: Calendar.current.startOfDay(for: .now)
+        )
+    }
 
     var body: some View {
         ScrollView {
@@ -88,7 +108,7 @@ private struct NoticesFeed: View {
                 }
 
                 NoticesArchive(
-                    sections: NoticeDateBucket.sections(from: Array(items.dropFirst()), now: .now),
+                    sections: archiveSections,
                     notices: notices,
                     viewModel: viewModel,
                     onOpenSeries: onOpenSeries
@@ -98,6 +118,9 @@ private struct NoticesFeed: View {
             .padding(.top, 18)
             .padding(.bottom, 24)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .task(id: archiveRevision) {
+            archiveSections = NoticeDateBucket.sections(from: Array(items.dropFirst()), now: .now)
         }
     }
 }
