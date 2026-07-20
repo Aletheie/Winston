@@ -94,6 +94,8 @@ struct SidebarView: View {
     @State private var renameText = ""
     @State private var browseRename: BrowseRename?
     @State private var browseRenameText = ""
+    @State private var deleteCollectionTarget: BookCollection?
+    @State private var deleteTagTarget: String?
     @State private var dismissedAuthorTips: Set<String> = []
     @State private var dismissedSeriesTips: Set<String> = []
 
@@ -127,7 +129,7 @@ struct SidebarView: View {
                     } icon: {
                         Image(systemName: "sparkles")
                     }
-                    .font(theme.label(size: 12))
+                    .font(theme.label(size: 14))
                     .lineLimit(1)
                     .tag(SidebarItem.discover)
                     .accessibilityIdentifier("sidebar.discover")
@@ -138,7 +140,7 @@ struct SidebarView: View {
                     } icon: {
                         Image(systemName: "globe")
                     }
-                    .font(theme.label(size: 12))
+                    .font(theme.label(size: 14))
                     .lineLimit(1)
                     .tag(SidebarItem.catalogs)
                     .accessibilityIdentifier("sidebar.catalogs")
@@ -182,7 +184,13 @@ struct SidebarView: View {
                 onNewSmartShelf: { smartShelfRequest = .create() },
                 onEditSmartShelf: { smartShelfRequest = SmartShelfEditorRequest.edit($0) },
                 onRename: { renameText = $0.name; renameTarget = $0 },
-                onDelete: { viewModel.deleteCollection($0) }
+                onDelete: { deleteCollectionTarget = $0 },
+                onDropBooks: { bookIDs, collection in
+                    guard !collection.isSystem, !collection.isSmart else { return }
+                    let draggedBooks = books.filter { bookIDs.contains($0.uuid) }
+                    guard !draggedBooks.isEmpty else { return }
+                    viewModel.add(draggedBooks, to: collection)
+                }
             )
 
             if !facets.formatKeys.isEmpty || !facets.authorKeys.isEmpty || !facets.seriesKeys.isEmpty || !facets.tagKeys.isEmpty {
@@ -199,7 +207,7 @@ struct SidebarView: View {
                                      onRename: { browseRenameText = $0; browseRename = .series($0) }, onDelete: nil)
                     BrowseDisclosure(terminal: "TAGS", native: "Tags", isExpanded: $showTags, items: facets.tagKeys,
                                      icon: "tag", count: { facets.tags[$0] ?? 0 }, make: SidebarItem.tag,
-                                     onRename: { browseRenameText = $0; browseRename = .tag($0) }, onDelete: { viewModel.deleteTag($0) })
+                                     onRename: { browseRenameText = $0; browseRename = .tag($0) }, onDelete: { deleteTagTarget = $0 })
                 } header: {
                     header(terminal: "BROWSE", native: "Browse")
                 }
@@ -326,6 +334,41 @@ struct SidebarView: View {
                 browseRename = nil
             }
             Button("Cancel", role: .cancel) { browseRename = nil }
+        }
+        .alert("Delete Collection \u{201C}\(deleteCollectionTarget?.name ?? "")\u{201D}?", isPresented: Binding(
+            get: { deleteCollectionTarget != nil },
+            set: { if !$0 { deleteCollectionTarget = nil } }
+        )) {
+            Button("Delete", role: .destructive) {
+                if let target = deleteCollectionTarget { viewModel.deleteCollection(target) }
+                deleteCollectionTarget = nil
+            }
+            Button("Cancel", role: .cancel) { deleteCollectionTarget = nil }
+        } message: {
+            if let target = deleteCollectionTarget {
+                Text(
+                    "\(target.books.count) books in this collection stay in your library.",
+                    comment: "Deletion confirmation: number of books that remain after their collection is deleted."
+                )
+            }
+        }
+        .alert("Delete Tag \u{201C}\(deleteTagTarget ?? "")\u{201D}?", isPresented: Binding(
+            get: { deleteTagTarget != nil },
+            set: { if !$0 { deleteTagTarget = nil } }
+        )) {
+            Button("Delete", role: .destructive) {
+                if let target = deleteTagTarget { viewModel.deleteTag(target) }
+                deleteTagTarget = nil
+            }
+            Button("Cancel", role: .cancel) { deleteTagTarget = nil }
+        } message: {
+            if let target = deleteTagTarget {
+                let count = books.lazy.filter { $0.tags.contains(target) }.count
+                Text(
+                    "The tag is removed from \(count) books.",
+                    comment: "Deletion confirmation: number of books from which the tag is removed."
+                )
+            }
         }
     }
 

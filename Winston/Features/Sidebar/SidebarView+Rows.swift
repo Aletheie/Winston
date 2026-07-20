@@ -10,7 +10,7 @@ struct SidebarRow: View {
 
     var body: some View {
         Label { title } icon: { Image(systemName: systemImage) }
-            .font(theme.label(size: 12))
+            .font(theme.label(size: 14))
             .badge(count)
             .lineLimit(1)
     }
@@ -26,9 +26,9 @@ struct DeviceSidebarRow: View {
             Label {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(info.name)
-                        .font(theme.label(size: 12, weight: .medium))
+                        .font(theme.label(size: 14, weight: .medium))
                         .lineLimit(1)
-                    Text(detail(for: info))
+                    detail(for: info)
                         .font(theme.label(size: 10, weight: .regular))
                         .foregroundStyle(theme.textTertiary)
                 }
@@ -38,14 +38,18 @@ struct DeviceSidebarRow: View {
             }
         } else {
             Label(theme.usesTerminalCopy ? "NO DEVICE" : "No device", systemImage: "bolt.horizontal.circle")
-                .font(theme.label(size: 12))
+                .font(theme.label(size: 14))
                 .foregroundStyle(theme.textTertiary)
         }
     }
 
-    private func detail(for info: DeviceInfo) -> String {
+    private func detail(for info: DeviceInfo) -> Text {
         let free = ByteCountFormatter.string(fromByteCount: Int64(info.freeBytes), countStyle: .file)
-        return "\(free) free \u{00B7} \(info.kind == .mtp ? "MTP" : "USB")"
+        let transport = info.kind == .mtp ? "MTP" : "USB"
+        return Text(
+            "\(free) free · \(transport)",
+            comment: "Device sidebar detail: available storage followed by the MTP or USB transport."
+        )
     }
 }
 
@@ -60,6 +64,7 @@ struct CollectionsSection: View {
     let onEditSmartShelf: (BookCollection) -> Void
     let onRename: (BookCollection) -> Void
     let onDelete: (BookCollection) -> Void
+    let onDropBooks: ([UUID], BookCollection) -> Void
 
     @Environment(\.theme) private var theme
 
@@ -78,6 +83,9 @@ struct CollectionsSection: View {
                         : (collection.isSmart ? smartCounts[collection.id, default: 0] : collection.books.count)
                 )
                     .tag(SidebarItem.collection(collection.id))
+                    .dropDestination(for: BookDragItem.self) { items, _ in
+                        onDropBooks(items.map(\.bookID), collection)
+                    }
                     .contextMenu {
                         if !collection.isSystem {
                             if collection.smartShelfDefinition != nil {
@@ -104,6 +112,7 @@ struct CollectionsSection: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .help("New Collection or Smart Shelf")
+                .accessibilityLabel("New Collection or Smart Shelf")
             }
         }
     }
@@ -139,7 +148,7 @@ struct BrowseDisclosure: View {
                 }
             } label: {
                 theme.styledText(terminal: terminal, native: native)
-                    .font(theme.label(size: 12, weight: .medium))
+                    .font(theme.label(size: 14, weight: .medium))
                     .foregroundStyle(theme.textSecondary)
                     .badge(items.count)
             }
@@ -176,6 +185,7 @@ struct SidebarFixTip: View {
                 }
                 .buttonStyle(.plain)
                 .help("Dismiss")
+                .accessibilityLabel("Dismiss")
             }
             Button(action: onApply) {
                 HStack(spacing: 4) {
