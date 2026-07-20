@@ -26,7 +26,9 @@ struct BookTableView: View {
             TableColumn("") { book in
                 BookCoverImageView(book: book, tier: .thumb)
                     .frame(width: 26, height: 38)
-                    .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                    .clipShape(
+                        RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall, style: .continuous)
+                    )
             }
             .width(34)
             .customizationID("cover")

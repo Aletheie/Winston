@@ -34,7 +34,7 @@ struct EditMetadataSheet: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall, style: .continuous)
                             .fill(theme.accent.opacity(0.15))
                     )
             }
@@ -91,7 +91,7 @@ struct EditMetadataSheet: View {
                     .foregroundStyle(theme.textSecondary)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .themedBorder(cornerRadius: 6)
+                    .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
                     .keyboardShortcut(.cancelAction)
 
                 Spacer()
@@ -119,7 +119,7 @@ struct EditMetadataSheet: View {
                 .padding(.horizontal, 18)
                 .padding(.vertical, 7)
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
                         .fill(saveBackground)
                 )
                 .keyboardShortcut(.defaultAction)

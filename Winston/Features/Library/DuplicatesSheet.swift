@@ -110,7 +110,9 @@ private struct DuplicateRow: View {
         HStack(spacing: 10) {
             BookCoverImageView(book: book)
                 .frame(width: 36, height: 52)
-                .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                .clipShape(
+                    RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall, style: .continuous)
+                )
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -147,6 +149,7 @@ private struct DuplicateRow: View {
             .buttonStyle(.borderless)
             .disabled(!canResolve)
             .help("Delete this copy")
+            .accessibilityLabel("Delete this copy")
         }
         .padding(.vertical, 4)
     }

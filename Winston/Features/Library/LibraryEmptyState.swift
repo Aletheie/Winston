@@ -33,7 +33,7 @@ struct LibraryEmptyState: View {
                     .font(theme.label(size: 12, weight: .semibold))
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
-                    .themedBorder(cornerRadius: 6)
+                    .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
                 }
                 .buttonStyle(.pressable)
                 .padding(.top, 4)

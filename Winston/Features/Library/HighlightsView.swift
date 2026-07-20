@@ -86,8 +86,11 @@ struct HighlightsView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(theme.surface.opacity(0.6)))
-            .themedBorder(cornerRadius: 6)
+            .background(
+                RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
+                    .fill(theme.surface.opacity(0.6))
+            )
+            .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
         }
         .padding(16)
     }

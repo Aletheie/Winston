@@ -417,10 +417,10 @@ private struct ReadingHistoryImportLoadingRows: View {
         VStack(alignment: .leading, spacing: 18) {
             ForEach(0..<6, id: \.self) { _ in
                 VStack(alignment: .leading, spacing: 7) {
-                    RoundedRectangle(cornerRadius: 3)
+                    RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
                         .fill(.secondary.opacity(0.15))
                         .frame(width: 190, height: 12)
-                    RoundedRectangle(cornerRadius: 3)
+                    RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
                         .fill(.secondary.opacity(0.1))
                         .frame(width: 125, height: 9)
                 }

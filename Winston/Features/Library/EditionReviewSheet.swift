@@ -185,9 +185,9 @@ private struct EditionProposalRow: View {
                 ForEach(books) { book in
                     BookCoverImageView(book: book, tier: .thumb)
                         .frame(width: 34, height: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                        .clipShape(RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 3)
+                            RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
                                 .stroke(theme.backgroundAlt, lineWidth: 2)
                         }
                 }
