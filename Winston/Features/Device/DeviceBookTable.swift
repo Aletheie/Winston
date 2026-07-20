@@ -132,12 +132,16 @@ private struct DeviceFilterBar: View {
                 }
                 .buttonStyle(.plain)
                 .help(theme.copy.clearSearch)
+                .accessibilityLabel(Text(theme.copy.clearSearch))
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .frame(maxWidth: 240)
-        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(theme.surface.opacity(0.6)))
+        .background(
+            RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
+                .fill(theme.surface.opacity(0.6))
+        )
     }
 
     private var countText: Text {
@@ -187,6 +191,7 @@ private struct AuthorFilterButton: View {
                 }
                 .buttonStyle(.plain)
                 .help(theme.copy.clearSearch)
+                .accessibilityLabel(Text(theme.copy.clearSearch))
             }
         }
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {

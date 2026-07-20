@@ -11,6 +11,7 @@ struct DeviceView: View {
     @Environment(ToastCenter.self) private var toasts
     @State private var selectedDeviceBooks: Set<DeviceBook.ID> = []
     @State private var isCleaningSidecars = false
+    @State private var sidecarCleanupTask: Task<Void, Never>?
     @State private var sidecarSummary: String?
     @State private var deviceRows: [DeviceBookRow] = []
     @State private var deviceAuthors: [String] = []
@@ -46,6 +47,12 @@ struct DeviceView: View {
         }
         .sheet(isPresented: $showsSyncPlan) {
             KindleSyncPlanSheet(books: books)
+        }
+        .onChange(of: monitor.info?.identifier) {
+            cancelSidecarCleanup()
+        }
+        .onDisappear {
+            cancelSidecarCleanup()
         }
     }
 
@@ -140,19 +147,31 @@ struct DeviceView: View {
     }
 
     private func cleanSidecars() {
-        guard let connection = monitor.connection, !isCleaningSidecars else { return }
+        if isCleaningSidecars {
+            cancelSidecarCleanup()
+            return
+        }
+        guard let connection = monitor.connection else { return }
         isCleaningSidecars = true
-        Task {
+        sidecarSummary = nil
+        sidecarCleanupTask = Task {
             defer { isCleaningSidecars = false }
             do {
                 let removed = try await connection.removeAppleDoubleSidecars()
                 sidecarSummary = removed == 0
                     ? String(localized: "No hidden macOS files found")
                     : String(localized: "Removed \(removed) hidden macOS files")
+            } catch is CancellationError {
+                sidecarSummary = nil
             } catch {
                 sidecarSummary = error.localizedDescription
             }
         }
+    }
+
+    private func cancelSidecarCleanup() {
+        sidecarCleanupTask?.cancel()
+        sidecarCleanupTask = nil
     }
 
     private func deleteFromDevice(_ ids: Set<DeviceBook.ID>) {
@@ -214,7 +233,10 @@ private struct DeviceHeader: View {
                         .foregroundStyle(theme.accentSecondary)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
-                        .background(RoundedRectangle(cornerRadius: 3).fill(theme.accentSecondary.opacity(0.15)))
+                        .background(
+                            RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
+                                .fill(theme.accentSecondary.opacity(0.15))
+                        )
                     Text("\(bookCount) books")
                         .font(theme.label(size: 10, weight: .regular))
                         .foregroundStyle(theme.textTertiary)
@@ -250,10 +272,16 @@ private struct DeviceHeader: View {
                     }
                     .buttonStyle(.borderless)
                     .help("Import highlights & notes from this device")
+                    .accessibilityLabel("Import highlights & notes from this device")
                 }
                 if let onCleanSidecars {
                     if isCleaningSidecars {
-                        ProgressView().controlSize(.small)
+                        Button(action: onCleanSidecars) {
+                            ProgressView().controlSize(.small)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Cancel")
+                        .accessibilityLabel("Cancel")
                     } else {
                         Button(action: onCleanSidecars) {
                             Image(systemName: "wand.and.sparkles")
@@ -261,6 +289,7 @@ private struct DeviceHeader: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Remove hidden macOS files that can confuse the Kindle indexer")
+                        .accessibilityLabel("Remove hidden macOS files that can confuse the Kindle indexer")
                     }
                 }
                 Button(action: onRefresh) {
@@ -269,6 +298,7 @@ private struct DeviceHeader: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Refresh device contents")
+                .accessibilityLabel("Refresh device contents")
 
                 Button(action: onDisconnect) {
                     Image(systemName: "eject")
@@ -276,6 +306,7 @@ private struct DeviceHeader: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Disconnect (eject) the Kindle so it re-indexes sideloaded books")
+                .accessibilityLabel("Disconnect (eject) the Kindle so it re-indexes sideloaded books")
             }
         }
     }
@@ -291,7 +322,7 @@ private struct DeviceStorageBar: View {
             ProgressView(value: usedFraction)
                 .tint(theme.accent)
                 .frame(maxWidth: 360)
-            Text(storageText)
+            storageText
                 .font(theme.label(size: 9, weight: .regular))
                 .foregroundStyle(theme.textTertiary)
         }
@@ -302,10 +333,13 @@ private struct DeviceStorageBar: View {
         return Double(info.usedBytes) / Double(info.totalBytes)
     }
 
-    private var storageText: String {
+    private var storageText: Text {
         let free = ByteCountFormatter.string(fromByteCount: Int64(info.freeBytes), countStyle: .file)
         let total = ByteCountFormatter.string(fromByteCount: Int64(info.totalBytes), countStyle: .file)
-        return "\(free) free of \(total)"
+        return Text(
+            "\(free) free of \(total)",
+            comment: "Device storage: the first value is free space and the second is total capacity."
+        )
     }
 }
 
