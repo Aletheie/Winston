@@ -177,41 +177,46 @@ private struct DiscoveryContent: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        switch phase {
-        case .disabledOnline:
-            DiscoveryPrompt(needsToken: false)
-        case .disabledToken:
-            DiscoveryPrompt(needsToken: true)
-        case .loading:
-            DiscoverySkeletonGrid(columns: columns)
-        case .loaded:
-            DiscoveryGrid(
-                books: books,
-                hasMore: hasMore,
-                columns: columns,
-                externalBookWebsiteURL: externalBookWebsiteURL,
-                wishlist: wishlist,
-                onLoadMore: onLoadMore
-            )
-        case .empty:
-            DiscoveryMessage(
-                systemImage: "books.vertical",
-                title: theme.styledText(
-                    terminal: "no_released_books_try_another_genre",
-                    native: "No new releases found."
-                ),
-                onRetry: onRetry
-            )
-        case .failed:
-            DiscoveryMessage(
-                systemImage: "wifi.exclamationmark",
-                title: theme.styledText(
-                    terminal: "couldnt_reach_hardcover",
-                    native: "Couldn’t reach Hardcover. Check your connection."
-                ),
-                onRetry: onRetry
-            )
+        Group {
+            switch phase {
+            case .disabledOnline:
+                DiscoveryPrompt(needsToken: false)
+            case .disabledToken:
+                DiscoveryPrompt(needsToken: true)
+            case .loading:
+                DiscoverySkeletonGrid(columns: columns)
+            case .loaded:
+                DiscoveryGrid(
+                    books: books,
+                    hasMore: hasMore,
+                    columns: columns,
+                    externalBookWebsiteURL: externalBookWebsiteURL,
+                    wishlist: wishlist,
+                    onLoadMore: onLoadMore
+                )
+            case .empty:
+                DiscoveryMessage(
+                    systemImage: "books.vertical",
+                    title: theme.styledText(
+                        terminal: "no_released_books_try_another_genre",
+                        native: "No new releases found."
+                    ),
+                    onRetry: onRetry
+                )
+            case .failed:
+                DiscoveryMessage(
+                    systemImage: "wifi.exclamationmark",
+                    title: theme.styledText(
+                        terminal: "couldnt_reach_hardcover",
+                        native: "Couldn’t reach Hardcover. Check your connection."
+                    ),
+                    onRetry: onRetry
+                )
+            }
         }
+        .id(phase)
+        .transition(.opacity)
+        .animation(.easeOut(duration: 0.2), value: phase)
     }
 }
 

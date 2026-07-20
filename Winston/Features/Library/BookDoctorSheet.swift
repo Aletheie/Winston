@@ -84,6 +84,7 @@ struct BookDoctorSheet: View {
                     .font(theme.body(size: 12))
                     .foregroundStyle(theme.textSecondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.opacity)
             } else {
                 List(reports) { report in
                     BookDoctorReportSection(
@@ -95,8 +96,10 @@ struct BookDoctorSheet: View {
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
+                .transition(.opacity)
             }
         }
+        .animation(.easeOut(duration: 0.2), value: reports.isEmpty)
     }
 
     private var footer: some View {

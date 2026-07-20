@@ -503,7 +503,7 @@ private struct LibraryTimeMachineBackupRow: View {
             if isNewest {
                 Text("Latest")
                     .font(theme.label(size: 8, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textSecondary)
             }
         }
         .padding(.vertical, 4)

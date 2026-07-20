@@ -391,6 +391,7 @@ private struct OPDSNavigationCard: View {
     let action: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
 
     var body: some View {
@@ -617,11 +618,11 @@ private struct OPDSLoadingView: View {
                                 .fill(theme.surfaceGlass)
                                 .frame(width: 34, height: 34)
                             VStack(alignment: .leading, spacing: 6) {
-                                RoundedRectangle(cornerRadius: 3)
+                                RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
                                     .fill(theme.surfaceGlass)
                                     .frame(maxWidth: 150)
                                     .frame(height: 10)
-                                RoundedRectangle(cornerRadius: 3)
+                                RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
                                     .fill(theme.surfaceGlass.opacity(0.7))
                                     .frame(maxWidth: 96)
                                     .frame(height: 8)

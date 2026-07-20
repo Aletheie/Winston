@@ -138,7 +138,10 @@ struct DetailSampleNotice: View {
             .foregroundStyle(theme.accent)
         }
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 6).fill(theme.highlight.opacity(0.08)))
+        .background(
+            RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium)
+                .fill(theme.highlight.opacity(0.08))
+        )
     }
 }
 
@@ -539,17 +542,20 @@ struct DetailDescription: View {
     let text: String
 
     @Environment(\.theme) private var theme
+    @State private var isExpanded = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            theme.styledText(terminal: "ABOUT", native: "About")
-                .font(theme.label(size: 10, weight: .semibold))
-                .foregroundStyle(theme.textTertiary)
+        DisclosureGroup(isExpanded: $isExpanded) {
             Text(text)
                 .font(theme.label(size: 11, weight: .regular))
                 .foregroundStyle(theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
+                .padding(.top, 6)
+        } label: {
+            theme.styledText(terminal: "ABOUT", native: "About")
+                .font(theme.label(size: 10, weight: .semibold))
+                .foregroundStyle(theme.textTertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -608,8 +614,11 @@ struct DetailNotes: View {
                 .scrollContentBackground(.hidden)
                 .frame(minHeight: 56)
                 .padding(6)
-                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(theme.surface.opacity(0.4)))
-                .themedBorder(cornerRadius: 6)
+                .background(
+                    RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
+                        .fill(theme.surface.opacity(0.4))
+                )
+                .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
                 .focused($focused)
                 .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
         }
