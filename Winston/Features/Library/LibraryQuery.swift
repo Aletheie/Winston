@@ -201,6 +201,31 @@ enum LibraryQuery {
         return matching.map(\.id)
     }
 
+    @concurrent
+    static func displayIDsConcurrently(
+        for books: [LibraryDisplaySnapshot],
+        filter: LibraryFilter,
+        searchText: String,
+        sort: LibraryDisplaySort,
+        savedSearch: String?,
+        smartShelf: SmartShelfDefinition?,
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool,
+        kindlePresenceFilter: KindlePresenceFilter = .all
+    ) async -> [UUID] {
+        displayIDs(
+            for: books,
+            filter: filter,
+            searchText: searchText,
+            sort: sort,
+            savedSearch: savedSearch,
+            smartShelf: smartShelf,
+            deviceFileNames: deviceFileNames,
+            deviceIsConnected: deviceIsConnected,
+            kindlePresenceFilter: kindlePresenceFilter
+        )
+    }
+
     private nonisolated static func matches(
         _ book: LibraryDisplaySnapshot,
         filter: LibraryFilter,

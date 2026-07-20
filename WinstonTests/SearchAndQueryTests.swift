@@ -181,6 +181,46 @@ struct LibraryQueryTests {
         #expect(ids == [dune.uuid, dispossessed.uuid])
     }
 
+    @Test func concurrentDisplayPathMatchesLegacyQuerySemantics() async {
+        let dune = makeBook("Dune", author: "Frank Herbert", tags: ["sci-fi"], status: .reading)
+        let dispossessed = makeBook(
+            "The Dispossessed",
+            author: "Ursula Le Guin",
+            tags: ["sci-fi"],
+            status: .reading
+        )
+        let emma = makeBook("Emma", author: "Jane Austen", tags: ["classic"], status: .reading)
+        let books = [dispossessed, emma, dune]
+        let sort = [BookSort.title.comparator(ascending: true)]
+        let expected = LibraryQuery.apply(
+            to: books,
+            filter: .status(.reading),
+            searchText: "tag:sci-fi",
+            sort: sort
+        ).map(\.uuid)
+        let snapshots = books.enumerated().map {
+            LibraryDisplaySnapshot(
+                $0.element,
+                sourceOrdinal: $0.offset,
+                includeCollections: true,
+                includeHighlights: true
+            )
+        }
+
+        let actual = await LibraryQuery.displayIDsConcurrently(
+            for: snapshots,
+            filter: .status(.reading),
+            searchText: "tag:sci-fi",
+            sort: LibraryDisplaySort(field: .title, ascending: true),
+            savedSearch: nil,
+            smartShelf: nil,
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+
+        #expect(actual == expected)
+    }
+
     @Test func displaySnapshotsComposeSavedAndStructuredShelvesWithVisibleSearch() {
         let dune = makeBook("Dune", tags: ["sci-fi"])
         let foundation = makeBook("Foundation", tags: ["sci-fi"])
