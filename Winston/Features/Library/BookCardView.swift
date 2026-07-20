@@ -11,6 +11,8 @@ struct BookCardView: View {
     let onDelete: () -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var isHovered = false
     @State private var isDeleteHovered = false
 
@@ -20,7 +22,10 @@ struct BookCardView: View {
                 coverArea
                 CardTitleStrip(book: book, isOnDevice: isOnDevice, isMissing: isMissing)
             }
-            .background(.ultraThinMaterial,
+            .background(
+                reduceTransparency
+                    ? AnyShapeStyle(theme.surface)
+                    : AnyShapeStyle(.ultraThinMaterial),
                 in: RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous))
             .background(
                 RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous)
@@ -50,14 +55,22 @@ struct BookCardView: View {
                     .foregroundStyle(theme.textPrimary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(.regularMaterial, in: Capsule())
+                    .background(
+                        reduceTransparency
+                            ? AnyShapeStyle(theme.surface)
+                            : AnyShapeStyle(.regularMaterial),
+                        in: Capsule()
+                    )
                     .padding(8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .accessibilityLabel(Text("\(editionCount) editions"))
             }
         }
         .padding(4)
-        .scaleEffect(isHovered ? 1.005 : 1.0)
+        .scaleEffect(isHovered && !reduceMotion ? 1.005 : 1.0)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovered)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isSelected)
+        .animation(.easeInOut(duration: 0.25), value: isConverting)
         .shadow(
             color: isSelected
                 ? theme.accentSecondary.opacity(0.18)
@@ -65,9 +78,6 @@ struct BookCardView: View {
             radius: isSelected ? 8 : (isHovered ? 6 : 3),
             y: isHovered ? 2 : 1
         )
-        .animation(.easeOut(duration: 0.15), value: isHovered)
-        .animation(.easeOut(duration: 0.12), value: isSelected)
-        .animation(.easeInOut(duration: 0.25), value: isConverting)
         .onHover { hovering in isHovered = hovering }
         .help("\(book.displayTitle)\(book.displayAuthor.map { " \u{2014} \($0)" } ?? "")")
         .accessibilityElement(children: .combine)
@@ -101,7 +111,12 @@ struct BookCardView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(.regularMaterial, in: Capsule())
+            .background(
+                reduceTransparency
+                    ? AnyShapeStyle(theme.surface)
+                    : AnyShapeStyle(.regularMaterial),
+                in: Capsule()
+            )
             .overlay(Capsule().stroke(theme.borderSubtle, lineWidth: 1))
         }
         .clipShape(RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous))
@@ -116,7 +131,12 @@ struct BookCardView: View {
                 .font(theme.label(size: 11, weight: .bold))
                 .foregroundStyle(isDeleteHovered ? theme.destructive : theme.textPrimary)
                 .frame(width: 22, height: 22)
-                .background(.ultraThinMaterial, in: Circle())
+                .background(
+                    reduceTransparency
+                        ? AnyShapeStyle(theme.surface)
+                        : AnyShapeStyle(.ultraThinMaterial),
+                    in: Circle()
+                )
                 .overlay(
                     Circle().stroke(
                         isDeleteHovered ? theme.destructive.opacity(0.6) : theme.borderSubtle,
@@ -127,7 +147,7 @@ struct BookCardView: View {
         .buttonStyle(.plain)
         .padding(8)
         .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.12)) { isDeleteHovered = hovering }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) { isDeleteHovered = hovering }
         }
         .accessibilityLabel("Delete \(book.displayTitle)")
     }
@@ -163,7 +183,7 @@ private struct CardTitleStrip: View {
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
                     .background(
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall, style: .continuous)
                             .fill(accent.opacity(0.18))
                     )
                 if book.readingStatus != .unread {
@@ -171,30 +191,35 @@ private struct CardTitleStrip: View {
                         .font(.system(size: 10))
                         .foregroundStyle(readingStatusColor)
                         .help(book.readingStatus.label)
+                        .accessibilityLabel(Text(book.readingStatus.label))
                 }
                 if isOnDevice {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(theme.accentSecondary)
                         .help("On device")
+                        .accessibilityLabel("On device")
                 }
                 if isMissing {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(theme.destructive)
                         .help("File missing \u{2014} right-click to relink")
+                        .accessibilityLabel("File missing \u{2014} right-click to relink")
                 }
                 if !book.highlights.isEmpty {
                     Image(systemName: "quote.bubble")
                         .font(.system(size: 10))
                         .foregroundStyle(theme.accentSecondary)
                         .help("Has highlights")
+                        .accessibilityLabel("Has highlights")
                 }
                 if book.drmProtected == true {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(theme.textTertiary)
                         .help("DRM\u{2011}protected \u{2014} can't be converted or sideloaded")
+                        .accessibilityLabel("DRM\u{2011}protected \u{2014} can't be converted or sideloaded")
                 }
                 Spacer()
             }

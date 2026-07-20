@@ -1,6 +1,22 @@
 import SwiftUI
 import SwiftData
 import OSLog
+import CoreTransferable
+import UniformTypeIdentifiers
+
+extension UTType {
+    nonisolated static let winstonBookReference = UTType(exportedAs: "cz.annajung.Winston.book-reference")
+}
+
+struct BookDragItem: Codable, Sendable, Transferable {
+    let bookID: UUID
+    let fileURL: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .winstonBookReference)
+        ProxyRepresentation(exporting: \.fileURL)
+    }
+}
 
 struct BookGridView: View {
     let books: [Book]
@@ -15,6 +31,8 @@ struct BookGridView: View {
     @Binding var scrollTarget: Book.ID?
 
     @Environment(AppSettings.self) private var settings
+    @Environment(\.theme) private var theme
+    @FocusState private var focusedBookID: Book.ID?
 
     private var convertingUUIDs: Set<UUID> { conversion.convertingUUIDs }
     private var missingUUIDs: Set<UUID> { health.missingFileUUIDs }
@@ -53,8 +71,37 @@ struct BookGridView: View {
                         editionCount: editions.editionCounts[book.uuid] ?? 1,
                         onDelete: { actions.delete(book) }
                     )
-                    .onTapGesture { onClick(book) }
-                    .onDrag { NSItemProvider(contentsOf: book.fileURL) ?? NSItemProvider() }
+                    .overlay {
+                        if focusedBookID == book.id {
+                            RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge + 2, style: .continuous)
+                                .stroke(theme.accent, lineWidth: 2)
+                                .padding(1)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        focusedBookID = book.id
+                        actions.open(book)
+                    }
+                    .onTapGesture {
+                        focusedBookID = book.id
+                        onClick(book)
+                    }
+                    .draggable(BookDragItem(bookID: book.uuid, fileURL: book.fileURL))
+                    .focusable()
+                    .focused($focusedBookID, equals: book.id)
+                    .onMoveCommand { direction in
+                        moveFocus(from: book, direction: direction)
+                    }
+                    .onKeyPress(.return) {
+                        actions.open(book)
+                        return .handled
+                    }
+                    .onKeyPress(.space) {
+                        onClick(book)
+                        return .handled
+                    }
                     .contextMenu {
                         BookContextMenu(
                             book: book,
@@ -67,11 +114,33 @@ struct BookGridView: View {
                             actions: actions
                         )
                     }
-                    .accessibilityLabel("\(book.displayTitle), \(book.displayAuthor ?? "unknown author"), \(book.format)")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction {
+                        actions.open(book)
+                    }
+                    .accessibilityAction(named: Text("Delete")) {
+                        actions.delete(book)
+                    }
+                    .accessibilityHint("Press Return to open in Reader")
                 }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 14)
         }
+    }
+
+    private func moveFocus(from book: Book, direction: MoveCommandDirection) {
+        guard let index = books.firstIndex(where: { $0.id == book.id }) else { return }
+        let offset: Int
+        switch direction {
+        case .left, .up:
+            offset = -1
+        case .right, .down:
+            offset = 1
+        @unknown default:
+            return
+        }
+        let destination = min(max(index + offset, books.startIndex), books.index(before: books.endIndex))
+        focusedBookID = books[destination].id
     }
 }
