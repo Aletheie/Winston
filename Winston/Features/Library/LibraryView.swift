@@ -54,19 +54,25 @@ struct LibraryView: View {
     @Environment(DeviceMonitor.self) private var deviceMonitor
     @Environment(TransferQueue.self) private var transferQueue
     @Environment(ToastCenter.self) private var toasts
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @FocusState private var searchFocused: Bool
     @State private var selection = BookSelectionModel()
     @State private var isDropTargeted = false
     @State private var isImporting = false
+    @SceneStorage("library.viewMode") private var restoredViewMode = LibraryViewMode.grid.rawValue
     @State private var viewMode: LibraryViewMode = .grid
-    @State private var showInspector = true
+    @SceneStorage("library.showInspector") private var showInspector = true
     @State private var searchText = ""
     @State private var debouncedSearch = ""
     @State private var kindlePresenceFilter: KindlePresenceFilter = .all
     @State private var displayed: [Book] = []
+    @State private var animateNextDisplayChange = false
+    @State private var displaySnapshots: [LibraryDisplaySnapshot] = []
+    @State private var displaySnapshotRevision: DisplaySnapshotRevision?
     @State private var sortOrder: [KeyPathComparator<Book>] = [BookSort.dateAdded.comparator(ascending: false)]
     @State private var showDeleteConfirm = false
+    @State private var pendingDeletion: [Book] = []
     @State private var quickLookURL: URL?
     @State private var showNewCollectionAlert = false
     @State private var newCollectionName = ""
@@ -82,59 +88,63 @@ struct LibraryView: View {
         selection.primaryBook(in: books)
     }
 
-    private func recomputeDisplayed() {
-        if case .collection(let id) = filter,
-           let smart = collections.first(where: { $0.id == id && $0.isSmart }) {
-            if let definition = smart.smartShelfDefinition {
-                let shelfBooks = LibraryQuery.applySmartShelf(
-                    to: books,
-                    definition: definition,
-                    deviceFileNames: deviceMonitor.deviceFileNames,
-                    deviceIsConnected: deviceMonitor.isConnected,
-                    sort: sortOrder
-                )
-                displayed = filterByKindlePresence(LibraryQuery.apply(
-                    to: shelfBooks,
-                    filter: .all,
-                    searchText: debouncedSearch,
-                    sort: sortOrder
-                ))
-            } else if let search = smart.savedSearch {
-                let shelfBooks = LibraryQuery.apply(
-                    to: books,
-                    filter: .all,
-                    searchText: search,
-                    sort: sortOrder
-                )
-                displayed = filterByKindlePresence(LibraryQuery.apply(
-                    to: shelfBooks,
-                    filter: .all,
-                    searchText: debouncedSearch,
-                    sort: sortOrder
-                ))
-            } else {
-                displayed = []
-            }
-        } else {
-            displayed = filterByKindlePresence(
-                LibraryQuery.apply(
-                    to: books,
-                    filter: filter,
-                    searchText: debouncedSearch,
-                    sort: sortOrder
-                )
-            )
-        }
+    private struct DisplaySnapshotRevision: Hashable {
+        let mutationRevision: Int
+        let bookCount: Int
     }
 
-    private func filterByKindlePresence(_ candidates: [Book]) -> [Book] {
-        candidates.filter {
-            kindlePresenceFilter.includes(
-                deviceMatchKey: $0.deviceMatchKey,
-                deviceFileNames: deviceMonitor.deviceFileNames,
-                deviceIsConnected: deviceMonitor.isConnected
-            )
+    private enum ContentState: Hashable {
+        case empty
+        case grid
+        case table
+    }
+
+    private var contentState: ContentState {
+        if displayed.isEmpty { return .empty }
+        return viewMode == .grid ? .grid : .table
+    }
+
+    private struct SmartShelfDisplayConfiguration: Hashable {
+        let savedSearch: String?
+        let definition: SmartShelfDefinition?
+    }
+
+    private struct DisplayRevision: Hashable {
+        let snapshot: DisplaySnapshotRevision
+        let filter: LibraryFilter
+        let searchText: String
+        let sort: LibraryDisplaySort
+        let smartShelf: SmartShelfDisplayConfiguration?
+        let deviceFileNames: Set<String>
+        let deviceIsConnected: Bool
+        let kindlePresenceFilter: KindlePresenceFilter
+    }
+
+    private var smartShelfDisplayConfiguration: SmartShelfDisplayConfiguration? {
+        guard case .collection(let id) = filter,
+              let collection = collections.first(where: { $0.id == id && $0.isSmart }) else {
+            return nil
         }
+        return SmartShelfDisplayConfiguration(
+            savedSearch: collection.savedSearch,
+            definition: collection.smartShelfDefinition
+        )
+    }
+
+    private var displayRevision: DisplayRevision {
+        DisplayRevision(
+            snapshot: DisplaySnapshotRevision(
+                mutationRevision: LibraryMutationLog.shared.revision,
+                bookCount: books.count
+            ),
+            filter: filter,
+            searchText: debouncedSearch,
+            sort: LibraryQuery.displaySort(for: sortOrder),
+            smartShelf: smartShelfDisplayConfiguration,
+            deviceFileNames: deviceMonitor.deviceFileNames,
+            deviceIsConnected: deviceMonitor.isConnected,
+            kindlePresenceFilter: kindlePresenceFilter
+        )
     }
 
     private var bookActions: BookActions {
@@ -166,10 +176,13 @@ struct LibraryView: View {
             convertSelection: convertSelectedBooks,
             convertSelectionTo: { format in viewModel.convertBooks(selectedBooks, to: format) },
             delete: { book in
-                viewModel.remove(book)
-                selection.remove(book.id)
+                pendingDeletion = [book]
+                showDeleteConfirm = true
             },
-            deleteSelection: { showDeleteConfirm = true },
+            deleteSelection: {
+                pendingDeletion = selectedBooks
+                showDeleteConfirm = true
+            },
             removeFromDevice: { book in deleteFromDevice(targetBooks(for: book)) },
             removeSelectionFromDevice: { deleteFromDevice(selectedBooks) }
         )
@@ -208,6 +221,8 @@ struct LibraryView: View {
                     viewMode: $viewMode,
                     sortOrder: $sortOrder,
                     showInspector: $showInspector,
+                    kindlePresenceFilter: $kindlePresenceFilter,
+                    showsKindleFilter: deviceMonitor.isConnected,
                     transmitEnabled: deviceMonitor.isConnected && selection.hasSelection && !transferQueue.isTransferring,
                     onImport: { isImporting = true },
                     onTransmit: transmitSelected
@@ -278,10 +293,12 @@ struct LibraryView: View {
                     ReadingHistoryImportSheet(fileURL: url)
                 }
             }
-            .alert("Delete \(selection.count) books?",
+            .alert("Delete \(pendingDeletion.count) books?",
                    isPresented: $showDeleteConfirm) {
-                Button("Delete", role: .destructive) { deleteSelected() }
-                Button("Cancel", role: .cancel) { }
+                Button("Delete", role: .destructive) { deletePending() }
+                Button("Cancel", role: .cancel) { pendingDeletion = [] }
+            } message: {
+                Text("Deleted books are moved to the Trash.")
             }
             .alert("New Collection", isPresented: $showNewCollectionAlert) {
                 TextField("Name", text: $newCollectionName)
@@ -314,15 +331,17 @@ struct LibraryView: View {
                 guard !Task.isCancelled else { return }
                 debouncedSearch = searchText
             }
-            .onChange(of: LibraryMutationLog.shared.revision, initial: true) { recomputeDisplayed() }
-            .onChange(of: filter) { recomputeDisplayed() }
-            .onChange(of: debouncedSearch) { recomputeDisplayed() }
-            .onChange(of: sortOrder) { recomputeDisplayed() }
-            .onChange(of: kindlePresenceFilter) { recomputeDisplayed() }
-            .onChange(of: deviceMonitor.deviceFileNames) { recomputeDisplayed() }
+            .task(id: displayRevision) {
+                await refreshDisplayed(for: displayRevision)
+            }
+            .onAppear {
+                viewMode = LibraryViewMode(rawValue: restoredViewMode) ?? .grid
+            }
+            .onChange(of: viewMode) { _, mode in
+                restoredViewMode = mode.rawValue
+            }
             .onChange(of: deviceMonitor.isConnected) { _, isConnected in
                 if !isConnected { kindlePresenceFilter = .all }
-                recomputeDisplayed()
             }
     }
 
@@ -332,11 +351,12 @@ struct LibraryView: View {
         kindlePresenceFilter = .all
         searchText = ""
         debouncedSearch = ""
-        displayed = LibraryQuery.apply(to: books, filter: .all, searchText: "", sort: sortOrder)
         selection.selectedBookIDs = [book.id]
         selection.lastClickedBookID = book.id
         Task { @MainActor in
             await Task.yield()
+            await refreshDisplayed(for: displayRevision)
+            guard !Task.isCancelled, displayed.contains(where: { $0.id == book.id }) else { return }
             scrollTarget = book.id
         }
     }
@@ -349,58 +369,54 @@ struct LibraryView: View {
         onShowSeries(name)
     }
 
-    // MARK: - Top bar (drop zone + transfer status)
+    // MARK: - Top bar
 
     @ViewBuilder
     private var topBar: some View {
-        VStack(spacing: 0) {
-            LibraryDropZone(isTargeted: $isDropTargeted,
-                            onDrop: { LibraryExternalActions.handleDrop(providers: $0, viewModel: viewModel) })
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-                .padding(.bottom, 6)
-
-            if deviceMonitor.isConnected {
-                KindlePresenceFilterControl(selection: $kindlePresenceFilter)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 10)
-            }
-        }
-        .background(.ultraThinMaterial)
+        LibraryDropZone(isTargeted: $isDropTargeted,
+                        onDrop: { LibraryExternalActions.handleDrop(providers: $0, viewModel: viewModel) })
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+            .background(.ultraThinMaterial)
     }
 
     // MARK: - Content (grid or table)
 
-    @ViewBuilder
     private var content: some View {
-        if displayed.isEmpty {
-            LibraryEmptyState(kind: emptyStateKind)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if viewMode == .grid {
-            BookGridView(
-                books: displayed,
-                selection: selection,
-                deviceFileNames: deviceMonitor.deviceFileNames,
-                conversion: viewModel.conversion,
-                health: viewModel.health,
-                editions: viewModel.editions,
-                collections: collections,
-                actions: bookActions,
-                onClick: handleBookClick,
-                scrollTarget: $scrollTarget
-            )
-        } else {
-            BookTableView(
-                books: displayed,
-                selection: selection,
-                deviceFileNames: deviceMonitor.deviceFileNames,
-                conversion: viewModel.conversion,
-                editions: viewModel.editions,
-                collections: collections,
-                actions: bookActions,
-                sortOrder: $sortOrder
-            )
+        Group {
+            if displayed.isEmpty {
+                LibraryEmptyState(kind: emptyStateKind)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if viewMode == .grid {
+                BookGridView(
+                    books: displayed,
+                    selection: selection,
+                    deviceFileNames: deviceMonitor.deviceFileNames,
+                    conversion: viewModel.conversion,
+                    health: viewModel.health,
+                    editions: viewModel.editions,
+                    collections: collections,
+                    actions: bookActions,
+                    onClick: handleBookClick,
+                    scrollTarget: $scrollTarget
+                )
+            } else {
+                BookTableView(
+                    books: displayed,
+                    selection: selection,
+                    deviceFileNames: deviceMonitor.deviceFileNames,
+                    conversion: viewModel.conversion,
+                    editions: viewModel.editions,
+                    collections: collections,
+                    actions: bookActions,
+                    sortOrder: $sortOrder
+                )
+            }
         }
+        .id(contentState)
+        .transition(.opacity)
+        .animation(.easeOut(duration: 0.15), value: contentState)
     }
 
     private var emptyStateKind: LibraryEmptyState.Kind {
@@ -450,7 +466,10 @@ struct LibraryView: View {
             if selection.count > 1 { activeSheet = .bulkEdit }
             else if let book = primarySelectedBook { activeSheet = .edit(book) }
         case .deleteSelected:
-            if selection.hasSelection { showDeleteConfirm = true }
+            if selection.hasSelection {
+                pendingDeletion = selectedBooks
+                showDeleteConfirm = true
+            }
         case .selectAll:
             selection.selectAll(displayed)
         case .toggleSidebar:
@@ -548,10 +567,71 @@ struct LibraryView: View {
         }
     }
 
-    private func deleteSelected() {
-        let toDelete = books.filter { selection.selectedBookIDs.contains($0.id) }
+    private func deletePending() {
+        let toDelete = pendingDeletion.filter { $0.modelContext != nil }
+        pendingDeletion = []
+        guard !toDelete.isEmpty else { return }
+        animateNextDisplayChange = viewMode == .grid
         viewModel.removeBooks(toDelete)
-        selection.clear()
+        toDelete.forEach { selection.remove($0.id) }
+    }
+
+    private func refreshDisplayed(for revision: DisplayRevision) async {
+        let snapshots: [LibraryDisplaySnapshot]
+        if displaySnapshotRevision == revision.snapshot {
+            snapshots = displaySnapshots
+        } else {
+            var updated: [LibraryDisplaySnapshot] = []
+            updated.reserveCapacity(books.count)
+            for (index, book) in books.enumerated() {
+                updated.append(
+                    LibraryDisplaySnapshot(
+                        book,
+                        sourceOrdinal: index,
+                        includeCollections: true,
+                        includeHighlights: true
+                    )
+                )
+                if (index + 1).isMultiple(of: 512) {
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                }
+            }
+            displaySnapshots = updated
+            displaySnapshotRevision = revision.snapshot
+            snapshots = updated
+        }
+
+        if let smartShelf = revision.smartShelf,
+           smartShelf.savedSearch == nil,
+           smartShelf.definition == nil {
+            displayed = []
+            return
+        }
+
+        let ids = await LibraryQuery.displayIDsConcurrently(
+            for: snapshots,
+            filter: revision.filter,
+            searchText: revision.searchText,
+            sort: revision.sort,
+            savedSearch: revision.smartShelf?.savedSearch,
+            smartShelf: revision.smartShelf?.definition,
+            deviceFileNames: revision.deviceFileNames,
+            deviceIsConnected: revision.deviceIsConnected,
+            kindlePresenceFilter: revision.kindlePresenceFilter
+        )
+        guard !Task.isCancelled, displayRevision == revision else { return }
+
+        let booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
+        let updated = ids.compactMap { booksByID[$0] }
+        if animateNextDisplayChange {
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                displayed = updated
+            }
+            animateNextDisplayChange = false
+        } else {
+            displayed = updated
+        }
     }
 
     private func deleteFromDevice(_ booksToRemove: [Book]) {

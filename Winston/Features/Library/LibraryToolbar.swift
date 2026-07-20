@@ -1,6 +1,6 @@
 import SwiftUI
 
-enum LibraryViewMode: Hashable {
+enum LibraryViewMode: String, Hashable {
     case grid, table
 }
 
@@ -33,6 +33,8 @@ struct LibraryToolbar: ToolbarContent {
     @Binding var viewMode: LibraryViewMode
     @Binding var sortOrder: [KeyPathComparator<Book>]
     @Binding var showInspector: Bool
+    @Binding var kindlePresenceFilter: KindlePresenceFilter
+    let showsKindleFilter: Bool
     let transmitEnabled: Bool
     let onImport: () -> Void
     let onTransmit: () -> Void
@@ -42,8 +44,12 @@ struct LibraryToolbar: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItemGroup(placement: .navigation) {
             Picker("View", selection: $viewMode) {
-                Image(systemName: "square.grid.2x2").tag(LibraryViewMode.grid)
-                Image(systemName: "list.bullet").tag(LibraryViewMode.table)
+                Label("Grid View", systemImage: "square.grid.2x2")
+                    .labelStyle(.iconOnly)
+                    .tag(LibraryViewMode.grid)
+                Label("List View", systemImage: "list.bullet")
+                    .labelStyle(.iconOnly)
+                    .tag(LibraryViewMode.table)
             }
             .pickerStyle(.segmented)
             .help("Switch between grid and list")
@@ -72,6 +78,12 @@ struct LibraryToolbar: ToolbarContent {
                 Label(theme.copy.addFiles, systemImage: "plus")
             }
             .help("Import book files")
+        }
+
+        if showsKindleFilter {
+            ToolbarItem(placement: .primaryAction) {
+                KindlePresenceFilterControl(selection: $kindlePresenceFilter)
+            }
         }
 
         ToolbarItem(placement: .primaryAction) {
