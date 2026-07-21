@@ -112,7 +112,7 @@ final class LibraryHealthService {
         primaryEntries.reserveCapacity(books.count)
         for (index, book) in books.enumerated() {
             guard !Task.isCancelled else { return 0 }
-            primaryEntries.append((book.uuid, book.fileName))
+            if book.hasDigitalFile { primaryEntries.append((book.uuid, book.fileName)) }
             if index > 0, index.isMultiple(of: 256) { await Task.yield() }
         }
         var assetEntries: [(uuid: UUID, fileName: String)] = []
@@ -215,7 +215,7 @@ final class LibraryHealthService {
             return
         }
         missingFileUUIDs.remove(book.uuid)
-        if fileName != oldFileName {
+        if fileName != oldFileName, BookFileStore.validatedURL(for: oldFileName) != nil {
             Task.detached(priority: .utility) {
                 BookFileStore.delete(fileName: oldFileName)
             }

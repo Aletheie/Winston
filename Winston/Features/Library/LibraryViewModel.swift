@@ -2,6 +2,17 @@ import Foundation
 import SwiftData
 import Observation
 
+struct PhysicalBookDraft: Sendable {
+    var title: String
+    var author: String
+    var publisher: String
+    var year: String
+    var isbn: String
+    var shelfLocation: String
+    var notes: String
+    var readingStatus: ReadingStatus
+}
+
 @MainActor
 @Observable
 final class LibraryViewModel {
@@ -92,6 +103,45 @@ final class LibraryViewModel {
     func addEditions(from urls: [URL], to work: Work) { importer.addBooks(from: urls, assigningTo: work) }
     func importCalibreLibrary(at root: URL) { calibreImporter.importLibrary(at: root) }
 
+    @discardableResult
+    func addPhysicalBook(_ draft: PhysicalBookDraft) -> Book? {
+        let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        func optional(_ value: String) -> String? {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        let author = optional(draft.author)
+        let book = Book(fileName: "", originalFileName: title)
+        book.title = title
+        book.author = author
+        book.publisher = optional(draft.publisher)
+        book.year = optional(draft.year)
+        book.isbn = optional(draft.isbn)
+        book.shelfLocation = optional(draft.shelfLocation)
+        book.notes = optional(draft.notes)
+        book.hasPhysicalCopy = true
+        if draft.readingStatus != .unread { book.setStatus(draft.readingStatus) }
+
+        let work = Work(title: title, author: author, dateCreated: book.dateAdded)
+        work.preferredEditionUUID = book.uuid
+        modelContext.insert(work)
+        modelContext.insert(book)
+        book.work = work
+
+        do {
+            try modelContext.saveAndPublish()
+            editions.refreshEditionCounts()
+            toasts.success(String(localized: "Added physical book “\(title)”"))
+            return book
+        } catch {
+            modelContext.rollback()
+            toasts.error(String(localized: "Couldn’t add the physical book."))
+            return nil
+        }
+    }
+
     // MARK: - Integrity (forwarded)
 
     var missingFileUUIDs: Set<UUID> { health.missingFileUUIDs }
@@ -127,7 +177,8 @@ final class LibraryViewModel {
     private func forget(_ book: Book) -> RemovedBook? {
         guard book.modelContext != nil else { return nil }
         let work = book.work
-        let assetNames = book.assets.isEmpty ? [book.fileName] : book.assets.map(\.fileName)
+        let assetNames = (book.assets.isEmpty ? [book.fileName] : book.assets.map(\.fileName))
+            .filter { BookFileStore.validatedURL(for: $0) != nil }
         book.work = nil
         modelContext.delete(book)
         WorkService.pruneIfOrphaned(work, context: modelContext, save: false)
@@ -147,12 +198,12 @@ final class LibraryViewModel {
         for book: Book,
         title: String?, author: String?, publisher: String?, year: String?,
         series: String?, seriesIndex: String?, language: String?, translator: String?, isbn: String?,
-        description: String?, tags: [String]
+        description: String?, tags: [String], shelfLocation: String?
     ) {
         metadata.updateMetadata(
             for: book, title: title, author: author, publisher: publisher, year: year,
             series: series, seriesIndex: seriesIndex, language: language, translator: translator, isbn: isbn,
-            description: description, tags: tags
+            description: description, tags: tags, shelfLocation: shelfLocation
         )
     }
     func updateRating(for book: Book, rating: Int?) { metadata.updateRating(for: book, rating: rating) }
@@ -275,6 +326,7 @@ final class LibraryViewModel {
 
     @discardableResult
     func addFile(to book: Book, from url: URL, origin: AssetOrigin = .imported) async -> BookAsset? {
+        let shouldBecomePrimary = !book.hasDigitalFile
         let uuid = UUID()
         guard let fileName = try? BookFileStore.importCopy(of: url, uuid: uuid) else { return nil }
         let managedURL = BookFileStore.url(for: fileName)
@@ -300,6 +352,12 @@ final class LibraryViewModel {
             book: book
         )
         modelContext.insert(asset)
+        if shouldBecomePrimary {
+            book.fileName = fileName
+            book.fileSizeBytes = asset.sizeBytes
+            book.drmProtected = nil
+            book.coverVersion += 1
+        }
         do {
             try modelContext.saveAndPublish()
             return asset

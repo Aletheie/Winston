@@ -103,7 +103,8 @@ struct Theme: Equatable, Sendable {
     // MARK: Helpers
 
     func coverAccents(for book: Book) -> ColorPair {
-        let hash = book.fileName.utf8.reduce(0) { $0 &+ Int($1) }
+        let source = book.hasDigitalFile ? book.fileName : book.uuid.uuidString
+        let hash = source.utf8.reduce(0) { $0 &+ Int($1) }
         return coverPalettes[abs(hash) % coverPalettes.count]
     }
 }

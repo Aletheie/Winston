@@ -99,9 +99,10 @@ final class FullTextSearchViewModel {
                     originRank: rank(asset.origin)
                 )
             }
-            if !candidates.contains(where: { $0.source.fileURL.lastPathComponent == book.fileName }) {
+            if let primaryURL = book.primaryFileURL,
+               !candidates.contains(where: { $0.source.fileURL.lastPathComponent == book.fileName }) {
                 candidates.append(SourceCandidate(
-                    source: .init(fileURL: book.fileURL, contentHash: nil),
+                    source: .init(fileURL: primaryURL, contentHash: nil),
                     isPrimary: true,
                     originRank: 0
                 ))

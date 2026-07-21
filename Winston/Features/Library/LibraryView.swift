@@ -5,6 +5,7 @@ import QuickLook
 import OSLog
 
 enum LibrarySheet: Identifiable {
+    case addPhysicalBook
     case edit(Book)
     case bulkEdit
     case duplicates
@@ -22,6 +23,7 @@ enum LibrarySheet: Identifiable {
 
     var id: String {
         switch self {
+        case .addPhysicalBook: "addPhysicalBook"
         case .edit(let book): "edit-\(book.uuid.uuidString)"
         case .bulkEdit:       "bulkEdit"
         case .duplicates:     "duplicates"
@@ -166,7 +168,7 @@ struct LibraryView: View {
             openWork: { activeSheet = .work($0) },
             openSeries: { activeSheet = .series(name: $0) },
             showAuthorInLibrary: showAuthorInLibrary,
-            quickLook: { quickLookURL = $0.fileURL },
+            quickLook: { quickLookURL = $0.primaryFileURL },
             showInFinder: { LibraryExternalActions.showInFinder($0) },
             edit: { activeSheet = .edit($0) },
             editSelection: { activeSheet = .bulkEdit },
@@ -211,7 +213,7 @@ struct LibraryView: View {
     }
 
     private var convertibleSelectionCount: Int {
-        selectedBooks.filter { EbookConverter.needsConversion(format: $0.format) }.count
+        selectedBooks.filter { $0.hasDigitalFile && EbookConverter.needsConversion(format: $0.format) }.count
     }
 
     // MARK: - Body
@@ -237,8 +239,11 @@ struct LibraryView: View {
                     showInspector: $showInspector,
                     kindlePresenceFilter: $kindlePresenceFilter,
                     showsKindleFilter: deviceMonitor.isConnected,
-                    transmitEnabled: deviceMonitor.isConnected && selection.hasSelection && !transferQueue.isTransferring,
+                    transmitEnabled: deviceMonitor.isConnected
+                        && selectedBooks.contains(where: \.hasDigitalFile)
+                        && !transferQueue.isTransferring,
                     onImport: { isImporting = true },
+                    onAddPhysicalBook: { activeSheet = .addPhysicalBook },
                     onTransmit: transmitSelected
                 )
             }
@@ -257,6 +262,8 @@ struct LibraryView: View {
             }
             .sheet(item: $activeSheet) { sheet in
                 switch sheet {
+                case .addPhysicalBook:
+                    AddPhysicalBookSheet(viewModel: viewModel)
                 case .edit(let book):
                     EditMetadataSheet(book: book, viewModel: viewModel)
                 case .bulkEdit:
@@ -481,7 +488,7 @@ struct LibraryView: View {
         case .openInReader:
             if let book = primarySelectedBook { LibraryExternalActions.openInReader(book) }
         case .quickLook:
-            if let book = primarySelectedBook { quickLookURL = book.fileURL }
+            if let book = primarySelectedBook { quickLookURL = book.primaryFileURL }
         case .showInFinder:
             if let book = primarySelectedBook { LibraryExternalActions.showInFinder(book) }
         case .editMetadata:
@@ -562,7 +569,7 @@ struct LibraryView: View {
     }
 
     private func transmitSelected() {
-        let toSend = books.filter { selection.selectedBookIDs.contains($0.id) }
+        let toSend = books.filter { selection.selectedBookIDs.contains($0.id) && $0.hasDigitalFile }
         guard !toSend.isEmpty else { return }
         if settings.inspectBeforeKindleTransfer {
             presentBookDoctor(for: toSend, purpose: .sendToKindle)
@@ -572,10 +579,10 @@ struct LibraryView: View {
     }
 
     private func presentBookDoctor(for books: [Book], purpose: BookDoctorRequest.Purpose) {
-        guard !books.isEmpty else { return }
-        let sources = books.map {
-            BookDoctorSource(id: $0.uuid, title: $0.displayTitle, url: $0.fileURL)
+        let sources = books.compactMap { book in
+            book.primaryFileURL.map { BookDoctorSource(id: book.uuid, title: book.displayTitle, url: $0) }
         }
+        guard !sources.isEmpty else { return }
         activeSheet = .bookDoctor(BookDoctorRequest(sources: sources, purpose: purpose))
     }
 
@@ -584,7 +591,10 @@ struct LibraryView: View {
         switch request.purpose {
         case .sendToKindle:
             let paths = Set(urls.map { $0.standardizedFileURL.path(percentEncoded: false) })
-            let ready = books.filter { paths.contains($0.fileURL.standardizedFileURL.path(percentEncoded: false)) }
+            let ready = books.filter { book in
+                guard let url = book.primaryFileURL else { return false }
+                return paths.contains(url.standardizedFileURL.path(percentEncoded: false))
+            }
             if !ready.isEmpty { transferQueue.beginSend(books: ready, via: deviceMonitor) }
         case .review:
             break

@@ -19,9 +19,9 @@ struct BookCoverImageView: View {
                 }
             }
             .clipped()
-            .task(id: "\(book.fileName)#\(book.coverVersion)") {
+            .task(id: "\(book.uuid)#\(book.fileName)#\(book.coverVersion)") {
                 coverImage = nil
-                let resolved = await resolvedCover(for: book.fileURL, uuid: book.uuid)
+                let resolved = await resolvedCover(for: book.coverCacheURL, uuid: book.uuid)
                 guard !Task.isCancelled else { return }
                 coverImage = resolved
             }

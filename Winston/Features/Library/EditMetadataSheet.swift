@@ -19,6 +19,7 @@ struct EditMetadataSheet: View {
     @State private var isbn: String = ""
     @State private var tags: String = ""
     @State private var bookDescription: String = ""
+    @State private var shelfLocation: String = ""
     @State private var seriesSuggestions: [String] = []
 
     var body: some View {
@@ -63,6 +64,10 @@ struct EditMetadataSheet: View {
 
                 MetaField(label: theme.styledText(terminal: "TAGS", native: "Tags"), text: $tags,
                           hint: "comma separated")
+
+                if book.hasPhysicalCopy {
+                    MetaField(label: theme.styledText(terminal: "POLICE", native: "Shelf"), text: $shelfLocation)
+                }
 
                 VStack(alignment: .leading, spacing: 4) {
                     theme.styledText(terminal: "DESCRIPTION", native: "Description")
@@ -109,7 +114,8 @@ struct EditMetadataSheet: View {
                         translator: translator.isEmpty ? nil : translator,
                         isbn: isbn.isEmpty ? nil : isbn,
                         description: bookDescription.isEmpty ? nil : bookDescription,
-                        tags: tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                        tags: tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty },
+                        shelfLocation: shelfLocation.isEmpty ? nil : shelfLocation
                     )
                     dismiss()
                 }
@@ -140,6 +146,7 @@ struct EditMetadataSheet: View {
             isbn = book.isbn ?? ""
             tags = book.tags.joined(separator: ", ")
             bookDescription = book.bookDescription ?? ""
+            shelfLocation = book.shelfLocation ?? ""
         }
         .task {
             let suggestions = await viewModel.seriesSuggestions()
@@ -157,7 +164,7 @@ struct EditMetadataSheet: View {
     }
 }
 
-private struct MetaField: View {
+struct MetaField: View {
     let label: Text
     @Binding var text: String
     var hint: LocalizedStringKey? = nil

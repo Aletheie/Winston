@@ -50,7 +50,7 @@ final class ExportService {
                 for: book,
                 fileName: book.fileName,
                 format: book.format,
-                sourceURL: book.fileURL
+                sourceURL: book.primaryFileURL
             )]
         }
         return book.assets.map { asset in
@@ -67,7 +67,7 @@ final class ExportService {
         for book: Book,
         fileName: String,
         format: String,
-        sourceURL: URL
+        sourceURL: URL?
     ) -> ExportRow {
         ExportRow(
             title: book.displayTitle,
@@ -81,12 +81,14 @@ final class ExportService {
             tags: book.tags.joined(separator: "; "),
             rating: book.rating ?? 0,
             status: book.readingStatus.label,
-            sourcePath: sourceURL.path(percentEncoded: false),
-            readableName: Self.readableFileName(for: book, fileName: fileName),
+            sourcePath: sourceURL?.path(percentEncoded: false) ?? "",
+            readableName: sourceURL == nil ? "" : Self.readableFileName(for: book, fileName: fileName),
             workUUID: book.work?.uuid.uuidString ?? "",
             workTitle: book.work?.displayTitle ?? "",
             editionUUID: book.uuid.uuidString,
-            editionStatement: book.editionStatement ?? ""
+            editionStatement: book.editionStatement ?? "",
+            isPhysicalCopy: book.hasPhysicalCopy,
+            shelfLocation: book.shelfLocation ?? ""
         )
     }
 

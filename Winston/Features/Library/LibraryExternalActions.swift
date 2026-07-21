@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 enum LibraryExternalActions {
 
     static func openInReader(_ book: Book) {
-        let url = book.fileURL
+        guard let url = book.primaryFileURL else { return }
         let booksReadable = ["epub", "pdf"].contains(url.pathExtension.lowercased())
         if booksReadable,
            let books = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.iBooksX") {
@@ -17,7 +17,8 @@ enum LibraryExternalActions {
     }
 
     static func showInFinder(_ book: Book) {
-        NSWorkspace.shared.activateFileViewerSelecting([book.fileURL])
+        guard let url = book.primaryFileURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     static func exportLibrary(via viewModel: LibraryViewModel) async {

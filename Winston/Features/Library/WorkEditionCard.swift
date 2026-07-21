@@ -136,7 +136,9 @@ private struct WorkEditionMenu: View {
 
     var body: some View {
         Menu {
-            Button("Open") { LibraryExternalActions.openInReader(book) }
+            if book.hasDigitalFile {
+                Button("Open") { LibraryExternalActions.openInReader(book) }
+            }
             Button("Show in Library") { onShowInLibrary(book) }
             Button("Make Preferred") { service.setPreferred(book, in: work) }
                 .disabled(isPreferred)

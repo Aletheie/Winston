@@ -25,6 +25,8 @@ nonisolated struct LibraryTimeMachineMetadataSnapshot: Equatable, Sendable {
     var sampleNoticeDismissed: Bool?
     var editionStatement: String?
     var editionTypeRaw: String?
+    var hasPhysicalCopyRaw: Bool?
+    var shelfLocation: String?
 
     init(
         title: String? = nil,
@@ -49,7 +51,9 @@ nonisolated struct LibraryTimeMachineMetadataSnapshot: Equatable, Sendable {
         pageCount: Int? = nil,
         sampleNoticeDismissed: Bool? = nil,
         editionStatement: String? = nil,
-        editionTypeRaw: String? = nil
+        editionTypeRaw: String? = nil,
+        hasPhysicalCopyRaw: Bool? = nil,
+        shelfLocation: String? = nil
     ) {
         self.title = title
         self.author = author
@@ -74,6 +78,8 @@ nonisolated struct LibraryTimeMachineMetadataSnapshot: Equatable, Sendable {
         self.sampleNoticeDismissed = sampleNoticeDismissed
         self.editionStatement = editionStatement
         self.editionTypeRaw = editionTypeRaw
+        self.hasPhysicalCopyRaw = hasPhysicalCopyRaw
+        self.shelfLocation = shelfLocation
     }
 }
 
@@ -292,6 +298,8 @@ nonisolated enum LibraryTimeMachineField: String, CaseIterable, Sendable, Identi
     case editionStatement
     case editionType
     case drmProtected
+    case physicalCopy
+    case shelf
 
     var id: Self { self }
 
@@ -320,6 +328,8 @@ nonisolated enum LibraryTimeMachineField: String, CaseIterable, Sendable, Identi
         case .editionStatement: "Edition"
         case .editionType: "Edition type"
         case .drmProtected: "DRM"
+        case .physicalCopy: "Physical copy"
+        case .shelf: "Shelf"
         }
     }
 }
@@ -640,6 +650,8 @@ enum LibraryTimeMachineDiffBuilder {
             (.editionStatement, .text(current.metadata.editionStatement), .text(backup.metadata.editionStatement)),
             (.editionType, .text(current.metadata.editionTypeRaw), .text(backup.metadata.editionTypeRaw)),
             (.drmProtected, .boolean(current.metadata.drmProtected), .boolean(backup.metadata.drmProtected)),
+            (.physicalCopy, .boolean(current.metadata.hasPhysicalCopyRaw), .boolean(backup.metadata.hasPhysicalCopyRaw)),
+            (.shelf, .text(current.metadata.shelfLocation), .text(backup.metadata.shelfLocation)),
         ]
         return pairs.compactMap { field, currentValue, backupValue in
             guard currentValue != backupValue else { return nil }
@@ -675,6 +687,8 @@ enum LibraryTimeMachineDiffBuilder {
             || lhs.pageCount != rhs.pageCount
             || lhs.editionStatement != rhs.editionStatement
             || lhs.editionTypeRaw != rhs.editionTypeRaw
+            || lhs.hasPhysicalCopyRaw != rhs.hasPhysicalCopyRaw
+            || lhs.shelfLocation != rhs.shelfLocation
     }
 }
 
@@ -801,7 +815,9 @@ private nonisolated enum LibraryTimeMachineSnapshotBuilder {
                 pageCount: book.pageCount,
                 sampleNoticeDismissed: book.sampleNoticeDismissed,
                 editionStatement: book.editionStatement,
-                editionTypeRaw: book.editionTypeRaw
+                editionTypeRaw: book.editionTypeRaw,
+                hasPhysicalCopyRaw: book.hasPhysicalCopyRaw,
+                shelfLocation: book.shelfLocation
             ),
             reading: LibraryTimeMachineReadingSnapshot(
                 statusRaw: book.readingStatusRaw,
@@ -814,9 +830,9 @@ private nonisolated enum LibraryTimeMachineSnapshotBuilder {
             work: work,
             assets: assets,
             coverURL: coverURL,
-            bookFileExists: bookFileExists ?? FileManager.default.fileExists(
+            bookFileExists: bookFileExists ?? (!book.hasDigitalFile || FileManager.default.fileExists(
                 atPath: primaryFile.path(percentEncoded: false)
-            )
+            ))
         )
     }
 }

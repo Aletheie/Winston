@@ -387,14 +387,21 @@ struct DetailActions: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                DetailActionButton(title: theme.styledText(terminal: "OPEN", native: "Open"),
-                                   icon: "book", color: theme.accentSecondary) {
-                    actions.open(book)
+            if book.hasDigitalFile {
+                HStack(spacing: 6) {
+                    DetailActionButton(title: theme.styledText(terminal: "OPEN", native: "Open"),
+                                       icon: "book", color: theme.accentSecondary) {
+                        actions.open(book)
+                    }
+                    DetailActionButton(title: theme.styledText(terminal: "FINDER", native: "Finder"),
+                                       icon: "folder", color: theme.accentSecondary) {
+                        actions.showInFinder(book)
+                    }
                 }
-                DetailActionButton(title: theme.styledText(terminal: "FINDER", native: "Finder"),
-                                   icon: "folder", color: theme.accentSecondary) {
-                    actions.showInFinder(book)
+            } else {
+                DetailActionButton(title: theme.styledText(terminal: "ATTACH", native: "Attach Digital File"),
+                                   icon: "doc.badge.plus", color: theme.accentSecondary) {
+                    actions.relink(book)
                 }
             }
             HStack(spacing: 6) {
@@ -407,7 +414,7 @@ struct DetailActions: View {
                     actions.delete(book)
                 }
             }
-            if EbookConverter.needsConversion(format: book.format) {
+            if book.hasDigitalFile && EbookConverter.needsConversion(format: book.format) {
                 if isConverting {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
@@ -449,7 +456,14 @@ struct DetailMetadataList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             DetailMetaRow(key: "FORMAT", value: book.format.isEmpty ? "\u{2014}" : book.format)
-            DetailMetaRow(key: "SIZE", value: book.fileSizeDisplay)
+            if book.hasPhysicalCopy {
+                DetailMetaRow(key: theme.usesTerminalCopy ? "KOPIE" : String(localized: "Copy"),
+                              value: String(localized: "Physical"))
+                if let shelf = book.shelfLocation, !shelf.isEmpty {
+                    DetailMetaRow(key: theme.usesTerminalCopy ? "POLICE" : String(localized: "Shelf"), value: shelf)
+                }
+            }
+            if book.hasDigitalFile { DetailMetaRow(key: "SIZE", value: book.fileSizeDisplay) }
             if let pages = book.pageCount {
                 DetailMetaRow(key: "PAGES", value: book.format == "PDF" ? "\(pages)" : "~\(pages)")
             }

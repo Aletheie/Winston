@@ -37,6 +37,7 @@ struct LibraryToolbar: ToolbarContent {
     let showsKindleFilter: Bool
     let transmitEnabled: Bool
     let onImport: () -> Void
+    let onAddPhysicalBook: () -> Void
     let onTransmit: () -> Void
 
     @Environment(\.theme) private var theme
@@ -74,10 +75,17 @@ struct LibraryToolbar: ToolbarContent {
         }
 
         ToolbarItem(placement: .primaryAction) {
-            Button(action: onImport) {
+            Menu {
+                Button(action: onImport) {
+                    Label("Import Book Files…", systemImage: "doc.badge.plus")
+                }
+                Button(action: onAddPhysicalBook) {
+                    Label("Add Physical Book…", systemImage: "books.vertical")
+                }
+            } label: {
                 Label(theme.copy.addFiles, systemImage: "plus")
             }
-            .help("Import book files")
+            .help("Add books")
         }
 
         if showsKindleFilter {

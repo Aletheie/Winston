@@ -34,7 +34,7 @@ final class MetadataService {
         for book: Book,
         title: String?, author: String?, publisher: String?, year: String?,
         series: String?, seriesIndex: String?, language: String?, translator: String?, isbn: String?,
-        description: String?, tags: [String]
+        description: String?, tags: [String], shelfLocation: String?
     ) {
         book.title = title
         book.author = author
@@ -47,6 +47,7 @@ final class MetadataService {
         book.isbn = isbn
         book.bookDescription = description
         book.tags = tags
+        book.shelfLocation = shelfLocation
         modelContext.saveQuietly()
     }
 
@@ -65,8 +66,8 @@ final class MetadataService {
 
     /// Books imported before page counts existed get theirs the first time the panel shows them.
     func backfillPageCount(for book: Book) async {
-        guard book.pageCount == nil, book.modelContext != nil else { return }
-        let url = book.fileURL
+        guard book.pageCount == nil, book.modelContext != nil,
+              let url = book.primaryFileURL else { return }
         let format = book.format
         guard let pages = await PageCountEstimator.pageCount(at: url, format: format) else { return }
         guard book.modelContext != nil, book.pageCount == nil else { return }
@@ -283,7 +284,7 @@ final class MetadataService {
         var coverRollback: CoverRollbackTicket?
         var installedCoverURL: URL?
         if let image = downloadedCover {
-            let fileURL = book.fileURL
+            let fileURL = book.coverCacheURL
             let data = await Task.detached(priority: .utility) {
                 ImageTranscoder.jpegData(from: image)
             }.value

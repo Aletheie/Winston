@@ -44,12 +44,13 @@ final class ConversionService {
     func isConverting(_ book: Book) -> Bool { convertingUUIDs.contains(book.uuid) }
 
     func convert(_ book: Book) {
-        guard EbookConverter.needsConversion(format: book.format) else { return }
+        guard book.hasDigitalFile, EbookConverter.needsConversion(format: book.format) else { return }
         convert(book, to: EbookConverter.kindleTarget(forFormat: book.format))
     }
 
     func convert(_ book: Book, to format: EbookConverter.OutputFormat) {
-        guard book.format.lowercased() != format.ext, !convertingUUIDs.contains(book.uuid) else { return }
+        guard book.hasDigitalFile, book.format.lowercased() != format.ext,
+              !convertingUUIDs.contains(book.uuid) else { return }
         if book.drmProtected == true {
             toasts.error(String(localized: "\u{201C}\(book.displayTitle)\u{201D} is DRM\u{2011}protected and can't be converted."))
             return
@@ -65,7 +66,8 @@ final class ConversionService {
 
     func convertBooks(_ books: [Book]) {
         let candidates = books.filter {
-            EbookConverter.needsConversion(format: $0.format) && !convertingUUIDs.contains($0.uuid)
+            $0.hasDigitalFile && EbookConverter.needsConversion(format: $0.format)
+                && !convertingUUIDs.contains($0.uuid)
         }
         let drmCount = candidates.filter { $0.drmProtected == true }.count
         if drmCount > 0 {
@@ -90,7 +92,10 @@ final class ConversionService {
     }
 
     func convertBooks(_ books: [Book], to format: EbookConverter.OutputFormat) {
-        let convertible = books.filter { $0.format.lowercased() != format.ext && !convertingUUIDs.contains($0.uuid) }
+        let convertible = books.filter {
+            $0.hasDigitalFile && $0.format.lowercased() != format.ext
+                && !convertingUUIDs.contains($0.uuid)
+        }
         let drmCount = convertible.filter { $0.drmProtected == true }.count
         if drmCount > 0 {
             toasts.error(String(localized: "Some DRM\u{2011}protected books were skipped (\(drmCount))."))

@@ -46,28 +46,36 @@ struct BookContextMenu: View {
     private var manualCollections: [BookCollection] { collections.filter { !$0.isSmart } }
 
     var body: some View {
-        Button { actions.open(book) } label: {
-            Label("Open in Books", systemImage: "book")
+        if book.hasDigitalFile {
+            Button { actions.open(book) } label: {
+                Label("Open in Books", systemImage: "book")
+            }
         }
         if let work = book.work {
             Button { actions.openWork(work) } label: {
                 Label("Open Work", systemImage: "books.vertical")
             }
         }
-        Button { actions.quickLook(book) } label: {
-            Label("Quick Look", systemImage: "eye")
-        }
-        Button { actions.showInFinder(book) } label: {
-            Label("Show in Finder", systemImage: "folder")
-        }
-        ShareLink(item: book.fileURL) {
-            Label("Share\u{2026}", systemImage: "square.and.arrow.up")
-        }
-        Button { actions.relink(book) } label: {
-            Label("Replace File\u{2026}", systemImage: "arrow.triangle.2.circlepath.doc.on.clipboard")
-        }
-        Button { actions.inspect(book) } label: {
-            Label("Inspect with Book Doctor…", systemImage: "stethoscope")
+        if let fileURL = book.primaryFileURL {
+            Button { actions.quickLook(book) } label: {
+                Label("Quick Look", systemImage: "eye")
+            }
+            Button { actions.showInFinder(book) } label: {
+                Label("Show in Finder", systemImage: "folder")
+            }
+            ShareLink(item: fileURL) {
+                Label("Share\u{2026}", systemImage: "square.and.arrow.up")
+            }
+            Button { actions.relink(book) } label: {
+                Label("Replace File\u{2026}", systemImage: "arrow.triangle.2.circlepath.doc.on.clipboard")
+            }
+            Button { actions.inspect(book) } label: {
+                Label("Inspect with Book Doctor…", systemImage: "stethoscope")
+            }
+        } else {
+            Button { actions.relink(book) } label: {
+                Label("Attach Digital File…", systemImage: "doc.badge.plus")
+            }
         }
         Divider()
 
@@ -131,7 +139,8 @@ struct BookContextMenu: View {
                     Label("Convert \(selectionCount) to", systemImage: "arrow.triangle.2.circlepath")
                 }
             }
-        } else if EbookConverter.isCalibreAvailable || EbookConverter.canConvertForKindle(book.format) {
+        } else if book.hasDigitalFile
+                    && (EbookConverter.isCalibreAvailable || EbookConverter.canConvertForKindle(book.format)) {
             Menu {
                 ForEach(EbookConverter.OutputFormat.allCases.filter { $0.ext != book.format.lowercased() }) { format in
                     Button(format.label) { actions.convertTo(book, format) }

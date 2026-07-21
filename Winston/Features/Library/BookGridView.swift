@@ -18,6 +18,19 @@ struct BookDragItem: Codable, Sendable, Transferable {
     }
 }
 
+private struct BookFileDragModifier: ViewModifier {
+    let book: Book
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let fileURL = book.primaryFileURL {
+            content.draggable(BookDragItem(bookID: book.uuid, fileURL: fileURL))
+        } else {
+            content
+        }
+    }
+}
+
 struct BookGridView: View {
     let books: [Book]
     let selection: BookSelectionModel
@@ -91,7 +104,7 @@ struct BookGridView: View {
                         focusedBookID = book.id
                         onClick(book)
                     }
-                    .draggable(BookDragItem(bookID: book.uuid, fileURL: book.fileURL))
+                    .modifier(BookFileDragModifier(book: book))
                     .focusable()
                     .focused($focusedBookID, equals: book.id)
                     .onMoveCommand { direction in
@@ -124,7 +137,9 @@ struct BookGridView: View {
                     .accessibilityAction(named: Text("Delete")) {
                         actions.delete(book)
                     }
-                    .accessibilityHint("Press Return to open in Reader")
+                    .accessibilityHint(book.hasDigitalFile
+                        ? "Press Return to open in Reader"
+                        : "Physical copy without a digital file")
                 }
             }
             .padding(.horizontal, 14)

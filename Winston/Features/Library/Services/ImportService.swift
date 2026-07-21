@@ -242,7 +242,9 @@ final class ImportService {
 
     func backfillMissingSizes() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.fileSizeBytes == 0 })
-        guard let books = try? modelContext.fetch(descriptor), !books.isEmpty else { return }
+        guard let fetched = try? modelContext.fetch(descriptor) else { return }
+        let books = fetched.filter(\.hasDigitalFile)
+        guard !books.isEmpty else { return }
         let candidates = books.map { MaintenanceCandidate(uuid: $0.uuid, fileName: $0.fileName) }
         let sizes = await Task.detached(priority: .background) {
             Dictionary(uniqueKeysWithValues: candidates.map { candidate in
@@ -269,7 +271,9 @@ final class ImportService {
 
     func detectMissingDRM() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.drmProtected == nil })
-        guard let books = try? modelContext.fetch(descriptor), !books.isEmpty else { return }
+        guard let fetched = try? modelContext.fetch(descriptor) else { return }
+        let books = fetched.filter(\.hasDigitalFile)
+        guard !books.isEmpty else { return }
         let candidates = books.map { MaintenanceCandidate(uuid: $0.uuid, fileName: $0.fileName) }
         let results = await Task.detached(priority: .background) {
             Dictionary(uniqueKeysWithValues: candidates.map { candidate in
@@ -291,7 +295,7 @@ final class ImportService {
     func rescanMissingMetadata() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.title == nil })
         guard let fetched = try? modelContext.fetch(descriptor) else { return }
-        let books = fetched.filter { !pendingMetadataUUIDs.contains($0.uuid) }
+        let books = fetched.filter { $0.hasDigitalFile && !pendingMetadataUUIDs.contains($0.uuid) }
         guard !books.isEmpty else { return }
 
         let batchID: UUID?
@@ -363,8 +367,8 @@ final class ImportService {
         for book: Book,
         evaluateMatch: Bool
     ) async {
-        guard !Task.isCancelled, book.modelContext != nil else { return }
-        let url = book.fileURL
+        guard !Task.isCancelled, book.modelContext != nil,
+              let url = book.primaryFileURL else { return }
         let analyzer = analyzeBook
         let result = await analyzer(url)
         guard !Task.isCancelled, book.modelContext != nil else { return }

@@ -348,7 +348,7 @@ final class EditionService {
         let winningFileNames = Set(winner.assets.map(\.fileName))
         let losingAssets = loser.assets
         var discardedFileNames: [String] = []
-        if losingAssets.isEmpty, !winningFileNames.contains(loser.fileName) {
+        if losingAssets.isEmpty, loser.hasDigitalFile, !winningFileNames.contains(loser.fileName) {
             let asset = BookAsset(
                 uuid: loser.uuid,
                 fileName: loser.fileName,
@@ -379,6 +379,8 @@ final class EditionService {
             collection.books.append(winner)
         }
         fillEmptyBookMetadata(winner, from: loser)
+        winner.hasPhysicalCopy = winner.hasPhysicalCopy || loser.hasPhysicalCopy
+        if winner.shelfLocation?.isEmpty != false { winner.shelfLocation = loser.shelfLocation }
         mergeReadingHistory(into: winner, from: loser)
         let winnerCoverToken = await covers.beginUserMutation(for: winner.uuid)
         let winnerCoverRollback = await covers.copy(

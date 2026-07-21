@@ -53,13 +53,13 @@ final class CoverService {
                 _ = await covers.rollback(rollback)
                 return
             }
-            await CoverCache.shared.replace(image, for: book.fileURL)
+            await CoverCache.shared.replace(image, for: book.coverCacheURL)
         }
     }
 
     func resetCover(for book: Book) {
         let uuid = book.uuid
-        let fileURL = book.fileURL
+        let fileURL = book.coverCacheURL
         let token = beginOperation(for: uuid)
         Task {
             defer { finishOperation(token, for: uuid) }
@@ -80,11 +80,11 @@ final class CoverService {
                       let data = ImageTranscoder.jpegData(from: image) else { return nil }
                 return (image, data)
             }.value
-            guard operationIsCurrent(token, for: book), book.fileURL == fileURL else { return }
+            guard operationIsCurrent(token, for: book), book.coverCacheURL == fileURL else { return }
             guard let (image, data) = prepared,
                   let extractionRollback = await covers.install(data, using: repositoryToken),
                   operationIsCurrent(token, for: book),
-                  book.fileURL == fileURL,
+                  book.coverCacheURL == fileURL,
                   await covers.isCurrent(repositoryToken) else { return }
             book.coverVersion += 1
             guard modelContext.saveQuietly(rollbackOnFailure: true) else {

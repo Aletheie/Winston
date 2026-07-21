@@ -275,7 +275,7 @@ final class ReadingRecommendationViewModel {
             personalRating: book.rating,
             communityRating: book.communityRating,
             dateAdded: book.dateAdded,
-            fileURL: book.fileURL,
+            fileURL: book.primaryFileURL ?? book.coverCacheURL,
             validationAllowsReading: validationAllowsReading
         )
     }

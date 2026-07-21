@@ -228,16 +228,17 @@ struct LibraryTimeMachineRestorer {
 
         if coverIsIncluded, let restoredBook {
             let image = restoredCoverData.flatMap(NSImage.init(data:))
-            await CoverCache.shared.replace(image, for: restoredBook.fileURL)
+            await CoverCache.shared.replace(image, for: restoredBook.coverCacheURL)
         }
 
         return LibraryTimeMachineRestoreResult(
             bookID: snapshot.id,
             scope: scope,
             createdBook: createdBook,
-            bookFileMissing: restoredBook.map { !FileManager.default.fileExists(
-                atPath: $0.fileURL.path(percentEncoded: false)
-            ) } ?? true,
+            bookFileMissing: restoredBook.map { book in
+                guard let url = book.primaryFileURL else { return false }
+                return !FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
+            } ?? true,
             skippedCollectionCount: skippedCollections,
             safetyBackupURL: safetyBackup
         )
@@ -283,6 +284,8 @@ struct LibraryTimeMachineRestorer {
         book.pageCount = metadata.pageCount
         book.editionStatement = metadata.editionStatement
         book.editionTypeRaw = metadata.editionTypeRaw
+        book.hasPhysicalCopyRaw = metadata.hasPhysicalCopyRaw
+        book.shelfLocation = metadata.shelfLocation
     }
 
     private func makeBook(from snapshot: LibraryTimeMachineBookSnapshot) -> Book {

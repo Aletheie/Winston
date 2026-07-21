@@ -59,6 +59,8 @@ final class Book {
     var sampleNoticeDismissed: Bool?
     var editionStatement: String?
     var editionTypeRaw: String?
+    var hasPhysicalCopyRaw: Bool?
+    var shelfLocation: String?
     var work: Work?
     @Relationship(deleteRule: .cascade, inverse: \BookAsset.book)
     var assets: [BookAsset] = []
@@ -77,6 +79,23 @@ final class Book {
         BookFileStore.url(for: fileName)
     }
 
+    var primaryFileURL: URL? {
+        BookFileStore.validatedURL(for: fileName)
+    }
+
+    var coverCacheURL: URL {
+        primaryFileURL ?? AppPaths.coversDirectory.appending(path: "\(uuid.uuidString).jpg")
+    }
+
+    var hasDigitalFile: Bool {
+        primaryFileURL != nil
+    }
+
+    var hasPhysicalCopy: Bool {
+        get { hasPhysicalCopyRaw ?? false }
+        set { hasPhysicalCopyRaw = newValue }
+    }
+
     nonisolated(unsafe) private static let formats: NSCache<NSString, NSString> = {
         let cache = NSCache<NSString, NSString>()
         cache.countLimit = 16_384
@@ -84,6 +103,7 @@ final class Book {
     }()
 
     var format: String {
+        if !hasDigitalFile { return hasPhysicalCopy ? "PRINT" : "" }
         let key = fileName as NSString
         if let cached = Self.formats.object(forKey: key) { return cached as String }
         let value = key.pathExtension.uppercased()
@@ -122,6 +142,7 @@ final class Book {
     }()
 
     var deviceMatchKey: String {
+        if !hasDigitalFile { return "physical:\(uuid.uuidString.lowercased())" }
         let key = originalFileName as NSString
         if let cached = Self.deviceMatchKeys.object(forKey: key) { return cached as String }
         let value = key.deletingPathExtension.lowercased()
@@ -329,7 +350,7 @@ final class Book {
     static let sampleMaxPages = 30
 
     var probablySample: Bool {
-        guard sampleNoticeDismissed != true, let pageCount else { return false }
+        guard hasDigitalFile, sampleNoticeDismissed != true, let pageCount else { return false }
         return pageCount <= Self.sampleMaxPages
     }
 

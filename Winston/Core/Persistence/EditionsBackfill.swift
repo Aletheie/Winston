@@ -10,7 +10,7 @@ enum EditionsBackfill {
         var inserted = 0
 
         for (index, book) in books.enumerated() {
-            if book.assets.isEmpty {
+            if book.assets.isEmpty, book.hasDigitalFile {
                 let size = book.fileSizeBytes > 0
                     ? book.fileSizeBytes
                     : BookFileStore.size(of: book.fileName)

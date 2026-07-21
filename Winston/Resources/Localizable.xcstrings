@@ -11,6 +11,136 @@
         }
       }
     },
+    "Add Book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat knihu"
+          }
+        }
+      }
+    },
+    "Add books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat knihy"
+          }
+        }
+      }
+    },
+    "Add Physical Book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat fyzickou knihu"
+          }
+        }
+      }
+    },
+    "Add Physical Book…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat fyzickou knihu…"
+          }
+        }
+      }
+    },
+    "Added physical book “%@”" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fyzická kniha „%@“ byla přidána"
+          }
+        }
+      }
+    },
+    "Attach Digital File" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Připojit digitální soubor"
+          }
+        }
+      }
+    },
+    "Attach Digital File…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Připojit digitální soubor…"
+          }
+        }
+      }
+    },
+    "Copy" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kopie"
+          }
+        }
+      }
+    },
+    "Couldn’t add the physical book." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fyzickou knihu se nepodařilo přidat."
+          }
+        }
+      }
+    },
+    "Import Book Files…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Importovat soubory knih…"
+          }
+        }
+      }
+    },
+    "Physical" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fyzická"
+          }
+        }
+      }
+    },
+    "Physical copy without a digital file" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fyzická kopie bez digitálního souboru"
+          }
+        }
+      }
+    },
+    "Shelf" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Police"
+          }
+        }
+      }
+    },
     "—" : {
       "localizations" : {
         "cs" : {

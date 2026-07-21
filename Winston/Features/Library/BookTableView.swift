@@ -70,6 +70,16 @@ struct BookTableView: View {
             .width(70)
             .customizationID("format")
 
+            TableColumn(columnTitle("Shelf", terminal: "shelf")) { book in
+                Text(book.shelfLocation ?? "\u{2014}")
+                    .font(theme.label(size: 10, weight: .regular))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+            }
+            .width(min: 80, ideal: 120, max: 220)
+            .defaultVisibility(.hidden)
+            .customizationID("shelf")
+
             TableColumn(columnTitle("Editions", terminal: "editions")) { book in
                 Text((editions.editionCounts[book.uuid] ?? 1).formatted())
                     .font(theme.label(size: 10, weight: .regular))
@@ -120,7 +130,7 @@ struct BookTableView: View {
     @ViewBuilder
     private func menu(for ids: Set<Book.ID>) -> some View {
         let chosen = books.filter { ids.contains($0.id) }
-        let convertible = chosen.filter { EbookConverter.needsConversion(format: $0.format) }.count
+        let convertible = chosen.filter { $0.hasDigitalFile && EbookConverter.needsConversion(format: $0.format) }.count
         let onDevice = chosen.filter { deviceFileNames.contains($0.deviceMatchKey) }.count
         if chosen.count == 1, let book = chosen.first {
             BookContextMenu(
