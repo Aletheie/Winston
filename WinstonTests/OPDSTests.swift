@@ -221,6 +221,19 @@ struct OPDSServiceTests {
             try await service.feed(at: URL(string: "https://example.com/private")!)
         }
     }
+
+    @Test func `Service stops reading a feed at the byte limit`() async throws {
+        OPDSTestURLProtocol.prepare(
+            status: 200,
+            body: Data(repeating: 0x20, count: OPDSService.maximumFeedBytes + 1)
+        )
+        let session = URLSession(configuration: OPDSTestURLProtocol.configuration)
+        let service = OPDSService(session: session)
+
+        await #expect(throws: OPDSServiceError.feedTooLarge) {
+            try await service.feed(at: URL(string: "https://example.com/large")!)
+        }
+    }
 }
 
 @MainActor

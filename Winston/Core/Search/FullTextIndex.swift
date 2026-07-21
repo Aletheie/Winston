@@ -82,7 +82,7 @@ private nonisolated struct StoredFullTextSection: Codable, Sendable {
 private nonisolated struct LoadedFullTextBook: Sendable {
     let title: String
     let author: String?
-    let index: StoredFullTextIndex
+    let format: String
 }
 
 actor FullTextIndexService {
@@ -94,6 +94,11 @@ actor FullTextIndexService {
     private static let maximumExcerpts = 240
     private static let maximumExcerptsPerSection = 3
 
+    private let executor = DispatchQueueSerialExecutor(label: "cz.annajung.Winston.full-text")
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
+
     private let indexDirectory: URL
     private var documents: [UUID: LoadedFullTextBook] = [:]
     private var orderedDocuments: [(UUID, LoadedFullTextBook)] = []
@@ -103,6 +108,13 @@ actor FullTextIndexService {
     }
 
     func synchronize(_ snapshots: [FullTextBookSnapshot]) throws -> FullTextIndexSummary {
+        let signposter = Log.searchSignposter
+        let interval = signposter.beginInterval(
+            "SynchronizeFullTextIndex",
+            id: signposter.makeSignpostID(),
+            "\(snapshots.count) books"
+        )
+        defer { signposter.endInterval("SynchronizeFullTextIndex", interval) }
         try Task.checkCancellation()
         try AppPaths.ensureDirectory(indexDirectory)
         removeIndexesMissingFromLibrary(Set(snapshots.map(\.bookID)))
@@ -167,7 +179,7 @@ actor FullTextIndexService {
                 loaded[snapshot.bookID] = LoadedFullTextBook(
                     title: snapshot.title,
                     author: snapshot.author,
-                    index: stored
+                    format: stored.format
                 )
             } catch is CancellationError {
                 throw CancellationError()
@@ -198,14 +210,25 @@ actor FullTextIndexService {
         let query = Self.collapsedWhitespace(rawQuery)
         guard query.count >= 2 else { return [] }
 
+        let signposter = Log.searchSignposter
+        let interval = signposter.beginInterval(
+            "SearchFullTextIndex",
+            id: signposter.makeSignpostID(),
+            "\(self.orderedDocuments.count) books"
+        )
+        defer { signposter.endInterval("SearchFullTextIndex", interval) }
+
         var results: [FullTextBookResult] = []
         var excerptCount = 0
 
         for (bookID, document) in orderedDocuments {
+            if Task.isCancelled { return [] }
             guard excerptCount < Self.maximumExcerpts else { break }
+            guard let index = loadIndex(for: bookID) else { continue }
             var chapters: [FullTextChapterResult] = []
 
-            for section in document.index.sections {
+            for section in index.sections {
+                if Task.isCancelled { return [] }
                 let remaining = Self.maximumExcerpts - excerptCount
                 guard remaining > 0 else { break }
                 let excerpts = Self.excerpts(
@@ -229,7 +252,7 @@ actor FullTextIndexService {
                 bookID: bookID,
                 title: document.title,
                 author: document.author,
-                format: document.index.format.uppercased(),
+                format: document.format.uppercased(),
                 chapters: chapters
             ))
         }
@@ -337,6 +360,7 @@ actor FullTextIndexService {
 
         while excerpts.count < limit,
               let match = text.range(of: query, options: options, range: searchRange) {
+            if Task.isCancelled { return [] }
             let snippetLower = text.index(match.lowerBound, offsetBy: -90, limitedBy: text.startIndex)
                 ?? text.startIndex
             let snippetUpper = text.index(match.upperBound, offsetBy: 120, limitedBy: text.endIndex)

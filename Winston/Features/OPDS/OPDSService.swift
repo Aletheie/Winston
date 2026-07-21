@@ -36,16 +36,7 @@ actor OPDSService: OPDSFetching {
             forHTTPHeaderField: "Accept"
         )
 
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            if error is CancellationError { throw error }
-            throw OPDSServiceError.network
-        }
-        let http = try validate(response)
-        guard data.count <= Self.maximumFeedBytes else { throw OPDSServiceError.feedTooLarge }
+        let (data, http) = try await boundedFeedData(for: request)
         do {
             return try OPDSParser.parse(
                 data,
@@ -56,6 +47,38 @@ actor OPDSService: OPDSFetching {
             throw CancellationError()
         } catch {
             throw OPDSServiceError.invalidFeed
+        }
+    }
+
+    private func boundedFeedData(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            let http = try validate(response)
+            let expected = response.expectedContentLength
+            guard expected <= 0 || expected <= Int64(Self.maximumFeedBytes) else {
+                throw OPDSServiceError.feedTooLarge
+            }
+
+            var data = Data()
+            if expected > 0 {
+                data.reserveCapacity(Int(expected))
+            }
+            for try await byte in bytes {
+                guard data.count < Self.maximumFeedBytes else {
+                    throw OPDSServiceError.feedTooLarge
+                }
+                data.append(byte)
+                if data.count.isMultiple(of: 16 * 1_024) {
+                    try Task.checkCancellation()
+                }
+            }
+            return (data, http)
+        } catch let error as OPDSServiceError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw OPDSServiceError.network
         }
     }
 

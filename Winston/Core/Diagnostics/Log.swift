@@ -1,4 +1,21 @@
+import Foundation
 import OSLog
+
+nonisolated final class DispatchQueueSerialExecutor: SerialExecutor, @unchecked Sendable {
+    private let queue: DispatchQueue
+
+    init(label: String) {
+        queue = DispatchQueue(label: label)
+    }
+
+    func enqueue(_ job: consuming ExecutorJob) {
+        let unownedJob = UnownedJob(job)
+        let executor = asUnownedSerialExecutor()
+        queue.async {
+            unownedJob.runSynchronously(on: executor)
+        }
+    }
+}
 
 nonisolated enum Log {
     static let subsystem = "cz.annajung.Winston"
@@ -15,4 +32,6 @@ nonisolated enum Log {
     static let conversionSignposter = OSSignposter(subsystem: subsystem, category: "conversion")
     static let deviceSignposter = OSSignposter(subsystem: subsystem, category: "device")
     static let librarySignposter = OSSignposter(subsystem: subsystem, category: "library")
+    static let persistenceSignposter = OSSignposter(subsystem: subsystem, category: "persistence")
+    static let searchSignposter = OSSignposter(subsystem: subsystem, category: "search")
 }

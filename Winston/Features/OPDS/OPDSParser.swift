@@ -7,6 +7,7 @@ nonisolated enum OPDSParser {
     }
 
     static func parse(_ data: Data, baseURL: URL, contentType: String? = nil) throws -> OPDSFeed {
+        try Task.checkCancellation()
         let type = contentType?.lowercased() ?? ""
         let firstByte = data.first { byte in
             byte != 0x20 && byte != 0x09 && byte != 0x0A && byte != 0x0D
@@ -29,7 +30,9 @@ nonisolated enum OPDSParser {
         parser.delegate = delegate
         parser.shouldProcessNamespaces = false
         parser.shouldReportNamespacePrefixes = false
-        guard parser.parse(), parser.parserError == nil else {
+        let parsed = parser.parse()
+        if delegate.wasCancelled { throw CancellationError() }
+        guard parsed, parser.parserError == nil else {
             throw ParseError.malformedDocument
         }
         return delegate.feed
@@ -44,6 +47,7 @@ nonisolated enum OPDSParser {
         } catch {
             throw ParseError.malformedDocument
         }
+        try Task.checkCancellation()
 
         let groupNavigation = document.groups.flatMap(\.navigation)
         let navigation = unique(
@@ -240,6 +244,7 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
     private var feedLinks: [Link] = []
     private var navigation: [OPDSNavigationItem] = []
     private var publications: [OPDSPublication] = []
+    private(set) var wasCancelled = false
 
     init(baseURL: URL) {
         self.baseURL = baseURL
@@ -272,6 +277,11 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
         qualifiedName qName: String?,
         attributes attributeDict: [String: String] = [:]
     ) {
+        if Task.isCancelled {
+            wasCancelled = true
+            parser.abortParsing()
+            return
+        }
         depth += 1
         if capture != nil { return }
         let name = localName(elementName)
@@ -324,6 +334,11 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if Task.isCancelled {
+            wasCancelled = true
+            parser.abortParsing()
+            return
+        }
         capture?.text.append(string)
     }
 
