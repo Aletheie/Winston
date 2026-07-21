@@ -4,6 +4,7 @@ struct BookActions {
     var open: (Book) -> Void
     var openWork: (Work) -> Void
     var openSeries: (String) -> Void
+    var showAuthorInLibrary: (String) -> Void
     var quickLook: (Book) -> Void
     var showInFinder: (Book) -> Void
     var edit: (Book) -> Void

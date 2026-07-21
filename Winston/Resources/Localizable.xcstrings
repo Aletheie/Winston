@@ -9178,6 +9178,16 @@
         }
       }
     },
+    "Show all books by this author" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zobrazit všechny knihy tohoto autora"
+          }
+        }
+      }
+    },
     "Show Catalogs" : {
       "localizations" : {
         "cs" : {

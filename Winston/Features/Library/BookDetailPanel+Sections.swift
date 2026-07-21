@@ -72,7 +72,11 @@ struct DetailSingleBook: View {
             VStack(alignment: .leading, spacing: 0) {
                 DetailCover(book: book, actions: actions)
                 VStack(alignment: .leading, spacing: 8) {
-                    DetailIdentity(title: book.displayTitle, author: book.displayAuthor)
+                    DetailIdentity(
+                        title: book.displayTitle,
+                        author: book.displayAuthor,
+                        onShowAuthor: actions.showAuthorInLibrary
+                    )
                     if book.probablySample {
                         DetailSampleNotice(book: book, viewModel: viewModel)
                     }
@@ -199,6 +203,7 @@ private enum DroppedCoverError: Error {
 struct DetailIdentity: View {
     let title: String
     let author: String?
+    let onShowAuthor: (String) -> Void
 
     @Environment(\.theme) private var theme
 
@@ -210,9 +215,15 @@ struct DetailIdentity: View {
                 .lineLimit(3)
                 .help(title)
             if let author {
-                Text("by \(author)")
-                    .font(theme.label(size: 10))
-                    .foregroundStyle(theme.textSecondary)
+                Button {
+                    onShowAuthor(author)
+                } label: {
+                    Text("by \(author)")
+                }
+                .buttonStyle(.link)
+                .font(theme.label(size: 10))
+                .help("Show all books by this author")
+                .accessibilityIdentifier("bookDetail.author")
             }
         }
     }

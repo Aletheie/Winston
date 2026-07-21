@@ -68,6 +68,7 @@ struct ContentView: View {
                         viewModel: viewModel,
                         filter: filter,
                         onShowAll: { sidebarSelection = .all },
+                        onShowAuthor: { sidebarSelection = .author($0) },
                         onShowSeries: { sidebarSelection = .series($0) },
                         columnVisibility: $columnVisibility,
                         activeSheet: $activeLibrarySheet

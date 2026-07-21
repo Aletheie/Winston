@@ -241,6 +241,19 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .onChange(of: selection, initial: true) { _, selection in
+            guard let selection else { return }
+            switch selection {
+            case .author:
+                showAuthors = true
+            case .series:
+                showSeries = true
+            case .tag:
+                showTags = true
+            default:
+                break
+            }
+        }
         .task(id: FacetRevision(
             revision: LibraryMutationLog.shared.catalogRevision,
             bookCount: books.count,

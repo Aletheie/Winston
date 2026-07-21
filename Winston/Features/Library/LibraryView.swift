@@ -46,6 +46,7 @@ struct LibraryView: View {
     var viewModel: LibraryViewModel
     let filter: LibraryFilter
     let onShowAll: () -> Void
+    let onShowAuthor: (String) -> Void
     let onShowSeries: (String) -> Void
     @Binding var columnVisibility: NavigationSplitViewVisibility
     @Binding var activeSheet: LibrarySheet?
@@ -164,6 +165,7 @@ struct LibraryView: View {
             open: { LibraryExternalActions.openInReader($0) },
             openWork: { activeSheet = .work($0) },
             openSeries: { activeSheet = .series(name: $0) },
+            showAuthorInLibrary: showAuthorInLibrary,
             quickLook: { quickLookURL = $0.fileURL },
             showInFinder: { LibraryExternalActions.showInFinder($0) },
             edit: { activeSheet = .edit($0) },
@@ -379,6 +381,14 @@ struct LibraryView: View {
         debouncedSearch = ""
         selection.clear()
         onShowSeries(name)
+    }
+
+    private func showAuthorInLibrary(_ author: String) {
+        activeSheet = nil
+        kindlePresenceFilter = .all
+        searchText = ""
+        debouncedSearch = ""
+        onShowAuthor(author)
     }
 
     // MARK: - Top bar
@@ -676,6 +686,7 @@ struct LibraryView: View {
             viewModel: LibraryViewModel(modelContext: container.mainContext, settings: AppSettings(), toasts: ToastCenter()),
             filter: .all,
             onShowAll: {},
+            onShowAuthor: { _ in },
             onShowSeries: { _ in },
             columnVisibility: .constant(.all),
             activeSheet: .constant(nil)

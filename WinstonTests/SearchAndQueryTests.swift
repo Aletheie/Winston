@@ -75,6 +75,23 @@ struct LibraryQueryTests {
         #expect(result.map(\.title) == ["A"])
     }
 
+    @Test func authorNavigationUsesTheExistingLibraryFilter() {
+        let author = "Ursula K. Le Guin"
+        let selection = SidebarItem.author(author)
+        let books = [
+            makeBook("A Wizard of Earthsea", author: author),
+            makeBook("The Tombs of Atuan", author: author),
+            makeBook("Dune", author: "Frank Herbert"),
+        ]
+
+        #expect(selection.libraryFilter == .author(author))
+        #expect(SidebarItem(rawValue: selection.rawValue) == selection)
+        #expect(
+            LibraryQuery.apply(to: books, filter: selection.libraryFilter, searchText: "", sort: [])
+                .map(\.title) == ["A Wizard of Earthsea", "The Tombs of Atuan"]
+        )
+    }
+
     @Test func fieldSearchNarrowsByTag() {
         let books = [makeBook("Dune", tags: ["sci-fi"]), makeBook("Mythago", tags: ["fantasy"])]
         let result = LibraryQuery.apply(to: books, filter: .all, searchText: "tag:sci-fi", sort: [])
