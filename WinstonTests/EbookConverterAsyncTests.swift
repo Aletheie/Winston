@@ -121,6 +121,23 @@ struct EbookConverterAsyncTests {
         #expect(clock.now - start < .seconds(10))
     }
 
+    @Test func converterIgnoringTerminationIsKilledAfterGracePeriod() async throws {
+        let script = try makeScript("trap '' TERM\nsleep 30")
+        defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
+        let source = try makeFB2Source()
+        defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        await withOverrides(executable: script, timeout: 0.2) {
+            await #expect(throws: EbookConverter.ConversionError.self) {
+                try await EbookConverter.convert(source, to: .epub)
+            }
+        }
+
+        #expect(clock.now - start < .seconds(6))
+    }
+
     @Test func cancellationTerminatesTheConverterPromptly() async throws {
         let script = try makeScript("sleep 30")
         defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }

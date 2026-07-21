@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import os
+import Darwin
 
 nonisolated enum EbookConverter {
     enum ConversionError: Error, LocalizedError {
@@ -128,30 +129,48 @@ nonisolated enum EbookConverter {
         return try await convertViaCalibre(source, to: format)
     }
 
-    private struct ProcessBox: @unchecked Sendable {
+    private final class ProcessBox: @unchecked Sendable {
         let process: Process
+        private let group = OSAllocatedUnfairLock<Int32?>(initialState: nil)
+
+        init(process: Process) {
+            self.process = process
+        }
+
+        func captureProcessGroup() {
+            let pid = process.processIdentifier
+            guard pid > 0 else { return }
+            if setpgid(pid, pid) == 0 || getpgid(pid) == pid {
+                group.withLock { $0 = pid }
+            }
+        }
+
+        func signal(_ signal: Int32) {
+            let pid = process.processIdentifier
+            guard pid > 0 else { return }
+            if let groupID = group.withLock({ $0 }) {
+                _ = kill(-groupID, signal)
+            } else {
+                _ = kill(pid, signal)
+            }
+        }
     }
 
     private final class ProcessRunState: @unchecked Sendable {
-        private enum State {
-            case pending
-            case active(CheckedContinuation<Int32, any Error>)
-            case completed(Result<Int32, any Error>)
+        private struct State {
+            var continuation: CheckedContinuation<Int32, any Error>?
+            var result: Result<Int32, any Error>?
+            var requestedError: (any Error)?
         }
 
-        private let state = OSAllocatedUnfairLock(initialState: State.pending)
+        private let state = OSAllocatedUnfairLock(initialState: State())
 
         func install(_ continuation: CheckedContinuation<Int32, any Error>) -> Bool {
             let result = state.withLock { state -> Result<Int32, any Error>? in
-                switch state {
-                case .pending:
-                    state = .active(continuation)
-                    return nil
-                case .active:
-                    return nil
-                case .completed(let result):
-                    return result
-                }
+                if let result = state.result { return result }
+                guard state.continuation == nil else { return nil }
+                state.continuation = continuation
+                return nil
             }
             if let result { continuation.resume(with: result); return false }
             return true
@@ -159,25 +178,41 @@ nonisolated enum EbookConverter {
 
         func complete(_ result: Result<Int32, any Error>) {
             let continuation = state.withLock { state -> CheckedContinuation<Int32, any Error>? in
-                switch state {
-                case .pending:
-                    state = .completed(result)
-                    return nil
-                case .active(let continuation):
-                    state = .completed(result)
-                    return continuation
-                case .completed:
-                    return nil
-                }
+                guard state.result == nil else { return nil }
+                state.result = result
+                defer { state.continuation = nil }
+                return state.continuation
             }
             continuation?.resume(with: result)
         }
 
-        var isCompleted: Bool {
+        func requestTermination(_ error: any Error) -> Bool {
             state.withLock { state in
-                if case .completed = state { return true }
-                return false
+                guard state.result == nil, state.requestedError == nil else { return false }
+                state.requestedError = error
+                return true
             }
+        }
+
+        func completeAfterTermination(status: Int32) {
+            let result = state.withLock { state -> Result<Int32, any Error>? in
+                guard state.result == nil else { return nil }
+                return state.requestedError.map(Result.failure) ?? .success(status)
+            }
+            if let result { complete(result) }
+        }
+
+        func completeRequestedTermination() {
+            let error = state.withLock { $0.requestedError }
+            if let error { complete(.failure(error)) }
+        }
+
+        var terminationWasRequested: Bool {
+            state.withLock { $0.requestedError != nil }
+        }
+
+        var isCompleted: Bool {
+            state.withLock { $0.result != nil }
         }
     }
 
@@ -228,14 +263,14 @@ nonisolated enum EbookConverter {
                 let watchdog = Task {
                     try? await Task.sleep(for: .seconds(timeout))
                     guard !Task.isCancelled else { return }
-                    state.complete(.failure(ConversionError.timedOut))
-                    if box.process.isRunning { box.process.terminate() }
+                    guard state.requestTermination(ConversionError.timedOut) else { return }
+                    stop(box, state: state)
                     Log.conversion.error("Calibre timed out after \(Int(timeout))s and was stopped")
                 }
 
                 process.terminationHandler = { finished in
                     watchdog.cancel()
-                    state.complete(.success(finished.terminationStatus))
+                    state.completeAfterTermination(status: finished.terminationStatus)
                 }
 
                 guard !state.isCompleted else {
@@ -244,15 +279,27 @@ nonisolated enum EbookConverter {
                 }
                 do {
                     try process.run()
-                    if state.isCompleted, process.isRunning { process.terminate() }
+                    box.captureProcessGroup()
+                    if state.terminationWasRequested { stop(box, state: state) }
                 } catch {
                     watchdog.cancel()
                     state.complete(.failure(error))
                 }
             }
         } onCancel: {
-            state.complete(.failure(CancellationError()))
-            if box.process.isRunning { box.process.terminate() }
+            guard state.requestTermination(CancellationError()) else { return }
+            stop(box, state: state)
+        }
+    }
+
+    private static func stop(_ box: ProcessBox, state: ProcessRunState) {
+        guard box.process.isRunning else {
+            state.completeRequestedTermination()
+            return
+        }
+        box.signal(SIGTERM)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            if box.process.isRunning { box.signal(SIGKILL) }
         }
     }
 }
