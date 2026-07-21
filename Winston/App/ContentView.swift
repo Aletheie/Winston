@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import OSLog
 
 enum MainDestination: Hashable {
     case library
@@ -98,6 +99,12 @@ struct ContentView: View {
             await viewModel.notices.checkForNewReleasesIfDue()
         }
         .task(priority: .background) {
+            let signposter = Log.persistenceSignposter
+            let interval = signposter.beginInterval(
+                "StartupMaintenance",
+                id: signposter.makeSignpostID()
+            )
+            defer { signposter.endInterval("StartupMaintenance", interval) }
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
             await checkIntegrityAndBackup()
@@ -148,7 +155,7 @@ struct ContentView: View {
     }
 
     private var metadataBackfillConfiguration: String {
-        "\(settings.onlineMetadataEnabled)|\(settings.hardcoverToken)|\(settings.releaseCheckEnabled)"
+        "\(settings.onlineMetadataEnabled)|\(settings.hardcoverToken.hashValue)|\(settings.releaseCheckEnabled)"
     }
 
     private func openEditionReview() {

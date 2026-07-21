@@ -105,6 +105,7 @@ let project = Project(
                 "CFBundleHelpBookName": "cz.annajung.Winston.helpbook",
                 "CFBundleDevelopmentRegion": "en",
                 "CFBundleLocalizations": .array([.string("en"), .string("cs")]),
+                "LSApplicationCategoryType": "public.app-category.reference",
                 "UTImportedTypeDeclarations": kindleTypeDeclarations,
                 // The private half of SUPublicEDKey lives in the login Keychain — losing
                 // it means existing users can't accept updates. TODO: point SUFeedURL at
@@ -129,10 +130,26 @@ let project = Project(
                 "com.apple.security.hardened-process.platform-restrictions-string": "2",
             ]),
             scripts: [
+                .pre(
+                    path: "Scripts/check-release-readiness.sh",
+                    name: "Check release readiness",
+                    basedOnDependencyAnalysis: false,
+                    runForInstallBuildsOnly: true
+                ),
                 .post(
                     path: "Scripts/bundle-libmtp.sh",
                     name: "Bundle libmtp",
-                    basedOnDependencyAnalysis: false
+                    inputPaths: [
+                        "$(SRCROOT)/Scripts/bundle-libmtp.sh",
+                        "/opt/homebrew/opt/libmtp/lib/libmtp.9.dylib",
+                        "/opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib",
+                        "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+                    ],
+                    outputPaths: [
+                        "$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/libmtp.9.dylib",
+                        "$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/libusb-1.0.0.dylib",
+                    ],
+                    basedOnDependencyAnalysis: true
                 ),
             ],
             dependencies: [

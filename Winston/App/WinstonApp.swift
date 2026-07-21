@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import OSLog
 
 private enum StartupMigrationCheckpoint {
     private static let catalogV2Key = "migration.catalog-assets-reading-history.v2"
@@ -48,8 +49,14 @@ struct WinstonApp: App {
         )
         let context = container.mainContext
         if !isRunningUnitTests {
+            let signposter = Log.persistenceSignposter
+            let interval = signposter.beginInterval(
+                "StartupMigrations",
+                id: signposter.makeSignpostID()
+            )
             LegacyLibraryMigrator.migrateIfNeeded(context: context)
             StartupMigrationCheckpoint.runIfNeeded(context: context)
+            signposter.endInterval("StartupMigrations", interval)
         }
         let settings = AppSettings()
         let toastCenter = ToastCenter()
