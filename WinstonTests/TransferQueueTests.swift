@@ -192,14 +192,19 @@ struct TransferQueueTests {
         let second = try makeMOBIBook(in: lib, title: "Second")
         let fake = FakeKindleConnection()
         await fake.setBlockSends(true)
-        let queue = TransferQueue(toasts: ToastCenter())
+        var receipts: [KindleSyncTransferRecord] = []
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { receipts.append($0) }
+        )
         let monitor = makeMonitor(fake)
 
-        queue.beginSend(books: [first], via: monitor)
+        queue.beginSend(books: [first, second], via: monitor)
         await fake.waitUntilSendStarts()
         queue.cancel()
 
         #expect(queue.isTransferring)
+        #expect(queue.items.map(\.stage) == [.cancelling, .cancelled])
         queue.beginSend(books: [second], via: monitor)
         await fake.releaseBlockedSend()
 
@@ -210,7 +215,36 @@ struct TransferQueueTests {
 
         #expect(!queue.isTransferring)
         #expect(await fake.sentFiles.map(\.fileName) == ["First.mobi"])
-        #expect(queue.items.first?.stage == .failed)
+        #expect(queue.items.map(\.stage) == [.done, .cancelled])
+        #expect(receipts.map(\.sentFileName) == ["First.mobi"])
+        #expect(queue.failedCount == 0)
+    }
+
+    @Test func cooperativeCancellationEndsAsCancelledWithoutReceipt() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Cancelled")
+        let fake = FakeKindleConnection()
+        await fake.setBlockSendsCooperatively(true)
+        var receipts: [KindleSyncTransferRecord] = []
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { receipts.append($0) }
+        )
+
+        queue.beginSend(books: [book], via: makeMonitor(fake))
+        await fake.waitUntilSendStarts()
+        queue.cancel()
+
+        let deadline = Date.now.addingTimeInterval(2)
+        while queue.isTransferring, Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(!queue.isTransferring)
+        #expect(queue.items.first?.stage == .cancelled)
+        #expect(await fake.sentFiles.isEmpty)
+        #expect(receipts.isEmpty)
+        #expect(queue.failedCount == 0)
     }
 
     @Test func deletingLibraryBookDuringSendDoesNotInvalidateQueue() async throws {

@@ -73,13 +73,15 @@ nonisolated struct DeviceBook: Identifiable, Sendable, Hashable {
     }
 }
 
-nonisolated enum DeviceError: Error, LocalizedError {
+nonisolated enum DeviceError: Error, LocalizedError, Equatable {
     case notConnected
     case openFailed
     case listFailed
     case transferFailed(code: Int32)
     case deleteFailed(code: Int32)
     case fileMissing
+    case invalidFileName
+    case unsafePath
 
     var errorDescription: String? {
         switch self {
@@ -89,6 +91,8 @@ nonisolated enum DeviceError: Error, LocalizedError {
         case .transferFailed(let code):   "Transfer failed (error \(code))"
         case .deleteFailed(let code):     "Delete failed (error \(code))"
         case .fileMissing:                "The file no longer exists"
+        case .invalidFileName:            "The destination file name is invalid"
+        case .unsafePath:                 "The device path is outside the documents folder"
         }
     }
 }

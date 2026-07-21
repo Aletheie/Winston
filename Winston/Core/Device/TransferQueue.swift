@@ -34,6 +34,7 @@ final class TransferQueue {
         let sourceFingerprint: String
         let coverVersion: Int
         let drmProtected: Bool
+        let fileUnavailable: Bool
     }
 
     enum Direction: Sendable, Equatable {
@@ -45,6 +46,8 @@ final class TransferQueue {
         case waiting
         case converting
         case transferring
+        case cancelling
+        case cancelled
         case done
         case failed
     }
@@ -102,10 +105,13 @@ final class TransferQueue {
     func cancel() {
         guard isTransferring else { return }
         sendTask?.cancel()
-        let unfinished = items.compactMap { item in
-            item.stage == .done || item.stage == .failed ? nil : item.id
+        for item in items where !Self.isTerminal(item.stage) {
+            if item.id == activeItemID {
+                setStage(.cancelling, for: item.id)
+            } else {
+                markCancelled(item.id)
+            }
         }
-        for id in unfinished { markFailed(id) }
     }
 
     var activeItem: Item? {
@@ -195,10 +201,13 @@ final class TransferQueue {
         }
 
         if Task.isCancelled {
-            for item in items where item.stage != .done { markFailed(item.id) }
+            for item in items where !Self.isTerminal(item.stage) { markCancelled(item.id) }
         }
         let sent = completedItemCount
-        Log.device.notice("Send queue finished: \(sent) sent, \(self.failedCount) failed")
+        let cancelled = items.count { $0.stage == .cancelled }
+        Log.device.notice(
+            "Send queue finished: \(sent) sent, \(self.failedCount) failed, \(cancelled) cancelled"
+        )
         if announcesResult, !Task.isCancelled, failedCount > 0 {
             toasts.error(String(localized: "Some transfers failed (\(failedCount))."))
         } else if announcesResult, !Task.isCancelled, sent > 0 {
@@ -216,6 +225,11 @@ final class TransferQueue {
         connection: any KindleDeviceConnection,
         deviceInfo: DeviceInfo
     ) async {
+        if request.fileUnavailable {
+            lastError = "File unavailable"
+            markFailed(itemID)
+            return
+        }
         if request.drmProtected {
             lastError = "DRM-protected"
             toasts.error(String(localized: "\u{201C}\(request.displayName)\u{201D} is DRM\u{2011}protected and can't be sent."))
@@ -236,6 +250,10 @@ final class TransferQueue {
                 temporaryConversion = sourceURL
                 await onConversionArtifact?(request.uuid, sourceURL)
             } catch {
+                if error is CancellationError {
+                    markCancelled(itemID)
+                    return
+                }
                 Log.device.error("Convert-for-Kindle failed for \(request.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 lastError = error.localizedDescription
                 markFailed(itemID)
@@ -244,7 +262,7 @@ final class TransferQueue {
         }
 
         guard !Task.isCancelled else {
-            markFailed(itemID)
+            markCancelled(itemID)
             return
         }
 
@@ -270,10 +288,6 @@ final class TransferQueue {
                     }
                 }
             )
-            guard !Task.isCancelled else {
-                markFailed(itemID)
-                return
-            }
             Log.device.notice("Transferred \(fileName, privacy: .public)")
             markDone(itemID)
             await connection.removeStaleVariants(baseName: base, keeping: fileName)
@@ -292,6 +306,11 @@ final class TransferQueue {
                 completedAt: .now
             ))
         } catch {
+            if error is CancellationError {
+                Log.device.info("Transfer of \(fileName, privacy: .public) cancelled")
+                markCancelled(itemID)
+                return
+            }
             Log.device.error("Transfer of \(fileName, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             lastError = error.localizedDescription
             markFailed(itemID)
@@ -308,7 +327,8 @@ final class TransferQueue {
             format: descriptor.sourceFormat,
             sourceFingerprint: descriptor.sourceFingerprint,
             coverVersion: descriptor.coverVersion,
-            drmProtected: book.drmProtected == true
+            drmProtected: book.drmProtected == true,
+            fileUnavailable: descriptor.fileUnavailable
         )
     }
 
@@ -327,16 +347,21 @@ final class TransferQueue {
         let targetFormat = requiresConversion
             ? EbookConverter.kindleTarget(forFormat: asset.format).ext
             : asset.format.lowercased()
-        let baseName = (book.originalFileName as NSString).deletingPathExtension
+        let baseName = (descriptor.targetFileName as NSString).deletingPathExtension
+        let targetName = "\(baseName).\(targetFormat)"
+        let sourceURL = BookFileStore.validatedURL(for: asset.fileName) ?? asset.fileURL
         return SendRequest(
             uuid: book.uuid,
             displayName: book.displayTitle,
-            sourceURL: asset.fileURL,
-            targetFileName: "\(baseName).\(targetFormat)",
+            sourceURL: sourceURL,
+            targetFileName: ManagedLeafName(rawValue: targetName)?.rawValue
+                ?? descriptor.targetFileName,
             format: asset.format,
             sourceFingerprint: descriptor.sourceFingerprint,
             coverVersion: descriptor.coverVersion,
-            drmProtected: book.drmProtected == true
+            drmProtected: book.drmProtected == true,
+            fileUnavailable: descriptor.fileUnavailable
+                || BookFileStore.validatedURL(for: asset.fileName) == nil
         )
     }
 
@@ -381,8 +406,12 @@ final class TransferQueue {
             return destination
         } catch {
             lastError = error.localizedDescription
-            markFailed(item.id)
-            toasts.error(String(localized: "Couldn\u{2019}t copy the book from the device."))
+            if error is CancellationError {
+                markCancelled(item.id)
+            } else {
+                markFailed(item.id)
+                toasts.error(String(localized: "Couldn\u{2019}t copy the book from the device."))
+            }
             return nil
         }
     }
@@ -487,13 +516,13 @@ final class TransferQueue {
         completedItemCount = newItems.count { $0.stage == .done }
         totalProgress = newItems.reduce(0) { $0 + $1.progress }
         activeItemID = newItems.first {
-            $0.stage == .waiting || $0.stage == .converting || $0.stage == .transferring
+            !Self.isTerminal($0.stage)
         }?.id
     }
 
     private func updateProgress(_ fraction: Double, for id: UUID) {
         guard let index = itemIndexByID[id], items.indices.contains(index) else { return }
-        guard items[index].stage != .done, items[index].stage != .failed else { return }
+        guard !Self.isTerminal(items[index].stage) else { return }
         let clamped = max(items[index].progress, min(1, max(0, fraction)))
         totalProgress += clamped - items[index].progress
         items[index].progress = clamped
@@ -502,7 +531,7 @@ final class TransferQueue {
     private func setStage(_ stage: Stage, for id: UUID) {
         guard let index = itemIndexByID[id], items.indices.contains(index) else { return }
         items[index].stage = stage
-        if stage == .waiting || stage == .converting || stage == .transferring {
+        if !Self.isTerminal(stage) {
             activeItemID = id
         }
     }
@@ -528,11 +557,22 @@ final class TransferQueue {
         advanceActiveItem(after: index, completedID: id)
     }
 
+    private func markCancelled(_ id: UUID) {
+        guard let index = itemIndexByID[id], items.indices.contains(index) else { return }
+        guard !Self.isTerminal(items[index].stage) else { return }
+        items[index].stage = .cancelled
+        advanceActiveItem(after: index, completedID: id)
+    }
+
     private func advanceActiveItem(after index: Int, completedID: UUID) {
         guard activeItemID == completedID else { return }
         activeItemID = items.dropFirst(index + 1).first {
-            $0.stage == .waiting || $0.stage == .converting || $0.stage == .transferring
+            !Self.isTerminal($0.stage)
         }?.id
+    }
+
+    private static func isTerminal(_ stage: Stage) -> Bool {
+        stage == .done || stage == .failed || stage == .cancelled
     }
 
     private func scheduleClear() {

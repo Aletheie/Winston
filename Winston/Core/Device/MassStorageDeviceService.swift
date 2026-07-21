@@ -4,9 +4,14 @@ import OSLog
 
 actor MassStorageDeviceConnection: KindleDeviceConnection {
     private let volumeURL: URL
+    private let copyChunkHook: (@Sendable (Int64) throws -> Void)?
 
-    init(volumeURL: URL) {
+    init(
+        volumeURL: URL,
+        copyChunkHook: (@Sendable (Int64) throws -> Void)? = nil
+    ) {
         self.volumeURL = volumeURL
+        self.copyChunkHook = copyChunkHook
     }
 
     private var documentsURL: URL {
@@ -58,7 +63,9 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
     }
 
     func listBooks() throws -> [DeviceBook] {
-        let keys: Set<URLResourceKey> = [.fileSizeKey, .isRegularFileKey, .contentModificationDateKey]
+        let keys: Set<URLResourceKey> = [
+            .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey, .contentModificationDateKey,
+        ]
         guard let enumerator = FileManager.default.enumerator(
             at: documentsURL,
             includingPropertiesForKeys: Array(keys),
@@ -72,7 +79,7 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
             let ext = fileURL.pathExtension.lowercased()
             guard deviceBookExtensions.contains(ext) else { continue }
             let values = try? fileURL.resourceValues(forKeys: keys)
-            guard values?.isRegularFile == true else { continue }
+            guard values?.isRegularFile == true, values?.isSymbolicLink != true else { continue }
             books.append(DeviceBook(
                 mtpItemID: nil,
                 path: fileURL.path(percentEncoded: false),
@@ -85,9 +92,12 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
     }
 
     func send(fileURL: URL, fileName: String, progress: @escaping @Sendable (Double) -> Void) throws {
-        try? FileManager.default.createDirectory(at: documentsURL, withIntermediateDirectories: true)
+        guard let leaf = ManagedLeafName(rawValue: fileName),
+              let destination = leaf.appending(to: documentsURL) else {
+            throw DeviceError.invalidFileName
+        }
+        try FileManager.default.createDirectory(at: documentsURL, withIntermediateDirectories: true)
         suppressSpotlight()
-        let destination = documentsURL.appending(path: fileName)
         Log.device.info("Copying \(fileName, privacy: .public) → \(destination.path(percentEncoded: false), privacy: .public)")
         progress(0)
         try writeClean(from: fileURL, to: destination, progress: progress)
@@ -101,32 +111,41 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
         progress: (@Sendable (Double) -> Void)? = nil
     ) throws {
         let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: destination.path(percentEncoded: false)) {
-            try fileManager.removeItem(at: destination)
-        }
-        guard fileManager.createFile(atPath: destination.path(percentEncoded: false), contents: nil) else {
+        let temporary = destination.deletingLastPathComponent().appending(
+            path: ".winston-transfer-\(UUID().uuidString).tmp"
+        )
+        defer { try? fileManager.removeItem(at: temporary) }
+
+        guard fileManager.createFile(atPath: temporary.path(percentEncoded: false), contents: nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
 
-        do {
-            let input = try FileHandle(forReadingFrom: source)
-            let output = try FileHandle(forWritingTo: destination)
-            defer {
-                try? input.close()
-                try? output.close()
-            }
+        let input = try FileHandle(forReadingFrom: source)
+        let output = try FileHandle(forWritingTo: temporary)
+        defer {
+            try? input.close()
+            try? output.close()
+        }
 
-            let total = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
-            var written: Int64 = 0
-            while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
-                try output.write(contentsOf: chunk)
-                written += Int64(chunk.count)
-                if total > 0 { progress?(min(1, Double(written) / Double(total))) }
-            }
-            try output.synchronize()
-        } catch {
-            try? fileManager.removeItem(at: destination)
-            throw error
+        let total = (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        var written: Int64 = 0
+        while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            try Task.checkCancellation()
+            try output.write(contentsOf: chunk)
+            written += Int64(chunk.count)
+            try copyChunkHook?(written)
+            if total > 0 { progress?(min(1, Double(written) / Double(total))) }
+        }
+        try output.synchronize()
+        try Task.checkCancellation()
+        try output.close()
+
+        if fileManager.fileExists(atPath: destination.path(percentEncoded: false)) {
+            let values = try destination.resourceValues(forKeys: [.isSymbolicLinkKey])
+            guard values.isSymbolicLink != true else { throw DeviceError.unsafePath }
+            _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try fileManager.moveItem(at: temporary, to: destination)
         }
 
         let sidecar = destination.deletingLastPathComponent()
@@ -222,17 +241,15 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
 
     func copyBook(_ book: DeviceBook, to destination: URL, progress: @escaping @Sendable (Double) -> Void) throws {
         guard let path = book.path else { throw DeviceError.fileMissing }
-        if FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)) {
-            try FileManager.default.removeItem(at: destination)
-        }
+        let source = try containedDeviceURL(forPath: path)
         progress(0)
-        try FileManager.default.copyItem(atPath: path, toPath: destination.path(percentEncoded: false))
+        try writeClean(from: source, to: destination, progress: progress)
         progress(1)
     }
 
     func delete(_ book: DeviceBook) throws {
         guard let path = book.path else { throw DeviceError.fileMissing }
-        try FileManager.default.removeItem(atPath: path)
+        try FileManager.default.removeItem(at: containedDeviceURL(forPath: path))
     }
 
     func readClippingsText() throws -> String? {
@@ -246,11 +263,22 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
     }
 
     func pushCoverThumbnail(_ fileURL: URL, named name: String) throws {
+        guard let leaf = ManagedLeafName(rawValue: name) else { throw DeviceError.invalidFileName }
         let thumbsDir = volumeURL.appending(path: "system/thumbnails", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: thumbsDir, withIntermediateDirectories: true)
-        let dest = thumbsDir.appending(path: name)
+        guard let dest = leaf.appending(to: thumbsDir) else { throw DeviceError.invalidFileName }
         Log.device.info("Cover thumbnail → \(dest.path(percentEncoded: false), privacy: .public)")
         try writeClean(from: fileURL, to: dest)
+    }
+
+    private func containedDeviceURL(forPath path: String) throws -> URL {
+        let root = documentsURL.standardizedFileURL.resolvingSymlinksInPath()
+        let candidate = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+        let rootPath = root.path(percentEncoded: false) + "/"
+        guard candidate.path(percentEncoded: false).hasPrefix(rootPath) else {
+            throw DeviceError.unsafePath
+        }
+        return candidate
     }
 
     func isAlive() -> Bool {

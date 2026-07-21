@@ -1,6 +1,27 @@
 import Foundation
 import OSLog
 
+nonisolated struct ManagedLeafName: RawRepresentable, Sendable, Hashable {
+    let rawValue: String
+
+    init?(rawValue: String) {
+        guard !rawValue.isEmpty,
+              rawValue != ".",
+              rawValue != "..",
+              !rawValue.contains("/"),
+              !rawValue.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        else { return nil }
+        self.rawValue = rawValue
+    }
+
+    func appending(to directory: URL) -> URL? {
+        let root = directory.standardizedFileURL
+        let candidate = root.appending(path: rawValue).standardizedFileURL
+        guard candidate.deletingLastPathComponent() == root else { return nil }
+        return candidate
+    }
+}
+
 enum BookFileStore {
     // Trash is for user-initiated book removal only; artifact cleanup stays on delete(fileName:).
     // Tests disable trashing so fixtures never land in the user's Trash (process-global, like AppPaths).
@@ -18,7 +39,9 @@ enum BookFileStore {
     nonisolated static func importCopy(of source: URL, uuid: UUID) throws -> String {
         try AppPaths.ensureDirectory(AppPaths.booksDirectory)
         let fileName = fileName(for: source, uuid: uuid)
-        let destination = AppPaths.booksDirectory.appending(path: fileName)
+        guard let destination = validatedURL(for: fileName) else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
 
         if source.standardizedFileURL == destination.standardizedFileURL {
             return fileName
@@ -52,22 +75,44 @@ enum BookFileStore {
         return ext.isEmpty ? uuid.uuidString : "\(uuid.uuidString).\(ext)"
     }
 
+    nonisolated static func validatedURL(for fileName: String) -> URL? {
+        guard let leaf = ManagedLeafName(rawValue: fileName),
+              let candidate = leaf.appending(to: AppPaths.booksDirectory) else { return nil }
+
+        let root = AppPaths.booksDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        let resolved = candidate.resolvingSymlinksInPath()
+        guard resolved.deletingLastPathComponent() == root else { return nil }
+        return candidate
+    }
+
     nonisolated static func url(for fileName: String) -> URL {
-        AppPaths.booksDirectory.appending(path: fileName)
+        guard let url = validatedURL(for: fileName) else {
+            Log.persistence.error("Rejected unsafe managed file name: \(fileName, privacy: .private)")
+            return AppPaths.booksDirectory.appending(path: ".invalid-managed-reference")
+        }
+        return url
     }
 
     nonisolated static func size(of fileName: String) -> Int64 {
-        let path = url(for: fileName).path(percentEncoded: false)
+        guard let url = validatedURL(for: fileName) else { return 0 }
+        let path = url.path(percentEncoded: false)
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         return (attrs?[.size] as? Int64) ?? 0
     }
 
     nonisolated static func delete(fileName: String) {
-        try? FileManager.default.removeItem(at: url(for: fileName))
+        guard let url = validatedURL(for: fileName) else {
+            Log.persistence.error("Refused to delete unsafe managed file name: \(fileName, privacy: .private)")
+            return
+        }
+        try? FileManager.default.removeItem(at: url)
     }
 
     nonisolated static func trash(fileName: String) {
-        let target = url(for: fileName)
+        guard let target = validatedURL(for: fileName) else {
+            Log.persistence.error("Refused to trash unsafe managed file name: \(fileName, privacy: .private)")
+            return
+        }
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: target.path(percentEncoded: false)) else { return }
         if trashesRemovedBooks,

@@ -16,6 +16,7 @@ actor FakeKindleConnection: KindleDeviceConnection {
     private var alive = true
     private var failSends = false
     private var blockSends = false
+    private var blockSendsCooperatively = false
     private var sendStarted = false
     private var sendStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var blockedSend: CheckedContinuation<Void, Never>?
@@ -24,6 +25,7 @@ actor FakeKindleConnection: KindleDeviceConnection {
     func setAlive(_ value: Bool) { alive = value }
     func setFailSends(_ value: Bool) { failSends = value }
     func setBlockSends(_ value: Bool) { blockSends = value }
+    func setBlockSendsCooperatively(_ value: Bool) { blockSendsCooperatively = value }
     func setBooks(_ value: [DeviceBook]) { books = value }
 
     func waitUntilSendStarts() async {
@@ -51,6 +53,9 @@ actor FakeKindleConnection: KindleDeviceConnection {
         let waiters = sendStartWaiters
         sendStartWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
+        if blockSendsCooperatively {
+            try await Task.sleep(for: .seconds(60))
+        }
         if blockSends {
             await withCheckedContinuation { blockedSend = $0 }
         }

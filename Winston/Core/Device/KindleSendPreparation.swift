@@ -103,8 +103,12 @@ enum KindleSendPreparation {
         let targetFormat = requiresConversion
             ? EbookConverter.kindleTarget(forFormat: chosen.format).ext
             : chosen.format.lowercased()
-        let baseName = (snapshot.originalFileName as NSString).deletingPathExtension
-        let targetFileName = "\(baseName).\(targetFormat)"
+        let originalLeaf = ManagedLeafName(rawValue: snapshot.originalFileName)
+        let baseName = originalLeaf.map { ($0.rawValue as NSString).deletingPathExtension }
+            ?? snapshot.uuid.uuidString
+        let proposedTargetFileName = "\(baseName).\(targetFormat)"
+        let targetLeaf = ManagedLeafName(rawValue: proposedTargetFileName)
+        let targetFileName = targetLeaf?.rawValue ?? "\(snapshot.uuid.uuidString).\(targetFormat)"
         let primaryOption = options.first(where: { $0.fileName == snapshot.primaryFileName })
         let sourceFingerprint = primarySourceHash ?? fallbackFingerprint(for: snapshot, primary: primaryOption)
         let generatedTargets = options.filter {
@@ -117,9 +121,13 @@ enum KindleSendPreparation {
             return option.generatedFromContentHash == primarySourceHash
         }
         let staleTarget = !generatedTargets.isEmpty && !hasCurrentTarget
-        let sourceURL = BookFileStore.url(for: chosen.fileName)
+        let validatedSourceURL = BookFileStore.validatedURL(for: chosen.fileName)
+        let sourceURL = validatedSourceURL ?? BookFileStore.url(for: chosen.fileName)
         let unavailable = chosen.validation == .missing
             || chosen.validation == .corrupt
+            || validatedSourceURL == nil
+            || originalLeaf == nil
+            || targetLeaf == nil
             || !FileManager.default.fileExists(atPath: sourceURL.path(percentEncoded: false))
         let supportsCoverThumbnail = ["azw", "azw3", "mobi"].contains(targetFormat)
         let storedSize = UInt64(max(0, chosen.sizeBytes))

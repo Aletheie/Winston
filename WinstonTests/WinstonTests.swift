@@ -289,6 +289,86 @@ struct SidecarCleanupTests {
     }
 }
 
+// MARK: - Mass storage transfer safety
+
+struct MassStorageTransferTests {
+    private struct InjectedCopyFailure: Error { }
+
+    private func fixture() throws -> (volume: URL, source: URL, destination: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonMassStorage-\(UUID().uuidString)")
+        let volume = root.appending(path: "Kindle", directoryHint: .isDirectory)
+        let documents = volume.appending(path: "documents", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+        let source = root.appending(path: "source.mobi")
+        let destination = documents.appending(path: "book.mobi")
+        return (volume, source, destination)
+    }
+
+    @Test func successfulSendAtomicallyReplacesExistingBook() async throws {
+        let urls = try fixture()
+        defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
+        try Data("new complete bytes".utf8).write(to: urls.source)
+        try Data("old bytes".utf8).write(to: urls.destination)
+        let connection = MassStorageDeviceConnection(volumeURL: urls.volume)
+
+        try await connection.send(fileURL: urls.source, fileName: "book.mobi") { _ in }
+
+        #expect(try Data(contentsOf: urls.destination) == Data("new complete bytes".utf8))
+    }
+
+    @Test func failedSendPreservesExistingBookAndRemovesTemporaryFile() async throws {
+        let urls = try fixture()
+        defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
+        try Data(repeating: 0x42, count: 2 * 1_024 * 1_024).write(to: urls.source)
+        try Data("old bytes".utf8).write(to: urls.destination)
+        let connection = MassStorageDeviceConnection(
+            volumeURL: urls.volume,
+            copyChunkHook: { _ in throw InjectedCopyFailure() }
+        )
+
+        await #expect(throws: InjectedCopyFailure.self) {
+            try await connection.send(fileURL: urls.source, fileName: "book.mobi") { _ in }
+        }
+
+        #expect(try Data(contentsOf: urls.destination) == Data("old bytes".utf8))
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: urls.destination.deletingLastPathComponent(),
+            includingPropertiesForKeys: nil
+        )
+        #expect(!entries.contains { $0.lastPathComponent.hasPrefix(".winston-transfer-") })
+    }
+
+    @Test func cancelledSendPreservesExistingBook() async throws {
+        let urls = try fixture()
+        defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
+        try Data(repeating: 0x42, count: 2 * 1_024 * 1_024).write(to: urls.source)
+        try Data("old bytes".utf8).write(to: urls.destination)
+        let connection = MassStorageDeviceConnection(volumeURL: urls.volume)
+        let transfer = Task {
+            try await connection.send(fileURL: urls.source, fileName: "book.mobi") { _ in }
+        }
+        transfer.cancel()
+
+        await #expect(throws: CancellationError.self) { try await transfer.value }
+        #expect(try Data(contentsOf: urls.destination) == Data("old bytes".utf8))
+    }
+
+    @Test func sendRejectsMultiComponentDestinationName() async throws {
+        let urls = try fixture()
+        defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
+        try Data("bytes".utf8).write(to: urls.source)
+        let connection = MassStorageDeviceConnection(volumeURL: urls.volume)
+
+        await #expect(throws: DeviceError.invalidFileName) {
+            try await connection.send(fileURL: urls.source, fileName: "../outside.mobi") { _ in }
+        }
+        #expect(!FileManager.default.fileExists(
+            atPath: urls.volume.appending(path: "outside.mobi").path(percentEncoded: false)
+        ))
+    }
+}
+
 // MARK: - Converter format policy
 
 struct ConverterPolicyTests {

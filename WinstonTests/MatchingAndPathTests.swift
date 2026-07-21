@@ -152,6 +152,46 @@ struct CoverServiceTests {
 @MainActor
 struct BookFileStoreTests {
 
+    @Test(arguments: ["", ".", "..", "../outside.epub", "/tmp/book.epub", "nested/book.epub", "bad\0name"])
+    func managedLeafRejectsUnsafeNames(_ value: String) {
+        #expect(ManagedLeafName(rawValue: value) == nil)
+    }
+
+    @Test(arguments: ["book.epub", "Válka a mír.azw3", ".hidden.mobi", "back\\slash.pdf"])
+    func managedLeafAcceptsSingleComponents(_ value: String) {
+        #expect(ManagedLeafName(rawValue: value)?.rawValue == value)
+    }
+
+    @Test func unsafePersistedNameCannotEscapeManagedDirectory() async throws {
+        let library = try await TestLibrary()
+        let outside = AppPaths.booksDirectory.deletingLastPathComponent().appending(path: "outside.epub")
+        try Data("keep".utf8).write(to: outside)
+
+        #expect(BookFileStore.validatedURL(for: "../outside.epub") == nil)
+        #expect(BookFileStore.size(of: "../outside.epub") == 0)
+        BookFileStore.delete(fileName: "../outside.epub")
+        BookFileStore.trash(fileName: "../outside.epub")
+
+        #expect(try Data(contentsOf: outside) == Data("keep".utf8))
+        #expect(BookFileStore.url(for: "../outside.epub").deletingLastPathComponent()
+            == AppPaths.booksDirectory)
+        _ = library
+    }
+
+    @Test func symlinkOutsideManagedDirectoryIsRejected() async throws {
+        let library = try await TestLibrary()
+        let outside = AppPaths.booksDirectory.deletingLastPathComponent().appending(path: "outside.epub")
+        let link = AppPaths.booksDirectory.appending(path: "linked.epub")
+        try Data("keep".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+
+        #expect(BookFileStore.validatedURL(for: "linked.epub") == nil)
+        BookFileStore.delete(fileName: "linked.epub")
+        #expect(try Data(contentsOf: outside) == Data("keep".utf8))
+        #expect(FileManager.default.fileExists(atPath: link.path(percentEncoded: false)))
+        _ = library
+    }
+
     @Test func pathGettersDoNotCreateDirectories() async throws {
         let library = try await TestLibrary()
         let untouchedRoot = library.root.appending(path: "pure-paths", directoryHint: .isDirectory)
