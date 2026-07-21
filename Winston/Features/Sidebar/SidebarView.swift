@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import OSLog
 
 enum SidebarItem: Hashable, RawRepresentable {
     case all
@@ -241,7 +242,7 @@ struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .task(id: FacetRevision(
-            revision: LibraryMutationLog.shared.revision,
+            revision: LibraryMutationLog.shared.catalogRevision,
             bookCount: books.count,
             deviceFileNames: deviceMonitor.deviceFileNames,
             deviceIsConnected: deviceMonitor.isConnected
@@ -463,18 +464,23 @@ struct SidebarView: View {
         var shelfBooks: [SmartShelfBookSnapshot] = []
         let includesSearch = !searches.isEmpty
         let includesShelves = !shelves.isEmpty
+        let includesHighlights = shelves.contains { $0.1.requiresHighlights }
         facetBooks.reserveCapacity(books.count)
         if includesSearch { searchBooks.reserveCapacity(books.count) }
         if includesShelves { shelfBooks.reserveCapacity(books.count) }
         for (index, book) in books.enumerated() {
             facetBooks.append(FacetBook(book))
             if includesSearch { searchBooks.append(LibraryQuery.SearchSnapshot(book)) }
-            if includesShelves { shelfBooks.append(SmartShelfBookSnapshot(book)) }
+            if includesShelves {
+                shelfBooks.append(SmartShelfBookSnapshot(book, includeHighlights: includesHighlights))
+            }
             if (index + 1).isMultiple(of: 512) {
                 await Task.yield()
                 guard !Task.isCancelled else { return }
             }
         }
+        let signposter = Log.librarySignposter
+        let interval = signposter.beginInterval("SidebarFacets")
         let updated = await Self.makeFacets(
             books: facetBooks,
             searchBooks: searchBooks,
@@ -484,6 +490,7 @@ struct SidebarView: View {
             deviceFileNames: deviceMonitor.deviceFileNames,
             deviceIsConnected: deviceMonitor.isConnected
         )
+        signposter.endInterval("SidebarFacets", interval)
         guard !Task.isCancelled else { return }
         facets = updated
     }

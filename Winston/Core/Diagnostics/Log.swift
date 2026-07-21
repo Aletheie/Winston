@@ -14,4 +14,5 @@ nonisolated enum Log {
 
     static let conversionSignposter = OSSignposter(subsystem: subsystem, category: "conversion")
     static let deviceSignposter = OSSignposter(subsystem: subsystem, category: "device")
+    static let librarySignposter = OSSignposter(subsystem: subsystem, category: "library")
 }

@@ -185,7 +185,7 @@ struct FullTextSearchSheet: View {
         .frame(minWidth: 700, idealWidth: 820, maxWidth: 1060,
                minHeight: 560, idealHeight: 700, maxHeight: 940)
         .background(theme.background)
-        .task(id: LibraryMutationLog.shared.revision) {
+        .task(id: LibraryMutationLog.shared.catalogRevision) {
             await model.prepare(books: books)
         }
         .onDisappear { model.cancel() }

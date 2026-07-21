@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 import QuickLook
+import OSLog
 
 enum LibrarySheet: Identifiable {
     case edit(Book)
@@ -91,6 +92,8 @@ struct LibraryView: View {
     private struct DisplaySnapshotRevision: Hashable {
         let mutationRevision: Int
         let bookCount: Int
+        let includeCollections: Bool
+        let includeHighlights: Bool
     }
 
     private enum ContentState: Hashable {
@@ -132,15 +135,24 @@ struct LibraryView: View {
     }
 
     private var displayRevision: DisplayRevision {
-        DisplayRevision(
+        let smartShelf = smartShelfDisplayConfiguration
+        let includeCollections: Bool
+        if case .collection = filter, smartShelf == nil {
+            includeCollections = true
+        } else {
+            includeCollections = false
+        }
+        return DisplayRevision(
             snapshot: DisplaySnapshotRevision(
-                mutationRevision: LibraryMutationLog.shared.revision,
-                bookCount: books.count
+                mutationRevision: LibraryMutationLog.shared.catalogRevision,
+                bookCount: books.count,
+                includeCollections: includeCollections,
+                includeHighlights: smartShelf?.definition?.requiresHighlights == true
             ),
             filter: filter,
             searchText: debouncedSearch,
             sort: LibraryQuery.displaySort(for: sortOrder),
-            smartShelf: smartShelfDisplayConfiguration,
+            smartShelf: smartShelf,
             deviceFileNames: deviceMonitor.deviceFileNames,
             deviceIsConnected: deviceMonitor.isConnected,
             kindlePresenceFilter: kindlePresenceFilter
@@ -581,6 +593,9 @@ struct LibraryView: View {
         if displaySnapshotRevision == revision.snapshot {
             snapshots = displaySnapshots
         } else {
+            let signposter = Log.librarySignposter
+            let interval = signposter.beginInterval("LibrarySnapshot")
+            defer { signposter.endInterval("LibrarySnapshot", interval) }
             var updated: [LibraryDisplaySnapshot] = []
             updated.reserveCapacity(books.count)
             for (index, book) in books.enumerated() {
@@ -588,8 +603,8 @@ struct LibraryView: View {
                     LibraryDisplaySnapshot(
                         book,
                         sourceOrdinal: index,
-                        includeCollections: true,
-                        includeHighlights: true
+                        includeCollections: revision.snapshot.includeCollections,
+                        includeHighlights: revision.snapshot.includeHighlights
                     )
                 )
                 if (index + 1).isMultiple(of: 512) {
@@ -609,6 +624,8 @@ struct LibraryView: View {
             return
         }
 
+        let signposter = Log.librarySignposter
+        let queryInterval = signposter.beginInterval("LibraryFilterAndSort")
         let ids = await LibraryQuery.displayIDsConcurrently(
             for: snapshots,
             filter: revision.filter,
@@ -620,6 +637,7 @@ struct LibraryView: View {
             deviceIsConnected: revision.deviceIsConnected,
             kindlePresenceFilter: revision.kindlePresenceFilter
         )
+        signposter.endInterval("LibraryFilterAndSort", queryInterval)
         guard !Task.isCancelled, displayRevision == revision else { return }
 
         let booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
