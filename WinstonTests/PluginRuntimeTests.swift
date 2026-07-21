@@ -153,6 +153,27 @@ struct PluginRuntimeTests {
         #expect(recorder.calls.isEmpty)
     }
 
+    @Test func pendingHostCallsAreBounded() async throws {
+        let recorder = HostRecorder()
+        let total = PluginRuntime.maximumPendingHostCalls + 6
+        let runtime = try makeRuntime(source: """
+            exports.activate = () => {
+                const calls = [];
+                let rejected = 0;
+                for (let i = 0; i < \(total); i++) {
+                    calls.push(Winston.ui.toast("x").catch(e => {
+                        if (e.code === "unavailable") rejected++;
+                    }));
+                }
+                Promise.all(calls).then(() => console.log("rejected:" + rejected));
+            };
+            """, permissions: [.uiToast])
+        try await runtime.load(granted: [.uiToast], handler: recorder.handler())
+
+        #expect(await logged("rejected:6", in: runtime))
+        #expect(recorder.calls.count == PluginRuntime.maximumPendingHostCalls)
+    }
+
     // MARK: - Permission gating
 
     @Test func ungrantedNamespacesDoNotExist() async throws {
@@ -175,7 +196,21 @@ struct PluginRuntimeTests {
                         typeof Winston.metadata, typeof Winston.ui);
             """, permissions: [.libraryRead])
         try await runtime.load(granted: [.libraryRead], handler: recorder.handler())
-        #expect(runtime.logBuffer.snapshot.contains { $0.message == "object function object undefined" })
+        #expect(runtime.logBuffer.snapshot.contains { $0.message == "object function undefined undefined" })
+    }
+
+    @Test func metadataNamespaceRequiresDedicatedPermission() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            console.log(typeof Winston.library, typeof Winston.metadata,
+                        Winston.capabilities.has("library.list"),
+                        Winston.capabilities.has("metadata.fetch"));
+            """, permissions: [.metadataFetch])
+        try await runtime.load(granted: [.metadataFetch], handler: recorder.handler())
+
+        #expect(runtime.logBuffer.snapshot.contains {
+            $0.message == "undefined object false true"
+        })
     }
 
     @Test func optionsObjectsAreOptional() async throws {

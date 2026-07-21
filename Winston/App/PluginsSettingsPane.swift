@@ -149,6 +149,7 @@ extension PluginPermission {
         switch self {
         case .libraryRead: String(localized: "Read library metadata")
         case .libraryWrite: String(localized: "Fill in missing book metadata")
+        case .metadataFetch: String(localized: "Fetch metadata from online catalogs")
         case .uiToast: String(localized: "Show notifications")
         }
     }

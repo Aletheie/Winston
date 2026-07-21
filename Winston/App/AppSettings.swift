@@ -1,6 +1,86 @@
 import Foundation
 import SwiftUI
 import Observation
+import Security
+
+nonisolated protocol SecretStoring: Sendable {
+    func string(for account: String) -> String?
+    @discardableResult func set(_ value: String?, for account: String) -> Bool
+}
+
+nonisolated final class KeychainSecretStore: SecretStoring, Sendable {
+    private let service: String
+
+    init(service: String = "cz.annajung.Winston") {
+        self.service = service
+    }
+
+    func string(for account: String) -> String? {
+        var query = baseQuery(for: account)
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    @discardableResult
+    func set(_ value: String?, for account: String) -> Bool {
+        let query = baseQuery(for: account)
+        guard let value, !value.isEmpty else {
+            let status = SecItemDelete(query as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
+
+        let data = Data(value.utf8)
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess { return true }
+        guard updateStatus == errSecItemNotFound else { return false }
+
+        var attributes = query
+        attributes[kSecValueData] = data
+        attributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
+        return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
+    }
+
+    private func baseQuery(for account: String) -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+        ]
+    }
+}
+
+nonisolated final class VolatileSecretStore: SecretStoring, @unchecked Sendable {
+    static let shared = VolatileSecretStore()
+
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    func string(for account: String) -> String? {
+        lock.withLock { values[account] }
+    }
+
+    @discardableResult
+    func set(_ value: String?, for account: String) -> Bool {
+        lock.withLock { values[account] = value }
+        return true
+    }
+}
+
+nonisolated enum AppSecretStoreFactory {
+    static func make() -> any SecretStoring {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            return VolatileSecretStore.shared
+        }
+        return KeychainSecretStore()
+    }
+}
 
 nonisolated enum ExternalBookSearchURL {
     static func make(
@@ -117,6 +197,9 @@ final class AppSettings {
 
     static let defaultGridZoom = 0.35
     static let gridZoomStep = 0.125
+    nonisolated static let hardcoverTokenAccount = "hardcover-token"
+
+    @ObservationIgnored private let secretStore: any SecretStoring
 
     // Never reassign inside didSet — @Observable turns stored properties into accessors and the setter recurses (clamping lives in adjustGridZoom).
     var gridZoom: Double {
@@ -139,9 +222,13 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(watchFolderPath, forKey: Keys.watchPath) }
     }
 
-    // UserDefaults instead of Keychain: ad-hoc debug signatures invalidate Keychain ACLs on every rebuild.
     var hardcoverToken: String {
-        didSet { UserDefaults.standard.set(hardcoverToken, forKey: Keys.hardcoverToken) }
+        didSet {
+            let value = hardcoverToken.isEmpty ? nil : hardcoverToken
+            if secretStore.set(value, for: Self.hardcoverTokenAccount) {
+                UserDefaults.standard.removeObject(forKey: Keys.hardcoverToken)
+            }
+        }
     }
 
     var externalBookWebsiteURL: String {
@@ -215,7 +302,10 @@ final class AppSettings {
         }
     }
 
-    init() {
+    init(secretStore: any SecretStoring = AppSecretStoreFactory.make()) {
+        self.secretStore = secretStore
+        let storedToken = secretStore.string(for: Self.hardcoverTokenAccount)
+        let legacyToken = UserDefaults.standard.string(forKey: Keys.hardcoverToken)
         onlineMetadataEnabled = UserDefaults.standard.bool(forKey: Keys.onlineMetadata)
         watchFolderEnabled = UserDefaults.standard.bool(forKey: Keys.watchEnabled)
         watchFolderPath = UserDefaults.standard.string(forKey: Keys.watchPath)
@@ -233,7 +323,7 @@ final class AppSettings {
         ) as? Bool ?? false
         enabledPluginIDs = Set(UserDefaults.standard.stringArray(forKey: Keys.enabledPlugins) ?? [])
         pluginGrants = (UserDefaults.standard.dictionary(forKey: Keys.pluginGrants) as? [String: [String]]) ?? [:]
-        hardcoverToken = UserDefaults.standard.string(forKey: Keys.hardcoverToken) ?? ""
+        hardcoverToken = storedToken ?? legacyToken ?? ""
         externalBookWebsiteURL = UserDefaults.standard.string(
             forKey: Keys.externalBookWebsiteURL
         ) ?? UserDefaults.standard.string(
@@ -241,5 +331,11 @@ final class AppSettings {
         ) ?? ""
         appLanguage = UserDefaults.standard.string(forKey: Keys.appLanguage)
             .flatMap(AppLanguage.init(rawValue:)) ?? .system
+        if storedToken != nil {
+            UserDefaults.standard.removeObject(forKey: Keys.hardcoverToken)
+        } else if let legacyToken,
+                  secretStore.set(legacyToken, for: Self.hardcoverTokenAccount) {
+            UserDefaults.standard.removeObject(forKey: Keys.hardcoverToken)
+        }
     }
 }

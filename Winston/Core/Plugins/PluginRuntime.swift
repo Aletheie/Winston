@@ -33,6 +33,8 @@ typealias PluginHostHandler = @MainActor @Sendable (PluginAPICall) async -> Resu
 
 // Every JSContext/JSValue is confined to `queue`; nothing JSC-typed may leave it — that invariant is what makes @unchecked Sendable sound.
 nonisolated final class PluginRuntime: @unchecked Sendable {
+    static let maximumPendingHostCalls = 64
+
     let manifest: PluginManifest
     let folderURL: URL
     let logBuffer = PluginLogBuffer()
@@ -174,8 +176,9 @@ nonisolated final class PluginRuntime: @unchecked Sendable {
         winston.setObject(host, forKeyedSubscript: "host")
 
         var capabilities: Set<String> = ["storage"]
-        if granted.contains(.libraryRead) { capabilities.formUnion(["library.list", "library.get", "metadata.fetch"]) }
+        if granted.contains(.libraryRead) { capabilities.formUnion(["library.list", "library.get"]) }
         if granted.contains(.libraryWrite) { capabilities.insert("library.update") }
+        if granted.contains(.metadataFetch) { capabilities.insert("metadata.fetch") }
         if granted.contains(.uiToast) { capabilities.insert("ui.toast") }
         let has: @convention(block) (String?) -> Bool = { name in capabilities.contains(name ?? "") }
         let capabilitiesObject = JSValue(newObjectIn: context)!
@@ -251,7 +254,7 @@ nonisolated final class PluginRuntime: @unchecked Sendable {
             winston.setObject(library, forKeyedSubscript: "library")
         }
 
-        if granted.contains(.libraryRead) {
+        if granted.contains(.metadataFetch) {
             let metadata = JSValue(newObjectIn: context)!
             installAsyncMethod(named: "fetch", on: metadata, handler: handler) { arg0, _ in
                 guard let arg0, arg0.isObject else {
@@ -307,6 +310,13 @@ nonisolated final class PluginRuntime: @unchecked Sendable {
     private func makePendingPromise(for call: PluginAPICall, handler: @escaping PluginHostHandler,
                                     in context: JSContext) -> JSValue? {
         dispatchPrecondition(condition: .onQueue(queue))
+        guard pending.count < Self.maximumPendingHostCalls else {
+            let error = PluginError.unavailable("too many pending host calls")
+            return JSValue(
+                newPromiseRejectedWithReason: Self.errorValue(error, in: context),
+                in: context
+            )
+        }
         nextCallID += 1
         let id = nextCallID
         let promise = JSValue(newPromiseIn: context) { resolve, reject in

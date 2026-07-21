@@ -167,7 +167,7 @@ struct SettingsView: View {
             )
 
             Section("Community Ratings") {
-                TextField("Hardcover API token", text: $settings.hardcoverToken)
+                SecureField("Hardcover API token", text: $settings.hardcoverToken)
                     .textFieldStyle(.roundedBorder)
                     .disabled(!settings.onlineMetadataEnabled)
                 if let url = URL(string: "https://hardcover.app/account/api") {

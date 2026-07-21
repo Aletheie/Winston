@@ -3,6 +3,7 @@ import Foundation
 nonisolated enum PluginPermission: String, Codable, Sendable, CaseIterable {
     case libraryRead = "library.read"
     case libraryWrite = "library.write"
+    case metadataFetch = "metadata.fetch"
     case uiToast = "ui.toast"
 }
 
@@ -17,7 +18,7 @@ nonisolated struct PluginManifest: Codable, Sendable, Equatable {
     let author: String?
 
     static let supportedAPIMajor = 1
-    static let hostAPIVersion = "1.0.0"
+    static let hostAPIVersion = "1.1.0"
 
     var apiMajor: Int? { api.split(separator: ".").first.flatMap { Int($0) } }
 

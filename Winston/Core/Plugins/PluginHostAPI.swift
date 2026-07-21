@@ -83,12 +83,116 @@ nonisolated struct PluginApplyResultDTO: Codable, Sendable {
     let applied: [String]
 }
 
+nonisolated final class PluginStorageRepository: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "cz.annajung.Winston.plugin-storage")
+
+    func get(_ key: String, for manifest: PluginManifest) async -> Result<Data?, PluginError> {
+        await perform {
+            do {
+                return .success(try Self.load(for: manifest)[key].map { Data($0.utf8) })
+            } catch let error as PluginError {
+                return .failure(error)
+            } catch {
+                return .failure(.unavailable("could not read plugin storage"))
+            }
+        }
+    }
+
+    func set(_ valueJSON: String, for key: String,
+             manifest: PluginManifest) async -> Result<Data?, PluginError> {
+        await perform {
+            do {
+                var store = try Self.load(for: manifest)
+                store[key] = valueJSON
+                return Self.save(store, for: manifest)
+            } catch let error as PluginError {
+                return .failure(error)
+            } catch {
+                return .failure(.unavailable("could not read plugin storage"))
+            }
+        }
+    }
+
+    func remove(_ key: String, for manifest: PluginManifest) async -> Result<Data?, PluginError> {
+        await perform {
+            do {
+                var store = try Self.load(for: manifest)
+                store.removeValue(forKey: key)
+                return Self.save(store, for: manifest)
+            } catch let error as PluginError {
+                return .failure(error)
+            } catch {
+                return .failure(.unavailable("could not read plugin storage"))
+            }
+        }
+    }
+
+    private func perform(
+        _ operation: @escaping @Sendable () -> Result<Data?, PluginError>
+    ) async -> Result<Data?, PluginError> {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                continuation.resume(returning: operation())
+            }
+        }
+    }
+
+    private static func storageURL(for manifest: PluginManifest) -> URL {
+        AppPaths.pluginDataDirectory(for: manifest.id).appending(path: "storage.json")
+    }
+
+    private static func load(for manifest: PluginManifest) throws -> [String: String] {
+        let url = storageURL(for: manifest)
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return [:] }
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard data.count <= PluginStorageLimits.maxFileBytes else {
+            throw PluginError.unavailable("plugin storage exceeds its 2 MB quota")
+        }
+        guard let store = try? JSONDecoder().decode([String: String].self, from: data) else {
+            throw PluginError.unavailable("plugin storage is unreadable")
+        }
+        guard store.count <= PluginStorageLimits.maxEntries,
+              store.allSatisfy({
+                  PluginStorageLimits.accepts(key: $0.key)
+                      && $0.value.utf8.count <= PluginStorageLimits.maxValueBytes
+              }) else {
+            throw PluginError.unavailable("plugin storage exceeds its entry or value limit")
+        }
+        return store
+    }
+
+    private static func save(
+        _ store: [String: String],
+        for manifest: PluginManifest
+    ) -> Result<Data?, PluginError> {
+        do {
+            try AppPaths.ensurePluginDataDirectory(for: manifest.id)
+            guard store.count <= PluginStorageLimits.maxEntries,
+                  store.allSatisfy({
+                      PluginStorageLimits.accepts(key: $0.key)
+                          && $0.value.utf8.count <= PluginStorageLimits.maxValueBytes
+                  }) else {
+                return .failure(.invalidArgument("plugin storage exceeds its entry or value limit"))
+            }
+            let data = try JSONEncoder().encode(store)
+            guard data.count <= PluginStorageLimits.maxFileBytes else {
+                return .failure(.invalidArgument("plugin storage exceeds its 2 MB quota"))
+            }
+            try data.write(to: storageURL(for: manifest), options: .atomic)
+            return .success(nil)
+        } catch {
+            return .failure(.unavailable("could not persist plugin storage: \(error.localizedDescription)"))
+        }
+    }
+}
+
 @MainActor
 final class PluginHostAPI {
     private let modelContext: ModelContext
     private let settings: AppSettings
     private let toasts: ToastCenter
     private let online: any OnlineMetadataFetching
+    private let storage = PluginStorageRepository()
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
          online: any OnlineMetadataFetching = OnlineMetadataService()) {
@@ -125,10 +229,13 @@ final class PluginHostAPI {
             guard let book = book(with: uuid) else {
                 return .failure(.invalidArgument("no book with uuid \(uuid.uuidString)"))
             }
-            return encode(apply(patch, to: book))
+            switch apply(patch, to: book) {
+            case .success(let result): return encode(result)
+            case .failure(let error): return .failure(error)
+            }
 
         case .metadataFetch(let isbn, let title, let author):
-            if let denied = require(.libraryRead) { return .failure(denied) }
+            if let denied = require(.metadataFetch) { return .failure(denied) }
             guard settings.onlineMetadataEnabled else {
                 return .failure(.unavailable("online metadata is disabled in Settings"))
             }
@@ -141,36 +248,13 @@ final class PluginHostAPI {
             return encode(outcome.metadata.map(PluginFetchedMetadataDTO.init))
 
         case .storageGet(let key):
-            do {
-                let store = try loadStorage(for: manifest)
-                return .success(store[key].map { Data($0.utf8) })
-            } catch let error as PluginError {
-                return .failure(error)
-            } catch {
-                return .failure(.unavailable("could not read plugin storage"))
-            }
+            return await storage.get(key, for: manifest)
 
         case .storageSet(let key, let valueJSON):
-            do {
-                var store = try loadStorage(for: manifest)
-                store[key] = valueJSON
-                return saveStorage(store, for: manifest)
-            } catch let error as PluginError {
-                return .failure(error)
-            } catch {
-                return .failure(.unavailable("could not read plugin storage"))
-            }
+            return await storage.set(valueJSON, for: key, manifest: manifest)
 
         case .storageRemove(let key):
-            do {
-                var store = try loadStorage(for: manifest)
-                store.removeValue(forKey: key)
-                return saveStorage(store, for: manifest)
-            } catch let error as PluginError {
-                return .failure(error)
-            } catch {
-                return .failure(.unavailable("could not read plugin storage"))
-            }
+            return await storage.remove(key, for: manifest)
 
         case .toast(let message, let style):
             if let denied = require(.uiToast) { return .failure(denied) }
@@ -205,7 +289,10 @@ final class PluginHostAPI {
         return (try? modelContext.fetch(descriptor))?.first
     }
 
-    private func apply(_ patch: PluginMetadataPatch, to book: Book) -> PluginApplyResultDTO {
+    private func apply(
+        _ patch: PluginMetadataPatch,
+        to book: Book
+    ) -> Result<PluginApplyResultDTO, PluginError> {
         var applied: [String] = []
         func fill(_ keyPath: ReferenceWritableKeyPath<Book, String?>, _ value: String?, _ name: String) {
             guard let value, !value.isEmpty, (book[keyPath: keyPath] ?? "").isEmpty else { return }
@@ -226,55 +313,11 @@ final class PluginHostAPI {
             book.tags = tags
             applied.append("tags")
         }
-        if !applied.isEmpty { modelContext.saveQuietly() }
-        return PluginApplyResultDTO(applied: applied)
-    }
-
-    // MARK: - Storage (per-plugin key → JSON-fragment string)
-
-    private func storageURL(for manifest: PluginManifest) -> URL {
-        AppPaths.pluginDataDirectory(for: manifest.id).appending(path: "storage.json")
-    }
-
-    private func loadStorage(for manifest: PluginManifest) throws -> [String: String] {
-        let url = storageURL(for: manifest)
-        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return [:] }
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
-        guard data.count <= PluginStorageLimits.maxFileBytes else {
-            throw PluginError.unavailable("plugin storage exceeds its 2 MB quota")
+        if !applied.isEmpty,
+           !modelContext.saveQuietly(rollbackOnFailure: true) {
+            return .failure(.unavailable("could not persist library changes"))
         }
-        guard let store = try? JSONDecoder().decode([String: String].self, from: data) else {
-            throw PluginError.unavailable("plugin storage is unreadable")
-        }
-        guard store.count <= PluginStorageLimits.maxEntries,
-              store.allSatisfy({
-                  PluginStorageLimits.accepts(key: $0.key)
-                      && $0.value.utf8.count <= PluginStorageLimits.maxValueBytes
-              }) else {
-            throw PluginError.unavailable("plugin storage exceeds its entry or value limit")
-        }
-        return store
-    }
-
-    private func saveStorage(_ store: [String: String], for manifest: PluginManifest) -> Result<Data?, PluginError> {
-        do {
-            try AppPaths.ensurePluginDataDirectory(for: manifest.id)
-            guard store.count <= PluginStorageLimits.maxEntries,
-                  store.allSatisfy({
-                      PluginStorageLimits.accepts(key: $0.key)
-                          && $0.value.utf8.count <= PluginStorageLimits.maxValueBytes
-                  }) else {
-                return .failure(.invalidArgument("plugin storage exceeds its entry or value limit"))
-            }
-            let data = try JSONEncoder().encode(store)
-            guard data.count <= PluginStorageLimits.maxFileBytes else {
-                return .failure(.invalidArgument("plugin storage exceeds its 2 MB quota"))
-            }
-            try data.write(to: storageURL(for: manifest), options: .atomic)
-            return .success(nil)
-        } catch {
-            return .failure(.unavailable("could not persist plugin storage: \(error.localizedDescription)"))
-        }
+        return .success(PluginApplyResultDTO(applied: applied))
     }
 
     // MARK: - Encoding
