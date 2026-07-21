@@ -55,6 +55,23 @@ struct TransferQueueTests {
         #expect(monitor.deviceFileNames == ["second"])
     }
 
+    @Test func copyFromDeviceRejectsUnsafeFileName() async {
+        let fake = FakeKindleConnection()
+        let queue = TransferQueue(toasts: ToastCenter())
+        let book = DeviceBook(
+            mtpItemID: 1,
+            path: nil,
+            fileName: "../outside.epub",
+            sizeBytes: 10
+        )
+
+        let copied = await queue.copyToLibrary(book, via: makeMonitor(fake))
+
+        #expect(copied == nil)
+        #expect(queue.items.first?.stage == .failed)
+        #expect(queue.lastError == DeviceError.invalidFileName.localizedDescription)
+    }
+
     @Test func sendsMOBIAsIsWithThumbnailAndStaleVariantCleanup() async throws {
         let lib = try await TestLibrary()
         let book = try makeMOBIBook(in: lib, title: "Fox Book")

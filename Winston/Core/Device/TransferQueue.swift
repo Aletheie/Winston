@@ -386,7 +386,14 @@ final class TransferQueue {
         let tempDir = FileManager.default.temporaryDirectory
             .appending(path: "WinstonImports", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        let destination = tempDir.appending(path: book.fileName)
+        guard let fileName = ManagedLeafName(rawValue: book.fileName) else {
+            lastError = DeviceError.invalidFileName.localizedDescription
+            markFailed(item.id)
+            isTransferring = false
+            scheduleClear()
+            return nil
+        }
+        let destination = fileName.appending(to: tempDir) ?? tempDir.appending(path: UUID().uuidString)
 
         defer {
             isTransferring = false

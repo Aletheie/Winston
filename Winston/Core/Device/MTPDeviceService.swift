@@ -7,17 +7,27 @@ private nonisolated final class ProgressBox: @unchecked Sendable {
     init(_ report: @escaping @Sendable (Double) -> Void) { self.report = report }
 }
 
+private nonisolated func mtpTaskIsCancelled() -> Bool {
+    withUnsafeCurrentTask { $0?.isCancelled == true }
+}
+
 private nonisolated let progressBridge: LIBMTP_progressfunc_t = { sent, total, data in
     guard let data else { return 0 }
+    if mtpTaskIsCancelled() { return 1 }
     let box = Unmanaged<ProgressBox>.fromOpaque(data).takeUnretainedValue()
     box.report(total > 0 ? Double(sent) / Double(total) : 0)
-    return 0
+    return mtpTaskIsCancelled() ? 1 : 0
 }
 
 actor MTPDeviceConnection: KindleDeviceConnection {
     private static let amazonVendorID: UInt16 = 0x1949
 
     private static let libmtpInitialized: Void = LIBMTP_Init()
+
+    private let executor = DispatchQueueSerialExecutor(label: "cz.annajung.Winston.mtp")
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
 
     private var device: UnsafeMutablePointer<LIBMTP_mtpdevice_t>?
     private var documentsFolderID: UInt32 = 0
@@ -174,7 +184,8 @@ actor MTPDeviceConnection: KindleDeviceConnection {
         while let node = file {
             let fileName = node.pointee.filename.map { String(cString: $0) } ?? ""
             let ext = (fileName as NSString).pathExtension.lowercased()
-            if deviceBookExtensions.contains(ext) {
+            if ManagedLeafName(rawValue: fileName) != nil,
+               deviceBookExtensions.contains(ext) {
                 let mtime = node.pointee.modificationdate
                 books.append(DeviceBook(
                     mtpItemID: node.pointee.item_id,
@@ -194,6 +205,9 @@ actor MTPDeviceConnection: KindleDeviceConnection {
 
     func send(fileURL: URL, fileName: String, progress: @escaping @Sendable (Double) -> Void) throws {
         guard let device else { throw DeviceError.notConnected }
+        guard let fileName = ManagedLeafName(rawValue: fileName)?.rawValue else {
+            throw DeviceError.invalidFileName
+        }
         guard documentsFolderID != 0 else {
             Log.device.error("Refusing to send \(fileName, privacy: .public): documents folder unknown")
             throw DeviceError.transferFailed(code: -2)
@@ -220,6 +234,10 @@ actor MTPDeviceConnection: KindleDeviceConnection {
                 Unmanaged.passUnretained(box).toOpaque()
             )
         }
+        if mtpTaskIsCancelled() {
+            if meta.pointee.item_id != 0 { _ = LIBMTP_Delete_Object(device, meta.pointee.item_id) }
+            throw CancellationError()
+        }
         guard result == 0 else {
             Log.device.error("LIBMTP_Send_File_From_File failed (code \(result)) for \(fileName, privacy: .public)")
             LIBMTP_Dump_Errorstack(device)
@@ -232,17 +250,28 @@ actor MTPDeviceConnection: KindleDeviceConnection {
         guard let device else { throw DeviceError.notConnected }
         guard let itemID = book.mtpItemID else { throw DeviceError.fileMissing }
 
+        let temporary = destination.deletingLastPathComponent().appending(
+            path: ".winston-mtp-\(UUID().uuidString).tmp"
+        )
+        defer { try? FileManager.default.removeItem(at: temporary) }
+
         let box = ProgressBox(progress)
         let result = withExtendedLifetime(box) {
             LIBMTP_Get_File_To_File(
-                device, itemID, destination.path(percentEncoded: false), progressBridge,
+                device, itemID, temporary.path(percentEncoded: false), progressBridge,
                 Unmanaged.passUnretained(box).toOpaque()
             )
         }
+        if mtpTaskIsCancelled() { throw CancellationError() }
         guard result == 0 else {
             Log.device.error("LIBMTP_Get_File_To_File failed (code \(result)) for \(book.fileName, privacy: .public)")
             LIBMTP_Clear_Errorstack(device)
             throw DeviceError.transferFailed(code: result)
+        }
+        if FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: destination)
         }
     }
 
@@ -258,6 +287,9 @@ actor MTPDeviceConnection: KindleDeviceConnection {
 
     func pushCoverThumbnail(_ fileURL: URL, named name: String) throws {
         guard let device else { throw DeviceError.notConnected }
+        guard let name = ManagedLeafName(rawValue: name)?.rawValue else {
+            throw DeviceError.invalidFileName
+        }
         let parentID = thumbnailsFolderID()
         guard parentID != 0 else { throw DeviceError.transferFailed(code: -2) }
 
