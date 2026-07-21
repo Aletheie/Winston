@@ -36,6 +36,43 @@ struct LibraryMutationTests {
         #expect(LibraryMutationLog.shared.catalogRevision == catalogBefore + 1)
     }
 
+    @Test func throwingSavePublishesTheMutation() async throws {
+        let lib = try await TestLibrary()
+        let before = LibraryMutationLog.shared.revision
+        let catalogBefore = LibraryMutationLog.shared.catalogRevision
+        lib.context.insert(Book(fileName: "throwing.epub", originalFileName: "Throwing.epub"))
+
+        try lib.context.saveAndPublish()
+
+        #expect(LibraryMutationLog.shared.revision == before + 1)
+        #expect(LibraryMutationLog.shared.catalogRevision == catalogBefore + 1)
+    }
+
+    @Test func legacyHardcoverTokenMigratesOutOfDefaults() {
+        let defaults = UserDefaults.standard
+        let previous = defaults.object(forKey: "hardcoverToken")
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: "hardcoverToken")
+            } else {
+                defaults.removeObject(forKey: "hardcoverToken")
+            }
+        }
+        defaults.set("legacy-token", forKey: "hardcoverToken")
+        let secrets = TestSecretStore()
+
+        let settings = AppSettings(secretStore: secrets)
+
+        #expect(settings.hardcoverToken == "legacy-token")
+        #expect(secrets.string(for: AppSettings.hardcoverTokenAccount) == "legacy-token")
+        #expect(defaults.string(forKey: "hardcoverToken") == nil)
+
+        settings.hardcoverToken = "replacement"
+        #expect(secrets.string(for: AppSettings.hardcoverTokenAccount) == "replacement")
+        settings.hardcoverToken = ""
+        #expect(secrets.string(for: AppSettings.hardcoverTokenAccount) == nil)
+    }
+
     @Test func nonCatalogSaveDoesNotInvalidateTheLibraryUI() async throws {
         let lib = try await TestLibrary()
         let before = LibraryMutationLog.shared.revision
@@ -207,5 +244,20 @@ struct LibraryMutationTests {
 
         #expect(groups.first?.recommendation.bookUUID == richer.uuid)
         #expect(groups.first?.recommendation.reasons.contains(.preferredKindleFormat("AZW3")) == true)
+    }
+}
+
+private final class TestSecretStore: SecretStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    func string(for account: String) -> String? {
+        lock.withLock { values[account] }
+    }
+
+    @discardableResult
+    func set(_ value: String?, for account: String) -> Bool {
+        lock.withLock { values[account] = value }
+        return true
     }
 }

@@ -8,11 +8,15 @@ extension ModelContext {
         (try? fetch(FetchDescriptor<Book>())) ?? []
     }
 
+    func saveAndPublish(catalogChanged: Bool = true) throws {
+        try save()
+        LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
+    }
+
     @discardableResult
     func saveQuietly(rollbackOnFailure: Bool = false, catalogChanged: Bool = true) -> Bool {
         do {
-            try save()
-            LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
+            try saveAndPublish(catalogChanged: catalogChanged)
             return true
         } catch {
             if rollbackOnFailure {

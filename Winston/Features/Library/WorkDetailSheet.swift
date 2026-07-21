@@ -113,8 +113,10 @@ struct WorkDetailSheet: View {
                 presenting: viewModel.editions.mergeSurvivor(among: comparedEditions)
             ) { _ in
                 Button("Merge Editions", role: .destructive) {
-                    _ = viewModel.editions.mergeEditions(comparedEditions)
-                    selectedEditionUUIDs.removeAll()
+                    Task {
+                        _ = await viewModel.editions.mergeEditions(comparedEditions)
+                        selectedEditionUUIDs.removeAll()
+                    }
                 }
             } message: { survivor in
                 Text("Both editions become one. All files are kept as files of “\(survivor.displayTitle)”.")

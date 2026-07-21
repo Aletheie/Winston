@@ -22,15 +22,21 @@ final class EditionService {
 
     private let modelContext: ModelContext
     private let defaults: UserDefaults
+    private let covers: CoverRepository
     private let dismissedDefaultsKey = "editionMatcherDismissedPairKeys"
 
     private(set) var pendingProposals: [EditionMatchProposal] = []
     private(set) var editionCounts: [UUID: Int] = [:]
     private var dismissedPairKeys: Set<String>
 
-    init(modelContext: ModelContext, defaults: UserDefaults = .standard) {
+    init(
+        modelContext: ModelContext,
+        defaults: UserDefaults = .standard,
+        covers: CoverRepository = .shared
+    ) {
         self.modelContext = modelContext
         self.defaults = defaults
+        self.covers = covers
         self.dismissedPairKeys = Set(defaults.stringArray(forKey: dismissedDefaultsKey) ?? [])
         refreshEditionCounts()
     }
@@ -196,7 +202,7 @@ final class EditionService {
     }
 
     @discardableResult
-    func approve(_ proposal: EditionMatchProposal) -> Bool {
+    func approve(_ proposal: EditionMatchProposal) async -> Bool {
         let members = proposal.memberUUIDs.compactMap { lookupBook(uuid: $0) }
         guard members.count == proposal.memberUUIDs.count else {
             let liveUUIDs = Set(members.map(\.uuid))
@@ -220,11 +226,11 @@ final class EditionService {
         case .sameEditionOtherFormat:
             guard let winner = preferredBook(in: members),
                   let loser = members.first(where: { $0.uuid != winner.uuid }) else { return false }
-            succeeded = absorb(loser, into: winner)
+            succeeded = await absorb(loser, into: winner)
         case .duplicateFile:
             guard let winner = preferredBook(in: members),
                   let loser = members.first(where: { $0.uuid != winner.uuid }) else { return false }
-            succeeded = absorb(loser, into: winner, discardDuplicateAssets: true)
+            succeeded = await absorb(loser, into: winner, discardDuplicateAssets: true)
         }
         if succeeded {
             pendingProposals.removeAll { $0.pairKey == proposal.pairKey }
@@ -322,18 +328,18 @@ final class EditionService {
     }
 
     @discardableResult
-    func mergeEditions(_ books: [Book]) -> Book? {
+    func mergeEditions(_ books: [Book]) async -> Book? {
         let books = books.filter { $0.modelContext != nil }
         guard Set(books.map(\.uuid)).count > 1,
               let winner = preferredBook(in: books) else { return nil }
         for loser in books where loser.uuid != winner.uuid {
-            guard absorb(loser, into: winner) else { return winner }
+            guard await absorb(loser, into: winner) else { return winner }
         }
         return winner
     }
 
     @discardableResult
-    func absorb(_ loser: Book, into winner: Book, discardDuplicateAssets: Bool = false) -> Bool {
+    func absorb(_ loser: Book, into winner: Book, discardDuplicateAssets: Bool = false) async -> Bool {
         guard loser.uuid != winner.uuid,
               loser.modelContext != nil,
               winner.modelContext != nil else { return false }
@@ -374,31 +380,31 @@ final class EditionService {
         }
         fillEmptyBookMetadata(winner, from: loser)
         mergeReadingHistory(into: winner, from: loser)
-        let installedWinnerCover: Bool
-        if !CoverStore.exists(for: winner.uuid),
-           CoverStore.copy(from: loser.uuid, to: winner.uuid) {
+        let winnerCoverToken = await covers.beginUserMutation(for: winner.uuid)
+        let winnerCoverRollback = await covers.copy(
+            from: loser.uuid,
+            using: winnerCoverToken,
+            onlyIfMissing: true
+        )
+        if winnerCoverRollback != nil {
             winner.coverVersion += 1
-            installedWinnerCover = true
-        } else {
-            installedWinnerCover = false
         }
 
         modelContext.delete(loser)
         do {
-            try modelContext.save()
-            LibraryMutationLog.shared.bump()
+            try modelContext.saveAndPublish()
         } catch {
             modelContext.rollback()
-            if installedWinnerCover { CoverStore.delete(for: winner.uuid) }
+            if let winnerCoverRollback { _ = await covers.rollback(winnerCoverRollback) }
             return false
         }
 
         let loserUUID = loser.uuid
+        _ = await covers.deletePermanently(for: loserUUID)
         Task.detached(priority: .utility) {
             for fileName in discardedFileNames {
                 BookFileStore.delete(fileName: fileName)
             }
-            CoverStore.delete(for: loserUUID)
         }
         pendingProposals.removeAll { $0.memberUUIDs.contains(loser.uuid) }
         WorkService.pruneIfOrphaned(losingWork, context: modelContext)

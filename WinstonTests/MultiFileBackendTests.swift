@@ -169,6 +169,43 @@ struct MultiFileBackendTests {
         #expect(maximumConcurrency <= BookDoctorService.defaultMaximumConcurrentInspections)
     }
 
+    @Test func bulkImportCreatesOnlyTheConfiguredNumberOfAnalysisTasks() async throws {
+        let library = try await TestLibrary()
+        let sources = try (0..<6).map { index in
+            let url = library.root.appending(path: "queued-\(index).epub")
+            try Data("book \(index)".utf8).write(to: url)
+            return url
+        }
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let gate = MetadataQueueGate()
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: library.context, settings: settings),
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
+            toasts: ToastCenter(),
+            maximumConcurrentMetadataJobs: 2,
+            analyzeBook: { url in await gate.analyze(url) }
+        )
+
+        importer.addBooks(from: sources)
+        await gate.waitUntilStarted(2)
+
+        #expect(importer.activeMetadataJobCount == 2)
+        #expect(importer.pendingMetadataCount == sources.count)
+
+        await gate.resumeAll()
+        let deadline = Date.now.addingTimeInterval(2)
+        while importer.isExtracting, Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+            await gate.resumeAll()
+        }
+
+        #expect(!importer.isExtracting)
+        #expect(await gate.maximumConcurrency() == 2)
+    }
+
     @Test func relinkAfterMakePrimaryUpdatesTheCurrentPrimaryAsset() async throws {
         let library = try await TestLibrary()
         let epubSource = library.root.appending(path: "a.epub")
@@ -437,4 +474,48 @@ private actor MetadataRescanProbe {
     }
 
     func maximumConcurrency() -> Int { maximumActiveCount }
+}
+
+private actor MetadataQueueGate {
+    private var activeCount = 0
+    private var maximumActiveCount = 0
+    private var startedCount = 0
+    private var continuations: [CheckedContinuation<ImportBookAnalysis, Never>] = []
+    private var waiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func analyze(_ url: URL) async -> ImportBookAnalysis {
+        activeCount += 1
+        maximumActiveCount = max(maximumActiveCount, activeCount)
+        startedCount += 1
+        resumeSatisfiedWaiters()
+        let result = await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+        activeCount -= 1
+        return result
+    }
+
+    func waitUntilStarted(_ count: Int) async {
+        guard startedCount < count else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append((count, continuation))
+        }
+    }
+
+    func resumeAll() {
+        var metadata = BookMetadata()
+        metadata.title = "Queued"
+        let result = ImportBookAnalysis(metadata: metadata, drmProtected: false)
+        let pending = continuations
+        continuations.removeAll()
+        pending.forEach { $0.resume(returning: result) }
+    }
+
+    func maximumConcurrency() -> Int { maximumActiveCount }
+
+    private func resumeSatisfiedWaiters() {
+        let satisfied = waiters.filter { startedCount >= $0.count }
+        waiters.removeAll { startedCount >= $0.count }
+        satisfied.forEach { $0.continuation.resume() }
+    }
 }

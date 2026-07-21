@@ -301,8 +301,7 @@ final class LibraryViewModel {
         )
         modelContext.insert(asset)
         do {
-            try modelContext.save()
-            LibraryMutationLog.shared.bump()
+            try modelContext.saveAndPublish()
             return asset
         } catch {
             modelContext.rollback()
@@ -390,8 +389,7 @@ final class LibraryViewModel {
         let fileName = asset.fileName
         modelContext.delete(asset)
         do {
-            try modelContext.save()
-            LibraryMutationLog.shared.bump()
+            try modelContext.saveAndPublish()
             BookFileStore.delete(fileName: fileName)
             return true
         } catch {

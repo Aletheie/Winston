@@ -140,7 +140,9 @@ private struct EditionVerdictHeader: View {
             }
             Spacer()
             Button("Approve Group") {
-                for proposal in proposals { _ = service.approve(proposal) }
+                Task {
+                    for proposal in proposals { _ = await service.approve(proposal) }
+                }
             }
             .buttonStyle(.borderless)
             Button("Dismiss Group") { service.dismiss(proposals) }
@@ -159,7 +161,9 @@ private struct EditionReviewFooter: View {
     var body: some View {
         HStack {
             Button("Approve All Exact Matches") {
-                for proposal in exactProposals { _ = service.approve(proposal) }
+                Task {
+                    for proposal in exactProposals { _ = await service.approve(proposal) }
+                }
             }
             .disabled(exactProposals.isEmpty)
             Spacer()
@@ -225,7 +229,7 @@ private struct EditionProposalRow: View {
             Spacer()
             Button("Dismiss") { service.dismiss(proposal) }
                 .buttonStyle(.borderless)
-            Button("Approve") { _ = service.approve(proposal) }
+            Button("Approve") { Task { _ = await service.approve(proposal) } }
                 .buttonStyle(.borderedProminent)
         }
         .padding(.vertical, 5)

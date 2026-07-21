@@ -17,40 +17,6 @@ nonisolated struct ImportBookAnalysis: Sendable {
     }
 }
 
-private actor ImportAnalysisLimiter {
-    private var availablePermits: Int
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(limit: Int) {
-        availablePermits = max(1, limit)
-    }
-
-    func run<T: Sendable>(_ operation: @Sendable () async -> T) async -> T {
-        await acquire()
-        let result = await operation()
-        release()
-        return result
-    }
-
-    private func acquire() async {
-        if availablePermits > 0 {
-            availablePermits -= 1
-            return
-        }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
-        }
-    }
-
-    private func release() {
-        guard !waiters.isEmpty else {
-            availablePermits += 1
-            return
-        }
-        waiters.removeFirst().resume()
-    }
-}
-
 @MainActor
 @Observable
 final class ImportService {
@@ -59,6 +25,12 @@ final class ImportService {
     private struct MatchBatch {
         let books: [Book]
         var remaining: Set<UUID>
+    }
+
+    private struct MetadataJob {
+        let book: Book
+        let evaluateMatch: Bool
+        let matchBatchID: UUID?
     }
 
     nonisolated private struct CopyRequest: Sendable {
@@ -84,13 +56,13 @@ final class ImportService {
     private let toasts: ToastCenter
     private let editions: EditionService?
     private let analyzeBook: @Sendable (URL) async -> ImportBookAnalysis
-    private let analysisLimiter = ImportAnalysisLimiter(
-        limit: BookDoctorService.defaultMaximumConcurrentInspections
-    )
+    private let maximumConcurrentMetadataJobs: Int
 
     private(set) var pendingMetadataUUIDs: Set<UUID> = []
     private var pendingSourcePaths: Set<String> = []
     private var matchBatches: [UUID: MatchBatch] = [:]
+    private var queuedMetadataJobs: ArraySlice<MetadataJob> = []
+    private var activeMetadataTasks: [UUID: Task<Void, Never>] = [:]
 
     init(
         modelContext: ModelContext,
@@ -99,6 +71,7 @@ final class ImportService {
         wishlist: WishlistService,
         toasts: ToastCenter,
         editions: EditionService? = nil,
+        maximumConcurrentMetadataJobs: Int = BookDoctorService.defaultMaximumConcurrentInspections,
         analyzeBook: @escaping @Sendable (URL) async -> ImportBookAnalysis = ImportService.defaultAnalysis
     ) {
         self.modelContext = modelContext
@@ -107,11 +80,13 @@ final class ImportService {
         self.wishlist = wishlist
         self.toasts = toasts
         self.editions = editions
+        self.maximumConcurrentMetadataJobs = max(1, maximumConcurrentMetadataJobs)
         self.analyzeBook = analyzeBook
     }
 
     var isExtracting: Bool { !pendingMetadataUUIDs.isEmpty }
     var pendingMetadataCount: Int { pendingMetadataUUIDs.count }
+    var activeMetadataJobCount: Int { activeMetadataTasks.count }
 
     func addBooks(from urls: [URL], completion: ImportCompletion? = nil) {
         addBooks(from: urls, assigningTo: nil, completion: completion)
@@ -248,7 +223,20 @@ final class ImportService {
         }
     }
 
-    func cancelPending(_ uuid: UUID) { pendingMetadataUUIDs.remove(uuid) }
+    func cancelPending(_ uuid: UUID) {
+        if let task = activeMetadataTasks[uuid] {
+            task.cancel()
+            return
+        }
+        guard let index = queuedMetadataJobs.firstIndex(where: { $0.book.uuid == uuid }) else {
+            pendingMetadataUUIDs.remove(uuid)
+            return
+        }
+        let job = queuedMetadataJobs.remove(at: index)
+        if queuedMetadataJobs.isEmpty { queuedMetadataJobs = [] }
+        pendingMetadataUUIDs.remove(uuid)
+        if let batchID = job.matchBatchID { finishMatchBatch(batchID, completed: uuid) }
+    }
 
     // MARK: - Maintenance
 
@@ -320,11 +308,13 @@ final class ImportService {
                 if let batchID { matchBatches.removeValue(forKey: batchID) }
                 return
             }
+            pendingMetadataUUIDs.insert(book.uuid)
             await performMetadataExtraction(
                 for: book,
-                evaluateMatch: false,
-                matchBatchID: batchID
+                evaluateMatch: false
             )
+            pendingMetadataUUIDs.remove(book.uuid)
+            if let batchID { finishMatchBatch(batchID, completed: book.uuid) }
             await Task.yield()
         }
     }
@@ -336,31 +326,47 @@ final class ImportService {
         evaluateMatch: Bool = true,
         matchBatchID: UUID? = nil
     ) {
-        Task {
-            await performMetadataExtraction(
-                for: book,
-                evaluateMatch: evaluateMatch,
-                matchBatchID: matchBatchID
-            )
+        guard pendingMetadataUUIDs.insert(book.uuid).inserted else { return }
+        queuedMetadataJobs.append(MetadataJob(
+            book: book,
+            evaluateMatch: evaluateMatch,
+            matchBatchID: matchBatchID
+        ))
+        startMetadataJobs()
+    }
+
+    private func startMetadataJobs() {
+        while activeMetadataTasks.count < maximumConcurrentMetadataJobs,
+              let job = queuedMetadataJobs.popFirst() {
+            if queuedMetadataJobs.isEmpty { queuedMetadataJobs = [] }
+            let uuid = job.book.uuid
+            activeMetadataTasks[uuid] = Task { [weak self] in
+                guard let self else { return }
+                await self.performMetadataExtraction(
+                    for: job.book,
+                    evaluateMatch: job.evaluateMatch
+                )
+                self.finishMetadataJob(job)
+            }
         }
+    }
+
+    private func finishMetadataJob(_ job: MetadataJob) {
+        let uuid = job.book.uuid
+        activeMetadataTasks.removeValue(forKey: uuid)
+        pendingMetadataUUIDs.remove(uuid)
+        if let batchID = job.matchBatchID { finishMatchBatch(batchID, completed: uuid) }
+        startMetadataJobs()
     }
 
     private func performMetadataExtraction(
         for book: Book,
-        evaluateMatch: Bool,
-        matchBatchID: UUID?
+        evaluateMatch: Bool
     ) async {
+        guard !Task.isCancelled, book.modelContext != nil else { return }
         let url = book.fileURL
-        let uuid = book.uuid
-        pendingMetadataUUIDs.insert(uuid)
-        defer {
-            pendingMetadataUUIDs.remove(uuid)
-            if let matchBatchID { finishMatchBatch(matchBatchID, completed: uuid) }
-        }
         let analyzer = analyzeBook
-        let result = await analysisLimiter.run {
-            await analyzer(url)
-        }
+        let result = await analyzer(url)
         guard !Task.isCancelled, book.modelContext != nil else { return }
         book.apply(result.metadata)
         book.drmProtected = result.drmProtected

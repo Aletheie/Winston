@@ -137,7 +137,7 @@ struct LibraryTimeMachineRestorer {
 
         let restoredCoverData = try await coverData(for: snapshot, scope: scope)
         do {
-            if modelContext.hasChanges { try modelContext.save() }
+            if modelContext.hasChanges { try modelContext.saveAndPublish() }
         } catch {
             modelContext.rollback()
             throw LibraryTimeMachineRestoreError.saveFailed(error.localizedDescription)
@@ -214,7 +214,7 @@ struct LibraryTimeMachineRestorer {
             }
 
             do {
-                try modelContext.save()
+                try modelContext.saveAndPublish()
             } catch {
                 throw LibraryTimeMachineRestoreError.saveFailed(error.localizedDescription)
             }
@@ -226,7 +226,6 @@ struct LibraryTimeMachineRestorer {
             throw error
         }
 
-        LibraryMutationLog.shared.bump()
         if coverIsIncluded, let restoredBook {
             let image = restoredCoverData.flatMap(NSImage.init(data:))
             await CoverCache.shared.replace(image, for: restoredBook.fileURL)

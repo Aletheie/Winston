@@ -59,7 +59,7 @@ struct EditionServiceTests {
         try library.context.save()
 
         let service = EditionService(modelContext: library.context)
-        #expect(service.absorb(loser, into: winner))
+        #expect(await service.absorb(loser, into: winner))
         #expect(FileManager.default.fileExists(atPath: BookFileStore.url(for: "loser.mobi").path(percentEncoded: false)))
         #expect(winner.assets.contains(where: { $0.fileName == "loser.mobi" }))
         #expect(winner.highlights.contains(where: { $0.text == "Quote" }))
@@ -77,7 +77,7 @@ struct EditionServiceTests {
         let service = EditionService(modelContext: library.context)
         _ = try #require(service.groupIntoWork([epub, mobi]))
 
-        let survivor = try #require(service.mergeEditions([epub, mobi]))
+        let survivor = try #require(await service.mergeEditions([epub, mobi]))
         #expect(survivor.uuid == mobi.uuid)
         #expect(survivor.assets.count == 2)
         #expect(try library.context.fetchCount(FetchDescriptor<Book>()) == 1)
@@ -129,7 +129,7 @@ struct EditionServiceTests {
         second.assets.first?.contentHash = "replacement"
         try library.context.save()
 
-        #expect(!service.approve(stale))
+        #expect(!(await service.approve(stale)))
         #expect(try library.context.fetchCount(FetchDescriptor<Book>()) == 2)
         #expect(!service.pendingProposals.contains(where: {
             $0.pairKey == stale.pairKey && $0.verdict == .duplicateFile
@@ -148,7 +148,7 @@ struct EditionServiceTests {
         try library.context.save()
 
         let service = EditionService(modelContext: library.context)
-        #expect(service.absorb(loser, into: winner))
+        #expect(await service.absorb(loser, into: winner))
 
         #expect(winner.readingStatus == .finished)
         #expect(winner.dateStarted == started)
@@ -165,7 +165,7 @@ struct EditionServiceTests {
         try library.context.save()
 
         let service = EditionService(modelContext: library.context)
-        #expect(service.absorb(loser, into: winner))
+        #expect(await service.absorb(loser, into: winner))
 
         #expect(winner.readingSessions.count == 2)
         #expect(winner.readingSessions.allSatisfy { $0.book?.uuid == winner.uuid })
@@ -187,7 +187,7 @@ struct EditionServiceTests {
         await service.scanLibrary()
         let proposal = try #require(service.pendingProposals.first)
 
-        #expect(service.approve(proposal))
+        #expect(await service.approve(proposal))
 
         let remaining = Set(library.context.allBooks().map(\.uuid))
         #expect(service.pendingProposals.allSatisfy { proposal in
