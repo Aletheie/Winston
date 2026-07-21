@@ -18,6 +18,7 @@ struct BookDoctorSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var reports: [BookDoctorReport] = []
     @State private var isInspecting = true
     @State private var completedInspectionCount = 0
@@ -99,7 +100,7 @@ struct BookDoctorSheet: View {
                 .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.2), value: reports.isEmpty)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: reports.isEmpty)
     }
 
     private var footer: some View {

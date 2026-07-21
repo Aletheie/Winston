@@ -6,6 +6,7 @@ struct LibraryDropZone: View {
     let onDrop: ([NSItemProvider]) -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -42,7 +43,7 @@ struct LibraryDropZone: View {
         .frame(maxWidth: 720)
         .frame(height: isTargeted ? 72 : 30)
         .frame(maxWidth: .infinity)
-        .animation(.easeOut(duration: 0.2), value: isTargeted)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isTargeted)
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
             onDrop(providers)
             return true

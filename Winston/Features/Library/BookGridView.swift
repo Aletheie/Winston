@@ -32,6 +32,7 @@ struct BookGridView: View {
 
     @Environment(AppSettings.self) private var settings
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focusedBookID: Book.ID?
 
     private var convertingUUIDs: Set<UUID> { conversion.convertingUUIDs }
@@ -52,7 +53,9 @@ struct BookGridView: View {
             scrollContent
                 .onChange(of: scrollTarget) {
                     guard let target = scrollTarget else { return }
-                    withAnimation { proxy.scrollTo(target, anchor: .center) }
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                        proxy.scrollTo(target, anchor: .center)
+                    }
                     scrollTarget = nil
                 }
         }

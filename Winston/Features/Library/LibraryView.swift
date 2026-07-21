@@ -428,7 +428,7 @@ struct LibraryView: View {
         }
         .id(contentState)
         .transition(.opacity)
-        .animation(.easeOut(duration: 0.15), value: contentState)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: contentState)
     }
 
     private var emptyStateKind: LibraryEmptyState.Kind {
@@ -485,7 +485,9 @@ struct LibraryView: View {
         case .selectAll:
             selection.selectAll(displayed)
         case .toggleSidebar:
-            withAnimation { columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+            }
         case .toggleInspector:
             showInspector.toggle()
         case .setGridView:

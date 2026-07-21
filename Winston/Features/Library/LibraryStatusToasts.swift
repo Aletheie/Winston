@@ -14,6 +14,7 @@ struct LibraryStatusToasts: View {
             if transferQueue.isTransferring {
                 TransferToastCard(title: transferTitle,
                                   progress: transferQueue.overallProgress,
+                                  isCancelling: transferQueue.activeItem?.stage == .cancelling,
                                   onCancel: { transferQueue.cancel() })
                     .transition(toastTransition)
             }
@@ -40,6 +41,9 @@ struct LibraryStatusToasts: View {
     }
 
     private var transferTitle: String {
+        if transferQueue.activeItem?.stage == .cancelling {
+            return String(localized: "Cancelling…")
+        }
         if transferQueue.activeItem?.stage == .converting {
             return String(localized: "Converting\u{2026}")
         }
@@ -219,6 +223,7 @@ private struct ToastCard: View {
 private struct TransferToastCard: View {
     let title: String
     let progress: Double
+    let isCancelling: Bool
     let onCancel: () -> Void
 
     @Environment(\.theme) private var theme
@@ -242,6 +247,7 @@ private struct TransferToastCard: View {
                     .foregroundStyle(theme.textTertiary)
             }
             .buttonStyle(.plain)
+            .disabled(isCancelling)
             .help("Cancel")
             .accessibilityLabel("Cancel")
         }
@@ -268,6 +274,7 @@ private struct ToastProgressBar: View {
     let fraction: Double
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geo in
@@ -278,6 +285,6 @@ private struct ToastProgressBar: View {
             }
         }
         .frame(height: 3)
-        .animation(.linear(duration: 0.1), value: fraction)
+        .animation(reduceMotion ? nil : .linear(duration: 0.1), value: fraction)
     }
 }

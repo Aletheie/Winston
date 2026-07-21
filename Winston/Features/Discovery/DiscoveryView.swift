@@ -175,6 +175,7 @@ private struct DiscoveryContent: View {
     let onLoadMore: @MainActor () async -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
@@ -216,7 +217,7 @@ private struct DiscoveryContent: View {
         }
         .id(phase)
         .transition(.opacity)
-        .animation(.easeOut(duration: 0.2), value: phase)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: phase)
     }
 }
 

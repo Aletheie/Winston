@@ -70,7 +70,7 @@ struct BookCardView: View {
         .scaleEffect(isHovered && !reduceMotion ? 1.005 : 1.0)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovered)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isSelected)
-        .animation(.easeInOut(duration: 0.25), value: isConverting)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isConverting)
         .shadow(
             color: isSelected
                 ? theme.accentSecondary.opacity(0.18)
