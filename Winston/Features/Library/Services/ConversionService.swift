@@ -168,7 +168,7 @@ final class ConversionService {
 
         guard sourceSnapshotIsCurrent(request) else { return }
         var installedCover: InstalledCover?
-        if let (extractedCover, coverData) = extractedCover,
+        if let (_, coverData) = extractedCover,
            book.coverVersion == request.coverVersion {
             let rollback = await covers.install(coverData, using: coverToken, onlyIfMissing: true)
             guard sourceSnapshotIsCurrent(request) else {

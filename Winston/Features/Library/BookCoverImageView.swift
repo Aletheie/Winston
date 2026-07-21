@@ -41,7 +41,7 @@ struct BookCoverImageView: View {
                 return stored
             }
             let token = await CoverRepository.shared.beginBackgroundMutation(for: uuid)
-            let prepared = await Task.detached(priority: .background) {
+            let prepared = await Task.detached(priority: .background) { () -> (NSImage, Data)? in
                 guard let extracted = CoverExtractor.extractCover(from: url),
                       let data = ImageTranscoder.jpegData(from: extracted) else { return nil }
                 return (extracted, data)

@@ -164,7 +164,7 @@ final class CalibreImportService {
 
                 if let coverURL = cb.coverURL {
                     let token = await covers.beginBackgroundMutation(for: uuid)
-                    let prepared = await Task.detached(priority: .utility) {
+                    let prepared = await Task.detached(priority: .utility) { () -> (NSImage, Data)? in
                         guard let image = NSImage(contentsOf: coverURL),
                               let data = ImageTranscoder.jpegData(from: image) else { return nil }
                         return (image, data)

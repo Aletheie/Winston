@@ -36,9 +36,7 @@ enum LegacyLibraryMigrator {
 
         for legacy in legacyBooks {
             let sourceURL = resolveURL(for: legacy)
-            guard FileManager.default.fileExists(atPath: sourceURL.path),
-                  let fileName = try? BookFileStore.importCopy(of: sourceURL, uuid: legacy.id)
-            else { continue }
+            guard let fileName = importFile(sourceURL, uuid: legacy.id) else { continue }
 
             let book = Book(
                 uuid: legacy.id,
@@ -83,9 +81,17 @@ enum LegacyLibraryMigrator {
             relativeTo: nil,
             bookmarkDataIsStale: &isStale
         ) {
-            _ = url.startAccessingSecurityScopedResource()
             return url
         }
         return legacy.fileURL
+    }
+
+    private static func importFile(_ sourceURL: URL, uuid: UUID) -> String? {
+        let accessing = sourceURL.startAccessingSecurityScopedResource()
+        defer { if accessing { sourceURL.stopAccessingSecurityScopedResource() } }
+        guard FileManager.default.fileExists(atPath: sourceURL.path(percentEncoded: false)) else {
+            return nil
+        }
+        return try? BookFileStore.importCopy(of: sourceURL, uuid: uuid)
     }
 }

@@ -38,7 +38,7 @@ final class CoverService {
             defer { finishOperation(token, for: uuid) }
             let repositoryToken = await covers.beginUserMutation(for: uuid)
             guard operationIsCurrent(token, for: book) else { return }
-            let prepared = await Task.detached(priority: .userInitiated) {
+            let prepared = await Task.detached(priority: .userInitiated) { () -> (NSImage, Data)? in
                 guard let image = loadImage(),
                       let data = ImageTranscoder.jpegData(from: image) else { return nil }
                 return (image, data)
@@ -75,7 +75,7 @@ final class CoverService {
             }
             guard operationIsCurrent(token, for: book) else { return }
             await CoverCache.shared.replace(nil, for: fileURL)
-            let prepared = await Task.detached(priority: .userInitiated) {
+            let prepared = await Task.detached(priority: .userInitiated) { () -> (NSImage, Data)? in
                 guard let image = CoverExtractor.extractCover(from: fileURL),
                       let data = ImageTranscoder.jpegData(from: image) else { return nil }
                 return (image, data)

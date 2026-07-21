@@ -138,6 +138,59 @@ struct CoverServiceTests {
         #expect(!CoverStore.exists(for: book.uuid))
     }
 
+    @Test func backgroundCoverCannotReplaceNewerUserCover() async throws {
+        let library = try await TestLibrary()
+        let directory = library.root.appending(path: "repository-covers", directoryHint: .isDirectory)
+        let repository = CoverRepository(coversDirectory: directory)
+        let uuid = UUID()
+        let background = await repository.beginBackgroundMutation(for: uuid)
+        let user = await repository.beginUserMutation(for: uuid)
+        let userData = Data("user".utf8)
+
+        let userInstall = await repository.install(userData, using: user)
+        let backgroundInstall = await repository.install(
+            Data("background".utf8),
+            using: background,
+            onlyIfMissing: true
+        )
+
+        #expect(userInstall != nil)
+        #expect(backgroundInstall == nil)
+        #expect(CoverStore.loadData(for: uuid, in: directory) == userData)
+    }
+
+    @Test func staleCoverRollbackCannotReplaceNewerMutation() async throws {
+        let library = try await TestLibrary()
+        let directory = library.root.appending(path: "stale-rollback-covers", directoryHint: .isDirectory)
+        let repository = CoverRepository(coversDirectory: directory)
+        let uuid = UUID()
+        let first = await repository.beginUserMutation(for: uuid)
+        let firstTicket = try #require(await repository.install(Data("first".utf8), using: first))
+        let second = await repository.beginUserMutation(for: uuid)
+        _ = try #require(await repository.install(Data("second".utf8), using: second))
+
+        let rolledBack = await repository.rollback(firstTicket)
+
+        #expect(!rolledBack)
+        #expect(CoverStore.loadData(for: uuid, in: directory) == Data("second".utf8))
+    }
+
+    @Test func currentCoverRollbackRestoresPreviousData() async throws {
+        let library = try await TestLibrary()
+        let directory = library.root.appending(path: "current-rollback-covers", directoryHint: .isDirectory)
+        let repository = CoverRepository(coversDirectory: directory)
+        let uuid = UUID()
+        let first = await repository.beginUserMutation(for: uuid)
+        _ = try #require(await repository.install(Data("first".utf8), using: first))
+        let second = await repository.beginUserMutation(for: uuid)
+        let secondTicket = try #require(await repository.install(Data("second".utf8), using: second))
+
+        let rolledBack = await repository.rollback(secondTicket)
+
+        #expect(rolledBack)
+        #expect(CoverStore.loadData(for: uuid, in: directory) == Data("first".utf8))
+    }
+
     private func loadDroppedCover(from provider: NSItemProvider) async throws -> DroppedCoverImage {
         try await withCheckedThrowingContinuation { continuation in
             _ = provider.loadTransferable(type: DroppedCoverImage.self) { result in
