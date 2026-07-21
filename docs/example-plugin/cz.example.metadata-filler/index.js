@@ -5,7 +5,7 @@
 // This is the worked example from docs/WritingPlugins.md. Copy this folder into
 // ~/Library/Application Support/Winston/Plugins/ and enable it in
 // Settings → Plugins (grant Read library metadata, Fill in missing book
-// metadata, and Show notifications).
+// metadata, Fetch metadata from online catalogs, and Show notifications).
 
 // How many books to process per run. Kept small so we're polite to the
 // metadata sources and finish well inside the ~10s activate budget.
@@ -19,7 +19,7 @@ exports.activate = async () => {
         // capability, its namespace is `undefined`. capabilities.has() lets
         // you degrade gracefully rather than throw a TypeError.
         if (!Winston.capabilities.has("metadata.fetch")) {
-            console.error("This plugin needs the 'library.read' permission.");
+            console.error("This plugin needs the 'metadata.fetch' permission.");
             return;
         }
 
