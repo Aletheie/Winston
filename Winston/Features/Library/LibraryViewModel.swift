@@ -128,7 +128,6 @@ final class LibraryViewModel {
         guard book.modelContext != nil else { return nil }
         let work = book.work
         let assetNames = book.assets.isEmpty ? [book.fileName] : book.assets.map(\.fileName)
-        covers.cancelPending(for: book.uuid)
         book.work = nil
         modelContext.delete(book)
         WorkService.pruneIfOrphaned(work, context: modelContext, save: false)
@@ -137,7 +136,7 @@ final class LibraryViewModel {
 
     private func finishRemoval(_ removed: RemovedBook) {
         removed.fileNames.forEach { BookFileStore.trash(fileName: $0) }
-        CoverStore.delete(for: removed.uuid)
+        covers.deletePermanently(for: removed.uuid)
         importer.cancelPending(removed.uuid)
         editions.removeProposals(referencing: removed.uuid)
     }

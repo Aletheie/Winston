@@ -6,10 +6,12 @@ import AppKit
 @Observable
 final class CoverService {
     private let modelContext: ModelContext
+    private let covers: CoverRepository
     private var operationTokens: [UUID: UUID] = [:]
 
-    init(modelContext: ModelContext) {
+    init(modelContext: ModelContext, covers: CoverRepository = .shared) {
         self.modelContext = modelContext
+        self.covers = covers
     }
 
     // MARK: - Custom covers
@@ -34,18 +36,21 @@ final class CoverService {
         let token = beginOperation(for: uuid)
         Task {
             defer { finishOperation(token, for: uuid) }
-            let image = await Task.detached(priority: .userInitiated, operation: loadImage).value
-            guard let image, operationIsCurrent(token, for: book) else { return }
-            let diskWrite = await Task.detached(priority: .userInitiated) {
-                let previous = CoverStore.loadData(for: uuid)
-                return (previous: previous, saved: CoverStore.save(image, for: uuid))
+            let repositoryToken = await covers.beginUserMutation(for: uuid)
+            guard operationIsCurrent(token, for: book) else { return }
+            let prepared = await Task.detached(priority: .userInitiated) {
+                guard let image = loadImage(),
+                      let data = ImageTranscoder.jpegData(from: image) else { return nil }
+                return (image, data)
             }.value
-            guard diskWrite.saved, operationIsCurrent(token, for: book) else { return }
+            guard let (image, data) = prepared,
+                  operationIsCurrent(token, for: book),
+                  let rollback = await covers.install(data, using: repositoryToken),
+                  operationIsCurrent(token, for: book),
+                  await covers.isCurrent(repositoryToken) else { return }
             book.coverVersion += 1
             guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-                _ = await Task.detached(priority: .utility) {
-                    CoverStore.restore(diskWrite.previous, for: uuid)
-                }.value
+                _ = await covers.rollback(rollback)
                 return
             }
             await CoverCache.shared.replace(image, for: book.fileURL)
@@ -58,34 +63,32 @@ final class CoverService {
         let token = beginOperation(for: uuid)
         Task {
             defer { finishOperation(token, for: uuid) }
-            let diskReset = await Task.detached(priority: .userInitiated) {
-                let previous = CoverStore.loadData(for: uuid)
-                return (previous: previous, deleted: CoverStore.delete(for: uuid))
-            }.value
-            guard diskReset.deleted, operationIsCurrent(token, for: book) else { return }
+            let repositoryToken = await covers.beginUserMutation(for: uuid)
+            guard operationIsCurrent(token, for: book),
+                  let rollback = await covers.remove(using: repositoryToken),
+                  operationIsCurrent(token, for: book),
+                  await covers.isCurrent(repositoryToken) else { return }
             book.coverVersion += 1
             guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-                _ = await Task.detached(priority: .utility) {
-                    CoverStore.restore(diskReset.previous, for: uuid)
-                }.value
+                _ = await covers.rollback(rollback)
                 return
             }
             guard operationIsCurrent(token, for: book) else { return }
             await CoverCache.shared.replace(nil, for: fileURL)
-            let image: NSImage? = await Task.detached(priority: .userInitiated) {
-                CoverExtractor.extractCover(from: fileURL)
+            let prepared = await Task.detached(priority: .userInitiated) {
+                guard let image = CoverExtractor.extractCover(from: fileURL),
+                      let data = ImageTranscoder.jpegData(from: image) else { return nil }
+                return (image, data)
             }.value
             guard operationIsCurrent(token, for: book), book.fileURL == fileURL else { return }
-            guard let image else { return }
-            let saved = await Task.detached(priority: .userInitiated) {
-                CoverStore.save(image, for: uuid)
-            }.value
-            guard saved, operationIsCurrent(token, for: book), book.fileURL == fileURL else { return }
+            guard let (image, data) = prepared,
+                  let extractionRollback = await covers.install(data, using: repositoryToken),
+                  operationIsCurrent(token, for: book),
+                  book.fileURL == fileURL,
+                  await covers.isCurrent(repositoryToken) else { return }
             book.coverVersion += 1
             guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-                _ = await Task.detached(priority: .utility) {
-                    CoverStore.delete(for: uuid)
-                }.value
+                _ = await covers.rollback(extractionRollback)
                 return
             }
             await CoverCache.shared.replace(image, for: fileURL)
@@ -94,6 +97,12 @@ final class CoverService {
 
     func cancelPending(for uuid: UUID) {
         operationTokens.removeValue(forKey: uuid)
+        Task { await covers.invalidate(for: uuid) }
+    }
+
+    func deletePermanently(for uuid: UUID) {
+        operationTokens.removeValue(forKey: uuid)
+        Task { await covers.deletePermanently(for: uuid) }
     }
 
     private func beginOperation(for uuid: UUID) -> UUID {

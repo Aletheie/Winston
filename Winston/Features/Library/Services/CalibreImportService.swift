@@ -31,6 +31,7 @@ final class CalibreImportService {
     private let wishlist: WishlistService
     private let toasts: ToastCenter
     private let editions: EditionService?
+    private let covers: CoverRepository
 
     nonisolated static let kindlePreference = ["azw3", "mobi", "azw", "epub", "pdf", "txt"]
 
@@ -44,7 +45,8 @@ final class CalibreImportService {
         metadata: MetadataService,
         wishlist: WishlistService,
         toasts: ToastCenter,
-        editions: EditionService? = nil
+        editions: EditionService? = nil,
+        covers: CoverRepository = .shared
     ) {
         self.modelContext = modelContext
         self.settings = settings
@@ -52,6 +54,7 @@ final class CalibreImportService {
         self.wishlist = wishlist
         self.toasts = toasts
         self.editions = editions
+        self.covers = covers
     }
 
     var progressText: String? {
@@ -160,12 +163,14 @@ final class CalibreImportService {
                 seenKeys.insert(key)
 
                 if let coverURL = cb.coverURL {
-                    let image = await Task.detached(priority: .utility) {
+                    let token = await covers.beginBackgroundMutation(for: uuid)
+                    let prepared = await Task.detached(priority: .utility) {
                         guard let image = NSImage(contentsOf: coverURL),
-                              CoverStore.save(image, for: uuid) else { return nil as NSImage? }
-                        return image
+                              let data = ImageTranscoder.jpegData(from: image) else { return nil }
+                        return (image, data)
                     }.value
-                    if let image {
+                    if let (image, data) = prepared,
+                       await covers.install(data, using: token, onlyIfMissing: true) != nil {
                         await CoverCache.shared.replace(image, for: book.fileURL)
                     }
                 }

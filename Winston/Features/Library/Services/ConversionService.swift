@@ -5,6 +5,11 @@ import AppKit
 @MainActor
 @Observable
 final class ConversionService {
+    private struct InstalledCover {
+        let rollback: CoverRollbackTicket
+        let version: Int
+    }
+
     private struct Request {
         let book: Book
         let uuid: UUID
@@ -22,12 +27,18 @@ final class ConversionService {
 
     private let modelContext: ModelContext
     private let toasts: ToastCenter
+    private let covers: CoverRepository
 
     private(set) var convertingUUIDs: Set<UUID> = []
 
-    init(modelContext: ModelContext, toasts: ToastCenter) {
+    init(
+        modelContext: ModelContext,
+        toasts: ToastCenter,
+        covers: CoverRepository = .shared
+    ) {
         self.modelContext = modelContext
         self.toasts = toasts
+        self.covers = covers
     }
 
     func isConverting(_ book: Book) -> Bool { convertingUUIDs.contains(book.uuid) }
@@ -123,6 +134,7 @@ final class ConversionService {
         let book = request.book
         let uuid = request.uuid
         let sourceURL = request.sourceURL
+        let coverToken = await covers.beginBackgroundMutation(for: uuid)
         defer { convertingUUIDs.remove(uuid) }
         guard sourceSnapshotIsCurrent(request) else { return }
 
@@ -145,41 +157,40 @@ final class ConversionService {
             sourceAsset.contentHash = sourceHash
         }
 
-        let extractedCover: NSImage? = await Task.detached(priority: .utility) { () -> NSImage? in
+        let extractedCover = await Task.detached(priority: .utility) { () -> (NSImage, Data)? in
             if !CoverStore.exists(for: uuid),
-               let cover = CoverExtractor.extractCover(from: sourceURL) {
-                return cover
+               let cover = CoverExtractor.extractCover(from: sourceURL),
+               let data = ImageTranscoder.jpegData(from: cover) {
+                return (cover, data)
             }
             return nil
         }.value
 
         guard sourceSnapshotIsCurrent(request) else { return }
-        var installedCoverVersion: Int?
-        if let extractedCover,
+        var installedCover: InstalledCover?
+        if let (extractedCover, coverData) = extractedCover,
            book.coverVersion == request.coverVersion {
-            let installed = await Task.detached(priority: .utility) {
-                !CoverStore.exists(for: uuid) && CoverStore.save(extractedCover, for: uuid)
-            }.value
+            let rollback = await covers.install(coverData, using: coverToken, onlyIfMissing: true)
             guard sourceSnapshotIsCurrent(request) else {
-                if installed, book.coverVersion == request.coverVersion {
-                    _ = await Task.detached(priority: .utility) { CoverStore.delete(for: uuid) }.value
-                }
+                if let rollback { _ = await covers.rollback(rollback) }
                 return
             }
-            if installed, book.coverVersion == request.coverVersion {
+            if let rollback,
+               await covers.isCurrent(coverToken),
+               book.coverVersion == request.coverVersion {
                 book.coverVersion += 1
-                installedCoverVersion = book.coverVersion
+                installedCover = InstalledCover(rollback: rollback, version: book.coverVersion)
             }
         }
 
         let converted: URL? = try? await EbookConverter.convert(sourceURL, to: request.format)
         guard sourceSnapshotIsCurrent(request) else {
             if let converted { try? FileManager.default.removeItem(at: converted) }
-            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
+            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
             return
         }
         guard let converted else {
-            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
+            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
@@ -189,7 +200,7 @@ final class ConversionService {
             try? ContentHasher.sha256(of: converted)
         }.value
         guard sourceSnapshotIsCurrent(request) else {
-            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
+            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
             return
         }
 
@@ -215,7 +226,7 @@ final class ConversionService {
             }
         }.value
         guard let storedFile else {
-            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
+            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
@@ -225,7 +236,7 @@ final class ConversionService {
             Task.detached(priority: .utility) {
                 BookFileStore.delete(fileName: newFileName)
             }
-            await removeInstalledCover(for: book, url: sourceURL, version: installedCoverVersion)
+            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
             return
         }
         if let asset = existingAsset {
@@ -253,7 +264,7 @@ final class ConversionService {
                 BookFileStore.delete(fileName: newFileName)
             }
             await removeInstalledCover(
-                for: book, url: sourceURL, version: installedCoverVersion, force: true
+                for: book, url: sourceURL, installed: installedCover, force: true
             )
             toasts.error(String(localized: "Couldn\u{2019}t save \u{201C}\(request.title)\u{201D}."))
             return
@@ -269,14 +280,14 @@ final class ConversionService {
     private func removeInstalledCover(
         for book: Book,
         url: URL,
-        version: Int?,
+        installed: InstalledCover?,
         force: Bool = false
     ) async {
-        guard let version, force || book.coverVersion == version else { return }
-        let uuid = book.uuid
-        guard await Task.detached(priority: .utility, operation: {
-            CoverStore.delete(for: uuid)
-        }).value else { return }
+        guard let installed, force || book.coverVersion == installed.version else { return }
+        guard await covers.rollback(installed.rollback) else { return }
+        if book.coverVersion == installed.version {
+            book.coverVersion = max(0, installed.version - 1)
+        }
         await CoverCache.shared.replace(nil, for: url)
     }
 

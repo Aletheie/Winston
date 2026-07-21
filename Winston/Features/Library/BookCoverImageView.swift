@@ -31,14 +31,31 @@ struct BookCoverImageView: View {
         let maxDimension = tier.maxDimension
         let maxPixel = Int(maxDimension)
         return await CoverCache.shared.resolve(for: url, tier: tier) {
-            await Task.detached(priority: .background) {
+            if let stored = await Task.detached(priority: .background, operation: {
                 if let data = CoverStore.loadData(for: uuid),
                    let decoded = ImageTranscoder.decodedImage(from: data, maxPixel: maxPixel) {
                     return NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height))
                 }
-                guard let extracted = CoverExtractor.extractCover(from: url) else { return nil }
-                CoverStore.save(extracted, for: uuid)
+                return nil
+            }).value {
+                return stored
+            }
+            let token = await CoverRepository.shared.beginBackgroundMutation(for: uuid)
+            let prepared = await Task.detached(priority: .background) {
+                guard let extracted = CoverExtractor.extractCover(from: url),
+                      let data = ImageTranscoder.jpegData(from: extracted) else { return nil }
+                return (extracted, data)
+            }.value
+            guard let (extracted, data) = prepared else { return nil }
+            if await CoverRepository.shared.install(data, using: token, onlyIfMissing: true) != nil {
                 return CoverCache.downscaled(extracted, maxDimension: maxDimension)
+            }
+            return await Task.detached(priority: .background) {
+                guard let data = CoverStore.loadData(for: uuid),
+                      let decoded = ImageTranscoder.decodedImage(from: data, maxPixel: maxPixel) else {
+                    return nil
+                }
+                return NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height))
             }.value
         }
     }

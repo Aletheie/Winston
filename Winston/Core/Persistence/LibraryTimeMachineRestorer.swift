@@ -85,15 +85,24 @@ struct LibraryTimeMachineRestorer {
     private let modelContext: ModelContext
     private let coversDirectory: URL
     private let createSafetyBackup: SafetyBackupAction
+    private let covers: CoverRepository
 
     init(
         modelContext: ModelContext,
         liveStoreURL: URL = PersistenceController.storeURL,
         coversDirectory: URL = AppPaths.coversDirectory,
-        createSafetyBackup: SafetyBackupAction? = nil
+        createSafetyBackup: SafetyBackupAction? = nil,
+        coverRepository: CoverRepository? = nil
     ) {
         self.modelContext = modelContext
         self.coversDirectory = coversDirectory
+        if let coverRepository {
+            covers = coverRepository
+        } else if coversDirectory.standardizedFileURL == AppPaths.coversDirectory.standardizedFileURL {
+            covers = .shared
+        } else {
+            covers = CoverRepository(coversDirectory: coversDirectory)
+        }
         if let createSafetyBackup {
             self.createSafetyBackup = createSafetyBackup
         } else {
@@ -144,8 +153,10 @@ struct LibraryTimeMachineRestorer {
         }
 
         let coverIsIncluded = scope == .cover || scope == .book
-        let previousCoverData = coverIsIncluded ? loadLiveCover(for: snapshot.id) : nil
-        let hadPreviousCover = coverIsIncluded && liveCoverExists(for: snapshot.id)
+        let coverToken = coverIsIncluded
+            ? await covers.beginUserMutation(for: snapshot.id)
+            : nil
+        var coverRollback: CoverRollbackTicket?
         var restoredBook: Book?
         var createdBook = false
         var skippedCollections = 0
@@ -187,8 +198,15 @@ struct LibraryTimeMachineRestorer {
                 restoredBook = book
             }
 
-            if coverIsIncluded {
-                try writeLiveCover(restoredCoverData, for: snapshot.id)
+            if let coverToken {
+                coverRollback = if let restoredCoverData {
+                    await covers.install(restoredCoverData, using: coverToken)
+                } else {
+                    await covers.remove(using: coverToken)
+                }
+                guard coverRollback != nil else {
+                    throw LibraryTimeMachineRestoreError.coverWriteFailed
+                }
                 restoredBook?.coverVersion = max(
                     (restoredBook?.coverVersion ?? 0) + 1,
                     snapshot.coverVersion + 1
@@ -202,12 +220,8 @@ struct LibraryTimeMachineRestorer {
             }
         } catch {
             modelContext.rollback()
-            if coverIsIncluded {
-                try? restorePreviousCover(
-                    previousCoverData,
-                    existed: hadPreviousCover,
-                    bookID: snapshot.id
-                )
+            if let coverRollback {
+                _ = await covers.rollback(coverRollback)
             }
             throw error
         }
@@ -401,48 +415,4 @@ struct LibraryTimeMachineRestorer {
         book.work = work
     }
 
-    private func liveCoverURL(for bookID: UUID) -> URL {
-        coversDirectory.appending(path: "\(bookID.uuidString).jpg")
-    }
-
-    private func liveCoverExists(for bookID: UUID) -> Bool {
-        FileManager.default.fileExists(
-            atPath: liveCoverURL(for: bookID).path(percentEncoded: false)
-        )
-    }
-
-    private func loadLiveCover(for bookID: UUID) -> Data? {
-        try? Data(contentsOf: liveCoverURL(for: bookID))
-    }
-
-    private func writeLiveCover(_ data: Data?, for bookID: UUID) throws {
-        let fileManager = FileManager.default
-        let url = liveCoverURL(for: bookID)
-        if let data {
-            do {
-                try fileManager.createDirectory(at: coversDirectory, withIntermediateDirectories: true)
-                try data.write(to: url, options: .atomic)
-            } catch {
-                throw LibraryTimeMachineRestoreError.coverWriteFailed
-            }
-        } else if fileManager.fileExists(atPath: url.path(percentEncoded: false)) {
-            do {
-                try fileManager.removeItem(at: url)
-            } catch {
-                throw LibraryTimeMachineRestoreError.coverWriteFailed
-            }
-        }
-    }
-
-    private func restorePreviousCover(
-        _ data: Data?,
-        existed: Bool,
-        bookID: UUID
-    ) throws {
-        if existed, let data {
-            try writeLiveCover(data, for: bookID)
-        } else {
-            try writeLiveCover(nil, for: bookID)
-        }
-    }
 }

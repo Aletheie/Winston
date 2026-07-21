@@ -9,15 +9,21 @@ final class MetadataService {
     private let modelContext: ModelContext
     private let settings: AppSettings
     private let online: any OnlineMetadataFetching
+    private let covers: CoverRepository
 
     private(set) var enrichingUUIDs: Set<UUID> = []
     private(set) var metadataFetchSummary: String?
 
-    init(modelContext: ModelContext, settings: AppSettings,
-         online: any OnlineMetadataFetching = OnlineMetadataService()) {
+    init(
+        modelContext: ModelContext,
+        settings: AppSettings,
+        online: any OnlineMetadataFetching = OnlineMetadataService(),
+        covers: CoverRepository = .shared
+    ) {
         self.modelContext = modelContext
         self.settings = settings
         self.online = online
+        self.covers = covers
     }
 
     var isFetchingOnline: Bool { !enrichingUUIDs.isEmpty }
@@ -234,6 +240,9 @@ final class MetadataService {
         let author = book.displayAuthor
         let hasCover = CoverStore.exists(for: uuid)
         let coverVersion = book.coverVersion
+        let coverToken = replaceCover
+            ? await covers.beginUserMutation(for: uuid)
+            : await covers.beginBackgroundMutation(for: uuid)
 
         enrichingUUIDs.insert(uuid)
         defer { enrichingUUIDs.remove(uuid) }
@@ -271,27 +280,31 @@ final class MetadataService {
         }
 
         var installedCoverVersion: Int?
-        var previousCoverData: Data?
+        var coverRollback: CoverRollbackTicket?
         var installedCoverURL: URL?
         if let image = downloadedCover {
             let fileURL = book.fileURL
-            let diskWrite = await Task.detached(priority: .utility) {
-                let previous = CoverStore.loadData(for: uuid)
-                return (previous: previous, saved: CoverStore.save(image, for: uuid))
+            let data = await Task.detached(priority: .utility) {
+                ImageTranscoder.jpegData(from: image)
             }.value
-            previousCoverData = diskWrite.previous
-            if diskWrite.saved {
+            if let data,
+               let rollback = await covers.install(
+                   data,
+                   using: coverToken,
+                   onlyIfMissing: !replaceCover
+               ),
+               await covers.isCurrent(coverToken) {
+                coverRollback = rollback
                 book.coverVersion += 1
                 installedCoverVersion = book.coverVersion
                 installedCoverURL = fileURL
                 await CoverCache.shared.replace(image, for: fileURL)
                 guard book.modelContext != nil else {
-                    if book.coverVersion == installedCoverVersion {
-                        _ = await Task.detached(priority: .utility) {
-                            CoverStore.delete(for: uuid)
-                        }.value
-                        await CoverCache.shared.replace(nil, for: fileURL)
-                    }
+                    _ = await covers.rollback(rollback)
+                    await CoverCache.shared.replace(
+                        rollback.previousData.flatMap(NSImage.init(data:)),
+                        for: fileURL
+                    )
                     return false
                 }
             } else {
@@ -317,12 +330,12 @@ final class MetadataService {
         if save {
             let coverStillOurs = installedCoverVersion.map { $0 == book.coverVersion } ?? false
             guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-                if coverStillOurs, let installedCoverURL,
-                   await Task.detached(priority: .utility, operation: {
-                       CoverStore.restore(previousCoverData, for: uuid)
-                   }).value {
+                if coverStillOurs,
+                   let installedCoverURL,
+                   let coverRollback,
+                   await covers.rollback(coverRollback) {
                     await CoverCache.shared.replace(
-                        previousCoverData.flatMap(NSImage.init(data:)),
+                        coverRollback.previousData.flatMap(NSImage.init(data:)),
                         for: installedCoverURL
                     )
                 }
