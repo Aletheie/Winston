@@ -261,6 +261,41 @@ struct MetadataServiceTests {
         #expect(service.analysisCoordinator.activeJobCount == 0)
     }
 
+    @Test func readingProgressDoesNotInvalidateAnOtherwiseCurrentLookup() async throws {
+        let lib = try await TestLibrary()
+        let book = Book(fileName: "progress.epub", originalFileName: "Progress.epub")
+        lib.context.insert(book)
+        try lib.context.save()
+
+        var fetched = FetchedMetadata()
+        fetched.title = "Still Current"
+        let online = FetchGateOnlineClient(result: fetched)
+        let mutations = CatalogMutationService(modelContext: lib.context)
+        let service = MetadataService(
+            modelContext: lib.context,
+            settings: AppSettings(),
+            online: online,
+            mutations: mutations
+        )
+        let task = Task { @MainActor in
+            await service.performEnrich(book, replaceCover: false)
+        }
+        await online.waitUntilStarted()
+
+        try mutations.commit(
+            .setReadingStatus(bookIDs: [book.uuid], status: .reading),
+            affectedBookIDs: [book.uuid]
+        ) {
+            try mutations.book(id: book.uuid).setStatus(.reading)
+        }
+        #expect(service.analysisCoordinator.activeJobCount == 1)
+        await online.resume()
+
+        #expect(await task.value)
+        #expect(book.title == "Still Current")
+        #expect(book.readingStatus == .reading)
+    }
+
     @Test func replacingThePrimaryAssetDiscardsALatePageCount() async throws {
         let lib = try await TestLibrary()
         let source = lib.root.appending(path: "page-source.epub")

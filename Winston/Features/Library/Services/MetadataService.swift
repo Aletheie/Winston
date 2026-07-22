@@ -161,7 +161,19 @@ final class MetadataService {
     @discardableResult
     func bulkUpdate(_ books: [Book], _ edit: BulkEdit) -> Bool {
         let ids = Set(books.map(\.uuid))
-        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "bulkEdit"), bookIDs: ids) {
+        var fields: Set<String> = []
+        if edit.author != nil { fields.insert("author") }
+        if edit.publisher != nil { fields.insert("publisher") }
+        if edit.year != nil { fields.insert("year") }
+        if edit.series != nil { fields.insert("series") }
+        if edit.language != nil { fields.insert("language") }
+        if edit.translator != nil { fields.insert("translator") }
+        if edit.status != nil { fields.insert("readingStatus") }
+        if edit.tags != nil { fields.insert("tags") }
+        return commit(
+            .updateMetadataBatch(bookIDs: Array(ids), operation: "bulkEdit", fields: fields),
+            bookIDs: ids
+        ) {
             for book in try mutations.books(ids: ids) {
                 if let author = edit.author       { book.author = author.isEmpty ? nil : author }
                 if let publisher = edit.publisher { book.publisher = publisher.isEmpty ? nil : publisher }
@@ -188,7 +200,10 @@ final class MetadataService {
         guard !name.isEmpty, name != old else { return true }
         let ids = Set(modelContext.allBooks().filter { $0.tags.contains(old) }.map(\.uuid))
         guard !ids.isEmpty else { return true }
-        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "renameTag"), bookIDs: ids) {
+        return commit(
+            .updateMetadataBatch(bookIDs: Array(ids), operation: "renameTag", fields: ["tags"]),
+            bookIDs: ids
+        ) {
             for book in try mutations.books(ids: ids) {
                 book.tags = (book.tags.filter { $0 != old } + [name]).uniquedSorted()
             }
@@ -199,7 +214,10 @@ final class MetadataService {
     func deleteTag(_ tag: String) -> Bool {
         let ids = Set(modelContext.allBooks().filter { $0.tags.contains(tag) }.map(\.uuid))
         guard !ids.isEmpty else { return true }
-        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "deleteTag"), bookIDs: ids) {
+        return commit(
+            .updateMetadataBatch(bookIDs: Array(ids), operation: "deleteTag", fields: ["tags"]),
+            bookIDs: ids
+        ) {
             for book in try mutations.books(ids: ids) {
                 book.tags.removeAll { $0 == tag }
             }
@@ -210,7 +228,10 @@ final class MetadataService {
     func renameSeries(_ old: String, to new: String) -> Bool {
         let ids = Set(modelContext.allBooks().filter { $0.series == old }.map(\.uuid))
         guard !ids.isEmpty else { return true }
-        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "renameSeries"), bookIDs: ids) {
+        return commit(
+            .updateMetadataBatch(bookIDs: Array(ids), operation: "renameSeries", fields: ["series"]),
+            bookIDs: ids
+        ) {
             applySeriesRename(old, to: new)
         }
     }
@@ -219,7 +240,10 @@ final class MetadataService {
     func renameAuthor(_ old: String, to new: String) -> Bool {
         let ids = Set(modelContext.allBooks().filter { $0.displayAuthor == old }.map(\.uuid))
         guard !ids.isEmpty else { return true }
-        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "renameAuthor"), bookIDs: ids) {
+        return commit(
+            .updateMetadataBatch(bookIDs: Array(ids), operation: "renameAuthor", fields: ["author"]),
+            bookIDs: ids
+        ) {
             applyAuthorRename(old, to: new)
         }
     }
@@ -233,7 +257,17 @@ final class MetadataService {
     func applyMetadataFixes(_ fixes: [MetadataFix]) -> Bool {
         guard !fixes.isEmpty else { return true }
         let ids = Set(modelContext.allBooks().map(\.uuid))
-        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "metadataFixes"), bookIDs: ids) {
+        let fields = Set(fixes.flatMap { fix -> [String] in
+            switch fix.kind {
+            case .author: ["author"]
+            case .series: ["series"]
+            case .seriesAssignment: ["series", "seriesIndex"]
+            }
+        })
+        return commit(
+            .updateMetadataBatch(bookIDs: Array(ids), operation: "metadataFixes", fields: fields),
+            bookIDs: ids
+        ) {
             for fix in fixes { applyMetadataFixCore(fix) }
         }
     }

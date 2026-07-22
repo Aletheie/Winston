@@ -248,6 +248,10 @@ final class ImportService {
                 let size = await measureFile(url)
                 return size > 0 ? size : nil
             }
+            guard !Task.isCancelled else {
+                completed.forEach { analysisCoordinator.finish($0.job.ticket) }
+                return
+            }
 
             var valid: [(BookAnalysisSnapshot, CatalogAssetInspectionProposal<Int64>, Book, BookAsset?)] = []
             for result in completed {
@@ -314,6 +318,10 @@ final class ImportService {
                 kind: .drmInspection
             ) { url in
                 await inspectDRM(url)
+            }
+            guard !Task.isCancelled else {
+                completed.forEach { analysisCoordinator.finish($0.job.ticket) }
+                return
             }
 
             var valid: [(BookAnalysisSnapshot, CatalogAssetInspectionProposal<Bool>, Book)] = []

@@ -18,7 +18,7 @@ enum CatalogMutationCommand {
     case updateCollection(collectionID: UUID)
     case deleteCollection(collectionID: UUID)
     case updateMetadata(bookID: UUID, fields: Set<String>)
-    case updateMetadataBatch(bookIDs: [UUID], operation: String)
+    case updateMetadataBatch(bookIDs: [UUID], operation: String, fields: Set<String>)
     case assignEdition(bookIDs: [UUID], workID: UUID?)
     case updateWork(workID: UUID, fields: Set<String>)
     case pluginUpdate(bookID: UUID, fields: Set<String>)
@@ -473,10 +473,8 @@ final class CatalogMutationService {
              .pluginUpdate(let bookID, let fields):
             if !fields.isDisjoint(with: identityFields) { invalidatedBookIDs.insert(bookID) }
 
-        case .updateMetadataBatch(let bookIDs, let operation):
-            if ["bulkEdit", "renameSeries", "renameAuthor", "metadataFixes"].contains(operation) {
-                invalidatedBookIDs.formUnion(bookIDs)
-            }
+        case .updateMetadataBatch(let bookIDs, _, let fields):
+            if !fields.isDisjoint(with: identityFields) { invalidatedBookIDs.formUnion(bookIDs) }
 
         case .assignEdition(let bookIDs, _):
             invalidatedBookIDs.formUnion(bookIDs)
