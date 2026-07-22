@@ -158,6 +158,7 @@ struct MultiFileBackendTests {
         )
 
         importer.addBooks(from: sources)
+        #expect(importer.isExtracting)
         let deadline = Date.now.addingTimeInterval(3)
         while (library.context.allBooks().count < sources.count || importer.isExtracting), Date.now < deadline {
             try? await Task.sleep(for: .milliseconds(20))
@@ -259,6 +260,7 @@ struct MultiFileBackendTests {
         )
 
         importer.addBooks(from: [source, second])
+        #expect(importer.isExtracting)
         let deadline = Date.now.addingTimeInterval(4)
         while (library.context.allBooks().count < 2 || importer.isExtracting), Date.now < deadline {
             try? await Task.sleep(for: .milliseconds(20))
@@ -344,6 +346,7 @@ struct MultiFileBackendTests {
         try library.context.save()
 
         importer.addBooks(from: [first, second, first], assigningTo: work)
+        #expect(importer.isExtracting)
         let deadline = Date.now.addingTimeInterval(4)
         while (work.editions.count < 2 || importer.isExtracting), Date.now < deadline {
             try? await Task.sleep(for: .milliseconds(20))

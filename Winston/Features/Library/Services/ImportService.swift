@@ -63,6 +63,7 @@ final class ImportService {
     private let maximumConcurrentMetadataJobs: Int
 
     private(set) var pendingMetadataUUIDs: Set<UUID> = []
+    private var activeImportOperationCount = 0
     private var pendingSourcePaths: Set<String> = []
     private var matchBatches: [UUID: MatchBatch] = [:]
     private var queuedMetadataJobs: ArraySlice<MetadataJob> = []
@@ -95,7 +96,9 @@ final class ImportService {
         self.analyzeBook = analyzeBook
     }
 
-    var isExtracting: Bool { !pendingMetadataUUIDs.isEmpty }
+    var isExtracting: Bool {
+        activeImportOperationCount > 0 || !pendingMetadataUUIDs.isEmpty
+    }
     var pendingMetadataCount: Int { pendingMetadataUUIDs.count }
     var activeMetadataJobCount: Int { activeMetadataTasks.count }
 
@@ -126,11 +129,13 @@ final class ImportService {
         }
 
         let validationFailures = failed
+        activeImportOperationCount += 1
         Task { [weak self, requests] in
             guard let self else {
                 completion?([])
                 return
             }
+            defer { activeImportOperationCount -= 1 }
 
             var imported: [Book] = []
             var failureCount = validationFailures
