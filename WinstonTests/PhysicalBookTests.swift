@@ -140,11 +140,12 @@ struct PhysicalBookTests {
         let digital = Book(fileName: "dune.cbz", originalFileName: "Dune.cbz")
         digital.title = "Dune"
         digital.author = "Frank Herbert"
+        digital.isbn = physical.isbn
         digital.assets = [BookAsset(fileName: digital.fileName, book: digital)]
         library.context.insert(physical)
         library.context.insert(digital)
         try library.context.save()
-        let service = EditionService(modelContext: library.context)
+        let service = CatalogReconciliationService(modelContext: library.context)
 
         let merged = try #require(await service.mergeEditions([physical, digital]))
 

@@ -12,10 +12,20 @@ struct LibraryStatusToasts: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
             if transferQueue.isTransferring {
-                TransferToastCard(title: transferTitle,
+                ProgressToastCard(title: transferTitle,
                                   progress: transferQueue.overallProgress,
                                   isCancelling: transferQueue.activeItem?.stage == .cancelling,
                                   onCancel: { transferQueue.cancel() })
+                    .transition(toastTransition)
+            }
+            if viewModel.isImportingCalibre {
+                ProgressToastCard(
+                    title: viewModel.calibreImportProgressText
+                        ?? String(localized: "Importing from Calibre\u{2026}"),
+                    progress: viewModel.calibreImportFraction ?? 0,
+                    isCancelling: viewModel.isCancellingCalibreImport,
+                    onCancel: { viewModel.cancelCalibreImport() }
+                )
                     .transition(toastTransition)
             }
             VStack(alignment: .trailing, spacing: 8) {
@@ -28,6 +38,7 @@ struct LibraryStatusToasts: View {
         .padding(16)
         .animation(toastAnimation, value: activeToasts.map(\.id))
         .animation(toastAnimation, value: transferQueue.isTransferring)
+        .animation(toastAnimation, value: viewModel.isImportingCalibre)
     }
 
     private var toastTransition: AnyTransition {
@@ -57,12 +68,13 @@ struct LibraryStatusToasts: View {
     private var activeToasts: [Toast] {
         var toasts: [Toast] = []
 
-        if viewModel.isImportingCalibre {
-            toasts.append(Toast(id: "calibre", style: .progress,
-                                message: viewModel.calibreImportProgressText ?? String(localized: "Importing from Calibre\u{2026}"),
-                                progress: viewModel.calibreImportFraction))
-        } else if let summary = viewModel.calibreImportSummary {
-            toasts.append(Toast(id: "calibre", style: .success, message: summary))
+        if !viewModel.isImportingCalibre, let summary = viewModel.calibreImportSummary {
+            let style: Toast.Style = switch viewModel.calibreImportSummaryStyle {
+            case .success: .success
+            case .info: .info
+            case .error: .error
+            }
+            toasts.append(Toast(id: "calibre", style: style, message: summary))
         }
 
         if viewModel.isExtracting {
@@ -105,8 +117,6 @@ struct LibraryStatusToasts: View {
     private func handleAction(_ toast: Toast) {
         guard let action = toast.action else { return }
         switch action {
-        case .undoEditionAssignment(let undo):
-            viewModel.editions.undo(undo)
         case .reviewEditionProposals:
             onReviewEditions()
         }
@@ -189,7 +199,6 @@ private struct ToastCard: View {
 
     private var actionTitle: LocalizedStringResource {
         switch toast.action {
-        case .undoEditionAssignment: "Undo"
         case .reviewEditionProposals: "Review"
         case nil: "Open"
         }
@@ -218,9 +227,9 @@ private struct ToastCard: View {
     }
 }
 
-// MARK: - Transfer card (interactive, with Cancel)
+// MARK: - Progress card (interactive, with Cancel)
 
-private struct TransferToastCard: View {
+private struct ProgressToastCard: View {
     let title: String
     let progress: Double
     let isCancelling: Bool

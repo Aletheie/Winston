@@ -35,11 +35,17 @@ enum WorkService {
     }
 
     private static func bestAvailableFormatScore(for book: Book) -> Int {
-        if book.assets.isEmpty { return LibraryHealthService.kindleFormatScore(book.format) }
+        if book.assets.isEmpty { return formatScore(book.format) }
         return book.assets
             .filter { $0.validationStatus != .missing && $0.validationStatus != .corrupt }
-            .map { LibraryHealthService.kindleFormatScore($0.format) }
+            .map { formatScore($0.format) }
             .max() ?? 0
+    }
+
+    private static func formatScore(_ format: String) -> Int {
+        let preference = ["azw3", "mobi", "azw", "epub", "pdf", "txt"]
+        guard let index = preference.firstIndex(of: format.lowercased()) else { return 0 }
+        return preference.count - index
     }
 
     private static func metadataRichness(_ book: Book) -> Int {

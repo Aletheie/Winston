@@ -61,24 +61,42 @@ nonisolated struct ManagedFileCleanup: Identifiable, Codable, Sendable, Hashable
     let kind: ManagedFileKind
     let relativeName: String
     let disposition: ManagedFileCleanupDisposition
+    /// When set, cleanup is permitted only while this file still has the
+    /// expected digest. An optional retained equivalent adds the stronger
+    /// reconciliation invariant that another managed file has the same bytes.
+    /// This prevents stale journals from deleting a newer file generation.
+    let expectedSHA256: String?
+    let retainedEquivalentRelativeName: String?
 
     init(
         id: UUID = UUID(),
         kind: ManagedFileKind,
         relativeName: String,
-        disposition: ManagedFileCleanupDisposition = .delete
+        disposition: ManagedFileCleanupDisposition = .delete,
+        expectedSHA256: String? = nil,
+        retainedEquivalentRelativeName: String? = nil
     ) {
         self.id = id
         self.kind = kind
         self.relativeName = relativeName
         self.disposition = disposition
+        self.expectedSHA256 = expectedSHA256
+        self.retainedEquivalentRelativeName = retainedEquivalentRelativeName
     }
 
     static func book(
         _ fileName: String,
-        disposition: ManagedFileCleanupDisposition = .delete
+        disposition: ManagedFileCleanupDisposition = .delete,
+        expectedSHA256: String? = nil,
+        retainedEquivalentFileName: String? = nil
     ) -> ManagedFileCleanup {
-        ManagedFileCleanup(kind: .book, relativeName: fileName, disposition: disposition)
+        ManagedFileCleanup(
+            kind: .book,
+            relativeName: fileName,
+            disposition: disposition,
+            expectedSHA256: expectedSHA256,
+            retainedEquivalentRelativeName: retainedEquivalentFileName
+        )
     }
 
     static func cover(
@@ -197,6 +215,7 @@ nonisolated enum ManagedFileCoordinatorError: Error, Equatable {
     case destinationConflict(String)
     case journalNotFound(UUID)
     case catalogRequirementMismatch(UUID)
+    case cleanupContentChanged(String)
     case injectedFailure(ManagedFileFaultPoint)
 }
 
@@ -320,6 +339,9 @@ actor ManagedFileCoordinator {
             throw ManagedFileCoordinatorError.journalNotFound(transaction.id)
         }
         try faultInjector(.beforeCatalogSave)
+        for cleanup in transaction.cleanups {
+            try verifyContentGuard(for: cleanup, allowMissingTarget: false)
+        }
     }
 
     func catalogDidCommit(_ transaction: ManagedFileTransaction) throws {
@@ -526,6 +548,7 @@ actor ManagedFileCoordinator {
         }
         let target = try destinationURL(kind: cleanup.kind, relativeName: cleanup.relativeName)
         guard fileManager.fileExists(atPath: target.path(percentEncoded: false)) else { return }
+        try verifyContentGuard(for: cleanup, allowMissingTarget: true)
         if cleanup.disposition == .trash,
            cleanup.kind == .book,
            BookFileStore.trashesRemovedBooks {
@@ -535,13 +558,43 @@ actor ManagedFileCoordinator {
         }
     }
 
+    private func verifyContentGuard(
+        for cleanup: ManagedFileCleanup,
+        allowMissingTarget: Bool
+    ) throws {
+        guard let expectedSHA256 = cleanup.expectedSHA256?.lowercased() else { return }
+        guard cleanup.kind == .book else {
+            throw ManagedFileCoordinatorError.cleanupContentChanged(cleanup.relativeName)
+        }
+        let target = try destinationURL(kind: .book, relativeName: cleanup.relativeName)
+        if allowMissingTarget,
+           !fileManager.fileExists(atPath: target.path(percentEncoded: false)) {
+            return
+        }
+        guard fileManager.fileExists(atPath: target.path(percentEncoded: false)),
+              (try? ContentHasher.sha256(of: target)) == expectedSHA256 else {
+            throw ManagedFileCoordinatorError.cleanupContentChanged(cleanup.relativeName)
+        }
+        if let retainedName = cleanup.retainedEquivalentRelativeName {
+            guard retainedName != cleanup.relativeName else {
+                throw ManagedFileCoordinatorError.cleanupContentChanged(cleanup.relativeName)
+            }
+            let retained = try destinationURL(kind: .book, relativeName: retainedName)
+            guard fileManager.fileExists(atPath: retained.path(percentEncoded: false)),
+                  (try? ContentHasher.sha256(of: retained)) == expectedSHA256 else {
+                throw ManagedFileCoordinatorError.cleanupContentChanged(cleanup.relativeName)
+            }
+        }
+    }
+
     private func validate(
         requirement: ManagedFileRequirement,
         cleanups: [ManagedFileCleanup]
     ) throws {
         for name in requirement.referencedBookFileNames
             .union(requirement.unreferencedBookFileNames)
-            .union(cleanups.map(\.relativeName)) {
+            .union(cleanups.map(\.relativeName))
+            .union(cleanups.compactMap(\.retainedEquivalentRelativeName)) {
             guard ManagedLeafName(rawValue: name) != nil else {
                 throw ManagedFileCoordinatorError.unsafeRelativeName(name)
             }

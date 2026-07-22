@@ -65,7 +65,8 @@ struct WorkDetailSheet: View {
                 }
                 Divider()
                 WorkDetailFooter(
-                    canUseComparison: comparedEditions.count == 2,
+                    canCompare: comparedEditions.count == 2,
+                    canMerge: viewModel.editions.mergeProposal(among: comparedEditions) != nil,
                     showMerge: $showMerge,
                     isConfirmingEditionMerge: $isConfirmingEditionMerge,
                     showCompare: $showCompare,
@@ -218,7 +219,7 @@ private struct WorkEditionSection: View {
     let preferredEditionUUID: UUID?
     let compactList: Bool
     @Binding var selectedEditionUUIDs: Set<UUID>
-    let service: EditionService
+    let service: CatalogReconciliationService
     let onShowInLibrary: (Book) -> Void
     let onDelete: (Book) -> Void
 
@@ -258,7 +259,8 @@ private struct WorkEditionSection: View {
 }
 
 private struct WorkDetailFooter: View {
-    let canUseComparison: Bool
+    let canCompare: Bool
+    let canMerge: Bool
     @Binding var showMerge: Bool
     @Binding var isConfirmingEditionMerge: Bool
     @Binding var showCompare: Bool
@@ -270,9 +272,10 @@ private struct WorkDetailFooter: View {
             Button("Merge With Another Work…") { showMerge = true }
             Spacer()
             Button("Compare") { showCompare = true }
-                .disabled(!canUseComparison)
+                .disabled(!canCompare)
             Button("Merge Editions") { isConfirmingEditionMerge = true }
-                .disabled(!canUseComparison)
+                .disabled(!canMerge)
+                .help("Only byte-identical files or editions with matching identifiers can be merged.")
             Button("Add Edition…") { isAddingEdition = true }
             Button("Done", action: onClose)
                 .buttonStyle(.borderedProminent)

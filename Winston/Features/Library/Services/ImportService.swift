@@ -56,7 +56,7 @@ final class ImportService {
     private let metadata: MetadataService
     private let wishlist: WishlistService
     private let toasts: ToastCenter
-    private let editions: EditionService?
+    private let editions: CatalogReconciliationService?
     private let mutations: CatalogMutationService
     private let analysisCoordinator: CatalogAnalysisCoordinator
     private let managedFiles: ManagedFileCoordinator
@@ -78,7 +78,7 @@ final class ImportService {
         metadata: MetadataService,
         wishlist: WishlistService,
         toasts: ToastCenter,
-        editions: EditionService? = nil,
+        editions: CatalogReconciliationService? = nil,
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared,
         maximumConcurrentMetadataJobs: Int = BookDoctorService.defaultMaximumConcurrentInspections,
@@ -595,14 +595,8 @@ final class ImportService {
         }
         if evaluateMatch, let editions {
             guard let currentBook = try? mutations.book(id: bookID) else { return }
-            if let undo = editions.evaluate(currentBook) {
-                let title = currentBook.work?.displayTitle ?? currentBook.displayTitle
-                toasts.post(
-                    String(localized: "Grouped with “\(title)”"),
-                    style: .success,
-                    action: .undoEditionAssignment(undo)
-                )
-            } else if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(bookID) }) {
+            editions.evaluate(currentBook)
+            if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(bookID) }) {
                 toasts.post(
                     String(localized: "Edition suggestions are ready to review."),
                     style: .info,
@@ -623,17 +617,10 @@ final class ImportService {
         guard let editions else { return }
 
         let books = batch.books.filter { $0.modelContext != nil }
-        let assignments = editions.evaluate(books)
+        editions.evaluate(books)
         var hasSuggestions = false
         for book in books {
-            if let undo = assignments[book.uuid] {
-                let title = book.work?.displayTitle ?? book.displayTitle
-                toasts.post(
-                    String(localized: "Grouped with “\(title)”"),
-                    style: .success,
-                    action: .undoEditionAssignment(undo)
-                )
-            } else if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(book.uuid) }) {
+            if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(book.uuid) }) {
                 hasSuggestions = true
             }
         }

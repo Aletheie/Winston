@@ -3,7 +3,7 @@ import SwiftUI
 
 struct WorkMergePicker: View {
     let work: Work
-    let service: EditionService
+    let service: CatalogReconciliationService
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme

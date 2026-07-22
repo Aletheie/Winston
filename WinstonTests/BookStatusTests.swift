@@ -94,31 +94,6 @@ struct GridZoomTests {
     }
 }
 
-// MARK: - Duplicate key
-
-@MainActor
-struct DuplicateKeyTests {
-
-    private func book(title: String, author: String?) -> Book {
-        let book = Book(fileName: "x.epub", originalFileName: "x.epub")
-        book.title = title
-        book.author = author
-        return book
-    }
-
-    @Test func reversedAuthorFormsProduceTheSameKey() {
-        let stored = book(title: "The Hobbit", author: "Tolkien, J. R. R.")
-        let natural = book(title: "The Hobbit", author: "J. R. R. Tolkien")
-        #expect(LibraryHealthService.duplicateKey(stored) == LibraryHealthService.duplicateKey(natural))
-    }
-
-    @Test func differentAuthorsProduceDifferentKeys() {
-        let one = book(title: "Dune", author: "Frank Herbert")
-        let other = book(title: "Dune", author: "Brian Herbert")
-        #expect(LibraryHealthService.duplicateKey(one) != LibraryHealthService.duplicateKey(other))
-    }
-}
-
 // MARK: - Library statistics
 
 @MainActor

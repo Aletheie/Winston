@@ -37,7 +37,7 @@ struct BookGridView: View {
     var deviceFileNames: Set<String> = []
     let conversion: ConversionService
     let health: LibraryHealthService
-    let editions: EditionService
+    let editions: CatalogReconciliationService
     var collections: [BookCollection] = []
     let actions: BookActions
     let onClick: (Book) -> Void

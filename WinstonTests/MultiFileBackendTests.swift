@@ -335,7 +335,7 @@ struct MultiFileBackendTests {
         try Data(contentsOf: source).write(to: second)
         let metadata = MetadataService(modelContext: library.context, settings: settings)
         let wishlist = WishlistService(modelContext: library.context, toasts: ToastCenter())
-        let editions = EditionService(modelContext: library.context)
+        let editions = CatalogReconciliationService(modelContext: library.context)
         let importer = ImportService(
             modelContext: library.context,
             settings: settings,
@@ -394,7 +394,7 @@ struct MultiFileBackendTests {
             books.append(book)
         }
         try library.context.save()
-        let editions = EditionService(modelContext: library.context)
+        let editions = CatalogReconciliationService(modelContext: library.context)
 
         await editions.scanLibrary()
         #expect(editions.pendingProposals.isEmpty)
@@ -418,7 +418,7 @@ struct MultiFileBackendTests {
         settings.onlineMetadataEnabled = false
         let metadata = MetadataService(modelContext: library.context, settings: settings)
         let wishlist = WishlistService(modelContext: library.context, toasts: ToastCenter())
-        let editions = EditionService(modelContext: library.context)
+        let editions = CatalogReconciliationService(modelContext: library.context)
         let importer = ImportService(
             modelContext: library.context,
             settings: settings,

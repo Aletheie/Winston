@@ -29,6 +29,10 @@ enum AppPaths {
         managedFilesDirectory.appending(path: "Journal", directoryHint: .isDirectory)
     }
 
+    nonisolated static var calibreImportSessionsDirectory: URL {
+        managedFilesDirectory.appending(path: "CalibreImportSessions", directoryHint: .isDirectory)
+    }
+
     nonisolated static var pluginsDirectory: URL {
         appSupportDirectory.appending(path: "Plugins", directoryHint: .isDirectory)
     }
@@ -48,7 +52,7 @@ enum AppPaths {
     nonisolated static func ensureRequiredDirectories() throws {
         for directory in [appSupportDirectory, booksDirectory, coversDirectory,
                           managedFilesDirectory, managedFileStagingDirectory,
-                          managedFileJournalDirectory, pluginsDirectory,
+                          managedFileJournalDirectory, calibreImportSessionsDirectory, pluginsDirectory,
                           pluginDataRootDirectory, fullTextIndexDirectory] {
             try ensureDirectory(directory)
         }

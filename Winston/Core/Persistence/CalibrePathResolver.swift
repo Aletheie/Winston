@@ -29,7 +29,7 @@ nonisolated enum CalibrePathError: String, Error, Equatable, Sendable {
     }
 }
 
-nonisolated struct CalibreSourceFile: Sendable, Equatable {
+nonisolated struct CalibreSourceFile: Codable, Sendable, Equatable {
     let url: URL
     let declaredFormat: String
 
@@ -38,7 +38,7 @@ nonisolated struct CalibreSourceFile: Sendable, Equatable {
     fileprivate let rawFileName: String
     fileprivate let identity: Identity
 
-    fileprivate struct Identity: Sendable, Equatable {
+    fileprivate struct Identity: Codable, Sendable, Equatable {
         let resourceIdentifier: String?
         let fileSize: Int?
         let contentModificationDate: Date?

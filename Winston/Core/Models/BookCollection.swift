@@ -37,11 +37,12 @@ final class BookCollection {
     var isWishlist: Bool { systemKind == .wishlist }
 
     init(
+        id: UUID = UUID(),
         name: String,
         savedSearch: String? = nil,
         systemKind: BookCollectionSystemKind? = nil
     ) {
-        self.id = UUID()
+        self.id = id
         self.name = name
         self.dateCreated = Date()
         self.savedSearch = savedSearch

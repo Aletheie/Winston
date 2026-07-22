@@ -4,26 +4,12 @@ import SwiftData
 
 @MainActor
 @Observable
-final class EditionService {
-    struct WorkSnapshot: Hashable, Sendable {
-        let title: String?
-        let author: String?
-        let originalTitle: String?
-        let originalLanguage: String?
-        let openLibraryWorkKey: String?
-        let hardcoverBookID: String?
-        let notes: String?
-    }
-
-    struct AssignmentUndo: Hashable, Sendable {
-        let bookUUID: UUID
-        let previousWork: WorkSnapshot
-    }
-
+final class CatalogReconciliationService {
     private let modelContext: ModelContext
     private let defaults: UserDefaults
     private let covers: CoverRepository
     private let mutations: CatalogMutationService
+    private let managedFiles: ManagedFileCoordinator
     private let toasts: ToastCenter?
     private let dismissedDefaultsKey = "editionMatcherDismissedPairKeys"
 
@@ -31,17 +17,169 @@ final class EditionService {
     private(set) var editionCounts: [UUID: Int] = [:]
     private var dismissedPairKeys: Set<String>
 
+    private enum AssetMergePolicy {
+        case retainAll
+        case removeExactDuplicates(evidence: [ExactDuplicateEvidence])
+    }
+
+    private struct AssetFileSnapshot: Sendable {
+        let assetID: UUID
+        let fileName: String
+        let storedSHA256: String
+    }
+
+    private struct ExactDuplicateEvidence: Hashable, Sendable {
+        let discardedAssetID: UUID
+        let discardedFileName: String
+        let retainedFileName: String
+        let sha256: String
+    }
+
+    private struct AssetGeneration: Equatable {
+        let uuid: UUID
+        let fileName: String
+        let contentHash: String?
+        let sizeBytes: Int64
+        let dateAdded: Date
+        let validationStatus: AssetValidation?
+    }
+
+    private struct BookGeneration: Equatable {
+        let candidate: EditionCandidate
+        let fileName: String
+        let fileSizeBytes: Int64
+        let coverVersion: Int
+        let assets: [AssetGeneration]
+    }
+
+    private struct BookMergeScalarPreimage {
+        let metadata: CatalogBookMetadataPreimage
+        let fileName: String
+        let hasPhysicalCopyRaw: Bool?
+        let readingStatusRaw: String?
+        let dateStarted: Date?
+        let dateFinished: Date?
+        let editionStatement: String?
+        let editionTypeRaw: String?
+
+        init(_ book: Book) {
+            metadata = CatalogBookMetadataPreimage(book)
+            fileName = book.fileName
+            hasPhysicalCopyRaw = book.hasPhysicalCopyRaw
+            readingStatusRaw = book.readingStatusRaw
+            dateStarted = book.dateStarted
+            dateFinished = book.dateFinished
+            editionStatement = book.editionStatement
+            editionTypeRaw = book.editionTypeRaw
+        }
+
+        func restore(on book: Book) {
+            metadata.restore()
+            book.fileName = fileName
+            book.hasPhysicalCopyRaw = hasPhysicalCopyRaw
+            book.readingStatusRaw = readingStatusRaw
+            book.dateStarted = dateStarted
+            book.dateFinished = dateFinished
+            book.editionStatement = editionStatement
+            book.editionTypeRaw = editionTypeRaw
+        }
+    }
+
+    private struct CollectionMembershipPreimage {
+        let collection: BookCollection
+        let containedWinner: Bool
+        let containedLoser: Bool
+    }
+
+    private struct BookMergePreimage {
+        let winner: Book
+        let loser: Book
+        let winnerScalar: BookMergeScalarPreimage
+        let winnerWork: Work?
+        let loserWork: Work?
+        let workPreimages: [CatalogWorkPreimage]
+        let loserAssets: [BookAsset]
+        let loserHighlights: [Highlight]
+        let loserReadingSessions: [ReadingSession]
+        let collectionMemberships: [CollectionMembershipPreimage]
+
+        init(winner: Book, loser: Book) {
+            self.winner = winner
+            self.loser = loser
+            winnerScalar = BookMergeScalarPreimage(winner)
+            winnerWork = winner.work
+            loserWork = loser.work
+            var seenWorkIDs: Set<UUID> = []
+            workPreimages = [winner.work, loser.work].compactMap { work in
+                guard let work, seenWorkIDs.insert(work.uuid).inserted else { return nil }
+                return CatalogWorkPreimage(work)
+            }
+            loserAssets = loser.assets
+            loserHighlights = loser.highlights
+            loserReadingSessions = loser.readingSessions
+            var seenCollectionIDs: Set<UUID> = []
+            collectionMemberships = (winner.collections + loser.collections).compactMap { collection in
+                guard seenCollectionIDs.insert(collection.id).inserted else { return nil }
+                return CollectionMembershipPreimage(
+                    collection: collection,
+                    containedWinner: collection.books.contains { $0.uuid == winner.uuid },
+                    containedLoser: collection.books.contains { $0.uuid == loser.uuid }
+                )
+            }
+        }
+
+        func restore(in modelContext: ModelContext, removing insertedAsset: BookAsset?) {
+            if let insertedAsset {
+                winner.assets.removeAll { $0 === insertedAsset }
+                if insertedAsset.modelContext != nil { modelContext.delete(insertedAsset) }
+            }
+            for work in [winnerWork, loserWork].compactMap({ $0 })
+            where work.modelContext == nil {
+                modelContext.insert(work)
+            }
+            if loser.modelContext == nil { modelContext.insert(loser) }
+            winnerScalar.restore(on: winner)
+            winner.work = winnerWork
+            loser.work = loserWork
+            for asset in loserAssets {
+                if asset.modelContext == nil { modelContext.insert(asset) }
+                asset.book = loser
+            }
+            for highlight in loserHighlights {
+                if highlight.modelContext == nil { modelContext.insert(highlight) }
+                highlight.book = loser
+            }
+            for session in loserReadingSessions {
+                if session.modelContext == nil { modelContext.insert(session) }
+                session.book = loser
+            }
+            for membership in collectionMemberships {
+                membership.collection.books.removeAll {
+                    $0.uuid == winner.uuid || $0.uuid == loser.uuid
+                }
+                if membership.containedWinner { membership.collection.books.append(winner) }
+                if membership.containedLoser { membership.collection.books.append(loser) }
+            }
+            for preimage in workPreimages { preimage.restore() }
+        }
+    }
+
     init(
         modelContext: ModelContext,
         defaults: UserDefaults = .standard,
         covers: CoverRepository = .shared,
         mutations: CatalogMutationService? = nil,
+        managedFiles: ManagedFileCoordinator = .shared,
         toasts: ToastCenter? = nil
     ) {
         self.modelContext = modelContext
         self.defaults = defaults
         self.covers = covers
-        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
+        self.mutations = mutations ?? CatalogMutationService(
+            modelContext: modelContext,
+            managedFiles: managedFiles
+        )
+        self.managedFiles = managedFiles
         self.toasts = toasts
         self.dismissedPairKeys = Set(defaults.stringArray(forKey: dismissedDefaultsKey) ?? [])
         refreshEditionCounts()
@@ -122,106 +260,38 @@ final class EditionService {
         pendingProposals = proposals.filter { !dismissedPairKeys.contains($0.pairKey) }
     }
 
-    @discardableResult
-    func evaluate(_ book: Book, allowAutomaticAssignment: Bool = true) -> AssignmentUndo? {
+    func evaluate(_ book: Book) {
         let allBooks = modelContext.allBooks()
         var index = EditionMatcher.CandidateIndex(allBooks.map(Self.candidate))
-        return evaluate(
+        evaluate(
             book,
-            allowAutomaticAssignment: allowAutomaticAssignment,
-            index: &index,
-            booksByUUID: Dictionary(uniqueKeysWithValues: allBooks.map { ($0.uuid, $0) }),
-            incomingUUIDs: [book.uuid]
+            index: &index
         )
     }
 
-    func evaluate(_ books: [Book], allowAutomaticAssignment: Bool = true) -> [UUID: AssignmentUndo] {
+    func evaluate(_ books: [Book]) {
         let books = books.filter { $0.modelContext != nil }
-        guard !books.isEmpty else { return [:] }
+        guard !books.isEmpty else { return }
         let allBooks = modelContext.allBooks()
         var index = EditionMatcher.CandidateIndex(allBooks.map(Self.candidate))
-        let booksByUUID = Dictionary(uniqueKeysWithValues: allBooks.map { ($0.uuid, $0) })
-        let incomingUUIDs = Set(books.map(\.uuid))
-        var assignments: [UUID: AssignmentUndo] = [:]
         for book in books {
-            if let undo = evaluate(
-                book,
-                allowAutomaticAssignment: allowAutomaticAssignment,
-                index: &index,
-                booksByUUID: booksByUUID,
-                incomingUUIDs: incomingUUIDs
-            ) {
-                assignments[book.uuid] = undo
-            }
+            evaluate(book, index: &index)
         }
-        return assignments
     }
 
     private func evaluate(
         _ book: Book,
-        allowAutomaticAssignment: Bool,
-        index: inout EditionMatcher.CandidateIndex,
-        booksByUUID: [UUID: Book],
-        incomingUUIDs: Set<UUID>
-    ) -> AssignmentUndo? {
+        index: inout EditionMatcher.CandidateIndex
+    ) {
         let candidate = Self.candidate(book)
-        let matches = index.matches(for: candidate).filter {
-            candidate.workUUID == nil || candidate.workUUID != $0.workUUID
-        }
+        let matches = index.matches(for: candidate)
         let proposals = EditionMatcher.proposals(for: candidate, against: matches)
             .filter { !dismissedPairKeys.contains($0.pairKey) }
-        guard !proposals.isEmpty else { return nil }
-
-        let containsDestructiveMatch = proposals.contains {
-            $0.verdict == .duplicateFile || $0.verdict == .sameEditionOtherFormat
-        }
-        if allowAutomaticAssignment, !containsDestructiveMatch,
-           (book.work?.editions.count ?? 0) <= 1,
-           let other = automaticTarget(
-               for: book,
-               proposals: proposals,
-               booksByUUID: booksByUUID,
-               incomingUUIDs: incomingUUIDs
-           ),
-           let target = other.work {
-            let undo = assignmentUndo(for: book)
-            guard assign(book, to: target) != nil else { return nil }
-            index.update(Self.candidate(book))
-            pendingProposals.removeAll { $0.memberUUIDs.contains(book.uuid) }
-            return undo
-        }
+        guard !proposals.isEmpty else { return }
 
         let existing = Set(pendingProposals.map(\.pairKey))
         pendingProposals.append(contentsOf: proposals.filter { !existing.contains($0.pairKey) })
         pendingProposals.sort(by: EditionMatcher.proposalPrecedes)
-        return nil
-    }
-
-    private func automaticTarget(
-        for book: Book,
-        proposals: [EditionMatchProposal],
-        booksByUUID: [UUID: Book],
-        incomingUUIDs: Set<UUID>
-    ) -> Book? {
-        var best: Book?
-        for proposal in proposals
-        where proposal.verdict == .sameWorkOtherEdition && proposal.confidence == .high {
-            guard let uuid = proposal.memberUUIDs.first(where: { $0 != book.uuid }),
-                  let candidate = booksByUUID[uuid] else { continue }
-            guard let current = best else { best = candidate; continue }
-            let candidateRank = (
-                incomingUUIDs.contains(candidate.uuid) ? 1 : 0,
-                -(candidate.work?.editions.count ?? 0),
-                candidate.uuid.uuidString
-            )
-            let currentRank = (
-                incomingUUIDs.contains(current.uuid) ? 1 : 0,
-                -(current.work?.editions.count ?? 0),
-                current.uuid.uuidString
-            )
-            if candidateRank < currentRank { best = candidate }
-        }
-        return best
     }
 
     func dismiss(_ proposal: EditionMatchProposal) {
@@ -239,6 +309,7 @@ final class EditionService {
 
     @discardableResult
     func approve(_ proposal: EditionMatchProposal) async -> Bool {
+        guard proposal.canApply else { return false }
         let members = proposal.memberUUIDs.compactMap { lookupBook(uuid: $0) }
         guard members.count == proposal.memberUUIDs.count else {
             let liveUUIDs = Set(members.map(\.uuid))
@@ -262,11 +333,26 @@ final class EditionService {
         case .sameEditionOtherFormat:
             guard let winner = preferredBook(in: members),
                   let loser = members.first(where: { $0.uuid != winner.uuid }) else { return false }
-            succeeded = await absorb(loser, into: winner)
+            succeeded = await absorb(
+                loser,
+                into: winner,
+                policy: .retainAll,
+                expectedProposal: current
+            )
         case .duplicateFile:
+            guard current.isExactContentDuplicate else { return false }
             guard let winner = preferredBook(in: members),
                   let loser = members.first(where: { $0.uuid != winner.uuid }) else { return false }
-            succeeded = await absorb(loser, into: winner, discardDuplicateAssets: true)
+            let evidence = await verifiedExactDuplicateEvidence(winner: winner, loser: loser)
+            guard !evidence.isEmpty else { return false }
+            succeeded = await absorb(
+                loser,
+                into: winner,
+                policy: .removeExactDuplicates(evidence: evidence),
+                expectedProposal: current
+            )
+        case .similarItem:
+            succeeded = false
         }
         if succeeded {
             pendingProposals.removeAll { $0.pairKey == proposal.pairKey }
@@ -451,125 +537,222 @@ final class EditionService {
         preferredBook(in: books)
     }
 
-    @discardableResult
-    func mergeEditions(_ books: [Book]) async -> Book? {
+    func mergeProposal(among books: [Book]) -> EditionMatchProposal? {
         let books = books.filter { $0.modelContext != nil }
-        guard Set(books.map(\.uuid)).count > 1,
-              let winner = preferredBook(in: books) else { return nil }
-        for loser in books where loser.uuid != winner.uuid {
-            guard await absorb(loser, into: winner) else { return winner }
+        guard books.count == 2,
+              let proposal = revalidatedProposal(between: books) else { return nil }
+        switch proposal.verdict {
+        case .duplicateFile, .sameEditionOtherFormat:
+            return proposal
+        case .sameWorkOtherEdition, .similarItem:
+            return nil
         }
-        return winner
     }
 
     @discardableResult
-    func absorb(_ loser: Book, into winner: Book, discardDuplicateAssets: Bool = false) async -> Bool {
+    func mergeEditions(_ books: [Book]) async -> Book? {
+        let books = books.filter { $0.modelContext != nil }
+        guard Set(books.map(\.uuid)).count == 2,
+              let proposal = mergeProposal(among: books),
+              let winner = preferredBook(in: books),
+              let loser = books.first(where: { $0.uuid != winner.uuid }) else { return nil }
+        // Manual merging from a Work keeps every file. Physical cleanup is
+        // available only through the exact-hash reconciliation proposal.
+        return await absorb(
+            loser,
+            into: winner,
+            policy: .retainAll,
+            expectedProposal: proposal
+        ) ? winner : nil
+    }
+
+    @discardableResult
+    private func absorb(
+        _ loser: Book,
+        into winner: Book,
+        policy: AssetMergePolicy,
+        expectedProposal: EditionMatchProposal?
+    ) async -> Bool {
         guard loser.uuid != winner.uuid,
               loser.modelContext != nil,
               winner.modelContext != nil else { return false }
-        let losingWork = loser.work
-        let winningHashes = Set(winner.assets.compactMap(\.contentHash))
-        let winningFileNames = Set(winner.assets.map(\.fileName))
-        let losingAssets = loser.assets
-        var discardedFileNames: [String] = []
-        if !winner.hasDigitalFile, loser.hasDigitalFile {
-            winner.fileName = loser.fileName
-            winner.fileSizeBytes = loser.fileSizeBytes
-            winner.drmProtected = loser.drmProtected
-        }
-        if losingAssets.isEmpty, loser.hasDigitalFile, !winningFileNames.contains(loser.fileName) {
-            let asset = BookAsset(
-                uuid: loser.uuid,
-                fileName: loser.fileName,
-                origin: .imported,
-                sizeBytes: loser.fileSizeBytes,
-                dateAdded: loser.dateAdded,
-                book: winner
-            )
-            modelContext.insert(asset)
-        } else {
-            for asset in losingAssets {
-                if discardDuplicateAssets,
-                   let hash = asset.contentHash,
-                   winningHashes.contains(hash) {
-                    if !winningFileNames.contains(asset.fileName) {
-                        discardedFileNames.append(asset.fileName)
-                    }
-                    modelContext.delete(asset)
-                } else {
-                    asset.book = winner
-                }
+        let winnerID = winner.uuid
+        let loserID = loser.uuid
+        let winnerGeneration = Self.generation(of: winner)
+        let loserGeneration = Self.generation(of: loser)
+        let preimage = BookMergePreimage(winner: winner, loser: loser)
+        let discardAssetIDs: Set<UUID>
+        let exactEvidence: [ExactDuplicateEvidence]
+        switch policy {
+        case .retainAll:
+            discardAssetIDs = []
+            exactEvidence = []
+        case .removeExactDuplicates(let evidence):
+            let losingAssets = Dictionary(uniqueKeysWithValues: loser.assets.map { ($0.uuid, $0) })
+            let winningFilesByHash = Dictionary(grouping: winner.assets) { asset in
+                asset.contentHash?.lowercased() ?? ""
             }
+            guard !evidence.isEmpty,
+                  evidence.allSatisfy({ item in
+                      guard let losingAsset = losingAssets[item.discardedAssetID],
+                            losingAsset.fileName == item.discardedFileName,
+                            losingAsset.contentHash?.lowercased() == item.sha256 else { return false }
+                      return winningFilesByHash[item.sha256]?.contains {
+                          $0.fileName == item.retainedFileName
+                      } == true
+                  }) else { return false }
+            exactEvidence = evidence
+            discardAssetIDs = Set(evidence.map(\.discardedAssetID))
+            guard !discardAssetIDs.isEmpty else { return false }
         }
 
-        for highlight in loser.highlights { highlight.book = winner }
-        for collection in loser.collections
-        where !collection.books.contains(where: { $0.uuid == winner.uuid }) {
-            collection.books.append(winner)
+        let retainedFileNames = Set(winner.assets.map(\.fileName))
+            .union(loser.assets.lazy.filter { !discardAssetIDs.contains($0.uuid) }.map(\.fileName))
+            .union([winner.fileName].filter { !$0.isEmpty })
+        let discardedFileNames = Set(loser.assets.lazy
+            .filter { discardAssetIDs.contains($0.uuid) }
+            .map(\.fileName))
+            .subtracting(retainedFileNames)
+        let evidenceByDiscardedFile = Dictionary(
+            exactEvidence.map { ($0.discardedFileName, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let bookCleanups = discardedFileNames.compactMap { fileName -> ManagedFileCleanup? in
+            guard let evidence = evidenceByDiscardedFile[fileName] else { return nil }
+            return .book(
+                fileName,
+                expectedSHA256: evidence.sha256,
+                retainedEquivalentFileName: evidence.retainedFileName
+            )
         }
-        fillEmptyBookMetadata(winner, from: loser)
-        winner.hasPhysicalCopy = winner.hasPhysicalCopy || loser.hasPhysicalCopy
-        if winner.shelfLocation?.isEmpty != false { winner.shelfLocation = loser.shelfLocation }
-        mergeReadingHistory(into: winner, from: loser)
+        guard bookCleanups.count == discardedFileNames.count else { return false }
+
         let winnerCoverToken = await covers.beginUserMutation(for: winner.uuid)
         let winnerCoverRollback = await covers.copy(
             from: loser.uuid,
             using: winnerCoverToken,
             onlyIfMissing: true
         )
-        if winnerCoverRollback != nil {
-            winner.coverVersion += 1
-        }
-
-        modelContext.delete(loser)
+        let coverVersion = winner.coverVersion + (winnerCoverRollback == nil ? 0 : 1)
+        let transaction: ManagedFileTransaction
         do {
-            try modelContext.saveAndPublish()
+            transaction = try await managedFiles.prepareCleanup(
+                intent: .deleteBook,
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [winnerID],
+                    absentBookIDs: [loserID],
+                    referencedBookFileNames: Set(exactEvidence.map(\.retainedFileName)),
+                    unreferencedBookFileNames: discardedFileNames,
+                    coverVersions: winnerCoverRollback == nil ? [:] : [winnerID: coverVersion]
+                ),
+                // A second cover has no lossless catalog representation yet.
+                // Keep the source cover on disk even after a successful copy;
+                // only byte-verified BookAsset payloads may be retired here.
+                cleanups: bookCleanups
+            )
         } catch {
-            modelContext.rollback()
             if let winnerCoverRollback { _ = await covers.rollback(winnerCoverRollback) }
             return false
         }
 
-        let loserUUID = loser.uuid
-        _ = await covers.deletePermanently(for: loserUUID)
-        Task.detached(priority: .utility) {
-            for fileName in discardedFileNames {
-                BookFileStore.delete(fileName: fileName)
-            }
+        guard let currentWinner = lookupBook(uuid: winnerID),
+              let currentLoser = lookupBook(uuid: loserID),
+              Self.generation(of: currentWinner) == winnerGeneration,
+              Self.generation(of: currentLoser) == loserGeneration else {
+            await managedFiles.abort(transaction)
+            if let winnerCoverRollback { _ = await covers.rollback(winnerCoverRollback) }
+            return false
         }
-        pendingProposals.removeAll { $0.memberUUIDs.contains(loser.uuid) }
-        WorkService.pruneIfOrphaned(losingWork, context: modelContext)
-        refreshEditionCounts()
-        return true
-    }
 
-    @discardableResult
-    func undo(_ undo: AssignmentUndo) -> Bool {
-        guard let book = lookupBook(uuid: undo.bookUUID) else { return false }
-        let currentWorkID = book.work?.uuid
-        let snapshot = undo.previousWork
-        let restored = Work(title: snapshot.title, author: snapshot.author)
-        restored.originalTitle = snapshot.originalTitle
-        restored.originalLanguage = snapshot.originalLanguage
-        restored.openLibraryWorkKey = snapshot.openLibraryWorkKey
-        restored.hardcoverBookID = snapshot.hardcoverBookID
-        restored.notes = snapshot.notes
-        restored.preferredEditionUUID = book.uuid
+        var insertedAsset: BookAsset?
         do {
-            try mutations.commit(
-                .assignEdition(bookIDs: [undo.bookUUID], workID: restored.uuid),
-                affectedBookIDs: [undo.bookUUID],
-                affectedWorkIDs: Set([restored.uuid, currentWorkID].compactMap { $0 })
+            let result = try await mutations.commitFileMutation(
+                .reconcileEditions(
+                    survivorID: winnerID,
+                    removedID: loserID,
+                    removesExactDuplicateFiles: !discardAssetIDs.isEmpty
+                ),
+                transaction: transaction,
+                affectedBookIDs: [winnerID, loserID],
+                affectedWorkIDs: Set([winner.work?.uuid, loser.work?.uuid].compactMap { $0 }),
+                affectedCollectionIDs: Set((winner.collections + loser.collections).map(\.id)),
+                revertingOnFailure: {
+                    preimage.restore(in: modelContext, removing: insertedAsset)
+                }
             ) {
-                let storedBook = try mutations.book(id: undo.bookUUID)
-                let current = storedBook.work
-                modelContext.insert(restored)
-                storedBook.work = restored
-                WorkService.pruneIfOrphaned(current, context: modelContext, save: false)
+                let storedWinner = try mutations.book(id: winnerID)
+                let storedLoser = try mutations.book(id: loserID)
+                guard Self.generation(of: storedWinner) == winnerGeneration,
+                      Self.generation(of: storedLoser) == loserGeneration else {
+                    throw CatalogMutationError.staleReconciliation
+                }
+                if let expectedProposal {
+                    guard revalidatedProposal(between: [storedWinner, storedLoser]) == expectedProposal else {
+                        throw CatalogMutationError.staleReconciliation
+                    }
+                }
+
+                let losingWork = storedLoser.work
+                let winningFileNames = Set(storedWinner.assets.map(\.fileName))
+                let losingAssets = storedLoser.assets
+                if !storedWinner.hasDigitalFile, storedLoser.hasDigitalFile {
+                    storedWinner.fileName = storedLoser.fileName
+                    storedWinner.fileSizeBytes = storedLoser.fileSizeBytes
+                    storedWinner.drmProtected = storedLoser.drmProtected
+                }
+                if losingAssets.isEmpty,
+                   storedLoser.hasDigitalFile,
+                   !winningFileNames.contains(storedLoser.fileName) {
+                    let asset = BookAsset(
+                        uuid: storedLoser.uuid,
+                        fileName: storedLoser.fileName,
+                        origin: .imported,
+                        sizeBytes: storedLoser.fileSizeBytes,
+                        dateAdded: storedLoser.dateAdded,
+                        book: storedWinner
+                    )
+                    modelContext.insert(asset)
+                    insertedAsset = asset
+                } else {
+                    for asset in losingAssets {
+                        if discardAssetIDs.contains(asset.uuid) {
+                            modelContext.delete(asset)
+                        } else {
+                            asset.book = storedWinner
+                        }
+                    }
+                }
+
+                for highlight in storedLoser.highlights { highlight.book = storedWinner }
+                for collection in storedLoser.collections
+                where !collection.books.contains(where: { $0.uuid == storedWinner.uuid }) {
+                    collection.books.append(storedWinner)
+                }
+                fillEmptyBookMetadata(storedWinner, from: storedLoser)
+                storedWinner.hasPhysicalCopy = storedWinner.hasPhysicalCopy || storedLoser.hasPhysicalCopy
+                if storedWinner.shelfLocation?.isEmpty != false {
+                    storedWinner.shelfLocation = storedLoser.shelfLocation
+                }
+                mergeReadingHistory(into: storedWinner, from: storedLoser)
+                if winnerCoverRollback != nil { storedWinner.coverVersion = coverVersion }
+
+                if storedWinner.work?.preferredEditionUUID == loserID {
+                    storedWinner.work?.preferredEditionUUID = winnerID
+                }
+                storedLoser.work = nil
+                modelContext.delete(storedLoser)
+                WorkService.pruneIfOrphaned(losingWork, context: modelContext, save: false)
+            }
+            if !result.isFullyPublished {
+                toasts?.info(String(localized: "Edition merge completed; file cleanup will resume automatically."))
             }
         } catch {
-            return reportMutationFailure()
+            if let winnerCoverRollback { _ = await covers.rollback(winnerCoverRollback) }
+            return false
         }
+
+        await covers.invalidate(for: loserID)
+        pendingProposals.removeAll { $0.memberUUIDs.contains(loserID) }
         refreshEditionCounts()
         return true
     }
@@ -580,20 +763,55 @@ final class EditionService {
         return false
     }
 
-    private func assignmentUndo(for book: Book) -> AssignmentUndo {
-        let work = book.work
-        return AssignmentUndo(
-            bookUUID: book.uuid,
-            previousWork: WorkSnapshot(
-                title: work?.title ?? book.title,
-                author: work?.author ?? book.author,
-                originalTitle: work?.originalTitle,
-                originalLanguage: work?.originalLanguage,
-                openLibraryWorkKey: work?.openLibraryWorkKey,
-                hardcoverBookID: work?.hardcoverBookID,
-                notes: work?.notes
-            )
-        )
+    /// Re-hashes both sides away from the main actor. Stored fingerprints are
+    /// useful for discovery, but physical cleanup requires current byte-level
+    /// evidence from a retained file and the file proposed for removal.
+    private func verifiedExactDuplicateEvidence(
+        winner: Book,
+        loser: Book
+    ) async -> [ExactDuplicateEvidence] {
+        let winnerFiles = winner.assets.compactMap(Self.assetFileSnapshot)
+        let loserFiles = loser.assets.compactMap(Self.assetFileSnapshot)
+        let sharedStoredHashes = Set(winnerFiles.map(\.storedSHA256))
+            .intersection(loserFiles.map(\.storedSHA256))
+        guard !sharedStoredHashes.isEmpty else { return [] }
+
+        let retainedCandidates = winnerFiles.filter { sharedStoredHashes.contains($0.storedSHA256) }
+        let discardedCandidates = loserFiles.filter { sharedStoredHashes.contains($0.storedSHA256) }
+        return await Task.detached(priority: .userInitiated) {
+            var actualHashes: [UUID: String] = [:]
+            for file in retainedCandidates + discardedCandidates {
+                guard !Task.isCancelled,
+                      let url = BookFileStore.validatedURL(for: file.fileName),
+                      let actual = try? ContentHasher.sha256Cancellable(of: url) else { continue }
+                actualHashes[file.assetID] = actual
+            }
+            guard !Task.isCancelled else { return [] }
+
+            var retainedByHash: [String: [AssetFileSnapshot]] = [:]
+            for file in retainedCandidates
+            where actualHashes[file.assetID] == file.storedSHA256 {
+                retainedByHash[file.storedSHA256, default: []].append(file)
+            }
+
+            return discardedCandidates.compactMap { file in
+                guard actualHashes[file.assetID] == file.storedSHA256,
+                      let retained = retainedByHash[file.storedSHA256]?.first else { return nil }
+                return ExactDuplicateEvidence(
+                    discardedAssetID: file.assetID,
+                    discardedFileName: file.fileName,
+                    retainedFileName: retained.fileName,
+                    sha256: file.storedSHA256
+                )
+            }
+        }.value
+    }
+
+    private static func assetFileSnapshot(_ asset: BookAsset) -> AssetFileSnapshot? {
+        guard let hash = asset.contentHash?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !hash.isEmpty,
+              ManagedLeafName(rawValue: asset.fileName) != nil else { return nil }
+        return AssetFileSnapshot(assetID: asset.uuid, fileName: asset.fileName, storedSHA256: hash)
     }
 
     private func lookupBook(uuid: UUID) -> Book? {
@@ -632,7 +850,15 @@ final class EditionService {
             guard proposal.memberUUIDs.count == 2,
                   let left = workByBook[proposal.memberUUIDs[0]],
                   let right = workByBook[proposal.memberUUIDs[1]] else { return true }
-            return left == right
+            guard left == right else { return false }
+            switch proposal.verdict {
+            case .sameWorkOtherEdition, .similarItem:
+                return true
+            case .duplicateFile, .sameEditionOtherFormat:
+                // Being grouped under one Work does not resolve duplicate bytes or
+                // two edition records that still need an explicit reviewed merge.
+                return false
+            }
         }
     }
 
@@ -651,6 +877,25 @@ final class EditionService {
             sizeBytes: book.fileSizeBytes,
             contentHashes: Set(book.assets.compactMap(\.contentHash)),
             openLibraryWorkKey: book.work?.openLibraryWorkKey
+        )
+    }
+
+    private static func generation(of book: Book) -> BookGeneration {
+        BookGeneration(
+            candidate: candidate(book),
+            fileName: book.fileName,
+            fileSizeBytes: book.fileSizeBytes,
+            coverVersion: book.coverVersion,
+            assets: book.assets.map { asset in
+                AssetGeneration(
+                    uuid: asset.uuid,
+                    fileName: asset.fileName,
+                    contentHash: asset.contentHash,
+                    sizeBytes: asset.sizeBytes,
+                    dateAdded: asset.dateAdded,
+                    validationStatus: asset.validationStatus
+                )
+            }.sorted { $0.uuid.uuidString < $1.uuid.uuidString }
         )
     }
 

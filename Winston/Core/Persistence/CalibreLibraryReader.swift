@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 import SQLite3
 
-nonisolated struct CalibreBook: Sendable, Equatable {
+nonisolated struct CalibreBook: Codable, Sendable, Equatable {
     var calibreID: Int64
     var title: String
     var authors: [String]

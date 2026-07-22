@@ -515,3 +515,644 @@ struct CalibreLibraryReaderTests {
         }
     }
 }
+
+// MARK: - Reconciliation policy
+
+struct CalibreImportReconcilerTests {
+    private let existingBookID = UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
+    private let existingWorkID = UUID(uuidString: "20000000-0000-0000-0000-000000000001")!
+
+    @Test func onlyAnExactContentHashCanSkipAnItem() {
+        let reconciler = CalibreImportReconciler(books: [existing(hash: "same", isbn: "111")])
+
+        #expect(reconciler.decision(for: candidate(hash: "same", isbn: "999"))
+            == .skipExact(existingBookID: existingBookID))
+        #expect(reconciler.decision(for: candidate(hash: "different", isbn: "111"))
+            == .merge(existingBookID: existingBookID, workID: existingWorkID))
+    }
+
+    @Test func titleAndAuthorNeverSilentlySkipAnotherEdition() {
+        let reconciler = CalibreImportReconciler(books: [existing(hash: "old", isbn: "111")])
+
+        #expect(reconciler.decision(for: candidate(hash: "new", isbn: "222"))
+            == .addEdition(workID: existingWorkID))
+    }
+
+    @Test func weakTitleAuthorIdentityRequiresReviewInsteadOfSkipping() {
+        let reconciler = CalibreImportReconciler(books: [existing(hash: "old", isbn: nil)])
+
+        #expect(reconciler.decision(for: candidate(hash: "new", isbn: nil))
+            == .needsReview(candidateWorkIDs: [existingWorkID]))
+    }
+
+    @Test(arguments: [1_000, 10_000])
+    func indexedReconciliationBenchmark(_ count: Int) {
+        let catalog = (0..<count).map { index in
+            CalibreImportCatalogBook(
+                bookID: UUID(),
+                workID: UUID(),
+                title: "Book \(index)",
+                author: "Author \(index)",
+                isbn: "978\(index)",
+                language: "eng",
+                publisher: "Press",
+                year: "2024",
+                contentHashes: ["hash-\(index)"],
+                formats: ["epub"]
+            )
+        }
+        let candidates = catalog.map { book in
+            CalibreImportCandidate(
+                bookID: UUID(),
+                workID: UUID(),
+                title: book.title,
+                author: book.author,
+                isbn: book.isbn,
+                language: book.language,
+                publisher: book.publisher,
+                year: book.year,
+                contentHashes: book.contentHashes,
+                formats: ["pdf"]
+            )
+        }
+
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let reconciler = CalibreImportReconciler(books: catalog)
+        let exactMatches = candidates.count {
+            if case .skipExact = reconciler.decision(for: $0) { return true }
+            return false
+        }
+        let elapsed = startedAt.duration(to: clock.now)
+
+        print("Calibre reconciliation benchmark (\(count) books): \(elapsed)")
+        #expect(exactMatches == count)
+        #expect(elapsed < .seconds(5))
+    }
+
+    private func existing(hash: String, isbn: String?) -> CalibreImportCatalogBook {
+        CalibreImportCatalogBook(
+            bookID: existingBookID,
+            workID: existingWorkID,
+            title: "The Book",
+            author: "Ada Author",
+            isbn: isbn,
+            language: "eng",
+            publisher: "Press",
+            year: "2024",
+            contentHashes: [hash],
+            formats: ["epub"]
+        )
+    }
+
+    private func candidate(hash: String, isbn: String?) -> CalibreImportCandidate {
+        CalibreImportCandidate(
+            bookID: UUID(),
+            workID: UUID(),
+            title: "The Book",
+            author: "Ada Author",
+            isbn: isbn,
+            language: "eng",
+            publisher: "Press",
+            year: "2024",
+            contentHashes: [hash],
+            formats: ["pdf"]
+        )
+    }
+}
+
+// MARK: - Durable session state machine
+
+@Suite("Calibre import manifest", .serialized)
+struct CalibreImportManifestTests {
+    private actor InvocationCounter {
+        private var value = 0
+
+        func increment() -> Int {
+            value += 1
+            return value
+        }
+
+        func current() -> Int { value }
+    }
+
+    @Test func cancellationPersistsAndTheSameSessionResumesIdempotently() async throws {
+        let fixture = try CalibreSessionFixture.make(bookCount: 2)
+        let sessions = fixture.root.appending(path: "Sessions", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let read = try await CalibreLibraryReader.read(
+            libraryRoot: fixture.root,
+            formatPreference: CalibreImportService.kindlePreference
+        )
+        let session = try await CalibreImportSession.create(
+            libraryRoot: fixture.root,
+            books: read.books,
+            unsafeRejectedSources: 0,
+            collectionName: "Test Import",
+            directory: sessions
+        )
+        let counter = InvocationCounter()
+
+        let cancelled = await session.run(
+            chunkSize: 1,
+            progressHandler: { _ in },
+            processor: { items in
+                _ = await counter.increment()
+                let item = items[0]
+                await session.requestCancellation()
+                return CalibreImportChunkResult(outcomes: [CalibreImportOutcome(
+                    calibreID: item.calibreID,
+                    category: .imported,
+                    bookID: item.bookID,
+                    message: nil
+                )])
+            }
+        )
+
+        #expect(cancelled.phase == .cancelled)
+        #expect(cancelled.imported == 1)
+        #expect(cancelled.pending == 1)
+
+        let resumed = try #require(try await CalibreImportSession.resumable(
+            for: fixture.root,
+            directory: sessions
+        ))
+        try await resumed.reconcileForResume(durableOutcomes: [])
+        let completed = await resumed.run(
+            chunkSize: 1,
+            progressHandler: { _ in },
+            processor: { items in
+                _ = await counter.increment()
+                return CalibreImportChunkResult(outcomes: items.map {
+                    CalibreImportOutcome(
+                        calibreID: $0.calibreID,
+                        category: .imported,
+                        bookID: $0.bookID,
+                        message: nil
+                    )
+                })
+            }
+        )
+
+        #expect(completed.phase == .completed)
+        #expect(completed.imported == 2)
+        #expect(completed.pending == 0)
+        let callsBeforeReplay = await counter.current()
+        _ = await resumed.run(
+            chunkSize: 1,
+            progressHandler: { _ in },
+            processor: { _ in
+                _ = await counter.increment()
+                return CalibreImportChunkResult()
+            }
+        )
+        #expect(await counter.current() == callsBeforeReplay)
+        #expect(try await CalibreImportSession.resumable(
+            for: fixture.root,
+            directory: sessions
+        ) == nil)
+    }
+
+    @Test func resumeDoesNotDoubleCountRejectedSources() async throws {
+        let fixture = try CalibreSessionFixture.make(bookCount: 1)
+        let sessions = fixture.root.appending(path: "Sessions", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let read = try await CalibreLibraryReader.read(
+            libraryRoot: fixture.root,
+            formatPreference: CalibreImportService.kindlePreference
+        )
+        let session = try await CalibreImportSession.create(
+            libraryRoot: fixture.root,
+            books: read.books,
+            unsafeRejectedSources: 0,
+            collectionName: "Test Import",
+            directory: sessions
+        )
+
+        let failed = await session.run(
+            chunkSize: 1,
+            progressHandler: { _ in },
+            processor: { items in
+                CalibreImportChunkResult(
+                    unsafeRejectedSourcesByItem: [items[0].calibreID: 1],
+                    failure: CalibreImportChunkFailure(
+                        calibreID: items[0].calibreID,
+                        message: "Injected failure",
+                        isCancellation: false,
+                        preservePreparedItems: false
+                    )
+                )
+            }
+        )
+        #expect(failed.unsafeRejectedSources == 1)
+
+        let resumed = try #require(try await CalibreImportSession.resumable(
+            for: fixture.root,
+            directory: sessions
+        ))
+        try await resumed.reconcileForResume(durableOutcomes: [])
+        let completed = await resumed.run(
+            chunkSize: 1,
+            progressHandler: { _ in },
+            processor: { items in
+                CalibreImportChunkResult(
+                    outcomes: [CalibreImportOutcome(
+                        calibreID: items[0].calibreID,
+                        category: .imported,
+                        bookID: items[0].bookID,
+                        message: nil
+                    )],
+                    unsafeRejectedSourcesByItem: [items[0].calibreID: 1]
+                )
+            }
+        )
+
+        #expect(completed.phase == .completed)
+        #expect(completed.unsafeRejectedSources == 1)
+    }
+}
+
+// MARK: - End-to-end failure, recovery, and repeatability
+
+@Suite("Calibre import transactional session", .serialized)
+@MainActor
+struct CalibreImportSessionIntegrationTests {
+    private struct InjectedSaveFailure: Error {}
+
+    @Test(arguments: [1, 2, 3])
+    func saveFailureAtEveryChunkStopsThenResumeCompletesWithoutDuplicates(
+        _ failingChunk: Int
+    ) async throws {
+        let library = try await TestLibrary()
+        let fixture = try CalibreSessionFixture.make(bookCount: 3)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sessionDirectory = library.root.appending(path: "CalibreSessions", directoryHint: .isDirectory)
+        let managedFiles = ManagedFileCoordinator()
+        var saveCount = 0
+        let failingAdapter = CatalogSaveAdapter { context in
+            saveCount += 1
+            if saveCount == failingChunk { throw InjectedSaveFailure() }
+            try context.save()
+        }
+        let first = makeService(
+            library: library,
+            saveAdapter: failingAdapter,
+            managedFiles: managedFiles,
+            sessionDirectory: sessionDirectory
+        )
+
+        first.importLibrary(at: fixture.root)
+        await first.waitForCurrentImport()
+
+        let stopped = try #require(first.result)
+        #expect(stopped.phase == .failed)
+        #expect(stopped.imported == failingChunk - 1)
+        #expect(stopped.failed == 1)
+        #expect(library.context.allBooks().count == failingChunk - 1)
+        #expect(!library.context.hasChanges)
+
+        let resumed = makeService(
+            library: library,
+            saveAdapter: .live,
+            managedFiles: managedFiles,
+            sessionDirectory: sessionDirectory
+        )
+        resumed.importLibrary(at: fixture.root)
+        await resumed.waitForCurrentImport()
+
+        let completed = try #require(resumed.result)
+        #expect(completed.phase == .completed)
+        #expect(completed.imported == 3)
+        #expect(completed.failed == 0)
+        #expect(library.context.allBooks().count == 3)
+        #expect(library.context.allBooks().allSatisfy { $0.primaryFileURL != nil })
+        #expect(library.context.allBooks().allSatisfy { $0.coverVersion == 0 })
+
+        resumed.importLibrary(at: fixture.root)
+        await resumed.waitForCurrentImport()
+
+        let repeated = try #require(resumed.result)
+        #expect(repeated.phase == .completed)
+        #expect(repeated.imported == 0)
+        #expect(repeated.skippedExact == 3)
+        #expect(library.context.allBooks().count == 3)
+    }
+
+    @Test func publicationFailureAfterCatalogSaveResumesTheCommittedItem() async throws {
+        let library = try await TestLibrary()
+        let fixture = try CalibreSessionFixture.make(bookCount: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sessionDirectory = library.root.appending(path: "CalibreSessions", directoryHint: .isDirectory)
+        let failingCoordinator = ManagedFileCoordinator(
+            booksDirectory: AppPaths.booksDirectory,
+            coversDirectory: AppPaths.coversDirectory,
+            stateDirectory: AppPaths.managedFilesDirectory,
+            faultInjector: { point in
+                if case .duringPublish = point {
+                    throw ManagedFileCoordinatorError.injectedFailure(point)
+                }
+            }
+        )
+        let first = makeService(
+            library: library,
+            saveAdapter: .live,
+            managedFiles: failingCoordinator,
+            sessionDirectory: sessionDirectory
+        )
+
+        first.importLibrary(at: fixture.root)
+        await first.waitForCurrentImport()
+
+        let stopped = try #require(first.result)
+        #expect(stopped.phase == .failed)
+        #expect(stopped.failed == 1)
+        #expect(library.context.allBooks().count == 1)
+        #expect(await failingCoordinator.pendingTransactions().count == 1)
+
+        let recoveringCoordinator = ManagedFileCoordinator(
+            booksDirectory: AppPaths.booksDirectory,
+            coversDirectory: AppPaths.coversDirectory,
+            stateDirectory: AppPaths.managedFilesDirectory
+        )
+        let resumed = makeService(
+            library: library,
+            saveAdapter: .live,
+            managedFiles: recoveringCoordinator,
+            sessionDirectory: sessionDirectory
+        )
+        resumed.importLibrary(at: fixture.root)
+        await resumed.waitForCurrentImport()
+
+        let completed = try #require(resumed.result)
+        #expect(completed.phase == .completed)
+        #expect(completed.imported == 1)
+        #expect(completed.failed == 0)
+        #expect(library.context.allBooks().count == 1)
+        #expect(library.context.allBooks().first?.primaryFileURL != nil)
+        #expect(await recoveringCoordinator.pendingTransactions().isEmpty)
+    }
+
+    @Test func diskFullBeforeCatalogCommitLeavesNoDirtyModelsAndCanBeRetried() async throws {
+        let library = try await TestLibrary()
+        let fixture = try CalibreSessionFixture.make(bookCount: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sessionDirectory = library.root.appending(path: "CalibreSessions", directoryHint: .isDirectory)
+        let failingCoordinator = ManagedFileCoordinator(
+            booksDirectory: AppPaths.booksDirectory,
+            coversDirectory: AppPaths.coversDirectory,
+            stateDirectory: AppPaths.managedFilesDirectory,
+            faultInjector: { point in
+                if point == .afterStaging {
+                    throw POSIXError(.ENOSPC)
+                }
+            }
+        )
+        let first = makeService(
+            library: library,
+            saveAdapter: .live,
+            managedFiles: failingCoordinator,
+            sessionDirectory: sessionDirectory
+        )
+
+        first.importLibrary(at: fixture.root)
+        await first.waitForCurrentImport()
+
+        #expect(first.result?.phase == .failed)
+        #expect(library.context.allBooks().isEmpty)
+        #expect(!library.context.hasChanges)
+        #expect(await failingCoordinator.pendingTransactions().count == 1)
+
+        let recoveringCoordinator = ManagedFileCoordinator(
+            booksDirectory: AppPaths.booksDirectory,
+            coversDirectory: AppPaths.coversDirectory,
+            stateDirectory: AppPaths.managedFilesDirectory
+        )
+        let resumed = makeService(
+            library: library,
+            saveAdapter: .live,
+            managedFiles: recoveringCoordinator,
+            sessionDirectory: sessionDirectory
+        )
+        resumed.importLibrary(at: fixture.root)
+        await resumed.waitForCurrentImport()
+
+        #expect(resumed.result?.phase == .completed)
+        #expect(resumed.result?.imported == 1)
+        #expect(library.context.allBooks().count == 1)
+        #expect(await recoveringCoordinator.pendingTransactions().isEmpty)
+    }
+
+    @Test func invalidCoverDoesNotCreateAPartialFileTransaction() async throws {
+        let library = try await TestLibrary()
+        let fixture = try CalibreSessionFixture.make(bookCount: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sessionDirectory = library.root.appending(path: "CalibreSessions", directoryHint: .isDirectory)
+        let managedFiles = ManagedFileCoordinator()
+        let service = makeService(
+            library: library,
+            saveAdapter: .live,
+            managedFiles: managedFiles,
+            sessionDirectory: sessionDirectory
+        )
+
+        service.importLibrary(at: fixture.root)
+        await service.waitForCurrentImport()
+
+        let summary = try #require(service.result)
+        let book = try #require(library.context.allBooks().first)
+        #expect(summary.phase == .completed)
+        #expect(summary.imported == 1)
+        #expect(book.coverVersion == 0)
+        #expect(!CoverStore.exists(for: book.uuid))
+        #expect(book.primaryFileURL != nil)
+        #expect(await managedFiles.pendingTransactions().isEmpty)
+    }
+
+    @Test func anotherFormatOfTheSameEditionIsMergedInsteadOfSkipped() async throws {
+        let library = try await TestLibrary()
+        let fixture = try CalibreSessionFixture.make(bookCount: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sessionDirectory = library.root.appending(path: "CalibreSessions", directoryHint: .isDirectory)
+        let managedFiles = ManagedFileCoordinator()
+        let service = makeService(
+            library: library,
+            saveAdapter: .live,
+            managedFiles: managedFiles,
+            sessionDirectory: sessionDirectory
+        )
+
+        service.importLibrary(at: fixture.root)
+        await service.waitForCurrentImport()
+        #expect(service.result?.imported == 1)
+
+        let bookDirectory = fixture.root.appending(
+            path: "Author/Book 1",
+            directoryHint: .isDirectory
+        )
+        try Data("pdf-content".utf8).write(to: bookDirectory.appending(path: "book-pdf.pdf"))
+        try CalibreSessionFixture.execute(
+            "INSERT INTO data VALUES (100,1,'PDF',11,'book-pdf');",
+            in: fixture.database
+        )
+
+        service.importLibrary(at: fixture.root)
+        await service.waitForCurrentImport()
+
+        let summary = try #require(service.result)
+        let book = try #require(library.context.allBooks().first)
+        #expect(summary.phase == .completed)
+        #expect(summary.imported == 0)
+        #expect(summary.merged == 1)
+        #expect(summary.skippedExact == 0)
+        #expect(library.context.allBooks().count == 1)
+        #expect(Set(book.assets.map(\.format)) == ["EPUB", "PDF"])
+    }
+
+    @Test func sameTitleAndAuthorWithAnotherISBNCreatesAnotherEdition() async throws {
+        let library = try await TestLibrary()
+        let fixture = try CalibreSessionFixture.make(bookCount: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sessionDirectory = library.root.appending(path: "CalibreSessions", directoryHint: .isDirectory)
+        let managedFiles = ManagedFileCoordinator()
+        let service = makeService(
+            library: library,
+            saveAdapter: .live,
+            managedFiles: managedFiles,
+            sessionDirectory: sessionDirectory
+        )
+
+        service.importLibrary(at: fixture.root)
+        await service.waitForCurrentImport()
+        #expect(service.result?.imported == 1)
+
+        let source = fixture.root.appending(path: "Author/Book 1/book.epub")
+        try Data("another-edition".utf8).write(to: source, options: .atomic)
+        try CalibreSessionFixture.execute(
+            "UPDATE identifiers SET val='9789999999999' WHERE book=1 AND type='isbn';",
+            in: fixture.database
+        )
+
+        service.importLibrary(at: fixture.root)
+        await service.waitForCurrentImport()
+
+        let summary = try #require(service.result)
+        let books = library.context.allBooks()
+        #expect(summary.phase == .completed)
+        #expect(summary.imported == 1)
+        #expect(summary.merged == 0)
+        #expect(summary.skippedExact == 0)
+        #expect(books.count == 2)
+        #expect(Set(books.compactMap { $0.work?.uuid }).count == 1)
+        #expect(Set(books.compactMap(\.isbn)).count == 2)
+    }
+
+    private func makeService(
+        library: TestLibrary,
+        saveAdapter: CatalogSaveAdapter,
+        managedFiles: ManagedFileCoordinator,
+        sessionDirectory: URL
+    ) -> CalibreImportService {
+        let settings = AppSettings(secretStore: VolatileSecretStore())
+        let toasts = ToastCenter()
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            saveAdapter: saveAdapter,
+            managedFiles: managedFiles
+        )
+        let metadata = MetadataService(
+            modelContext: library.context,
+            settings: settings,
+            mutations: mutations
+        )
+        let wishlist = WishlistService(modelContext: library.context, toasts: toasts)
+        return CalibreImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: metadata,
+            wishlist: wishlist,
+            toasts: toasts,
+            mutations: mutations,
+            managedFiles: managedFiles,
+            sessionDirectory: sessionDirectory,
+            chunkSize: 1,
+            maximumConcurrentInspections: 2
+        )
+    }
+}
+
+private enum CalibreSessionFixture {
+    static func execute(_ statement: String, in database: URL) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(database.path(percentEncoded: false), &db) == SQLITE_OK,
+              let db else { throw CalibreImportError.cannotOpen }
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(db, statement, nil, nil, nil) == SQLITE_OK else {
+            throw CalibreImportError.stepFailed(
+                code: sqlite3_errcode(db),
+                message: String(cString: sqlite3_errmsg(db))
+            )
+        }
+    }
+
+    static func make(bookCount: Int) throws -> (root: URL, database: URL) {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "CalibreSessionFixture-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let database = root.appending(path: "metadata.db")
+        var db: OpaquePointer?
+        guard sqlite3_open(database.path(percentEncoded: false), &db) == SQLITE_OK,
+              let db else { throw CalibreImportError.cannotOpen }
+        defer { sqlite3_close(db) }
+
+        let schema = """
+        CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, series_index REAL, path TEXT, pubdate TEXT, timestamp TEXT, author_sort TEXT);
+        CREATE TABLE authors (id INTEGER PRIMARY KEY, name TEXT, sort TEXT);
+        CREATE TABLE books_authors_link (id INTEGER PRIMARY KEY, book INTEGER, author INTEGER);
+        CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_tags_link (id INTEGER PRIMARY KEY, book INTEGER, tag INTEGER);
+        CREATE TABLE series (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_series_link (id INTEGER PRIMARY KEY, book INTEGER, series INTEGER);
+        CREATE TABLE publishers (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE books_publishers_link (id INTEGER PRIMARY KEY, book INTEGER, publisher INTEGER);
+        CREATE TABLE ratings (id INTEGER PRIMARY KEY, rating INTEGER);
+        CREATE TABLE books_ratings_link (id INTEGER PRIMARY KEY, book INTEGER, rating INTEGER);
+        CREATE TABLE comments (id INTEGER PRIMARY KEY, book INTEGER, text TEXT);
+        CREATE TABLE identifiers (id INTEGER PRIMARY KEY, book INTEGER, type TEXT, val TEXT);
+        CREATE TABLE languages (id INTEGER PRIMARY KEY, lang_code TEXT);
+        CREATE TABLE books_languages_link (id INTEGER PRIMARY KEY, book INTEGER, lang_code INTEGER, item_order INTEGER);
+        CREATE TABLE data (id INTEGER PRIMARY KEY, book INTEGER, format TEXT, uncompressed_size INTEGER, name TEXT);
+        """
+        guard sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK else {
+            throw CalibreImportError.stepFailed(
+                code: sqlite3_errcode(db),
+                message: String(cString: sqlite3_errmsg(db))
+            )
+        }
+
+        for index in 1...bookCount {
+            let directoryName = "Author/Book \(index)"
+            let directory = root.appending(path: directoryName, directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data("book-content-\(index)".utf8).write(to: directory.appending(path: "book.epub"))
+            // Deliberately invalid cover data verifies that a cover decode failure
+            // never leaves a half-committed catalog mutation.
+            try Data("not-an-image".utf8).write(to: directory.appending(path: "cover.jpg"))
+            let statements = """
+            INSERT INTO books VALUES (\(index),'Book \(index)',1.0,'\(directoryName)','2024-01-01','2024-01-01 00:00:00+00:00','Author, Ada');
+            INSERT INTO authors VALUES (\(index),'Ada Author','Author, Ada');
+            INSERT INTO books_authors_link VALUES (\(index),\(index),\(index));
+            INSERT INTO identifiers VALUES (\(index),\(index),'isbn','978000000000\(index)');
+            INSERT INTO data VALUES (\(index),\(index),'EPUB',16,'book');
+            """
+            guard sqlite3_exec(db, statements, nil, nil, nil) == SQLITE_OK else {
+                throw CalibreImportError.stepFailed(
+                    code: sqlite3_errcode(db),
+                    message: String(cString: sqlite3_errmsg(db))
+                )
+            }
+        }
+        return (root, database)
+    }
+}

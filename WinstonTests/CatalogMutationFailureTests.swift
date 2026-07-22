@@ -108,7 +108,7 @@ struct CatalogMutationFailureTests {
             modelContext: library.context,
             saveAdapter: failingSaveAdapter
         )
-        let service = EditionService(modelContext: library.context, mutations: mutations)
+        let service = CatalogReconciliationService(modelContext: library.context, mutations: mutations)
 
         let assigned = service.assign(first, to: targetWork)
 

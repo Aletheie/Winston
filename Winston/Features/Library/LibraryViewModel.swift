@@ -30,7 +30,7 @@ final class LibraryViewModel {
     let exporter: ExportService
     let covers: CoverService
     let health: LibraryHealthService
-    let editions: EditionService
+    let editions: CatalogReconciliationService
     let wishlist: WishlistService
     let notices: NoticeService
 
@@ -63,7 +63,12 @@ final class LibraryViewModel {
             toasts: toasts,
             wishlist: wishlist
         )
-        let editions = EditionService(modelContext: modelContext, mutations: mutations, toasts: toasts)
+        let editions = CatalogReconciliationService(
+            modelContext: modelContext,
+            mutations: mutations,
+            managedFiles: managedFiles,
+            toasts: toasts
+        )
         self.editions = editions
         self.importer = ImportService(
             modelContext: modelContext,
@@ -114,7 +119,9 @@ final class LibraryViewModel {
     var isFetchingOnline: Bool { metadata.isFetchingOnline }
     var onlineMetadataEnabled: Bool { settings.onlineMetadataEnabled }
     var isImportingCalibre: Bool { calibreImporter.isImporting }
+    var isCancellingCalibreImport: Bool { calibreImporter.isCancelling }
     var calibreImportSummary: String? { calibreImporter.summary }
+    var calibreImportSummaryStyle: CalibreImportSummaryStyle { calibreImporter.summaryStyle }
     var calibreImportProgressText: String? { calibreImporter.progressText }
     var calibreImportFraction: Double? { calibreImporter.progressFraction }
     var isImportingHighlights: Bool { highlights.isImportingHighlights }
@@ -134,6 +141,7 @@ final class LibraryViewModel {
     }
     func addEditions(from urls: [URL], to work: Work) { importer.addBooks(from: urls, assigningTo: work) }
     func importCalibreLibrary(at root: URL) { calibreImporter.importLibrary(at: root) }
+    func cancelCalibreImport() { calibreImporter.cancelImport() }
 
     @discardableResult
     func addPhysicalBook(_ draft: PhysicalBookDraft) -> Book? {
@@ -375,7 +383,6 @@ final class LibraryViewModel {
     func setCustomCover(for book: Book, from url: URL) { covers.setCustomCover(for: book, from: url) }
     func setCustomCover(for book: Book, from data: Data) { covers.setCustomCover(for: book, from: data) }
     func resetCover(for book: Book) { covers.resetCover(for: book) }
-    func duplicateGroups() async -> [DuplicateGroup] { await health.duplicateGroups() }
     func metadataFixes() async -> [MetadataFix] { await health.metadataFixes() }
     func seriesSuggestions() async -> [String] { await health.seriesSuggestions() }
 

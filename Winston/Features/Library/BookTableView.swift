@@ -6,7 +6,7 @@ struct BookTableView: View {
     @Bindable var selection: BookSelectionModel
     var deviceFileNames: Set<String>
     let conversion: ConversionService
-    let editions: EditionService
+    let editions: CatalogReconciliationService
     var collections: [BookCollection] = []
     let actions: BookActions
     @Binding var sortOrder: [KeyPathComparator<Book>]

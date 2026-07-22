@@ -7,7 +7,6 @@ final class ToastCenter {
     struct Message: Identifiable, Equatable {
         enum Style: Equatable { case info, success, error }
         enum Action: Equatable {
-            case undoEditionAssignment(EditionService.AssignmentUndo)
             case reviewEditionProposals
         }
         let id = UUID()

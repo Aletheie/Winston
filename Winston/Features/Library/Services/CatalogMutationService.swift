@@ -20,6 +20,7 @@ enum CatalogMutationCommand {
     case updateMetadata(bookID: UUID, fields: Set<String>)
     case updateMetadataBatch(bookIDs: [UUID], operation: String, fields: Set<String>)
     case assignEdition(bookIDs: [UUID], workID: UUID?)
+    case reconcileEditions(survivorID: UUID, removedID: UUID, removesExactDuplicateFiles: Bool)
     case updateWork(workID: UUID, fields: Set<String>)
     case pluginUpdate(bookID: UUID, fields: Set<String>)
     case importBooks(bookIDs: [UUID])
@@ -46,6 +47,8 @@ enum CatalogMutationError: Error, Equatable {
     case dirtyContext
     case modelNotFound
     case staleAnalysis
+    case staleReconciliation
+    case staleConversion
     case saveFailed(String)
     case fileTransactionFailed(String)
 }
@@ -478,6 +481,9 @@ final class CatalogMutationService {
 
         case .assignEdition(let bookIDs, _):
             invalidatedBookIDs.formUnion(bookIDs)
+
+        case .reconcileEditions(let survivorID, let removedID, _):
+            invalidatedBookIDs.formUnion([survivorID, removedID])
 
         case .updateWork(_, let fields):
             if !fields.isDisjoint(with: identityFields) {

@@ -6,7 +6,7 @@ struct WorkEditionCard: View {
     let isPreferred: Bool
     let compact: Bool
     @Binding var selectedEditionUUIDs: Set<UUID>
-    let service: EditionService
+    let service: CatalogReconciliationService
     let onShowInLibrary: (Book) -> Void
     let onDelete: (Book) -> Void
 
@@ -130,7 +130,7 @@ private struct WorkEditionMenu: View {
     let book: Book
     let work: Work
     let isPreferred: Bool
-    let service: EditionService
+    let service: CatalogReconciliationService
     let onShowInLibrary: (Book) -> Void
     let onDelete: (Book) -> Void
 

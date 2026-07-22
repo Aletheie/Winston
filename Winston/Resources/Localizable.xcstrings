@@ -11746,6 +11746,96 @@
         }
       }
     },
+    "Pausing Calibre import…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pozastavuji import z Calibre…"
+          }
+        }
+      }
+    },
+    "Resuming Calibre import… %lld/%lld" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovuji import z Calibre… %lld/%lld"
+          }
+        }
+      }
+    },
+    "Some Calibre files are still waiting for recovery." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Některé soubory z Calibre stále čekají na obnovení."
+          }
+        }
+      }
+    },
+    "Couldn’t resume the Calibre import." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import z Calibre se nepodařilo obnovit."
+          }
+        }
+      }
+    },
+    "Calibre Import %@" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import z Calibre %@"
+          }
+        }
+      }
+    },
+    "Imported: %lld, merged: %lld, exact duplicates skipped: %lld, needs review: %lld, failed: %lld." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Importováno: %lld, sloučeno: %lld, přeskočené přesné duplicity: %lld, ke kontrole: %lld, selhalo: %lld."
+          }
+        }
+      }
+    },
+    "Calibre import completed. %@" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import z Calibre byl dokončen. %@"
+          }
+        }
+      }
+    },
+    "Calibre import paused and can be resumed. %@" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import z Calibre byl pozastaven a lze jej obnovit. %@"
+          }
+        }
+      }
+    },
+    "Calibre import stopped and can be resumed. %@" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import z Calibre byl zastaven a lze jej obnovit. %@"
+          }
+        }
+      }
+    },
     "Zoom Out" : {
       "localizations" : {
         "cs" : {

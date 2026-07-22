@@ -8,7 +8,6 @@ enum LibrarySheet: Identifiable {
     case addPhysicalBook
     case edit(Book)
     case bulkEdit
-    case duplicates
     case metadataFixes
     case statistics
     case highlights
@@ -26,7 +25,6 @@ enum LibrarySheet: Identifiable {
         case .addPhysicalBook: "addPhysicalBook"
         case .edit(let book): "edit-\(book.uuid.uuidString)"
         case .bulkEdit:       "bulkEdit"
-        case .duplicates:     "duplicates"
         case .metadataFixes:  "metadataFixes"
         case .statistics:     "statistics"
         case .highlights:     "highlights"
@@ -273,8 +271,6 @@ struct LibraryView: View {
                     ) { edit in
                         viewModel.bulkUpdate(selectedBooks, edit)
                     }
-                case .duplicates:
-                    DuplicatesSheet(viewModel: viewModel, onReviewEditions: { activeSheet = .editionReview })
                 case .metadataFixes:
                     MetadataFixesSheet(viewModel: viewModel)
                 case .statistics:
@@ -517,8 +513,6 @@ struct LibraryView: View {
             convertSelectedBooks()
         case .fetchMetadata:
             viewModel.fetchOnlineMetadata(for: selectedBooks)
-        case .findDuplicates:
-            activeSheet = .duplicates
         case .showMetadataFixes:
             activeSheet = .metadataFixes
         case .reviewEditions:

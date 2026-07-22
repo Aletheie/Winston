@@ -4,6 +4,7 @@ nonisolated enum EditionVerdict: String, Codable, CaseIterable, Sendable {
     case duplicateFile
     case sameEditionOtherFormat
     case sameWorkOtherEdition
+    case similarItem
 }
 
 nonisolated enum MatchConfidence: String, Codable, CaseIterable, Sendable {
@@ -35,6 +36,9 @@ nonisolated enum MatchSignal: String, Codable, CaseIterable, Hashable, Sendable 
     case sameTitleAndAuthor
     case differentLanguage
     case differentTranslator
+    case differentISBN
+    case differentPublisher
+    case differentPublicationYear
     case sameTitle
 
     var label: LocalizedStringResource {
@@ -45,6 +49,9 @@ nonisolated enum MatchSignal: String, Codable, CaseIterable, Hashable, Sendable 
         case .sameTitleAndAuthor: "Same title and author"
         case .differentLanguage: "Different language"
         case .differentTranslator: "Different translator"
+        case .differentISBN: "Different ISBN"
+        case .differentPublisher: "Different publisher"
+        case .differentPublicationYear: "Different publication year"
         case .sameTitle: "Same title"
         }
     }
@@ -57,9 +64,31 @@ nonisolated enum MatchSignal: String, Codable, CaseIterable, Hashable, Sendable 
         case .sameTitleAndAuthor: "SAME_TITLE_AUTHOR"
         case .differentLanguage: "DIFFERENT_LANGUAGE"
         case .differentTranslator: "DIFFERENT_TRANSLATOR"
+        case .differentISBN: "DIFFERENT_ISBN"
+        case .differentPublisher: "DIFFERENT_PUBLISHER"
+        case .differentPublicationYear: "DIFFERENT_YEAR"
         case .sameTitle: "SAME_TITLE"
         }
     }
+}
+
+nonisolated enum ReconciliationAssetPolicy: String, Codable, Sendable {
+    case removeExactContentDuplicates
+    case retainAll
+    case unchanged
+    case reviewOnly
+}
+
+/// Immutable description of the catalog and file effects that an approved
+/// reconciliation proposal is allowed to perform.
+nonisolated struct ReconciliationChangePlan: Hashable, Sendable {
+    let mergesEditionRecords: Bool
+    let groupsEditionsUnderWork: Bool
+    let assetPolicy: ReconciliationAssetPolicy
+    let preservesMetadata: Bool
+    let preservesReadingHistory: Bool
+    let preservesHighlights: Bool
+    let preservesCollections: Bool
 }
 
 nonisolated struct EditionCandidate: Hashable, Sendable {
@@ -121,6 +150,63 @@ nonisolated struct EditionMatchProposal: Identifiable, Hashable, Sendable {
     let pairKey: String
 
     var id: String { pairKey }
+
+    var isExactContentDuplicate: Bool {
+        verdict == .duplicateFile
+            && confidence == .high
+            && signals.contains(.identicalContent)
+    }
+
+    /// Exact bytes are the only evidence strong enough to authorize physical
+    /// cleanup. Other proposals always retain every asset.
+    var isAutomaticallySafe: Bool { isExactContentDuplicate }
+
+    var canApply: Bool { verdict != .similarItem }
+
+    var changePlan: ReconciliationChangePlan {
+        switch verdict {
+        case .duplicateFile:
+            ReconciliationChangePlan(
+                mergesEditionRecords: true,
+                groupsEditionsUnderWork: false,
+                assetPolicy: isExactContentDuplicate ? .removeExactContentDuplicates : .reviewOnly,
+                preservesMetadata: true,
+                preservesReadingHistory: true,
+                preservesHighlights: true,
+                preservesCollections: true
+            )
+        case .sameEditionOtherFormat:
+            ReconciliationChangePlan(
+                mergesEditionRecords: true,
+                groupsEditionsUnderWork: false,
+                assetPolicy: .retainAll,
+                preservesMetadata: true,
+                preservesReadingHistory: true,
+                preservesHighlights: true,
+                preservesCollections: true
+            )
+        case .sameWorkOtherEdition:
+            ReconciliationChangePlan(
+                mergesEditionRecords: false,
+                groupsEditionsUnderWork: true,
+                assetPolicy: .unchanged,
+                preservesMetadata: true,
+                preservesReadingHistory: true,
+                preservesHighlights: true,
+                preservesCollections: true
+            )
+        case .similarItem:
+            ReconciliationChangePlan(
+                mergesEditionRecords: false,
+                groupsEditionsUnderWork: false,
+                assetPolicy: .reviewOnly,
+                preservesMetadata: true,
+                preservesReadingHistory: true,
+                preservesHighlights: true,
+                preservesCollections: true
+            )
+        }
+    }
 }
 
 nonisolated enum EditionMatcher {
@@ -187,7 +273,6 @@ nonisolated enum EditionMatcher {
                     let rhs = candidates[indices[rightOffset]]
                     let key = pairKey(lhs.uuid, rhs.uuid)
                     guard seen.insert(key).inserted,
-                          lhs.workUUID == nil || lhs.workUUID != rhs.workUUID,
                           let proposal = proposal(between: lhs, and: rhs)
                     else { continue }
                     proposals.append(proposal)
@@ -235,6 +320,8 @@ nonisolated enum EditionMatcher {
                 pairKey: pair
             )
         }
+        let alreadyInOneWork = lhs.workUUID != nil && lhs.workUUID == rhs.workUUID
+        if alreadyInOneWork { return nil }
         if !lhs.openLibraryWorkKey.isEmpty, lhs.openLibraryWorkKey == rhs.openLibraryWorkKey {
             return EditionMatchProposal(
                 memberUUIDs: members,
@@ -248,20 +335,31 @@ nonisolated enum EditionMatcher {
             var signals: [MatchSignal] = [.sameTitleAndAuthor]
             let differentLanguage = valuesDiffer(lhs.language, rhs.language)
             let differentTranslator = valuesDiffer(lhs.translator, rhs.translator)
+            let differentISBN = valuesDiffer(lhs.isbn, rhs.isbn)
+            let differentPublisher = valuesDiffer(lhs.publisher, rhs.publisher)
+            let differentPublicationYear = valuesDiffer(lhs.year, rhs.year)
             if differentLanguage { signals.append(.differentLanguage) }
             if differentTranslator { signals.append(.differentTranslator) }
+            if differentISBN { signals.append(.differentISBN) }
+            if differentPublisher { signals.append(.differentPublisher) }
+            if differentPublicationYear { signals.append(.differentPublicationYear) }
+            let hasEditionDifference = differentLanguage
+                || differentTranslator
+                || differentISBN
+                || differentPublisher
+                || differentPublicationYear
             return EditionMatchProposal(
                 memberUUIDs: members,
-                verdict: .sameWorkOtherEdition,
-                confidence: differentLanguage || differentTranslator ? .likely : .uncertain,
+                verdict: hasEditionDifference ? .sameWorkOtherEdition : .similarItem,
+                confidence: hasEditionDifference ? .likely : .uncertain,
                 signals: signals,
                 pairKey: pair
             )
         }
-        if !lhs.title.isEmpty, lhs.title == rhs.title, lhs.author.isEmpty || rhs.author.isEmpty {
+        if !lhs.title.isEmpty, lhs.title == rhs.title {
             return EditionMatchProposal(
                 memberUUIDs: members,
-                verdict: .sameWorkOtherEdition,
+                verdict: .similarItem,
                 confidence: .uncertain,
                 signals: [.sameTitle],
                 pairKey: pair
@@ -293,6 +391,7 @@ nonisolated enum EditionMatcher {
         case .duplicateFile: 0
         case .sameEditionOtherFormat: 1
         case .sameWorkOtherEdition: 2
+        case .similarItem: 3
         }
     }
 }
