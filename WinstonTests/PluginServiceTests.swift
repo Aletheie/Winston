@@ -12,12 +12,17 @@ struct PluginServiceTests {
         let toasts: ToastCenter
         let service: PluginService
 
-        init() async throws {
+        init(online: any OnlineMetadataFetching = OnlineMetadataService()) async throws {
             Self.resetPluginDefaults()
             library = try await TestLibrary()
             settings = AppSettings()
             toasts = ToastCenter()
-            service = PluginService(modelContext: library.context, settings: settings, toasts: toasts)
+            service = PluginService(
+                modelContext: library.context,
+                settings: settings,
+                toasts: toasts,
+                online: online
+            )
         }
 
         deinit { Self.resetPluginDefaults() }
@@ -91,8 +96,8 @@ struct PluginServiceTests {
         harness.seedBook(title: "Beta")
         try harness.installPlugin(source: """
             exports.activate = async () => {
-                const books = await Winston.library.list();
-                console.log("count:" + books.length + " first:" + books[0].displayTitle);
+                const page = await Winston.library.list();
+                console.log("count:" + page.items.length + " first:" + page.items[0].displayTitle);
             };
             """)
         await harness.service.refresh()
@@ -112,8 +117,8 @@ struct PluginServiceTests {
         let book = harness.seedBook(title: "Kept", publisher: nil)
         try harness.installPlugin(permissions: ["library.read", "library.write"], source: """
             exports.activate = async () => {
-                const books = await Winston.library.list();
-                const result = await Winston.library.update(books[0].uuid,
+                const page = await Winston.library.list();
+                const result = await Winston.library.update(page.items[0].uuid,
                     { title: "Clobbered", publisher: "Argo", translator: "Jan Novák" });
                 console.log("applied:" + result.applied.join(","));
             };
@@ -170,11 +175,12 @@ struct PluginServiceTests {
             };
             """)
         await harness.service.refresh()
+        let startedAt = Date.now
         await harness.service.enable("cz.test.sample", grantingPermissions: true)
 
         #expect(harness.state("cz.test.sample")?.status == .quarantined)
         #expect(!harness.settings.enabledPluginIDs.contains("cz.test.sample"))
-        try? await Task.sleep(for: .seconds(1.6))
+        #expect(Date.now.timeIntervalSince(startedAt) < 1.2)
     }
 
     @Test func refreshReplacesChangedManifestAndRequiresFreshConsent() async throws {
@@ -204,5 +210,93 @@ struct PluginServiceTests {
         await harness.service.enable("cz.test.sample", grantingPermissions: true)
         #expect(harness.state("cz.test.sample")?.status == .active)
         #expect(await harness.loggedEventually("new-version", in: "cz.test.sample"))
+    }
+
+    @Test func changingOnlyEntryBytesInvalidatesConsentAndRebuildsRuntime() async throws {
+        let harness = try await Harness()
+        try harness.installPlugin(
+            permissions: ["ui.toast"],
+            source: "console.log('original-content');"
+        )
+        await harness.service.refresh()
+        await harness.service.enable("cz.test.sample", grantingPermissions: true)
+        #expect(harness.state("cz.test.sample")?.status == .active)
+        let oldGrantKeys = Set(harness.settings.pluginGrants.keys)
+        #expect(oldGrantKeys.count == 1)
+
+        try harness.installPlugin(
+            permissions: ["ui.toast"],
+            source: "console.log('changed-content');"
+        )
+        await harness.service.refresh()
+
+        #expect(harness.state("cz.test.sample")?.version == "1.0.0")
+        #expect(harness.state("cz.test.sample")?.status == .disabled)
+        #expect(harness.service.needsConsent("cz.test.sample"))
+        #expect(Set(harness.settings.pluginGrants.keys).isDisjoint(with: oldGrantKeys))
+
+        await harness.service.enable("cz.test.sample", grantingPermissions: true)
+        #expect(harness.state("cz.test.sample")?.status == .active)
+        #expect(await harness.loggedEventually("changed-content", in: "cz.test.sample"))
+    }
+
+    @Test func pendingHostWriteCannotCommitAfterDisable() async throws {
+        let gate = PluginMetadataGate()
+        let harness = try await Harness(online: gate)
+        harness.settings.onlineMetadataEnabled = true
+        let book = harness.seedBook(title: "Lease Test")
+        try harness.installPlugin(
+            permissions: ["library.read", "library.write", "metadata.fetch"],
+            source: """
+                exports.activate = async () => {
+                    const page = await Winston.library.list({ limit: 1 });
+                    await Winston.metadata.fetch({ title: "Lease Test" });
+                    await Winston.library.update(page.items[0].uuid, { publisher: "Too Late" });
+                };
+                """
+        )
+        await harness.service.refresh()
+        await harness.service.enable("cz.test.sample", grantingPermissions: true)
+        await gate.waitUntilStarted()
+
+        harness.service.disable("cz.test.sample")
+        await gate.resume()
+        try? await Task.sleep(for: .milliseconds(100))
+
+        #expect(book.publisher == nil)
+        #expect(harness.state("cz.test.sample")?.status == .disabled)
+    }
+}
+
+private actor PluginMetadataGate: OnlineMetadataFetching {
+    private var continuation: CheckedContinuation<OnlineMetadataFetchResult, Never>?
+    private var started = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func fetch(
+        isbn: String?,
+        title: String,
+        author: String?,
+        language: MetadataLanguage,
+        hardcoverToken: String?
+    ) async -> OnlineMetadataFetchResult {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            started = true
+            waiters.forEach { $0.resume() }
+            waiters.removeAll()
+        }
+    }
+
+    func downloadCover(_ url: URL) async -> Data? { nil }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func resume() {
+        continuation?.resume(returning: OnlineMetadataFetchResult(metadata: nil, reachedNetwork: true))
+        continuation = nil
     }
 }

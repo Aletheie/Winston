@@ -1,9 +1,9 @@
+import Darwin
 import Foundation
-import JavaScriptCore
-import OSLog
+import Synchronization
 
-nonisolated enum PluginAPICall: Sendable, Equatable {
-    case libraryList(searchText: String?)
+nonisolated enum PluginAPICall: Codable, Sendable, Equatable {
+    case libraryList(searchText: String?, cursor: String?, limit: Int)
     case libraryGet(uuid: UUID)
     case libraryUpdate(uuid: UUID, patch: PluginMetadataPatch)
     case metadataFetch(isbn: String?, title: String?, author: String?)
@@ -13,9 +13,9 @@ nonisolated enum PluginAPICall: Sendable, Equatable {
     case toast(message: String, style: PluginToastStyle)
 }
 
-nonisolated enum PluginToastStyle: String, Sendable { case info, success, error }
+nonisolated enum PluginToastStyle: String, Codable, Sendable { case info, success, error }
 
-nonisolated struct PluginMetadataPatch: Sendable, Equatable {
+nonisolated struct PluginMetadataPatch: Codable, Sendable, Equatable {
     var title: String?
     var author: String?
     var publisher: String?
@@ -31,356 +31,456 @@ nonisolated struct PluginMetadataPatch: Sendable, Equatable {
 
 typealias PluginHostHandler = @MainActor @Sendable (PluginAPICall) async -> Result<Data?, PluginError>
 
-// Every JSContext/JSValue is confined to `queue`; nothing JSC-typed may leave it — that invariant is what makes @unchecked Sendable sound.
-nonisolated final class PluginRuntime: @unchecked Sendable {
-    static let maximumPendingHostCalls = 64
+nonisolated enum PluginRuntimeFault: Sendable, Equatable {
+    case script(String)
+    case terminated(String)
+}
 
+nonisolated struct PluginWorkerConfiguration: Codable, Sendable {
     let manifest: PluginManifest
-    let folderURL: URL
-    let logBuffer = PluginLogBuffer()
+    let entrySource: String
+    let granted: Set<PluginPermission>
+    let appVersion: String
+    let locale: String
+    let maximumCPUSeconds: Int
+    let maximumMemoryBytes: UInt64
+}
 
-    private let queue: DispatchQueue
-    private let onFault: @Sendable (String) -> Void
+nonisolated struct PluginHostResponse: Codable, Sendable {
+    let data: Data?
+    let error: PluginError?
 
-    private var vm: JSVirtualMachine?
-    private var context: JSContext?
-    private var pending: [UInt64: (resolve: JSValue, reject: JSValue)] = [:]
-    private var nextCallID: UInt64 = 0
-    private var lastException: String?
+    init(_ result: Result<Data?, PluginError>) {
+        switch result {
+        case .success(let data):
+            self.data = data
+            error = nil
+        case .failure(let error):
+            data = nil
+            self.error = error
+        }
+    }
 
-    init(manifest: PluginManifest, folderURL: URL, onFault: @escaping @Sendable (String) -> Void) {
+    var result: Result<Data?, PluginError> {
+        if let error { return .failure(error) }
+        return .success(data)
+    }
+}
+
+nonisolated enum PluginWorkerCommand: Codable, Sendable {
+    case start(PluginWorkerConfiguration)
+    case hostResponse(id: UInt64, response: PluginHostResponse)
+    case shutdown
+}
+
+nonisolated enum PluginWorkerEvent: Codable, Sendable {
+    case loaded
+    case loadFailed(String)
+    case log(level: PluginLogEntry.Level, message: String)
+    case fault(String)
+    case hostCall(id: UInt64, call: PluginAPICall)
+    case executionBegan(UInt64)
+    case executionEnded(UInt64)
+    case stopped
+}
+
+nonisolated enum PluginWorkerWire {
+    static func encode<T: Encodable>(_ value: T) throws -> Data {
+        var data = try JSONEncoder().encode(value)
+        data.append(0x0A)
+        return data
+    }
+
+    static func decode<T: Decodable>(_ type: T.Type, from line: Data) throws -> T {
+        try JSONDecoder().decode(type, from: line)
+    }
+}
+
+private nonisolated final class PluginLineFramer: Sendable {
+    private let buffered = Mutex(Data())
+
+    func append(_ chunk: Data) -> [Data] {
+        buffered.withLock { buffer in
+            buffer.append(chunk)
+            var lines: [Data] = []
+            while let newline = buffer.firstIndex(of: 0x0A) {
+                lines.append(Data(buffer[..<newline]))
+                buffer.removeSubrange(...newline)
+            }
+            return lines
+        }
+    }
+}
+
+/// Parent-side owner of one killable plugin process. No JavaScriptCore value or
+/// plugin code exists in the host process; the only bridge is the Codable wire protocol above.
+actor PluginRuntime {
+    static let maximumPendingHostCalls = 64
+    static let defaultExecutionDeadline: TimeInterval = 10
+    static let defaultMaximumMemoryBytes: UInt64 = 512 * 1_024 * 1_024
+    static let workerArgument = "--winston-plugin-worker"
+
+    nonisolated let manifest: PluginManifest
+    nonisolated let folderURL: URL
+    nonisolated let contentDigest: String
+    nonisolated let logBuffer = PluginLogBuffer()
+
+    private let onFault: @Sendable (PluginRuntimeFault) -> Void
+    private let workerExecutableURL: URL?
+    private let executionDeadline: TimeInterval
+    private let outputFramer = PluginLineFramer()
+    private let errorFramer = PluginLineFramer()
+
+    private var process: Process?
+    private var inputHandle: FileHandle?
+    private var outputHandle: FileHandle?
+    private var errorHandle: FileHandle?
+    private var handler: PluginHostHandler?
+    private var hostTasks: [UInt64: Task<Void, Never>] = [:]
+    private var loadContinuation: CheckedContinuation<Void, any Error>?
+    private var executionWatchdog: Task<Void, Never>?
+    private var executionToken: UInt64?
+    private var loaded = false
+    private var stopping = false
+    private var expectedStop = false
+    private var timedOut = false
+
+    init(
+        manifest: PluginManifest,
+        folderURL: URL,
+        contentDigest: String,
+        executionDeadline: TimeInterval = PluginRuntime.defaultExecutionDeadline,
+        workerExecutableURL: URL? = nil,
+        onFault: @escaping @Sendable (PluginRuntimeFault) -> Void
+    ) {
         self.manifest = manifest
         self.folderURL = folderURL
+        self.contentDigest = contentDigest
+        self.executionDeadline = max(0.05, executionDeadline)
+        self.workerExecutableURL = workerExecutableURL
         self.onFault = onFault
-        self.queue = DispatchQueue(label: "cz.annajung.Winston.plugin.\(manifest.id)")
+    }
+
+    deinit {
+        if let process, process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+        }
     }
 
     // MARK: - Lifecycle
 
     func load(granted: Set<PluginPermission>, handler: @escaping PluginHostHandler) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-            queue.async {
-                do {
-                    try self.loadOnQueue(granted: granted, handler: handler)
-                    continuation.resume()
-                } catch {
-                    self.teardownOnQueue()
-                    continuation.resume(throwing: error)
-                }
+        guard process == nil, loadContinuation == nil else {
+            throw PluginError.loadFailed("plugin is already loaded")
+        }
+        let snapshot: PluginBundleSnapshot
+        do {
+            snapshot = try PluginDiscovery.bundleSnapshot(
+                in: folderURL,
+                expectedManifest: manifest,
+                expectedDigest: contentDigest
+            )
+        } catch {
+            throw PluginError.loadFailed(error.localizedDescription)
+        }
+
+        self.handler = handler
+        try launchWorker()
+        let configuration = PluginWorkerConfiguration(
+            manifest: manifest,
+            entrySource: snapshot.entrySource,
+            granted: granted,
+            appVersion: Bundle.main.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+            ) as? String ?? "0",
+            locale: Locale.current.identifier,
+            maximumCPUSeconds: max(1, Int(ceil(executionDeadline * 2))),
+            maximumMemoryBytes: Self.defaultMaximumMemoryBytes
+        )
+
+        try await withCheckedThrowingContinuation { continuation in
+            loadContinuation = continuation
+            armExecutionWatchdog(token: 0)
+            do {
+                try send(.start(configuration))
+            } catch {
+                loadContinuation = nil
+                continuation.resume(throwing: PluginError.workerTerminated(
+                    "could not start the plugin worker: \(error.localizedDescription)"
+                ))
+                Task { await self.terminate() }
             }
         }
     }
 
     func shutdown() async {
-        await withCheckedContinuation { continuation in
-            queue.async {
-                if let context = self.context,
-                   let deactivate = context.objectForKeyedSubscript("exports")?
-                       .objectForKeyedSubscript("deactivate"),
-                   !deactivate.isUndefined {
-                    deactivate.call(withArguments: [])
-                }
-                self.teardownOnQueue()
-                continuation.resume()
-            }
+        guard process != nil else {
+            cancelOutstandingWork()
+            return
+        }
+        expectedStop = true
+        stopping = true
+        cancelOutstandingWork()
+        try? send(.shutdown)
+        await waitForExit(grace: 0.35)
+        if process?.isRunning == true {
+            await terminateProcess()
         }
     }
 
-    private func loadOnQueue(granted: Set<PluginPermission>, handler: @escaping PluginHostHandler) throws {
-        dispatchPrecondition(condition: .onQueue(queue))
-        guard context == nil else { throw PluginError.loadFailed("plugin is already loaded") }
-
-        let entryURL = folderURL.appending(path: manifest.entry)
-        guard let sourceData = try? Data(contentsOf: entryURL),
-              sourceData.count <= PluginDiscovery.maxEntryBytes,
-              let source = String(data: sourceData, encoding: .utf8) else {
-            throw PluginError.loadFailed("could not read entry script \"\(manifest.entry)\"")
-        }
-
-        let vm = JSVirtualMachine()
-        guard let context = JSContext(virtualMachine: vm) else { throw PluginError.contextCreationFailed }
-        context.name = "Winston plugin \(manifest.id)"
-
-        let buffer = logBuffer
-        let fault = onFault
-        let pluginID = manifest.id
-        context.exceptionHandler = { [weak self] _, exception in
-            let text = exception?.toString() ?? "unknown error"
-            buffer.append(.error, text)
-            Log.plugins.error("[\(pluginID, privacy: .public)] uncaught: \(text, privacy: .public)")
-            self?.lastException = text
-            fault(text)
-        }
-
-        installConsole(in: context)
-        installWinston(in: context, granted: granted, handler: handler)
-        context.setObject(JSValue(newObjectIn: context), forKeyedSubscript: "exports" as NSString)
-
-        self.vm = vm
-        self.context = context
-
-        lastException = nil
-        context.evaluateScript(source, withSourceURL: entryURL)
-        if let text = lastException { throw PluginError.loadFailed(text) }
-
-        if let activate = context.objectForKeyedSubscript("exports")?.objectForKeyedSubscript("activate"),
-           !activate.isUndefined {
-            lastException = nil
-            activate.call(withArguments: [])
-            if let text = lastException { throw PluginError.loadFailed("activate() threw: \(text)") }
-        }
-        Log.plugins.info("[\(pluginID, privacy: .public)] loaded (v\(self.manifest.version, privacy: .public))")
+    func terminate() async {
+        expectedStop = true
+        stopping = true
+        cancelOutstandingWork()
+        await terminateProcess()
     }
 
-    private func teardownOnQueue() {
-        dispatchPrecondition(condition: .onQueue(queue))
-        pending.removeAll()
-        lastException = nil
-        context = nil
-        vm = nil
+    func workerProcessIdentifier() -> Int32? {
+        guard let process, process.isRunning else { return nil }
+        return process.processIdentifier
     }
 
-    // MARK: - console
-
-    private func installConsole(in context: JSContext) {
-        let buffer = logBuffer
-        let pluginID = manifest.id
-        let console = JSValue(newObjectIn: context)!
-        let levels: [(name: String, level: PluginLogEntry.Level, osType: OSLogType)] = [
-            ("debug", .debug, .debug), ("log", .info, .info),
-            ("info", .info, .info), ("warn", .warning, .default), ("error", .error, .error),
-        ]
-        for (name, level, osType) in levels {
-            let block: @convention(block) () -> Void = {
-                let args = (JSContext.currentArguments() as? [JSValue]) ?? []
-                let text = args.map { $0.toString() ?? "undefined" }.joined(separator: " ")
-                buffer.append(level, text)
-                Log.plugins.log(level: osType, "[\(pluginID, privacy: .public)] \(text, privacy: .public)")
-            }
-            console.setObject(block, forKeyedSubscript: name)
-        }
-        context.setObject(console, forKeyedSubscript: "console" as NSString)
+    func isWorkerRunning() -> Bool {
+        process?.isRunning == true
     }
 
-    // MARK: - The Winston namespace
+    // MARK: - Process
 
-    private func installWinston(in context: JSContext, granted: Set<PluginPermission>,
-                                handler: @escaping PluginHostHandler) {
-        let winston = JSValue(newObjectIn: context)!
+    private func launchWorker() throws {
+        let executable = try resolvedWorkerExecutableURL()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = [Self.workerArgument]
+        process.currentDirectoryURL = FileManager.default.temporaryDirectory
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
 
-        let host = JSValue(newObjectIn: context)!
-        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
-        host.setObject(appVersion, forKeyedSubscript: "appVersion")
-        host.setObject(PluginManifest.hostAPIVersion, forKeyedSubscript: "apiVersion")
-        host.setObject(Locale.current.identifier, forKeyedSubscript: "locale")
-        winston.setObject(host, forKeyedSubscript: "host")
-
-        var capabilities: Set<String> = ["storage"]
-        if granted.contains(.libraryRead) { capabilities.formUnion(["library.list", "library.get"]) }
-        if granted.contains(.libraryWrite) { capabilities.insert("library.update") }
-        if granted.contains(.metadataFetch) { capabilities.insert("metadata.fetch") }
-        if granted.contains(.uiToast) { capabilities.insert("ui.toast") }
-        let has: @convention(block) (String?) -> Bool = { name in capabilities.contains(name ?? "") }
-        let capabilitiesObject = JSValue(newObjectIn: context)!
-        capabilitiesObject.setObject(has, forKeyedSubscript: "has")
-        winston.setObject(capabilitiesObject, forKeyedSubscript: "capabilities")
-
-        let storage = JSValue(newObjectIn: context)!
-        installAsyncMethod(named: "get", on: storage, handler: handler) { arg0, _ in
-            let key = try Self.requireString(arg0, "storage.get expects a string key")
-            guard PluginStorageLimits.accepts(key: key) else {
-                throw PluginError.invalidArgument("storage keys are limited to 256 UTF-8 bytes")
-            }
-            return .storageGet(key: key)
+        let output = outputPipe.fileHandleForReading
+        output.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            guard let self else { return }
+            let lines = self.outputFramer.append(chunk)
+            guard !lines.isEmpty else { return }
+            Task { await self.receive(lines: lines) }
         }
-        installAsyncMethod(named: "set", on: storage, handler: handler) { arg0, arg1 in
-            let key = try Self.requireString(arg0, "storage.set expects a string key")
-            let object = arg1?.toObject() ?? NSNull()
-            guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed]),
-                  let json = String(data: data, encoding: .utf8) else {
-                throw PluginError.invalidArgument("storage.set value must be JSON-serializable")
+        let error = errorPipe.fileHandleForReading
+        error.readabilityHandler = { [weak self] handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty, let self else { return }
+            for line in self.errorFramer.append(chunk) where !line.isEmpty {
+                let message = String(data: line, encoding: .utf8) ?? "plugin worker error"
+                self.logBuffer.append(.warning, message)
             }
-            guard PluginStorageLimits.accepts(key: key),
-                  data.count <= PluginStorageLimits.maxValueBytes else {
-                throw PluginError.invalidArgument("plugin storage key or value exceeds its size limit")
-            }
-            return .storageSet(key: key, valueJSON: json)
         }
-        installAsyncMethod(named: "remove", on: storage, handler: handler) { arg0, _ in
-            let key = try Self.requireString(arg0, "storage.remove expects a string key")
-            guard PluginStorageLimits.accepts(key: key) else {
-                throw PluginError.invalidArgument("storage keys are limited to 256 UTF-8 bytes")
+        process.terminationHandler = { [weak self] process in
+            Task {
+                await self?.workerDidTerminate(
+                    pid: process.processIdentifier,
+                    status: process.terminationStatus,
+                    reason: process.terminationReason
+                )
             }
-            return .storageRemove(key: key)
-        }
-        winston.setObject(storage, forKeyedSubscript: "storage")
-
-        if granted.contains(.libraryRead) || granted.contains(.libraryWrite) {
-            let library = JSValue(newObjectIn: context)!
-            if granted.contains(.libraryRead) {
-                installAsyncMethod(named: "list", on: library, handler: handler) { arg0, _ in
-                    .libraryList(searchText: Self.optionalString(Self.property("text", of: arg0)))
-                }
-                installAsyncMethod(named: "get", on: library, handler: handler) { arg0, _ in
-                    .libraryGet(uuid: try Self.requireUUID(arg0, "library.get expects a book uuid string"))
-                }
-            }
-            if granted.contains(.libraryWrite) {
-                installAsyncMethod(named: "update", on: library, handler: handler) { arg0, arg1 in
-                    let uuid = try Self.requireUUID(arg0, "library.update expects a book uuid string")
-                    guard let arg1, arg1.isObject else {
-                        throw PluginError.invalidArgument("library.update expects a patch object")
-                    }
-                    func field(_ key: String) -> String? {
-                        Self.optionalString(arg1.objectForKeyedSubscript(key))
-                    }
-                    var patch = PluginMetadataPatch()
-                    patch.title = field("title")
-                    patch.author = field("author")
-                    patch.publisher = field("publisher")
-                    patch.year = field("year")
-                    patch.language = field("language")
-                    patch.translator = field("translator")
-                    patch.isbn = field("isbn")
-                    patch.series = field("series")
-                    patch.seriesIndex = field("seriesIndex")
-                    patch.description = field("description")
-                    if let tags = arg1.objectForKeyedSubscript("tags"), tags.isArray {
-                        patch.tags = tags.toArray()?.compactMap { $0 as? String }
-                    }
-                    return .libraryUpdate(uuid: uuid, patch: patch)
-                }
-            }
-            winston.setObject(library, forKeyedSubscript: "library")
         }
 
-        if granted.contains(.metadataFetch) {
-            let metadata = JSValue(newObjectIn: context)!
-            installAsyncMethod(named: "fetch", on: metadata, handler: handler) { arg0, _ in
-                guard let arg0, arg0.isObject else {
-                    throw PluginError.invalidArgument("metadata.fetch expects an options object")
-                }
-                let isbn = Self.optionalString(arg0.objectForKeyedSubscript("isbn"))
-                let title = Self.optionalString(arg0.objectForKeyedSubscript("title"))
-                let author = Self.optionalString(arg0.objectForKeyedSubscript("author"))
-                guard isbn != nil || title != nil else {
-                    throw PluginError.invalidArgument("metadata.fetch needs an isbn or a title")
-                }
-                return .metadataFetch(isbn: isbn, title: title, author: author)
-            }
-            winston.setObject(metadata, forKeyedSubscript: "metadata")
-        }
-
-        if granted.contains(.uiToast) {
-            let ui = JSValue(newObjectIn: context)!
-            installAsyncMethod(named: "toast", on: ui, handler: handler) { arg0, arg1 in
-                let message = try Self.requireString(arg0, "ui.toast expects a message string")
-                let style = PluginToastStyle(rawValue: Self.optionalString(arg1) ?? "info") ?? .info
-                return .toast(message: message, style: style)
-            }
-            winston.setObject(ui, forKeyedSubscript: "ui")
-        }
-
-        context.setObject(winston, forKeyedSubscript: "Winston" as NSString)
+        try process.run()
+        self.process = process
+        inputHandle = inputPipe.fileHandleForWriting
+        outputHandle = output
+        errorHandle = error
     }
 
-    // MARK: - Promise plumbing
+    private func resolvedWorkerExecutableURL() throws -> URL {
+        if let workerExecutableURL { return workerExecutableURL }
+        if let override = ProcessInfo.processInfo.environment["WINSTON_PLUGIN_WORKER_EXECUTABLE"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: override)
+        }
+        if let executable = Bundle.main.executableURL { return executable }
+        if let executable = Bundle.allBundles.first(where: {
+            $0.bundleIdentifier == "cz.annajung.Winston"
+        })?.executableURL {
+            return executable
+        }
+        throw PluginError.unavailable("plugin worker executable is unavailable")
+    }
 
-    private func installAsyncMethod(
-        named name: String, on object: JSValue,
-        handler: @escaping PluginHostHandler,
-        decode: @escaping (JSValue?, JSValue?) throws -> PluginAPICall
-    ) {
-        let block: @convention(block) (JSValue?, JSValue?) -> JSValue? = { [weak self] arg0, arg1 in
-            guard let context = JSContext.current() else { return nil }
-            guard let self else {
-                return JSValue(newPromiseRejectedWithReason: "plugin runtime is gone", in: context)
-            }
+    private func send(_ command: PluginWorkerCommand) throws {
+        guard let inputHandle, process?.isRunning == true else {
+            throw PluginError.workerTerminated("plugin worker is not running")
+        }
+        try inputHandle.write(contentsOf: PluginWorkerWire.encode(command))
+    }
+
+    private func receive(lines: [Data]) async {
+        for line in lines where !line.isEmpty {
             do {
-                return self.makePendingPromise(for: try decode(arg0, arg1), handler: handler, in: context)
-            } catch let error as PluginError {
-                return JSValue(newPromiseRejectedWithReason: Self.errorValue(error, in: context), in: context)
+                let event = try PluginWorkerWire.decode(PluginWorkerEvent.self, from: line)
+                await handle(event)
             } catch {
-                return JSValue(newPromiseRejectedWithReason: "\(error)", in: context)
-            }
-        }
-        object.setObject(block, forKeyedSubscript: name)
-    }
-
-    private func makePendingPromise(for call: PluginAPICall, handler: @escaping PluginHostHandler,
-                                    in context: JSContext) -> JSValue? {
-        dispatchPrecondition(condition: .onQueue(queue))
-        guard pending.count < Self.maximumPendingHostCalls else {
-            let error = PluginError.unavailable("too many pending host calls")
-            return JSValue(
-                newPromiseRejectedWithReason: Self.errorValue(error, in: context),
-                in: context
-            )
-        }
-        nextCallID += 1
-        let id = nextCallID
-        let promise = JSValue(newPromiseIn: context) { resolve, reject in
-            guard let resolve, let reject else { return }
-            self.pending[id] = (resolve, reject)
-        }
-        Task { [weak self] in
-            let result = await handler(call)
-            self?.complete(id, with: result)
-        }
-        return promise
-    }
-
-    private func complete(_ id: UInt64, with result: Result<Data?, PluginError>) {
-        queue.async {
-            guard let context = self.context,
-                  let callbacks = self.pending.removeValue(forKey: id) else { return }
-            switch result {
-            case .success(let json):
-                callbacks.resolve.call(withArguments: [Self.jsonValue(json, in: context)])
-            case .failure(let error):
-                callbacks.reject.call(withArguments: [Self.errorValue(error, in: context)])
+                logBuffer.append(.error, "invalid response from plugin worker")
+                expectedStop = true
+                await terminateProcess()
+                resumeLoad(throwing: .workerTerminated("plugin worker sent an invalid response"))
+                return
             }
         }
     }
 
-    // MARK: - Value conversion
+    private func handle(_ event: PluginWorkerEvent) async {
+        switch event {
+        case .loaded:
+            loaded = true
+            resumeLoad()
 
-    private static func jsonValue(_ json: Data?, in context: JSContext) -> JSValue {
-        guard let json,
-              let object = try? JSONSerialization.jsonObject(with: json, options: [.fragmentsAllowed]) else {
-            return JSValue(nullIn: context)
+        case .loadFailed(let message):
+            resumeLoad(throwing: .loadFailed(message))
+            expectedStop = true
+            await terminateProcess()
+
+        case .log(let level, let message):
+            logBuffer.append(level, message)
+
+        case .fault(let message):
+            onFault(.script(message))
+
+        case .hostCall(let id, let call):
+            guard !stopping, let handler else {
+                try? send(.hostResponse(
+                    id: id,
+                    response: PluginHostResponse(.failure(.unavailable("plugin session is inactive")))
+                ))
+                return
+            }
+            let task = Task { @MainActor [weak self, handler] in
+                let result = await handler(call)
+                await self?.completeHostCall(id: id, result: result)
+            }
+            hostTasks[id] = task
+
+        case .executionBegan(let token):
+            armExecutionWatchdog(token: token)
+
+        case .executionEnded(let token):
+            guard executionToken == token else { return }
+            executionToken = nil
+            executionWatchdog?.cancel()
+            executionWatchdog = nil
+
+        case .stopped:
+            expectedStop = true
         }
-        return JSValue(object: object, in: context) ?? JSValue(nullIn: context)
     }
 
-    private static func errorValue(_ error: PluginError, in context: JSContext) -> JSValue {
-        let value = JSValue(newErrorFromMessage: error.message, in: context) ?? JSValue(newObjectIn: context)!
-        value.setObject(error.code, forKeyedSubscript: "code")
-        return value
-    }
-
-    // Subscripting an undefined JSValue raises a TypeError on the whole context — guard isObject first.
-    private static func property(_ key: String, of value: JSValue?) -> JSValue? {
-        guard let value, value.isObject else { return nil }
-        return value.objectForKeyedSubscript(key)
-    }
-
-    private static func optionalString(_ value: JSValue?) -> String? {
-        guard let value, value.isString else { return nil }
-        return value.toString()
-    }
-
-    private static func requireString(_ value: JSValue?, _ complaint: String) throws -> String {
-        guard let string = optionalString(value), !string.isEmpty else {
-            throw PluginError.invalidArgument(complaint)
+    private func completeHostCall(
+        id: UInt64,
+        result: Result<Data?, PluginError>
+    ) async {
+        hostTasks.removeValue(forKey: id)
+        guard !stopping else { return }
+        do {
+            try send(.hostResponse(id: id, response: PluginHostResponse(result)))
+        } catch {
+            expectedStop = true
+            await terminateProcess()
         }
-        return string
     }
 
-    private static func requireUUID(_ value: JSValue?, _ complaint: String) throws -> UUID {
-        guard let uuid = UUID(uuidString: try requireString(value, complaint)) else {
-            throw PluginError.invalidArgument(complaint)
+    private func executionExpired(token: UInt64) async {
+        guard executionToken == token, process?.isRunning == true else { return }
+        executionToken = nil
+        timedOut = true
+        expectedStop = true
+        let message = "plugin execution exceeded its \(executionDeadline.formatted()) s limit"
+        logBuffer.append(.error, message)
+        if loaded { onFault(.terminated(message)) }
+        await terminateProcess()
+    }
+
+    private func armExecutionWatchdog(token: UInt64) {
+        executionToken = token
+        executionWatchdog?.cancel()
+        let deadline = executionDeadline
+        executionWatchdog = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(deadline))
+            } catch {
+                return
+            }
+            await self?.executionExpired(token: token)
         }
-        return uuid
+    }
+
+    private func workerDidTerminate(
+        pid: Int32,
+        status: Int32,
+        reason: Process.TerminationReason
+    ) {
+        guard process?.processIdentifier == pid else { return }
+        outputHandle?.readabilityHandler = nil
+        errorHandle?.readabilityHandler = nil
+        try? inputHandle?.close()
+        try? outputHandle?.close()
+        try? errorHandle?.close()
+        inputHandle = nil
+        outputHandle = nil
+        errorHandle = nil
+        process = nil
+        cancelOutstandingWork()
+
+        if timedOut {
+            resumeLoad(throwing: .timeout)
+        } else if loadContinuation != nil {
+            resumeLoad(throwing: .workerTerminated(
+                "plugin worker exited unexpectedly (status \(status))"
+            ))
+        } else if loaded, !expectedStop {
+            let description = reason == .uncaughtSignal
+                ? "plugin worker was terminated by signal \(status)"
+                : "plugin worker exited with status \(status)"
+            logBuffer.append(.error, description)
+            onFault(.terminated(description))
+        }
+        loaded = false
+        handler = nil
+    }
+
+    private func resumeLoad(throwing error: PluginError? = nil) {
+        guard let continuation = loadContinuation else { return }
+        loadContinuation = nil
+        if let error {
+            continuation.resume(throwing: error)
+        } else {
+            continuation.resume()
+        }
+    }
+
+    private func cancelOutstandingWork() {
+        executionWatchdog?.cancel()
+        executionWatchdog = nil
+        executionToken = nil
+        for task in hostTasks.values { task.cancel() }
+        hostTasks.removeAll()
+    }
+
+    private func waitForExit(grace: TimeInterval) async {
+        let deadline = Date.now.addingTimeInterval(grace)
+        while process?.isRunning == true, Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    private func terminateProcess() async {
+        guard let process else { return }
+        if process.isRunning { process.terminate() }
+        await waitForExit(grace: 0.15)
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            await waitForExit(grace: 0.15)
+        }
     }
 }

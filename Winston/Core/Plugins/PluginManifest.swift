@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 nonisolated enum PluginPermission: String, Codable, Sendable, CaseIterable {
@@ -18,23 +19,45 @@ nonisolated struct PluginManifest: Codable, Sendable, Equatable {
     let author: String?
 
     static let supportedAPIMajor = 1
-    static let hostAPIVersion = "1.1.0"
+    static let hostAPIVersion = "1.2.0"
 
     var apiMajor: Int? { api.split(separator: ".").first.flatMap { Int($0) } }
 
-    var grantKey: String { "\(id)@\(version)" }
+    func grantKey(contentDigest: String) -> String {
+        "\(id)@\(version)#sha256:\(contentDigest)"
+    }
 }
 
 nonisolated struct DiscoveredPlugin: Sendable, Identifiable {
     let folderURL: URL
     let manifest: PluginManifest?
+    let contentDigest: String?
     let invalidReason: String?
 
     var id: String { manifest?.id ?? folderURL.lastPathComponent }
 }
 
+nonisolated struct PluginBundleSnapshot: Sendable {
+    let manifest: PluginManifest
+    let contentDigest: String
+    let entrySource: String
+}
+
+private nonisolated enum PluginBundleError: LocalizedError {
+    case invalid(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalid(let message): message
+        }
+    }
+}
+
 nonisolated enum PluginDiscovery {
     static let maxEntryBytes = 5 * 1024 * 1024
+    static let maxManifestBytes = 256 * 1024
+    static let maxBundleBytes = 20 * 1024 * 1024
+    static let maxBundleFiles = 256
 
     @concurrent
     static func scan(directory: URL) async -> [DiscoveredPlugin] {
@@ -49,24 +72,150 @@ nonisolated enum PluginDiscovery {
 
     static func examine(folder: URL) -> DiscoveredPlugin {
         func invalid(_ reason: String) -> DiscoveredPlugin {
-            DiscoveredPlugin(folderURL: folder, manifest: nil, invalidReason: reason)
+            DiscoveredPlugin(
+                folderURL: folder,
+                manifest: nil,
+                contentDigest: nil,
+                invalidReason: reason
+            )
         }
 
-        let manifestURL = folder.appending(path: "manifest.json")
-        guard let data = try? Data(contentsOf: manifestURL) else {
-            return invalid("manifest.json is missing")
-        }
-        let manifest: PluginManifest
         do {
-            manifest = try JSONDecoder().decode(PluginManifest.self, from: data)
+            let snapshot = try bundleSnapshot(in: folder)
+            return DiscoveredPlugin(
+                folderURL: folder,
+                manifest: snapshot.manifest,
+                contentDigest: snapshot.contentDigest,
+                invalidReason: nil
+            )
         } catch {
-            return invalid("manifest.json does not decode: \(error.localizedDescription)")
+            return invalid(error.localizedDescription)
         }
-        if let reason = validationFailure(of: manifest, folder: folder) { return invalid(reason) }
-        return DiscoveredPlugin(folderURL: folder, manifest: manifest, invalidReason: nil)
     }
 
     static func validationFailure(of manifest: PluginManifest, folder: URL) -> String? {
+        if let reason = manifestValidationFailure(of: manifest, folder: folder) { return reason }
+        let entryURL = folder.appending(path: manifest.entry)
+        guard let values = try? entryURL.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .fileSizeKey,
+        ]), values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize else {
+            return "entry file \"\(manifest.entry)\" is missing or is not a regular file"
+        }
+        guard size <= maxEntryBytes else {
+            return "entry file is \(size) bytes; the limit is \(maxEntryBytes)"
+        }
+        return nil
+    }
+
+    static func bundleSnapshot(
+        in folder: URL,
+        expectedManifest: PluginManifest? = nil,
+        expectedDigest: String? = nil
+    ) throws -> PluginBundleSnapshot {
+        let folderValues = try folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard folderValues.isDirectory == true, folderValues.isSymbolicLink != true else {
+            throw PluginBundleError.invalid("plugin folder must be a real directory, not a symbolic link")
+        }
+
+        let keys: Set<URLResourceKey> = [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .fileSizeKey,
+        ]
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: Array(keys),
+            options: [],
+            errorHandler: { _, _ in false }
+        ) else {
+            throw PluginBundleError.invalid("plugin folder could not be read")
+        }
+
+        let rootPath = folder.standardizedFileURL.path(percentEncoded: false)
+        var files: [(path: String, data: Data)] = []
+        var totalBytes = 0
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: keys)
+            guard values.isSymbolicLink != true else {
+                throw PluginBundleError.invalid("plugin bundle must not contain symbolic links")
+            }
+            if values.isDirectory == true { continue }
+            guard values.isRegularFile == true else {
+                throw PluginBundleError.invalid("plugin bundle may contain only directories and regular files")
+            }
+            guard files.count < maxBundleFiles else {
+                throw PluginBundleError.invalid("plugin bundle contains more than \(maxBundleFiles) files")
+            }
+
+            let path = url.standardizedFileURL.path(percentEncoded: false)
+            guard path.hasPrefix(rootPath + "/") else {
+                throw PluginBundleError.invalid("plugin bundle contains an unsafe path")
+            }
+            let relativePath = String(path.dropFirst(rootPath.count + 1))
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            totalBytes += data.count
+            guard totalBytes <= maxBundleBytes else {
+                throw PluginBundleError.invalid("plugin bundle exceeds its \(maxBundleBytes)-byte limit")
+            }
+            files.append((relativePath, data))
+        }
+        files.sort { $0.path < $1.path }
+
+        guard let manifestData = files.first(where: { $0.path == "manifest.json" })?.data else {
+            throw PluginBundleError.invalid("manifest.json is missing")
+        }
+        guard manifestData.count <= maxManifestBytes else {
+            throw PluginBundleError.invalid("manifest.json exceeds its size limit")
+        }
+
+        let manifest: PluginManifest
+        do {
+            manifest = try JSONDecoder().decode(PluginManifest.self, from: manifestData)
+        } catch {
+            throw PluginBundleError.invalid("manifest.json does not decode: \(error.localizedDescription)")
+        }
+        if let reason = manifestValidationFailure(of: manifest, folder: folder) {
+            throw PluginBundleError.invalid(reason)
+        }
+        if let expectedManifest, manifest != expectedManifest {
+            throw PluginBundleError.invalid("plugin manifest changed; refresh plugins before enabling it")
+        }
+        guard let entryData = files.first(where: { $0.path == manifest.entry })?.data else {
+            throw PluginBundleError.invalid("entry file \"\(manifest.entry)\" is missing")
+        }
+        guard entryData.count <= maxEntryBytes else {
+            throw PluginBundleError.invalid(
+                "entry file is \(entryData.count) bytes; the limit is \(maxEntryBytes)"
+            )
+        }
+        guard let entrySource = String(data: entryData, encoding: .utf8) else {
+            throw PluginBundleError.invalid("entry script must be valid UTF-8")
+        }
+
+        var hasher = SHA256()
+        for file in files {
+            hasher.update(data: Data("\(file.path.utf8.count):\(file.path):\(file.data.count):".utf8))
+            hasher.update(data: file.data)
+        }
+        let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        if let expectedDigest, digest != expectedDigest {
+            throw PluginBundleError.invalid("plugin contents changed; refresh and grant permissions again")
+        }
+        return PluginBundleSnapshot(
+            manifest: manifest,
+            contentDigest: digest,
+            entrySource: entrySource
+        )
+    }
+
+    private static func manifestValidationFailure(
+        of manifest: PluginManifest,
+        folder: URL
+    ) -> String? {
         guard manifest.id == folder.lastPathComponent else {
             return "id \"\(manifest.id)\" does not match the folder name \"\(folder.lastPathComponent)\""
         }
@@ -81,13 +230,6 @@ nonisolated enum PluginDiscovery {
         }
         guard manifest.apiMajor == PluginManifest.supportedAPIMajor else {
             return "requires plugin API \(manifest.api); this Winston provides \(PluginManifest.hostAPIVersion)"
-        }
-        let entryURL = folder.appending(path: manifest.entry)
-        guard let size = try? entryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize else {
-            return "entry file \"\(manifest.entry)\" is missing"
-        }
-        guard size <= maxEntryBytes else {
-            return "entry file is \(size) bytes; the limit is \(maxEntryBytes)"
         }
         return nil
     }

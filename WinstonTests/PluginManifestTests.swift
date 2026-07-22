@@ -13,7 +13,10 @@ struct PluginManifestTests {
         #expect(manifest.id == "cz.example.tool")
         #expect(manifest.permissions == [.libraryRead, .uiToast])
         #expect(manifest.apiMajor == 1)
-        #expect(manifest.grantKey == "cz.example.tool@1.2.0")
+        #expect(
+            manifest.grantKey(contentDigest: "abc")
+                == "cz.example.tool@1.2.0#sha256:abc"
+        )
     }
 
     @Test func unknownPermissionFailsTheWholeManifest() {
@@ -76,6 +79,40 @@ struct PluginManifestTests {
         let folder = try makeFolder(named: "cz.example.tool",
                                     manifestJSON: manifestJSON(id: "cz.example.tool", entry: "../outside.js"))
         #expect(PluginDiscovery.examine(folder: folder).invalidReason?.contains("plain file name") == true)
+    }
+
+    @Test func symbolicLinkEntryIsRejected() throws {
+        let folder = try makeFolder(
+            named: "cz.example.tool",
+            manifestJSON: manifestJSON(id: "cz.example.tool"),
+            entry: nil
+        )
+        let outside = folder.deletingLastPathComponent().appending(path: "outside-\(UUID()).js")
+        try Data("console.log('outside')".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: folder.appending(path: "index.js"),
+            withDestinationURL: outside
+        )
+
+        let discovered = PluginDiscovery.examine(folder: folder)
+
+        #expect(discovered.manifest == nil)
+        #expect(discovered.invalidReason?.contains("symbolic") == true)
+    }
+
+    @Test func bundleDigestChangesWhenEntryChangesWithoutAManifestBump() throws {
+        let folder = try makeFolder(
+            named: "cz.example.tool",
+            manifestJSON: manifestJSON(id: "cz.example.tool"),
+            entry: "console.log('first')"
+        )
+        let first = try PluginDiscovery.bundleSnapshot(in: folder)
+
+        try Data("console.log('second')".utf8).write(to: folder.appending(path: "index.js"))
+        let second = try PluginDiscovery.bundleSnapshot(in: folder)
+
+        #expect(first.manifest == second.manifest)
+        #expect(first.contentDigest != second.contentDigest)
     }
 
     @Test func unsupportedAPIMajorIsRefused() throws {

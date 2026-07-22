@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import Synchronization
 
 nonisolated struct PluginBookDTO: Codable, Sendable {
     let uuid: String
@@ -87,11 +88,57 @@ nonisolated struct PluginApplyResultDTO: Codable, Sendable {
     let applied: [String]
 }
 
+nonisolated struct PluginBookPageDTO: Codable, Sendable {
+    let items: [PluginBookDTO]
+    let nextCursor: String?
+}
+
+nonisolated enum PluginLibraryLimits {
+    static let defaultPageSize = 50
+    static let maximumPageSize = 100
+    static let maximumScannedBooksPerPage = 500
+    static let maximumCursorOffset = 100_000
+    static let maximumSearchBytes = 256
+}
+
+nonisolated struct PluginSessionLease: Hashable, Sendable {
+    let id: UUID
+    let pluginID: String
+    let contentDigest: String
+}
+
+private nonisolated final class PluginSessionRegistry: Sendable {
+    private let active = Mutex(Set<PluginSessionLease>())
+
+    func issue(pluginID: String, contentDigest: String) -> PluginSessionLease {
+        let lease = PluginSessionLease(
+            id: UUID(),
+            pluginID: pluginID,
+            contentDigest: contentDigest
+        )
+        active.withLock { $0.insert(lease) }
+        return lease
+    }
+
+    func invalidate(_ lease: PluginSessionLease) {
+        active.withLock { $0.remove(lease) }
+    }
+
+    func contains(_ lease: PluginSessionLease) -> Bool {
+        active.withLock { $0.contains(lease) }
+    }
+}
+
 nonisolated final class PluginStorageRepository: @unchecked Sendable {
     private let queue = DispatchQueue(label: "cz.annajung.Winston.plugin-storage")
 
-    func get(_ key: String, for manifest: PluginManifest) async -> Result<Data?, PluginError> {
+    func get(
+        _ key: String,
+        for manifest: PluginManifest,
+        sessionIsValid: @escaping @Sendable () -> Bool
+    ) async -> Result<Data?, PluginError> {
         await perform {
+            guard sessionIsValid() else { return .failure(Self.inactiveSessionError) }
             do {
                 return .success(try Self.load(for: manifest)[key].map { Data($0.utf8) })
             } catch let error as PluginError {
@@ -102,12 +149,18 @@ nonisolated final class PluginStorageRepository: @unchecked Sendable {
         }
     }
 
-    func set(_ valueJSON: String, for key: String,
-             manifest: PluginManifest) async -> Result<Data?, PluginError> {
+    func set(
+        _ valueJSON: String,
+        for key: String,
+        manifest: PluginManifest,
+        sessionIsValid: @escaping @Sendable () -> Bool
+    ) async -> Result<Data?, PluginError> {
         await perform {
+            guard sessionIsValid() else { return .failure(Self.inactiveSessionError) }
             do {
                 var store = try Self.load(for: manifest)
                 store[key] = valueJSON
+                guard sessionIsValid() else { return .failure(Self.inactiveSessionError) }
                 return Self.save(store, for: manifest)
             } catch let error as PluginError {
                 return .failure(error)
@@ -117,11 +170,17 @@ nonisolated final class PluginStorageRepository: @unchecked Sendable {
         }
     }
 
-    func remove(_ key: String, for manifest: PluginManifest) async -> Result<Data?, PluginError> {
+    func remove(
+        _ key: String,
+        for manifest: PluginManifest,
+        sessionIsValid: @escaping @Sendable () -> Bool
+    ) async -> Result<Data?, PluginError> {
         await perform {
+            guard sessionIsValid() else { return .failure(Self.inactiveSessionError) }
             do {
                 var store = try Self.load(for: manifest)
                 store.removeValue(forKey: key)
+                guard sessionIsValid() else { return .failure(Self.inactiveSessionError) }
                 return Self.save(store, for: manifest)
             } catch let error as PluginError {
                 return .failure(error)
@@ -144,6 +203,10 @@ nonisolated final class PluginStorageRepository: @unchecked Sendable {
     private static func storageURL(for manifest: PluginManifest) -> URL {
         AppPaths.pluginDataDirectory(for: manifest.id).appending(path: "storage.json")
     }
+
+    private static let inactiveSessionError = PluginError.unavailable(
+        "plugin session is no longer active"
+    )
 
     private static func load(for manifest: PluginManifest) throws -> [String: String] {
         let url = storageURL(for: manifest)
@@ -198,6 +261,7 @@ final class PluginHostAPI {
     private let online: any OnlineMetadataFetching
     private let mutations: CatalogMutationService
     private let storage = PluginStorageRepository()
+    private let sessions = PluginSessionRegistry()
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
          online: any OnlineMetadataFetching = OnlineMetadataService(),
@@ -209,23 +273,57 @@ final class PluginHostAPI {
         self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
     }
 
-    func makeHandler(for manifest: PluginManifest, granted: Set<PluginPermission>) -> PluginHostHandler {
+    func openSession(for manifest: PluginManifest, contentDigest: String) -> PluginSessionLease {
+        sessions.issue(pluginID: manifest.id, contentDigest: contentDigest)
+    }
+
+    func invalidate(_ session: PluginSessionLease) {
+        sessions.invalidate(session)
+    }
+
+    func isActive(_ session: PluginSessionLease) -> Bool {
+        sessions.contains(session)
+    }
+
+    func makeHandler(
+        for manifest: PluginManifest,
+        granted: Set<PluginPermission>,
+        session: PluginSessionLease
+    ) -> PluginHostHandler {
         { [weak self] call in
             guard let self else { return .failure(.unavailable("Winston is shutting down")) }
-            return await self.handle(call, manifest: manifest, granted: granted)
+            return await self.handle(
+                call,
+                manifest: manifest,
+                granted: granted,
+                session: session
+            )
         }
     }
 
-    private func handle(_ call: PluginAPICall, manifest: PluginManifest,
-                        granted: Set<PluginPermission>) async -> Result<Data?, PluginError> {
+    private func handle(
+        _ call: PluginAPICall,
+        manifest: PluginManifest,
+        granted: Set<PluginPermission>,
+        session: PluginSessionLease
+    ) async -> Result<Data?, PluginError> {
+        guard session.pluginID == manifest.id, sessions.contains(session) else {
+            return .failure(Self.inactiveSessionError)
+        }
         func require(_ permission: PluginPermission) -> PluginError? {
             granted.contains(permission) ? nil : .permissionDenied("\(permission.rawValue) is not granted")
         }
+        let sessionIsValid: @Sendable () -> Bool = { [sessions] in
+            sessions.contains(session)
+        }
 
         switch call {
-        case .libraryList(let searchText):
+        case .libraryList(let searchText, let cursor, let limit):
             if let denied = require(.libraryRead) { return .failure(denied) }
-            return encode(listBooks(matching: searchText))
+            switch listBooks(matching: searchText, cursor: cursor, limit: limit) {
+            case .success(let page): return encode(page)
+            case .failure(let error): return .failure(error)
+            }
 
         case .libraryGet(let uuid):
             if let denied = require(.libraryRead) { return .failure(denied) }
@@ -236,7 +334,7 @@ final class PluginHostAPI {
             guard let book = book(with: uuid) else {
                 return .failure(.invalidArgument("no book with uuid \(uuid.uuidString)"))
             }
-            switch apply(patch, to: book) {
+            switch apply(patch, to: book, session: session) {
             case .success(let result): return encode(result)
             case .failure(let error): return .failure(error)
             }
@@ -252,19 +350,28 @@ final class PluginHostAPI {
             let outcome = await online.fetch(isbn: isbn, title: title ?? "", author: author,
                                              language: language,
                                              hardcoverToken: token.isEmpty ? nil : token)
+            guard sessions.contains(session), !Task.isCancelled else {
+                return .failure(Self.inactiveSessionError)
+            }
             return encode(outcome.metadata.map(PluginFetchedMetadataDTO.init))
 
         case .storageGet(let key):
-            return await storage.get(key, for: manifest)
+            return await storage.get(key, for: manifest, sessionIsValid: sessionIsValid)
 
         case .storageSet(let key, let valueJSON):
-            return await storage.set(valueJSON, for: key, manifest: manifest)
+            return await storage.set(
+                valueJSON,
+                for: key,
+                manifest: manifest,
+                sessionIsValid: sessionIsValid
+            )
 
         case .storageRemove(let key):
-            return await storage.remove(key, for: manifest)
+            return await storage.remove(key, for: manifest, sessionIsValid: sessionIsValid)
 
         case .toast(let message, let style):
             if let denied = require(.uiToast) { return .failure(denied) }
+            guard sessions.contains(session) else { return .failure(Self.inactiveSessionError) }
             let text = "\(manifest.name): \(message)"
             switch style {
             case .info: toasts.info(text)
@@ -277,17 +384,68 @@ final class PluginHostAPI {
 
     // MARK: - Library
 
-    private func listBooks(matching searchText: String?) -> [PluginBookDTO] {
-        let books = (try? modelContext.fetch(FetchDescriptor<Book>())) ?? []
-        let needle = searchText?.lowercased() ?? ""
-        return books
-            .filter {
-                needle.isEmpty
-                    || $0.displayTitle.lowercased().contains(needle)
-                    || ($0.displayAuthor?.lowercased().contains(needle) ?? false)
+    private func listBooks(
+        matching searchText: String?,
+        cursor: String?,
+        limit: Int
+    ) -> Result<PluginBookPageDTO, PluginError> {
+        guard (1 ... PluginLibraryLimits.maximumPageSize).contains(limit) else {
+            return .failure(.invalidArgument(
+                "library.list limit must be between 1 and \(PluginLibraryLimits.maximumPageSize)"
+            ))
+        }
+        let needle = searchText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard needle.utf8.count <= PluginLibraryLimits.maximumSearchBytes else {
+            return .failure(.invalidArgument("library.list search text is too long"))
+        }
+        guard let offset = Self.cursorOffset(cursor) else {
+            return .failure(.invalidArgument("library.list cursor is invalid"))
+        }
+
+        let scanLimit = needle.isEmpty
+            ? limit
+            : min(PluginLibraryLimits.maximumScannedBooksPerPage, max(limit * 5, limit))
+        var descriptor = FetchDescriptor<Book>(sortBy: [
+            SortDescriptor(\Book.title),
+            SortDescriptor(\Book.uuid),
+        ])
+        descriptor.fetchOffset = offset
+        descriptor.fetchLimit = scanLimit + 1
+        let fetched: [Book]
+        do {
+            fetched = try modelContext.fetch(descriptor)
+        } catch {
+            return .failure(.unavailable("could not read the library"))
+        }
+
+        var items: [PluginBookDTO] = []
+        var consumed = 0
+        for book in fetched.prefix(scanLimit) {
+            consumed += 1
+            if needle.isEmpty
+                || book.displayTitle.localizedCaseInsensitiveContains(needle)
+                || book.displayAuthor?.localizedCaseInsensitiveContains(needle) == true {
+                items.append(PluginBookDTO(book))
+                if items.count == limit { break }
             }
-            .sorted { $0.displayTitle.localizedCaseInsensitiveCompare($1.displayTitle) == .orderedAscending }
-            .map(PluginBookDTO.init)
+        }
+        let nextOffset = offset + consumed
+        let hasMore = consumed < fetched.count
+            && nextOffset <= PluginLibraryLimits.maximumCursorOffset
+        return .success(PluginBookPageDTO(
+            items: items,
+            nextCursor: hasMore ? "v1:\(nextOffset)" : nil
+        ))
+    }
+
+    private static func cursorOffset(_ cursor: String?) -> Int? {
+        guard let cursor else { return 0 }
+        guard cursor.hasPrefix("v1:"),
+              let offset = Int(cursor.dropFirst(3)),
+              (0 ... PluginLibraryLimits.maximumCursorOffset).contains(offset) else {
+            return nil
+        }
+        return offset
     }
 
     private func book(with uuid: UUID) -> Book? {
@@ -298,7 +456,8 @@ final class PluginHostAPI {
 
     private func apply(
         _ patch: PluginMetadataPatch,
-        to book: Book
+        to book: Book,
+        session: PluginSessionLease
     ) -> Result<PluginApplyResultDTO, PluginError> {
         let bookID = book.uuid
         let expectedFields = applicableFields(in: patch, to: book)
@@ -313,6 +472,7 @@ final class PluginHostAPI {
                 affectedBookIDs: [bookID],
                 revertingOnFailure: preimage.restore
             ) {
+                guard sessions.contains(session) else { throw Self.inactiveSessionError }
                 applied = applyFields(in: patch, to: try mutations.book(id: bookID))
             }
             return .success(PluginApplyResultDTO(applied: applied))
@@ -374,4 +534,8 @@ final class PluginHostAPI {
         do { return .success(try encoder.encode(value)) }
         catch { return .failure(.unavailable("could not encode the result")) }
     }
+
+    private static let inactiveSessionError = PluginError.unavailable(
+        "plugin session is no longer active"
+    )
 }

@@ -146,7 +146,12 @@ struct CatalogMutationFailureTests {
             description: nil,
             author: nil
         )
-        let handler = host.makeHandler(for: manifest, granted: [.libraryWrite])
+        let session = host.openSession(for: manifest, contentDigest: "test-digest")
+        let handler = host.makeHandler(
+            for: manifest,
+            granted: [.libraryWrite],
+            session: session
+        )
         let patch = PluginMetadataPatch(
             title: nil,
             author: nil,

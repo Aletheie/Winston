@@ -2,7 +2,7 @@ import Foundation
 import Synchronization
 
 nonisolated struct PluginLogEntry: Sendable, Identifiable, Equatable {
-    enum Level: Sendable, Equatable { case debug, info, warning, error }
+    enum Level: String, Codable, Sendable, Equatable { case debug, info, warning, error }
     let id = UUID()
     let date: Date
     let level: Level
@@ -23,12 +23,13 @@ nonisolated final class PluginLogBuffer: Sendable {
     var snapshot: [PluginLogEntry] { entries.withLock { $0 } }
 }
 
-nonisolated enum PluginError: Error, Sendable, Equatable {
+nonisolated enum PluginError: Error, Codable, Sendable, Equatable {
     case contextCreationFailed
     case loadFailed(String)
     case invalidArgument(String)
     case permissionDenied(String)
     case unavailable(String)
+    case workerTerminated(String)
     case timeout
 
     var code: String {
@@ -38,6 +39,7 @@ nonisolated enum PluginError: Error, Sendable, Equatable {
         case .invalidArgument: "invalid-argument"
         case .permissionDenied: "permission-denied"
         case .unavailable: "unavailable"
+        case .workerTerminated: "worker-terminated"
         case .timeout: "timeout"
         }
     }
@@ -49,6 +51,7 @@ nonisolated enum PluginError: Error, Sendable, Equatable {
         case .invalidArgument(let detail): detail
         case .permissionDenied(let detail): detail
         case .unavailable(let detail): detail
+        case .workerTerminated(let detail): detail
         case .timeout: "the operation timed out"
         }
     }
@@ -62,36 +65,5 @@ nonisolated enum PluginStorageLimits {
 
     static func accepts(key: String) -> Bool {
         !key.isEmpty && key.utf8.count <= maxKeyBytes
-    }
-}
-
-// JSC has no interruption API: on timeout the plugin is quarantined and its wedged
-// queue thread is deliberately leaked (one thread, never the main actor).
-nonisolated func withPluginDeadline<T: Sendable>(
-    seconds: TimeInterval,
-    _ operation: @escaping @Sendable () async throws -> T
-) async throws -> T {
-    let gate = ResumeGate()
-    return try await withCheckedThrowingContinuation { continuation in
-        Task {
-            let result: Result<T, any Error>
-            do { result = .success(try await operation()) } catch { result = .failure(error) }
-            if gate.claim() { continuation.resume(with: result) }
-        }
-        Task {
-            try? await Task.sleep(for: .seconds(seconds))
-            if gate.claim() { continuation.resume(throwing: PluginError.timeout) }
-        }
-    }
-}
-
-private nonisolated final class ResumeGate: Sendable {
-    private let resumed = Mutex(false)
-    func claim() -> Bool {
-        resumed.withLock { done in
-            if done { return false }
-            done = true
-            return true
-        }
     }
 }

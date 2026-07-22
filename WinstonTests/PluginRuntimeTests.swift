@@ -1,5 +1,6 @@
-import Testing
+import Darwin
 import Foundation
+import Testing
 @testable import Winston
 
 @MainActor
@@ -20,25 +21,39 @@ struct PluginRuntimeTests {
     private final class FaultRecorder: Sendable {
         let buffer = PluginLogBuffer()
         var count: Int { buffer.snapshot.count }
-        var callback: @Sendable (String) -> Void {
-            { [buffer] message in buffer.append(.error, message) }
+        var callback: @Sendable (PluginRuntimeFault) -> Void {
+            { [buffer] fault in
+                switch fault {
+                case .script(let message), .terminated(let message):
+                    buffer.append(.error, message)
+                }
+            }
         }
     }
 
     private func makeRuntime(
         source: String,
         permissions: Set<PluginPermission> = [],
+        executionDeadline: TimeInterval = PluginRuntime.defaultExecutionDeadline,
         faults: FaultRecorder = FaultRecorder()
     ) throws -> PluginRuntime {
         let folder = FileManager.default.temporaryDirectory
             .appending(path: "WinstonRuntimeTests-\(UUID().uuidString)", directoryHint: .isDirectory)
             .appending(path: "cz.test.plugin", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try Data(source.utf8).write(to: folder.appending(path: "index.js"))
         let manifest = PluginManifest(id: "cz.test.plugin", name: "Test", version: "1.0.0",
                                       api: "1", entry: "index.js", permissions: permissions,
                                       description: nil, author: nil)
-        return PluginRuntime(manifest: manifest, folderURL: folder, onFault: faults.callback)
+        try JSONEncoder().encode(manifest).write(to: folder.appending(path: "manifest.json"))
+        try Data(source.utf8).write(to: folder.appending(path: "index.js"))
+        let digest = try PluginDiscovery.bundleSnapshot(in: folder).contentDigest
+        return PluginRuntime(
+            manifest: manifest,
+            folderURL: folder,
+            contentDigest: digest,
+            executionDeadline: executionDeadline,
+            onFault: faults.callback
+        )
     }
 
     private func logged(_ needle: String, in runtime: PluginRuntime,
@@ -218,14 +233,20 @@ struct PluginRuntimeTests {
         recorder.result = .success(Data("[]".utf8))
         let runtime = try makeRuntime(source: """
             exports.activate = async () => {
-                const books = await Winston.library.list();
-                console.log("count:" + books.length);
+                const page = await Winston.library.list();
+                console.log("count:" + page.items.length);
             };
             """, permissions: [.libraryRead])
         try await runtime.load(granted: [.libraryRead], handler: recorder.handler())
 
         #expect(await logged("count:0", in: runtime))
-        #expect(recorder.calls == [.libraryList(searchText: nil)])
+        #expect(recorder.calls == [
+            .libraryList(
+                searchText: nil,
+                cursor: nil,
+                limit: PluginLibraryLimits.defaultPageSize
+            ),
+        ])
     }
 
     @Test func hostInfoIsExposed() async throws {
@@ -238,6 +259,61 @@ struct PluginRuntimeTests {
     }
 
     // MARK: - Lifecycle
+
+    @Test func infiniteLoopWorkerIsActuallyTerminatedAtTheDeadline() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(
+            source: "while (true) {}",
+            executionDeadline: 0.2
+        )
+        let load = Task {
+            try await runtime.load(granted: [], handler: recorder.handler())
+        }
+
+        var pid: Int32?
+        let pidDeadline = Date.now.addingTimeInterval(2)
+        while pid == nil, Date.now < pidDeadline {
+            pid = await runtime.workerProcessIdentifier()
+            if pid == nil { try? await Task.sleep(for: .milliseconds(10)) }
+        }
+        let result = await load.result
+
+        if case .failure(let error as PluginError) = result {
+            #expect(error == .timeout)
+        } else {
+            Issue.record("infinite loop should time out")
+        }
+        #expect(!(await runtime.isWorkerRunning()))
+        if let pid {
+            #expect(kill(pid, 0) == -1)
+            #expect(errno == ESRCH)
+        }
+    }
+
+    @Test func repeatedRunawayWorkersDoNotAccumulateProcesses() async throws {
+        let recorder = HostRecorder()
+        var pids: [Int32] = []
+        for _ in 0 ..< 3 {
+            let runtime = try makeRuntime(
+                source: "const blocks = []; while (true) { blocks.push(new ArrayBuffer(1048576)); }",
+                executionDeadline: 0.2
+            )
+            let load = Task {
+                try await runtime.load(granted: [], handler: recorder.handler())
+            }
+            let pidDeadline = Date.now.addingTimeInterval(2)
+            while await runtime.workerProcessIdentifier() == nil, Date.now < pidDeadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            if let pid = await runtime.workerProcessIdentifier() { pids.append(pid) }
+            _ = await load.result
+            #expect(!(await runtime.isWorkerRunning()))
+        }
+
+        for pid in pids {
+            #expect(kill(pid, 0) == -1)
+        }
+    }
 
     @Test func shutdownCallsDeactivate() async throws {
         let recorder = HostRecorder()

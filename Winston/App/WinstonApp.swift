@@ -50,6 +50,9 @@ struct WinstonApp: App {
     @State private var libraryStartupState: LibraryStartupState
 
     init() {
+        if PluginWorkerProcessMain.isWorkerInvocation {
+            PluginWorkerProcessMain.run()
+        }
         let isRunningUnitTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         let container = isRunningUnitTests ? PersistenceController.inMemory() : PersistenceController.shared
         self.container = container
