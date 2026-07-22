@@ -310,12 +310,17 @@ final class MetadataService {
             metadataFetchSummary = String(localized: "Turn on “Fetch metadata online” in Settings first.")
             return
         }
+        let bookIDs = books.map(\.uuid)
         metadataFetchSummary = nil
         Task {
             var matched = 0
-            for book in books where await performEnrich(book, replaceCover: true) { matched += 1 }
+            for bookID in bookIDs {
+                guard !Task.isCancelled,
+                      let book = try? mutations.book(id: bookID) else { continue }
+                if await performEnrich(book, replaceCover: true) { matched += 1 }
+            }
             metadataFetchSummary = matched > 0
-                ? String(localized: "Updated \(matched) of \(books.count) from online catalogs.")
+                ? String(localized: "Updated \(matched) of \(bookIDs.count) from online catalogs.")
                 : String(localized: "No matching records found online.")
             try? await Task.sleep(for: .seconds(6))
             if !isFetchingOnline { metadataFetchSummary = nil }
@@ -339,100 +344,155 @@ final class MetadataService {
                 $0.onlineLookupAt == nil && ($0.bookDescription == nil || $0.communityRating == nil)
             }
         }
-        guard !books.isEmpty else { return }
+        let bookIDs = books.map(\.uuid)
+        guard !bookIDs.isEmpty else { return }
         Task {
-            var processed = 0
-            for book in books {
-                await performEnrich(book, replaceCover: false, save: false)
-                processed += 1
-                if processed % 20 == 0 { modelContext.saveQuietly() }
+            for bookID in bookIDs {
+                guard !Task.isCancelled,
+                      let book = try? mutations.book(id: bookID) else { continue }
+                await performEnrich(book, replaceCover: false)
             }
-            modelContext.saveQuietly()
         }
     }
 
     @discardableResult
-    func performEnrich(_ book: Book, replaceCover: Bool, save: Bool = true) async -> Bool {
-        guard book.modelContext != nil else { return false }
-        let uuid = book.uuid
-        guard !enrichingUUIDs.contains(uuid) else { return false }
-        let isbn = book.isbn
-        let title = book.displayTitle
-        let author = book.displayAuthor
+    func performEnrich(_ book: Book, replaceCover: Bool) async -> Bool {
+        guard let snapshot = BookAnalysisSnapshot(book: book) else { return false }
+        let uuid = snapshot.bookID
         let hasCover = CoverStore.exists(for: uuid)
         let coverVersion = book.coverVersion
         let coverToken = replaceCover
             ? await covers.beginUserMutation(for: uuid)
             : await covers.beginBackgroundMutation(for: uuid)
 
+        let runID = UUID()
+        enrichmentRuns[uuid] = runID
         enrichingUUIDs.insert(uuid)
-        defer { enrichingUUIDs.remove(uuid) }
+        defer {
+            if enrichmentRuns[uuid] == runID {
+                enrichmentRuns.removeValue(forKey: uuid)
+                enrichingUUIDs.remove(uuid)
+            }
+        }
 
         let language = preferredLanguage
         let token = normalizedHardcoverToken
         let configuration = lookupConfiguration(language: language, hardcoverToken: token)
-        let outcome = await online.fetch(
-            isbn: isbn,
-            title: title,
-            author: author,
-            language: language,
-            hardcoverToken: token
-        )
-        guard let fetched = outcome.metadata else {
-            if outcome.reachedNetwork, book.modelContext != nil {
-                book.onlineLookupAt = .now
-                book.onlineLookupConfiguration = configuration
-                if save { modelContext.saveQuietly() }
+        let online = self.online
+        let shouldDownloadCover = replaceCover || !hasCover
+        let job: CatalogAnalysisJob<OnlineEnrichmentProposal> = analysisCoordinator.start(
+            snapshot: snapshot,
+            kind: .onlineEnrichment
+        ) { snapshot in
+            let outcome = await online.fetch(
+                isbn: snapshot.lookupISBN,
+                title: snapshot.lookupTitle,
+                author: snapshot.lookupAuthor,
+                language: language,
+                hardcoverToken: token
+            )
+            guard !Task.isCancelled else { return nil }
+
+            var coverJPEGData: Data?
+            if shouldDownloadCover,
+               let coverURL = outcome.metadata?.coverURL,
+               let downloaded = await online.downloadCover(coverURL),
+               !Task.isCancelled {
+                coverJPEGData = await Self.normalizedJPEGData(downloaded)
+            }
+            guard !Task.isCancelled else { return nil }
+            return OnlineEnrichmentProposal(
+                outcome: outcome,
+                coverJPEGData: coverJPEGData,
+                lookupConfiguration: configuration,
+                completedAt: .now
+            )
+        }
+        defer { analysisCoordinator.finish(job.ticket) }
+
+        guard let proposal = await analysisCoordinator.value(for: job),
+              proposal.lookupConfiguration == currentLookupConfiguration,
+              analysisCoordinator.isCurrent(job.ticket),
+              let currentBook = try? mutations.book(id: snapshot.bookID),
+              snapshot.matches(currentBook) else { return false }
+
+        var coverRollback: CoverRollbackTicket?
+        var installedCoverURL: URL?
+        if let data = proposal.coverJPEGData,
+           currentBook.coverVersion == coverVersion,
+           (replaceCover || !CoverStore.exists(for: uuid)) {
+            installedCoverURL = currentBook.coverCacheURL
+            coverRollback = await covers.install(
+                data,
+                using: coverToken,
+                onlyIfMissing: !replaceCover
+            )
+        }
+
+        if coverRollback != nil, !(await covers.isCurrent(coverToken)) {
+            return false
+        }
+        guard analysisCoordinator.isCurrent(job.ticket),
+              proposal.lookupConfiguration == currentLookupConfiguration,
+              let liveBook = try? mutations.book(id: snapshot.bookID),
+              snapshot.matches(liveBook),
+              coverRollback == nil || liveBook.coverVersion == coverVersion else {
+            if let coverRollback, let installedCoverURL {
+                await rollbackCover(coverRollback, cacheURL: installedCoverURL)
             }
             return false
         }
 
-        var downloadedCover: NSImage?
-        if (replaceCover || !hasCover), let coverURL = fetched.coverURL,
-           let data = await online.downloadCover(coverURL) {
-            downloadedCover = await Task.detached(priority: .utility) { NSImage(data: data) }.value
-        }
-
-        guard book.modelContext != nil else { return false }
-
-        if downloadedCover != nil,
-           book.coverVersion != coverVersion || (!replaceCover && CoverStore.exists(for: uuid)) {
-            downloadedCover = nil
-        }
-
-        var installedCoverVersion: Int?
-        var coverRollback: CoverRollbackTicket?
-        var installedCoverURL: URL?
-        if let image = downloadedCover {
-            let fileURL = book.coverCacheURL
-            let data = await Task.detached(priority: .utility) {
-                ImageTranscoder.jpegData(from: image)
-            }.value
-            if let data,
-               let rollback = await covers.install(
-                   data,
-                   using: coverToken,
-                   onlyIfMissing: !replaceCover
-               ),
-               await covers.isCurrent(coverToken) {
-                coverRollback = rollback
-                book.coverVersion += 1
-                installedCoverVersion = book.coverVersion
-                installedCoverURL = fileURL
-                await CoverCache.shared.replace(image, for: fileURL)
-                guard book.modelContext != nil else {
-                    _ = await covers.rollback(rollback)
-                    await CoverCache.shared.replace(
-                        rollback.previousData.flatMap(NSImage.init(data:)),
-                        for: fileURL
-                    )
-                    return false
+        let matched = proposal.outcome.metadata != nil
+        guard matched || proposal.outcome.reachedNetwork else { return false }
+        let bookPreimage = CatalogBookMetadataPreimage(liveBook)
+        let workPreimage = liveBook.work.map(CatalogWorkPreimage.init)
+        do {
+            try mutations.commit(
+                .applyAnalysis(bookID: snapshot.bookID, kind: .onlineEnrichment),
+                affectedBookIDs: [snapshot.bookID],
+                affectedWorkIDs: Set([snapshot.identityRevision.workID].compactMap { $0 }),
+                revertingOnFailure: {
+                    bookPreimage.restore()
+                    workPreimage?.restore()
                 }
-            } else {
-                downloadedCover = nil
+            ) {
+                let storedBook = try mutations.book(id: snapshot.bookID)
+                guard analysisCoordinator.isCurrent(job.ticket),
+                      proposal.lookupConfiguration == currentLookupConfiguration,
+                      snapshot.matches(storedBook),
+                      coverRollback == nil || storedBook.coverVersion == coverVersion else {
+                    throw CatalogMutationError.staleAnalysis
+                }
+                if let fetched = proposal.outcome.metadata {
+                    applyOnlineProposal(fetched, to: storedBook)
+                }
+                storedBook.onlineLookupAt = proposal.completedAt
+                storedBook.onlineLookupConfiguration = proposal.lookupConfiguration
+                if coverRollback != nil { storedBook.coverVersion += 1 }
             }
+        } catch {
+            if let coverRollback, let installedCoverURL {
+                await rollbackCover(coverRollback, cacheURL: installedCoverURL)
+            }
+            return false
         }
 
+        if let coverRollback,
+           let installedCoverURL,
+           let data = proposal.coverJPEGData,
+           await covers.isCurrent(coverToken) {
+            _ = coverRollback
+            await CoverCache.shared.replace(NSImage(data: data), for: installedCoverURL)
+        }
+        return matched
+    }
+
+    private var currentLookupConfiguration: String {
+        lookupConfiguration(language: preferredLanguage, hardcoverToken: normalizedHardcoverToken)
+    }
+
+    private func applyOnlineProposal(_ fetched: FetchedMetadata, to book: Book) {
         book.applyOnline(fetched)
         if let work = book.work {
             if work.openLibraryWorkKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
@@ -445,25 +505,32 @@ final class MetadataService {
                !id.isEmpty {
                 work.hardcoverBookID = id
             }
-        }
-        book.onlineLookupAt = .now
-        book.onlineLookupConfiguration = configuration
-        if save {
-            let coverStillOurs = installedCoverVersion.map { $0 == book.coverVersion } ?? false
-            guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-                if coverStillOurs,
-                   let installedCoverURL,
-                   let coverRollback,
-                   await covers.rollback(coverRollback) {
-                    await CoverCache.shared.replace(
-                        coverRollback.previousData.flatMap(NSImage.init(data:)),
-                        for: installedCoverURL
-                    )
-                }
-                return false
+            if work.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                work.title = book.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                    ? book.title
+                    : book.displayTitle
             }
+            if work.author?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                work.author = book.displayAuthor
+            }
+            work.refreshMatchKey()
         }
-        return true
+    }
+
+    private func rollbackCover(_ rollback: CoverRollbackTicket, cacheURL: URL) async {
+        if await covers.rollback(rollback) {
+            await CoverCache.shared.replace(
+                rollback.previousData.flatMap(NSImage.init(data:)),
+                for: cacheURL
+            )
+        }
+    }
+
+    @concurrent
+    private static func normalizedJPEGData(_ data: Data) async -> Data? {
+        guard !Task.isCancelled, let image = NSImage(data: data) else { return nil }
+        let jpeg = ImageTranscoder.jpegData(from: image)
+        return Task.isCancelled ? nil : jpeg
     }
 
     private var preferredLanguage: MetadataLanguage {

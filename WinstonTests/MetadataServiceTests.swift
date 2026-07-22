@@ -143,6 +143,196 @@ struct MetadataServiceTests {
         #expect(CoverStore.loadData(for: book.uuid) == expected)
     }
 
+    @Test func changingLookupIdentityCancelsAndDiscardsTheOnlineProposal() async throws {
+        let lib = try await TestLibrary()
+        let book = Book(fileName: "identity.epub", originalFileName: "Identity.epub")
+        book.title = "Original Title"
+        book.author = "Original Author"
+        book.isbn = "9780000000001"
+        let work = Work(title: "Original Title", author: "Original Author")
+        lib.context.insert(work)
+        lib.context.insert(book)
+        book.work = work
+        try lib.context.save()
+
+        var fetched = FetchedMetadata()
+        fetched.title = "Stale Online Title"
+        fetched.authors = ["Stale Online Author"]
+        fetched.ratingsAverage = 4.9
+        fetched.openLibraryWorkKey = "/works/STALE"
+        let online = FetchGateOnlineClient(result: fetched)
+        let service = makeService(in: lib, online: online)
+        let task = Task { @MainActor in
+            await service.performEnrich(book, replaceCover: false)
+        }
+
+        await online.waitUntilStarted()
+        #expect(service.updateMetadata(
+            for: book,
+            title: "Manual Replacement",
+            author: "Manual Author",
+            publisher: nil,
+            year: nil,
+            series: nil,
+            seriesIndex: nil,
+            language: nil,
+            translator: nil,
+            isbn: "9780000000002",
+            description: nil,
+            tags: [],
+            shelfLocation: nil
+        ))
+        await online.resume()
+
+        #expect(await task.value == false)
+        #expect(book.title == "Manual Replacement")
+        #expect(book.author == "Manual Author")
+        #expect(book.isbn == "9780000000002")
+        #expect(book.communityRating == nil)
+        #expect(work.openLibraryWorkKey == nil)
+    }
+
+    @Test func movingABookToAnotherWorkDiscardsTheOnlineProposal() async throws {
+        let lib = try await TestLibrary()
+        let book = Book(fileName: "move.epub", originalFileName: "Move.epub")
+        book.title = "Stable Title"
+        let originalWork = Work(title: "Original Work")
+        let replacementWork = Work(title: "Replacement Work")
+        lib.context.insert(originalWork)
+        lib.context.insert(replacementWork)
+        lib.context.insert(book)
+        book.work = originalWork
+        try lib.context.save()
+
+        var fetched = FetchedMetadata()
+        fetched.bookDescription = "Description from the old work lookup"
+        fetched.hardcoverBookID = "stale-work-id"
+        let online = FetchGateOnlineClient(result: fetched)
+        let service = makeService(in: lib, online: online)
+        let task = Task { @MainActor in
+            await service.performEnrich(book, replaceCover: false)
+        }
+
+        await online.waitUntilStarted()
+        book.work = replacementWork
+        try lib.context.save()
+        await online.resume()
+
+        #expect(await task.value == false)
+        #expect(book.work?.uuid == replacementWork.uuid)
+        #expect(book.bookDescription == nil)
+        #expect(replacementWork.hardcoverBookID == nil)
+        #expect(originalWork.hardcoverBookID == nil)
+    }
+
+    @Test func identityMutationCooperativelyCancelsUnneededNetworkWork() async throws {
+        let lib = try await TestLibrary()
+        let book = Book(fileName: "cancel.epub", originalFileName: "Cancel.epub")
+        book.title = "Before"
+        lib.context.insert(book)
+        try lib.context.save()
+
+        let online = CancellationAwareOnlineClient()
+        let service = makeService(in: lib, online: online)
+        let task = Task { @MainActor in
+            await service.performEnrich(book, replaceCover: false)
+        }
+        await online.waitUntilStarted()
+
+        #expect(service.updateMetadata(
+            for: book,
+            title: "After",
+            author: nil,
+            publisher: nil,
+            year: nil,
+            series: nil,
+            seriesIndex: nil,
+            language: nil,
+            translator: nil,
+            isbn: nil,
+            description: nil,
+            tags: [],
+            shelfLocation: nil
+        ))
+
+        #expect(await task.value == false)
+        #expect(await online.wasCancelled)
+        #expect(service.enrichingUUIDs.isEmpty)
+        #expect(service.analysisCoordinator.activeJobCount == 0)
+    }
+
+    @Test func replacingThePrimaryAssetDiscardsALatePageCount() async throws {
+        let lib = try await TestLibrary()
+        let source = lib.root.appending(path: "page-source.epub")
+        try Data("page source".utf8).write(to: source)
+        let uuid = UUID()
+        let fileName = try BookFileStore.importCopy(of: source, uuid: uuid)
+        let book = Book(uuid: uuid, fileName: fileName, originalFileName: "Pages.epub")
+        let asset = BookAsset(
+            uuid: uuid,
+            fileName: fileName,
+            contentHash: "original-content",
+            book: book
+        )
+        lib.context.insert(book)
+        lib.context.insert(asset)
+        try lib.context.save()
+
+        let gate = PageCountGate()
+        let service = MetadataService(
+            modelContext: lib.context,
+            settings: AppSettings(),
+            online: FakeOnlineClient(),
+            estimatePageCount: { url, format in await gate.estimate(url: url, format: format) }
+        )
+        let task = Task { @MainActor in await service.backfillPageCount(for: book) }
+        await gate.waitUntilStarted()
+
+        asset.contentHash = "replacement-content"
+        asset.dateAdded = asset.dateAdded.addingTimeInterval(1)
+        try lib.context.save()
+        await gate.resume(with: 321)
+        await task.value
+
+        #expect(book.pageCount == nil)
+    }
+
+    @Test func onlineProposalSaveFailureRestoresEveryChangedField() async throws {
+        struct InjectedFailure: Error {}
+
+        let lib = try await TestLibrary()
+        let book = Book(fileName: "failure.epub", originalFileName: "Failure.epub")
+        let work = Work(title: "Existing Work")
+        lib.context.insert(work)
+        lib.context.insert(book)
+        book.work = work
+        try lib.context.save()
+
+        var fetched = FetchedMetadata()
+        fetched.title = "Must Roll Back"
+        fetched.authors = ["Must Roll Back"]
+        fetched.ratingsAverage = 4.8
+        fetched.openLibraryWorkKey = "/works/ROLLBACK"
+        let mutations = CatalogMutationService(
+            modelContext: lib.context,
+            saveAdapter: CatalogSaveAdapter { _ in throw InjectedFailure() }
+        )
+        let service = MetadataService(
+            modelContext: lib.context,
+            settings: AppSettings(),
+            online: FakeOnlineClient(result: fetched),
+            mutations: mutations
+        )
+
+        #expect(await service.performEnrich(book, replaceCover: false) == false)
+        #expect(book.title == nil)
+        #expect(book.author == nil)
+        #expect(book.communityRating == nil)
+        #expect(book.onlineLookupAt == nil)
+        #expect(work.openLibraryWorkKey == nil)
+        #expect(!lib.context.hasChanges)
+    }
+
     @Test func renameTagRewritesEveryBookAndDeduplicates() async throws {
         let lib = try await TestLibrary()
         let a = Book(fileName: "a.epub", originalFileName: "A.epub")
@@ -398,6 +588,59 @@ struct MetadataServiceTests {
         #expect(!importer.pendingMetadataUUIDs.contains(uuid))
     }
 
+    @Test func replacingPrimaryAssetDuringImportAnalysisDiscardsTheEntireInspection() async throws {
+        let lib = try await TestLibrary()
+        let settings = AppSettings()
+        let oldOnline = settings.onlineMetadataEnabled
+        settings.onlineMetadataEnabled = false
+        defer { settings.onlineMetadataEnabled = oldOnline }
+
+        let source = lib.root.appending(path: "replace-during-analysis.epub")
+        try Data("original fixture".utf8).write(to: source)
+        let metadata = MetadataService(
+            modelContext: lib.context,
+            settings: settings,
+            online: FakeOnlineClient()
+        )
+        let gate = ImportAnalysisGate()
+        let importer = ImportService(
+            modelContext: lib.context,
+            settings: settings,
+            metadata: metadata,
+            wishlist: WishlistService(modelContext: lib.context, toasts: ToastCenter()),
+            toasts: ToastCenter(),
+            analyzeBook: { url in await gate.analyze(url) }
+        )
+
+        importer.addBooks(from: [source])
+        await gate.waitUntilStarted()
+        let book = try #require(lib.context.allBooks().first)
+        let asset = try #require(book.assets.first(where: { $0.fileName == book.fileName }))
+        asset.contentHash = "replacement-content"
+        asset.dateAdded = asset.dateAdded.addingTimeInterval(1)
+        try lib.context.save()
+
+        var staleMetadata = BookMetadata()
+        staleMetadata.title = "Metadata From Old Bytes"
+        staleMetadata.isbn = "9780000000999"
+        staleMetadata.pageCount = 999
+        await gate.resume(with: ImportBookAnalysis(
+            metadata: staleMetadata,
+            drmProtected: true,
+            validation: .corrupt
+        ))
+
+        let deadline = Date.now.addingTimeInterval(1)
+        while importer.pendingMetadataUUIDs.contains(book.uuid), Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(book.title == nil)
+        #expect(book.isbn == nil)
+        #expect(book.pageCount == nil)
+        #expect(book.drmProtected == nil)
+        #expect(asset.validationStatus == nil)
+    }
+
     @Test func importRefreshesWorkIdentityAfterOnlineEnrichment() async throws {
         let lib = try await TestLibrary()
         let settings = AppSettings()
@@ -541,6 +784,57 @@ private actor CoverGateOnlineClient: OnlineMetadataFetching {
     }
 }
 
+private actor CancellationAwareOnlineClient: OnlineMetadataFetching {
+    private(set) var wasCancelled = false
+    private var started = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func fetch(isbn: String?, title: String, author: String?, language: MetadataLanguage,
+               hardcoverToken: String?) async -> OnlineMetadataFetchResult {
+        started = true
+        waiters.forEach { $0.resume() }
+        waiters.removeAll()
+        do {
+            try await Task.sleep(for: .seconds(60))
+        } catch {
+            wasCancelled = true
+        }
+        return OnlineMetadataFetchResult(metadata: nil, reachedNetwork: false)
+    }
+
+    func downloadCover(_ url: URL) async -> Data? { nil }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+}
+
+private actor PageCountGate {
+    private var continuation: CheckedContinuation<Int?, Never>?
+    private var started = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func estimate(url: URL, format: String) async -> Int? {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            started = true
+            waiters.forEach { $0.resume() }
+            waiters.removeAll()
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func resume(with pages: Int?) {
+        continuation?.resume(returning: pages)
+        continuation = nil
+    }
+}
+
 private actor ImportAnalysisGate {
     private var continuation: CheckedContinuation<ImportBookAnalysis, Never>?
     private var started = false
@@ -563,7 +857,11 @@ private actor ImportAnalysisGate {
     func resume() {
         var metadata = BookMetadata()
         metadata.title = "Late Metadata"
-        continuation?.resume(returning: ImportBookAnalysis(metadata: metadata, drmProtected: false))
+        resume(with: ImportBookAnalysis(metadata: metadata, drmProtected: false))
+    }
+
+    func resume(with result: ImportBookAnalysis) {
+        continuation?.resume(returning: result)
         continuation = nil
     }
 }

@@ -37,13 +37,18 @@ struct DuplicateGroup: Identifiable {
 @Observable
 final class LibraryHealthService {
     private let modelContext: ModelContext
+    private let analysisCoordinator: CatalogAnalysisCoordinator
     private(set) var missingFileUUIDs: Set<UUID> = []
     private var cachedMetadataAnalysis: MetadataFixAnalysis?
     private var cachedMetadataAnalysisRevision = -1
     private var metadataAnalysisTask: (revision: Int, task: Task<MetadataFixAnalysis, Never>)?
 
-    init(modelContext: ModelContext) {
+    init(
+        modelContext: ModelContext,
+        analysisCoordinator: CatalogAnalysisCoordinator = CatalogAnalysisCoordinator()
+    ) {
         self.modelContext = modelContext
+        self.analysisCoordinator = analysisCoordinator
     }
 
     func isMissing(_ book: Book) -> Bool { missingFileUUIDs.contains(book.uuid) }
@@ -214,6 +219,7 @@ final class LibraryHealthService {
             }
             return
         }
+        analysisCoordinator.cancelAll(for: book.uuid)
         missingFileUUIDs.remove(book.uuid)
         if fileName != oldFileName, BookFileStore.validatedURL(for: oldFileName) != nil {
             Task.detached(priority: .utility) {

@@ -98,7 +98,10 @@ final class LibraryViewModel {
             mutations: mutations,
             managedFiles: managedFiles
         )
-        self.health = LibraryHealthService(modelContext: modelContext)
+        self.health = LibraryHealthService(
+            modelContext: modelContext,
+            analysisCoordinator: mutations.analysisCoordinator
+        )
     }
 
     // MARK: - Derived state (forwarded)
@@ -382,7 +385,10 @@ final class LibraryViewModel {
     func rescanMissingMetadata() async { await importer.rescanMissingMetadata() }
     func detectMissingDRM() async { await importer.detectMissingDRM() }
     func backfillMissingAssetHashes() async {
-        await BookAssetMaintenance.backfillMissingHashes(context: modelContext)
+        await BookAssetMaintenance.backfillMissingHashes(
+            context: modelContext,
+            mutations: mutations
+        )
     }
 
     func adoptConversionArtifact(for bookUUID: UUID, from url: URL) async {

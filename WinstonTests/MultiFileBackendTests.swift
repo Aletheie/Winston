@@ -112,12 +112,98 @@ struct MultiFileBackendTests {
         #expect(book.drmProtected == false)
     }
 
+    @Test func sizeBackfillDiscardsAResultForAReplacedPrimaryAsset() async throws {
+        let library = try await TestLibrary()
+        let source = library.root.appending(path: "size-race.epub")
+        try Data("original size bytes".utf8).write(to: source)
+        let uuid = UUID()
+        let fileName = try BookFileStore.importCopy(of: source, uuid: uuid)
+        let book = Book(uuid: uuid, fileName: fileName, originalFileName: "Size Race.epub")
+        let asset = BookAsset(
+            uuid: uuid,
+            fileName: fileName,
+            contentHash: "original-hash",
+            book: book
+        )
+        library.context.insert(book)
+        library.context.insert(asset)
+        try library.context.save()
+
+        let gate = MaintenanceValueGate<Int64>()
+        let settings = AppSettings()
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: library.context, settings: settings),
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
+            toasts: ToastCenter(),
+            measureFile: { url in await gate.value(for: url) }
+        )
+        let task = Task { @MainActor in await importer.backfillMissingSizes() }
+        await gate.waitUntilStarted()
+
+        asset.dateAdded = asset.dateAdded.addingTimeInterval(1)
+        asset.contentHash = "replacement-hash"
+        try library.context.save()
+        await gate.resume(with: 123_456)
+        await task.value
+
+        #expect(book.fileSizeBytes == 0)
+        #expect(asset.sizeBytes == 0)
+    }
+
+    @Test func drmBackfillDiscardsAResultForAReplacedPrimaryAsset() async throws {
+        let library = try await TestLibrary()
+        let source = library.root.appending(path: "drm-race.epub")
+        try Data("original drm bytes".utf8).write(to: source)
+        let uuid = UUID()
+        let fileName = try BookFileStore.importCopy(of: source, uuid: uuid)
+        let book = Book(uuid: uuid, fileName: fileName, originalFileName: "DRM Race.epub")
+        let asset = BookAsset(
+            uuid: uuid,
+            fileName: fileName,
+            contentHash: "original-hash",
+            book: book
+        )
+        library.context.insert(book)
+        library.context.insert(asset)
+        try library.context.save()
+
+        let gate = MaintenanceValueGate<Bool>()
+        let settings = AppSettings()
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: library.context, settings: settings),
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
+            toasts: ToastCenter(),
+            inspectDRM: { url in await gate.value(for: url) }
+        )
+        let task = Task { @MainActor in await importer.detectMissingDRM() }
+        await gate.waitUntilStarted()
+
+        asset.dateAdded = asset.dateAdded.addingTimeInterval(1)
+        asset.contentHash = "replacement-hash"
+        try library.context.save()
+        await gate.resume(with: true)
+        await task.value
+
+        #expect(book.drmProtected == nil)
+    }
+
     @Test func missingMetadataRescanLimitsAnalysisConcurrency() async throws {
         let library = try await TestLibrary()
         let books = (0..<4).map { index in
             Book(fileName: "rescan-\(index).epub", originalFileName: "Rescan \(index).epub")
         }
-        books.forEach(library.context.insert)
+        for book in books {
+            let source = library.root.appending(path: "source-\(book.fileName)")
+            try Data("rescan fixture".utf8).write(to: source)
+            try library.installBookFile(from: source, fileName: book.fileName)
+            let asset = BookAsset(uuid: book.uuid, fileName: book.fileName, book: book)
+            library.context.insert(book)
+            library.context.insert(asset)
+        }
         try library.context.save()
 
         let settings = AppSettings()
@@ -416,6 +502,9 @@ struct MultiFileBackendTests {
         let library = try await TestLibrary()
         let book = Book(fileName: "race.epub", originalFileName: "Race.epub")
         let asset = BookAsset(uuid: book.uuid, fileName: book.fileName, book: book)
+        let source = library.root.appending(path: "hash-race-source.epub")
+        try Data("hash race".utf8).write(to: source)
+        try library.installBookFile(from: source, fileName: book.fileName)
         library.context.insert(book)
         library.context.insert(asset)
         try library.context.save()
@@ -433,6 +522,60 @@ struct MultiFileBackendTests {
 
         #expect(await task.value == 0)
         #expect(asset.contentHash == nil)
+    }
+
+    @Test func hashBackfillSaveFailureDoesNotLeakAHashIntoALaterSave() async throws {
+        struct InjectedFailure: Error {}
+
+        let library = try await TestLibrary()
+        let book = Book(fileName: "hash-save-failure.epub", originalFileName: "Hash Failure.epub")
+        let asset = BookAsset(uuid: book.uuid, fileName: book.fileName, book: book)
+        let source = library.root.appending(path: "hash-save-failure-source.epub")
+        try Data("stable bytes".utf8).write(to: source)
+        try library.installBookFile(from: source, fileName: book.fileName)
+        library.context.insert(book)
+        library.context.insert(asset)
+        try library.context.save()
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            saveAdapter: CatalogSaveAdapter { _ in throw InjectedFailure() }
+        )
+
+        #expect(await BookAssetMaintenance.backfillMissingHashes(
+            context: library.context,
+            mutations: mutations
+        ) == 0)
+        #expect(asset.contentHash == nil)
+        #expect(!library.context.hasChanges)
+
+        book.notes = "unrelated"
+        try library.context.save()
+        #expect(asset.contentHash == nil)
+    }
+}
+
+private actor MaintenanceValueGate<Value: Sendable> {
+    private var continuation: CheckedContinuation<Value, Never>?
+    private var started = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func value(for url: URL) async -> Value {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            started = true
+            waiters.forEach { $0.resume() }
+            waiters.removeAll()
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func resume(with value: Value) {
+        continuation?.resume(returning: value)
+        continuation = nil
     }
 }
 

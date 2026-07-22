@@ -28,7 +28,7 @@ final class ImportService {
     }
 
     private struct MetadataJob {
-        let book: Book
+        let bookID: UUID
         let evaluateMatch: Bool
         let matchBatchID: UUID?
     }
@@ -46,9 +46,9 @@ final class ImportService {
         case targetUnavailable
     }
 
-    nonisolated private struct MaintenanceCandidate: Sendable {
-        let uuid: UUID
-        let fileName: String
+    private struct CompletedMaintenance<Value: Sendable> {
+        let job: CatalogAnalysisJob<CatalogAssetInspectionProposal<Value>>
+        let proposal: CatalogAssetInspectionProposal<Value>
     }
 
     private let modelContext: ModelContext
@@ -58,8 +58,11 @@ final class ImportService {
     private let toasts: ToastCenter
     private let editions: EditionService?
     private let mutations: CatalogMutationService
+    private let analysisCoordinator: CatalogAnalysisCoordinator
     private let managedFiles: ManagedFileCoordinator
     private let analyzeBook: @Sendable (URL) async -> ImportBookAnalysis
+    private let measureFile: @Sendable (URL) async -> Int64
+    private let inspectDRM: @Sendable (URL) async -> Bool
     private let maximumConcurrentMetadataJobs: Int
 
     private(set) var pendingMetadataUUIDs: Set<UUID> = []
@@ -79,21 +82,29 @@ final class ImportService {
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared,
         maximumConcurrentMetadataJobs: Int = BookDoctorService.defaultMaximumConcurrentInspections,
-        analyzeBook: @escaping @Sendable (URL) async -> ImportBookAnalysis = ImportService.defaultAnalysis
+        analyzeBook: @escaping @Sendable (URL) async -> ImportBookAnalysis = ImportService.defaultAnalysis,
+        measureFile: @escaping @Sendable (URL) async -> Int64 = ImportService.defaultFileSize,
+        inspectDRM: @escaping @Sendable (URL) async -> Bool = ImportService.defaultDRMInspection
     ) {
+        let coordinator = mutations?.analysisCoordinator ?? metadata.analysisCoordinator
+        let resolvedMutations = mutations ?? CatalogMutationService(
+            modelContext: modelContext,
+            managedFiles: managedFiles,
+            analysisCoordinator: coordinator
+        )
         self.modelContext = modelContext
         self.settings = settings
         self.metadata = metadata
         self.wishlist = wishlist
         self.toasts = toasts
         self.editions = editions
-        self.mutations = mutations ?? CatalogMutationService(
-            modelContext: modelContext,
-            managedFiles: managedFiles
-        )
+        self.mutations = resolvedMutations
+        self.analysisCoordinator = resolvedMutations.analysisCoordinator
         self.managedFiles = managedFiles
         self.maximumConcurrentMetadataJobs = max(1, maximumConcurrentMetadataJobs)
         self.analyzeBook = analyzeBook
+        self.measureFile = measureFile
+        self.inspectDRM = inspectDRM
     }
 
     var isExtracting: Bool {
@@ -208,7 +219,7 @@ final class ImportService {
             task.cancel()
             return
         }
-        guard let index = queuedMetadataJobs.firstIndex(where: { $0.book.uuid == uuid }) else {
+        guard let index = queuedMetadataJobs.firstIndex(where: { $0.bookID == uuid }) else {
             pendingMetadataUUIDs.remove(uuid)
             return
         }
@@ -223,53 +234,124 @@ final class ImportService {
     func backfillMissingSizes() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.fileSizeBytes == 0 })
         guard let fetched = try? modelContext.fetch(descriptor) else { return }
-        let books = fetched.filter(\.hasDigitalFile)
-        guard !books.isEmpty else { return }
-        let candidates = books.map { MaintenanceCandidate(uuid: $0.uuid, fileName: $0.fileName) }
-        let sizes = await Task.detached(priority: .background) {
-            Dictionary(uniqueKeysWithValues: candidates.map { candidate in
-                (candidate.uuid, BookFileStore.size(of: candidate.fileName))
-            })
-        }.value
-        guard !Task.isCancelled else { return }
+        let snapshots = fetched.filter(\.hasDigitalFile).compactMap(BookAnalysisSnapshot.init(book:))
+        guard !snapshots.isEmpty else { return }
 
-        var changed = false
-        for book in books where book.modelContext != nil {
-            guard let size = sizes[book.uuid], size > 0 else { continue }
-            if book.fileSizeBytes != size {
-                book.fileSizeBytes = size
-                changed = true
+        for chunkStart in stride(from: 0, to: snapshots.count, by: 50) {
+            guard !Task.isCancelled else { return }
+            let chunk = Array(snapshots[chunkStart ..< min(chunkStart + 50, snapshots.count)])
+            let measureFile = self.measureFile
+            let completed = await collectMaintenance(
+                snapshots: chunk,
+                kind: .fileSize
+            ) { url in
+                let size = await measureFile(url)
+                return size > 0 ? size : nil
             }
-            if let primary = book.assets.first(where: { $0.fileName == book.fileName }),
-               primary.sizeBytes != size {
-                primary.sizeBytes = size
-                changed = true
+
+            var valid: [(BookAnalysisSnapshot, CatalogAssetInspectionProposal<Int64>, Book, BookAsset?)] = []
+            for result in completed {
+                let snapshot = result.job.snapshot
+                guard analysisCoordinator.isCurrent(result.job.ticket),
+                      result.proposal.sourceIsCurrent(for: snapshot),
+                      let book = try? mutations.book(id: snapshot.bookID),
+                      snapshot.matches(book),
+                      book.fileSizeBytes == 0 else { continue }
+                let asset = snapshot.assetID.flatMap { id in
+                    book.assets.first(where: { $0.uuid == id })
+                }
+                valid.append((snapshot, result.proposal, book, asset))
             }
+
+            if !valid.isEmpty {
+                let bookPreimages = valid.map { CatalogBookMetadataPreimage($0.2) }
+                let assetPreimages = valid.compactMap { $0.3 }.map(CatalogBookAssetPreimage.init)
+                let bookIDs = Set(valid.map { $0.0.bookID })
+                do {
+                    try mutations.commit(
+                        .applyAnalysisBatch(bookIDs: Array(bookIDs), kind: .fileSize),
+                        affectedBookIDs: bookIDs,
+                        revertingOnFailure: {
+                            bookPreimages.forEach { $0.restore() }
+                            assetPreimages.forEach { $0.restore() }
+                        }
+                    ) {
+                        for (snapshot, proposal, _, _) in valid {
+                            let book = try mutations.book(id: snapshot.bookID)
+                            guard snapshot.matches(book),
+                                  proposal.sourceIsCurrent(for: snapshot),
+                                  book.fileSizeBytes == 0 else {
+                                throw CatalogMutationError.staleAnalysis
+                            }
+                            book.fileSizeBytes = proposal.value
+                            if let assetID = snapshot.assetID,
+                               let asset = book.assets.first(where: { $0.uuid == assetID }),
+                               asset.sizeBytes == 0 {
+                                asset.sizeBytes = proposal.value
+                            }
+                        }
+                    }
+                } catch {
+                    // Best-effort startup maintenance; every preimage was restored.
+                }
+            }
+            completed.forEach { analysisCoordinator.finish($0.job.ticket) }
         }
-        if changed { modelContext.saveQuietly() }
     }
 
     func detectMissingDRM() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.drmProtected == nil })
         guard let fetched = try? modelContext.fetch(descriptor) else { return }
-        let books = fetched.filter(\.hasDigitalFile)
-        guard !books.isEmpty else { return }
-        let candidates = books.map { MaintenanceCandidate(uuid: $0.uuid, fileName: $0.fileName) }
-        let results = await Task.detached(priority: .background) {
-            Dictionary(uniqueKeysWithValues: candidates.map { candidate in
-                let url = BookFileStore.url(for: candidate.fileName)
-                return (candidate.uuid, DRMDetector.isProtected(url: url))
-            })
-        }.value
-        guard !Task.isCancelled else { return }
+        let snapshots = fetched.filter(\.hasDigitalFile).compactMap(BookAnalysisSnapshot.init(book:))
+        guard !snapshots.isEmpty else { return }
 
-        var changed = false
-        for book in books where book.modelContext != nil && book.drmProtected == nil {
-            guard let protected = results[book.uuid] else { continue }
-            book.drmProtected = protected
-            changed = true
+        for chunkStart in stride(from: 0, to: snapshots.count, by: 50) {
+            guard !Task.isCancelled else { return }
+            let chunk = Array(snapshots[chunkStart ..< min(chunkStart + 50, snapshots.count)])
+            let inspectDRM = self.inspectDRM
+            let completed = await collectMaintenance(
+                snapshots: chunk,
+                kind: .drmInspection
+            ) { url in
+                await inspectDRM(url)
+            }
+
+            var valid: [(BookAnalysisSnapshot, CatalogAssetInspectionProposal<Bool>, Book)] = []
+            for result in completed {
+                let snapshot = result.job.snapshot
+                guard analysisCoordinator.isCurrent(result.job.ticket),
+                      result.proposal.sourceIsCurrent(for: snapshot),
+                      let book = try? mutations.book(id: snapshot.bookID),
+                      snapshot.matches(book),
+                      book.drmProtected == nil else { continue }
+                valid.append((snapshot, result.proposal, book))
+            }
+
+            if !valid.isEmpty {
+                let preimages = valid.map { CatalogBookMetadataPreimage($0.2) }
+                let bookIDs = Set(valid.map { $0.0.bookID })
+                do {
+                    try mutations.commit(
+                        .applyAnalysisBatch(bookIDs: Array(bookIDs), kind: .drmInspection),
+                        affectedBookIDs: bookIDs,
+                        revertingOnFailure: { preimages.forEach { $0.restore() } }
+                    ) {
+                        for (snapshot, proposal, _) in valid {
+                            let book = try mutations.book(id: snapshot.bookID)
+                            guard snapshot.matches(book),
+                                  proposal.sourceIsCurrent(for: snapshot),
+                                  book.drmProtected == nil else {
+                                throw CatalogMutationError.staleAnalysis
+                            }
+                            book.drmProtected = proposal.value
+                        }
+                    }
+                } catch {
+                    // Best-effort startup maintenance; every preimage was restored.
+                }
+            }
+            completed.forEach { analysisCoordinator.finish($0.job.ticket) }
         }
-        if changed { modelContext.saveQuietly() }
     }
 
     func rescanMissingMetadata() async {
@@ -294,7 +376,7 @@ final class ImportService {
             }
             pendingMetadataUUIDs.insert(book.uuid)
             await performMetadataExtraction(
-                for: book,
+                for: book.uuid,
                 evaluateMatch: false
             )
             pendingMetadataUUIDs.remove(book.uuid)
@@ -398,7 +480,7 @@ final class ImportService {
     ) {
         guard pendingMetadataUUIDs.insert(book.uuid).inserted else { return }
         queuedMetadataJobs.append(MetadataJob(
-            book: book,
+            bookID: book.uuid,
             evaluateMatch: evaluateMatch,
             matchBatchID: matchBatchID
         ))
@@ -409,11 +491,11 @@ final class ImportService {
         while activeMetadataTasks.count < maximumConcurrentMetadataJobs,
               let job = queuedMetadataJobs.popFirst() {
             if queuedMetadataJobs.isEmpty { queuedMetadataJobs = [] }
-            let uuid = job.book.uuid
+            let uuid = job.bookID
             activeMetadataTasks[uuid] = Task { [weak self] in
                 guard let self else { return }
                 await self.performMetadataExtraction(
-                    for: job.book,
+                    for: job.bookID,
                     evaluateMatch: job.evaluateMatch
                 )
                 self.finishMetadataJob(job)
@@ -422,7 +504,7 @@ final class ImportService {
     }
 
     private func finishMetadataJob(_ job: MetadataJob) {
-        let uuid = job.book.uuid
+        let uuid = job.bookID
         activeMetadataTasks.removeValue(forKey: uuid)
         pendingMetadataUUIDs.remove(uuid)
         if let batchID = job.matchBatchID { finishMatchBatch(batchID, completed: uuid) }
@@ -430,36 +512,89 @@ final class ImportService {
     }
 
     private func performMetadataExtraction(
-        for book: Book,
+        for bookID: UUID,
         evaluateMatch: Bool
     ) async {
-        guard !Task.isCancelled, book.modelContext != nil,
-              let url = book.primaryFileURL else { return }
+        guard !Task.isCancelled,
+              let book = try? mutations.book(id: bookID),
+              let snapshot = BookAnalysisSnapshot(book: book),
+              snapshot.fileURL != nil else { return }
         let analyzer = analyzeBook
-        let result = await analyzer(url)
-        guard !Task.isCancelled, book.modelContext != nil else { return }
-        book.apply(result.metadata)
-        book.drmProtected = result.drmProtected
-        book.assets.first(where: { $0.fileName == book.fileName })?.validationStatus = result.validation
-        refreshWorkIdentity(for: book, allowDisplayTitleFallback: !settings.onlineMetadataEnabled)
-        modelContext.saveQuietly()
-        wishlist.fulfil(with: [book])
+        let job = analysisCoordinator.start(snapshot: snapshot, kind: .metadataExtraction) { snapshot in
+            await CatalogAnalysisWorker.inspect(snapshot: snapshot) { url in
+                await analyzer(url)
+            }
+        }
+        defer { analysisCoordinator.finish(job.ticket) }
+
+        guard let proposal = await analysisCoordinator.value(for: job),
+              proposal.sourceIsCurrent(for: snapshot),
+              analysisCoordinator.isCurrent(job.ticket),
+              let liveBook = try? mutations.book(id: bookID),
+              snapshot.matches(liveBook) else { return }
+
+        let bookPreimage = CatalogBookMetadataPreimage(liveBook)
+        let workPreimage = liveBook.work.map(CatalogWorkPreimage.init)
+        let assetPreimage = snapshot.assetID
+            .flatMap { id in liveBook.assets.first(where: { $0.uuid == id }) }
+            .map(CatalogBookAssetPreimage.init)
+        do {
+            try mutations.commit(
+                .applyAnalysis(bookID: bookID, kind: .metadataExtraction),
+                affectedBookIDs: [bookID],
+                affectedWorkIDs: Set([snapshot.identityRevision.workID].compactMap { $0 }),
+                revertingOnFailure: {
+                    bookPreimage.restore()
+                    workPreimage?.restore()
+                    assetPreimage?.restore()
+                }
+            ) {
+                let storedBook = try mutations.book(id: bookID)
+                guard analysisCoordinator.isCurrent(job.ticket),
+                      snapshot.matches(storedBook),
+                      proposal.sourceIsCurrent(for: snapshot) else {
+                    throw CatalogMutationError.staleAnalysis
+                }
+                storedBook.apply(proposal.value.metadata)
+                storedBook.drmProtected = proposal.value.drmProtected
+                if let assetID = snapshot.assetID,
+                   let asset = storedBook.assets.first(where: { $0.uuid == assetID }) {
+                    asset.validationStatus = proposal.value.validation
+                }
+                refreshWorkIdentity(
+                    for: storedBook,
+                    allowDisplayTitleFallback: !settings.onlineMetadataEnabled
+                )
+            }
+        } catch {
+            return
+        }
+
+        analysisCoordinator.finish(job.ticket)
+        guard let appliedBook = try? mutations.book(id: bookID) else { return }
+        wishlist.fulfil(with: [appliedBook])
         if settings.onlineMetadataEnabled {
-            await metadata.performEnrich(book, replaceCover: false)
-            guard !Task.isCancelled, book.modelContext != nil else { return }
-            refreshWorkIdentity(for: book, allowDisplayTitleFallback: true)
-            modelContext.saveQuietly()
-            wishlist.fulfil(with: [book])
+            let enrichmentSnapshot = BookAnalysisSnapshot(book: appliedBook)
+            let matched = await metadata.performEnrich(appliedBook, replaceCover: false)
+            guard !Task.isCancelled,
+                  let enrichedBook = try? mutations.book(id: bookID) else { return }
+            if !matched,
+               let enrichmentSnapshot,
+               enrichmentSnapshot.matches(enrichedBook) {
+                commitWorkIdentity(for: enrichedBook, allowDisplayTitleFallback: true)
+            }
+            wishlist.fulfil(with: [enrichedBook])
         }
         if evaluateMatch, let editions {
-            if let undo = editions.evaluate(book) {
-                let title = book.work?.displayTitle ?? book.displayTitle
+            guard let currentBook = try? mutations.book(id: bookID) else { return }
+            if let undo = editions.evaluate(currentBook) {
+                let title = currentBook.work?.displayTitle ?? currentBook.displayTitle
                 toasts.post(
                     String(localized: "Grouped with “\(title)”"),
                     style: .success,
                     action: .undoEditionAssignment(undo)
                 )
-            } else if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(book.uuid) }) {
+            } else if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(bookID) }) {
                 toasts.post(
                     String(localized: "Edition suggestions are ready to review."),
                     style: .info,
@@ -503,17 +638,79 @@ final class ImportService {
         }
     }
 
-    nonisolated static func defaultAnalysis(for url: URL) async -> ImportBookAnalysis {
-        await Task.detached(priority: .utility) {
-            let report = BookDoctorService.inspect(
-                BookDoctorSource(title: url.lastPathComponent, url: url)
-            )
-            return ImportBookAnalysis(
-                metadata: MetadataExtractor.extractMetadata(from: url),
-                drmProtected: report.issues.contains { $0.kind == .drm },
-                validation: report.assetValidation
-            )
-        }.value
+    private func collectMaintenance<Value: Sendable>(
+        snapshots: [BookAnalysisSnapshot],
+        kind: CatalogAnalysisJobKind,
+        operation: @escaping @Sendable (URL) async -> Value?
+    ) async -> [CompletedMaintenance<Value>] {
+        var completed: [CompletedMaintenance<Value>] = []
+        let concurrency = min(4, maximumConcurrentMetadataJobs)
+        for start in stride(from: 0, to: snapshots.count, by: concurrency) {
+            let batch = snapshots[start ..< min(start + concurrency, snapshots.count)]
+            let jobs: [CatalogAnalysisJob<CatalogAssetInspectionProposal<Value>>] = batch.map { snapshot in
+                analysisCoordinator.start(snapshot: snapshot, kind: kind) { snapshot in
+                    await CatalogAnalysisWorker.inspect(snapshot: snapshot, operation: operation)
+                }
+            }
+            for job in jobs {
+                if let proposal = await analysisCoordinator.value(for: job) {
+                    completed.append(CompletedMaintenance(job: job, proposal: proposal))
+                } else {
+                    analysisCoordinator.finish(job.ticket)
+                }
+            }
+        }
+        return completed
+    }
+
+    private func commitWorkIdentity(for book: Book, allowDisplayTitleFallback: Bool) {
+        guard let snapshot = BookAnalysisSnapshot(book: book),
+              let work = book.work else { return }
+        let preimage = CatalogWorkPreimage(work)
+        do {
+            try mutations.commit(
+                .applyAnalysis(bookID: book.uuid, kind: .onlineEnrichment),
+                affectedBookIDs: [book.uuid],
+                affectedWorkIDs: [work.uuid],
+                revertingOnFailure: preimage.restore
+            ) {
+                let storedBook = try mutations.book(id: snapshot.bookID)
+                guard snapshot.matches(storedBook) else {
+                    throw CatalogMutationError.staleAnalysis
+                }
+                refreshWorkIdentity(
+                    for: storedBook,
+                    allowDisplayTitleFallback: allowDisplayTitleFallback
+                )
+            }
+        } catch {
+            return
+        }
+    }
+
+    @concurrent
+    static func defaultAnalysis(for url: URL) async -> ImportBookAnalysis {
+        let report = BookDoctorService.inspect(
+            BookDoctorSource(title: url.lastPathComponent, url: url)
+        )
+        return ImportBookAnalysis(
+            metadata: MetadataExtractor.extractMetadata(from: url),
+            drmProtected: report.issues.contains { $0.kind == .drm },
+            validation: report.assetValidation
+        )
+    }
+
+    @concurrent
+    static func defaultFileSize(at url: URL) async -> Int64 {
+        guard !Task.isCancelled,
+              let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return 0 }
+        return Int64(size)
+    }
+
+    @concurrent
+    static func defaultDRMInspection(at url: URL) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        return DRMDetector.isProtected(url: url)
     }
 
     private func refreshWorkIdentity(for book: Book, allowDisplayTitleFallback: Bool) {

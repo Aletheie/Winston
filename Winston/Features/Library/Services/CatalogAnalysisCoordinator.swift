@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import SwiftData
 
 nonisolated enum CatalogAnalysisJobKind: Hashable, Sendable {
     case metadataExtraction
@@ -117,7 +118,8 @@ nonisolated struct BookAnalysisSnapshot: Hashable, Sendable {
     init?(book: Book, sourceAsset: BookAsset) {
         guard book.modelContext != nil,
               sourceAsset.modelContext != nil,
-              sourceAsset.book?.uuid == book.uuid else { return nil }
+              (sourceAsset.book?.uuid == book.uuid
+                  || book.assets.contains(where: { $0.uuid == sourceAsset.uuid })) else { return nil }
         self.init(book: book, primary: Self.primaryAsset(in: book), source: sourceAsset)
     }
 
@@ -145,7 +147,8 @@ nonisolated struct BookAnalysisSnapshot: Hashable, Sendable {
         guard let sourceAsset else { return true }
         guard let liveAsset = book.assets.first(where: { $0.uuid == sourceAsset.id }),
               liveAsset.modelContext != nil,
-              liveAsset.book?.uuid == bookID else { return false }
+              (liveAsset.book?.uuid == bookID
+                  || book.assets.contains(where: { $0.uuid == liveAsset.uuid })) else { return false }
         return BookAssetRevision(liveAsset) == sourceAsset
     }
 

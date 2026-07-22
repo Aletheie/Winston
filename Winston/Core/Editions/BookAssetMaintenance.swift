@@ -5,10 +5,19 @@ import SwiftData
 
 nonisolated enum ContentHasher {
     static func sha256(of url: URL) throws -> String {
+        try hash(url, checkingCancellation: false)
+    }
+
+    static func sha256Cancellable(of url: URL) throws -> String {
+        try hash(url, checkingCancellation: true)
+    }
+
+    private static func hash(_ url: URL, checkingCancellation: Bool) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
         while true {
+            if checkingCancellation { try Task.checkCancellation() }
             guard let data = try handle.read(upToCount: 1_048_576), !data.isEmpty else { break }
             hasher.update(data: data)
         }
@@ -42,83 +51,108 @@ nonisolated enum BookAssetValidator {
 
 @MainActor
 enum BookAssetMaintenance {
-    private struct HashSnapshot: Sendable {
-        let uuid: UUID
-        let fileName: String
-        let dateAdded: Date
+    private struct CompletedHash {
+        let job: CatalogAnalysisJob<CatalogAssetInspectionProposal<String>>
+        let proposal: CatalogAssetInspectionProposal<String>
     }
 
     @discardableResult
     static func backfillMissingHashes(
         context: ModelContext,
+        mutations: CatalogMutationService? = nil,
         hashFile: @escaping @Sendable (URL) async -> String? = { url in
-            await Task.detached(priority: .background) {
-                try? ContentHasher.sha256(of: url)
-            }.value
+            try? ContentHasher.sha256Cancellable(of: url)
         }
     ) async -> Int {
+        let resolvedMutations = mutations ?? CatalogMutationService(modelContext: context)
+        let coordinator = resolvedMutations.analysisCoordinator
         let assets = (try? context.fetch(FetchDescriptor<BookAsset>())) ?? []
-        let snapshots = assets.filter { $0.contentHash == nil }.map {
-            HashSnapshot(uuid: $0.uuid, fileName: $0.fileName, dateAdded: $0.dateAdded)
+        let books = (try? context.fetch(FetchDescriptor<Book>())) ?? []
+        let snapshots = assets.compactMap { asset -> BookAnalysisSnapshot? in
+            guard asset.contentHash == nil else { return nil }
+            let book = asset.book ?? books.first { book in
+                book.assets.contains(where: { $0.uuid == asset.uuid })
+            }
+            guard let book else { return nil }
+            return BookAnalysisSnapshot(book: book, sourceAsset: asset)
         }
         guard !snapshots.isEmpty else { return 0 }
 
-        let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.uuid, $0) })
         var processed = 0
         // Hash and persist in chunks so quitting mid-backfill keeps the work done so far.
         for chunkStart in stride(from: 0, to: snapshots.count, by: 50) {
             guard !Task.isCancelled else { break }
             let chunk = Array(snapshots[chunkStart ..< min(chunkStart + 50, snapshots.count)])
-            let results = await hashSnapshots(chunk, hashFile: hashFile)
-            var chunkProcessed = 0
-            for result in results {
-                let snapshot = result.snapshot
-                guard let asset = assetsByID[snapshot.uuid],
-                      asset.modelContext != nil,
-                      asset.contentHash == nil,
-                      asset.fileName == snapshot.fileName,
-                      asset.dateAdded == snapshot.dateAdded else { continue }
-                asset.contentHash = result.hash
-                chunkProcessed += 1
+            var completed: [CompletedHash] = []
+            for pairStart in stride(from: 0, to: chunk.count, by: 2) {
+                let pair = chunk[pairStart ..< min(pairStart + 2, chunk.count)]
+                let jobs: [CatalogAnalysisJob<CatalogAssetInspectionProposal<String>>] = pair.compactMap { snapshot in
+                    guard let assetID = snapshot.assetID else { return nil }
+                    return coordinator.start(
+                        snapshot: snapshot,
+                        kind: .assetHash(assetID: assetID)
+                    ) { snapshot in
+                        await CatalogAnalysisWorker.inspect(snapshot: snapshot, operation: hashFile)
+                    }
+                }
+                for job in jobs {
+                    if let proposal = await coordinator.value(for: job) {
+                        completed.append(CompletedHash(job: job, proposal: proposal))
+                    } else {
+                        coordinator.finish(job.ticket)
+                    }
+                }
             }
-            if chunkProcessed > 0 { context.saveQuietly() }
-            processed += chunkProcessed
+
+            if Task.isCancelled {
+                completed.forEach { coordinator.finish($0.job.ticket) }
+                break
+            }
+
+            var valid: [(BookAnalysisSnapshot, CatalogAssetInspectionProposal<String>, BookAsset)] = []
+            for result in completed {
+                let snapshot = result.job.snapshot
+                guard coordinator.isCurrent(result.job.ticket),
+                      result.proposal.sourceIsCurrent(for: snapshot),
+                      let book = try? resolvedMutations.book(id: snapshot.bookID),
+                      snapshot.matches(book),
+                      let assetID = snapshot.assetID,
+                      let asset = book.assets.first(where: { $0.uuid == assetID }),
+                      asset.contentHash == nil else { continue }
+                valid.append((snapshot, result.proposal, asset))
+            }
+
+            if !valid.isEmpty {
+                let preimages = valid.map { CatalogBookAssetPreimage($0.2) }
+                let bookIDs = Set(valid.map { $0.0.bookID })
+                do {
+                    try resolvedMutations.commit(
+                        .applyAnalysisBatch(
+                            bookIDs: Array(bookIDs),
+                            kind: .assetHash(assetID: valid[0].2.uuid)
+                        ),
+                        affectedBookIDs: bookIDs,
+                        revertingOnFailure: { preimages.forEach { $0.restore() } }
+                    ) {
+                        for (snapshot, proposal, _) in valid {
+                            let book = try resolvedMutations.book(id: snapshot.bookID)
+                            guard snapshot.matches(book),
+                                  proposal.sourceIsCurrent(for: snapshot),
+                                  let assetID = snapshot.assetID,
+                                  let asset = book.assets.first(where: { $0.uuid == assetID }),
+                                  asset.contentHash == nil else {
+                                throw CatalogMutationError.staleAnalysis
+                            }
+                            asset.contentHash = proposal.value
+                        }
+                    }
+                    processed += valid.count
+                } catch {
+                    // Best-effort startup maintenance; every asset preimage was restored.
+                }
+            }
+            completed.forEach { coordinator.finish($0.job.ticket) }
         }
         return processed
-    }
-
-    @concurrent
-    private static func hashSnapshots(
-        _ snapshots: [HashSnapshot],
-        hashFile: @escaping @Sendable (URL) async -> String?
-    ) async -> [(snapshot: HashSnapshot, hash: String)] {
-        let concurrency = min(2, snapshots.count)
-        guard concurrency > 0 else { return [] }
-        return await withTaskGroup(
-            of: (HashSnapshot, String?).self,
-            returning: [(snapshot: HashSnapshot, hash: String)].self
-        ) { group in
-            var nextIndex = 0
-            var results: [(snapshot: HashSnapshot, hash: String)] = []
-            results.reserveCapacity(snapshots.count)
-
-            while nextIndex < concurrency {
-                let snapshot = snapshots[nextIndex]
-                group.addTask(priority: .background) {
-                    (snapshot, await hashFile(BookFileStore.url(for: snapshot.fileName)))
-                }
-                nextIndex += 1
-            }
-            while let (snapshot, hash) = await group.next() {
-                if let hash { results.append((snapshot, hash)) }
-                guard nextIndex < snapshots.count, !Task.isCancelled else { continue }
-                let pending = snapshots[nextIndex]
-                group.addTask(priority: .background) {
-                    (pending, await hashFile(BookFileStore.url(for: pending.fileName)))
-                }
-                nextIndex += 1
-            }
-            return results
-        }
     }
 }
