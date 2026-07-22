@@ -62,11 +62,12 @@ final class CalibreImportService {
         Task {
             defer { isImporting = false }
 
-            let calibreBooks: [CalibreBook]
+            let readResult: CalibreLibraryReadResult
             do {
-                calibreBooks = try await Task.detached(priority: .userInitiated) {
-                    try CalibreLibraryReader.read(libraryRoot: root, formatPreference: Self.kindlePreference)
-                }.value
+                readResult = try await CalibreLibraryReader.read(
+                    libraryRoot: root,
+                    formatPreference: Self.kindlePreference
+                )
             } catch CalibreImportError.noLibrary {
                 toasts.error(String(localized: "No Calibre library (metadata.db) found in that folder."))
                 return
@@ -75,8 +76,15 @@ final class CalibreImportService {
                 return
             }
 
+            let calibreBooks = readResult.books
+            var unsafeRejectedSources = readResult.unsafeRejectionCount
             guard !calibreBooks.isEmpty else {
-                toasts.error(String(localized: "No importable books found in that Calibre library."))
+                let noBooks = String(localized: "No importable books found in that Calibre library.")
+                if unsafeRejectedSources > 0 {
+                    toasts.error("\(noBooks) \(Self.unsafeRejectionText(unsafeRejectedSources))")
+                } else {
+                    toasts.error(noBooks)
+                }
                 return
             }
 
@@ -107,7 +115,9 @@ final class CalibreImportService {
                 }
 
                 do {
-                    guard let book = try await importOne(calibreBook) else {
+                    let outcome = try await importOne(calibreBook)
+                    unsafeRejectedSources += outcome.unsafeRejectionCount
+                    guard let book = outcome.book else {
                         skipped += 1
                         continue
                     }
@@ -161,7 +171,12 @@ final class CalibreImportService {
             }
             progress = nil
 
-            finish(summary: Self.summaryText(imported: imported.count, total: total, skipped: skipped))
+            finish(summary: Self.summaryText(
+                imported: imported.count,
+                total: total,
+                skipped: skipped,
+                unsafeRejectedSources: unsafeRejectedSources
+            ))
 
             if settings.onlineMetadataEnabled { metadata.backfillMissingOnlineMetadata() }
         }
@@ -171,20 +186,30 @@ final class CalibreImportService {
         zeroBasedIndex + 1
     }
 
-    private func importOne(_ calibreBook: CalibreBook) async throws -> Book? {
+    private func importOne(
+        _ calibreBook: CalibreBook
+    ) async throws -> (book: Book?, unsafeRejectionCount: Int) {
+        let revalidated = await CalibreLibraryReader.revalidateSources(for: calibreBook)
+        let unsafeRejectionCount = revalidated.rejectedSources.count(where: {
+            $0.reason.isSecurityViolation
+        })
+        guard let primaryURL = revalidated.primaryURL else {
+            return (nil, unsafeRejectionCount)
+        }
+
         let bookID = UUID()
         var assetSources: [(id: UUID, source: ManagedFileSource)] = []
         assetSources.append((
             bookID,
-            try .book(sourceURL: calibreBook.fileURL, fileID: bookID)
+            try .book(sourceURL: primaryURL, fileID: bookID)
         ))
-        for url in calibreBook.additionalFileURLs {
+        for url in revalidated.additionalURLs {
             let assetID = UUID()
             assetSources.append((assetID, try .book(sourceURL: url, fileID: assetID)))
         }
 
         let preparedCover = await Task.detached(priority: .utility) { () -> (NSImage, Data)? in
-            guard let coverURL = calibreBook.coverURL,
+            guard let coverURL = revalidated.coverURL,
                   let image = NSImage(contentsOf: coverURL),
                   let data = ImageTranscoder.jpegData(from: image) else { return nil }
             return (image, data)
@@ -210,13 +235,13 @@ final class CalibreImportService {
         )
         guard let primary = stagedByName[assetSources[0].source.finalRelativeName] else {
             await managedFiles.abort(transaction)
-            return nil
+            return (nil, unsafeRejectionCount)
         }
 
         let book = Book(
             uuid: bookID,
             fileName: primary.finalRelativeName,
-            originalFileName: calibreBook.fileURL.lastPathComponent
+            originalFileName: primaryURL.lastPathComponent
         )
         book.apply(Self.metadata(from: calibreBook))
         book.rating = calibreBook.rating
@@ -234,7 +259,7 @@ final class CalibreImportService {
             guard let staged = stagedByName[assetSource.source.finalRelativeName] else {
                 modelContext.rollback()
                 await managedFiles.abort(transaction)
-                return nil
+                return (nil, unsafeRejectionCount)
             }
             let asset = BookAsset(
                 uuid: assetSource.id,
@@ -260,7 +285,7 @@ final class CalibreImportService {
         if let image = preparedCover?.0 {
             await CoverCache.shared.replace(image, for: book.fileURL)
         }
-        return book
+        return (book, unsafeRejectionCount)
     }
 
     private func finish(summary: String) {
@@ -296,10 +321,23 @@ final class CalibreImportService {
         return "Calibre Import \(formatter.string(from: Date()))"
     }
 
-    private static func summaryText(imported: Int, total: Int, skipped: Int) -> String {
+    private static func summaryText(
+        imported: Int,
+        total: Int,
+        skipped: Int,
+        unsafeRejectedSources: Int
+    ) -> String {
+        let base: String
         if skipped > 0 {
-            return String(localized: "Imported \(imported) of \(total) from Calibre (\(skipped) skipped).")
+            base = String(localized: "Imported \(imported) of \(total) from Calibre (\(skipped) skipped).")
+        } else {
+            base = String(localized: "Imported \(imported) of \(total) from Calibre.")
         }
-        return String(localized: "Imported \(imported) of \(total) from Calibre.")
+        guard unsafeRejectedSources > 0 else { return base }
+        return "\(base) \(unsafeRejectionText(unsafeRejectedSources))"
+    }
+
+    private static func unsafeRejectionText(_ count: Int) -> String {
+        String(localized: "Rejected unsafe Calibre sources: \(count).")
     }
 }

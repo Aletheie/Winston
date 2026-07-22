@@ -7963,6 +7963,16 @@
         }
       }
     },
+    "Rejected unsafe Calibre sources: %lld." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Odmítnuté nebezpečné zdroje Calibre: %lld."
+          }
+        }
+      }
+    },
     "Release to add to library" : {
       "localizations" : {
         "cs" : {

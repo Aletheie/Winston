@@ -56,6 +56,184 @@ struct CalibreMappingTests {
     }
 }
 
+// MARK: - Calibre path boundary
+
+struct CalibrePathResolverTests {
+
+    private func makeSandbox() throws -> (base: URL, root: URL) {
+        let base = FileManager.default.temporaryDirectory
+            .appending(path: "CalibrePathResolver-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let root = base.appending(path: "Library", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return (base, root)
+    }
+
+    @Test func resolvesRegularUnicodeFileAndNormalizesFormatCase() throws {
+        let fixture = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        let directory = fixture.root.appending(
+            path: "Čapek/Žluťoučký kůň",
+            directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let expected = directory.appending(path: "Příběh.epub")
+        try Data("book".utf8).write(to: expected)
+
+        let resolver = try CalibrePathResolver(
+            libraryRoot: fixture.root,
+            supportedFormats: ["epub"]
+        )
+        let source = try resolver.resolve(
+            rawRelativeBookPath: "Čapek/Žluťoučký kůň",
+            rawFileName: "Příběh",
+            declaredFormat: "EPUB"
+        )
+
+        #expect(source.url == expected.standardizedFileURL.resolvingSymlinksInPath())
+        #expect(try source.revalidatedURL() == source.url)
+    }
+
+    @Test func rejectsTraversalAndAbsoluteBookPaths() throws {
+        let fixture = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        let outside = fixture.base.appending(path: "Outside", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try Data("outside".utf8).write(to: outside.appending(path: "book.epub"))
+        let resolver = try CalibrePathResolver(
+            libraryRoot: fixture.root,
+            supportedFormats: ["epub"]
+        )
+
+        #expect(throws: CalibrePathError.traversalComponent) {
+            try resolver.resolve(
+                rawRelativeBookPath: "Žluťoučký/../Outside",
+                rawFileName: "book",
+                declaredFormat: "epub"
+            )
+        }
+        #expect(throws: CalibrePathError.absoluteBookPath) {
+            try resolver.resolve(
+                rawRelativeBookPath: outside.path(percentEncoded: false),
+                rawFileName: "book",
+                declaredFormat: "epub"
+            )
+        }
+    }
+
+    @Test func rejectsSymlinkedParentEvenWhenTargetExists() throws {
+        let fixture = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        let outside = fixture.base.appending(path: "Outside", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try Data("outside".utf8).write(to: outside.appending(path: "book.epub"))
+        try FileManager.default.createSymbolicLink(
+            at: fixture.root.appending(path: "Linked", directoryHint: .isDirectory),
+            withDestinationURL: outside
+        )
+        let resolver = try CalibrePathResolver(
+            libraryRoot: fixture.root,
+            supportedFormats: ["epub"]
+        )
+
+        #expect(throws: CalibrePathError.symbolicLink) {
+            try resolver.resolve(
+                rawRelativeBookPath: "Linked",
+                rawFileName: "book",
+                declaredFormat: "epub"
+            )
+        }
+    }
+
+    @Test func rejectsSymlinkedFileAndNonRegularFile() throws {
+        let fixture = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        let bookDirectory = fixture.root.appending(path: "Book", directoryHint: .isDirectory)
+        let outside = fixture.base.appending(path: "outside.epub")
+        try FileManager.default.createDirectory(at: bookDirectory, withIntermediateDirectories: true)
+        try Data("outside".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: bookDirectory.appending(path: "linked.epub"),
+            withDestinationURL: outside
+        )
+        try FileManager.default.createDirectory(
+            at: bookDirectory.appending(path: "directory.epub", directoryHint: .isDirectory),
+            withIntermediateDirectories: false
+        )
+        let resolver = try CalibrePathResolver(
+            libraryRoot: fixture.root,
+            supportedFormats: ["epub"]
+        )
+
+        #expect(throws: CalibrePathError.symbolicLink) {
+            try resolver.resolve(
+                rawRelativeBookPath: "Book",
+                rawFileName: "linked",
+                declaredFormat: "epub"
+            )
+        }
+        #expect(throws: CalibrePathError.notRegularFile) {
+            try resolver.resolve(
+                rawRelativeBookPath: "Book",
+                rawFileName: "directory",
+                declaredFormat: "epub"
+            )
+        }
+    }
+
+    @Test func revalidationRejectsFileReplacedBySymlink() throws {
+        let fixture = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        let bookDirectory = fixture.root.appending(path: "Book", directoryHint: .isDirectory)
+        let bookURL = bookDirectory.appending(path: "book.epub")
+        let outside = fixture.base.appending(path: "outside.epub")
+        try FileManager.default.createDirectory(at: bookDirectory, withIntermediateDirectories: true)
+        try Data("original".utf8).write(to: bookURL)
+        try Data("outside".utf8).write(to: outside)
+        let resolver = try CalibrePathResolver(
+            libraryRoot: fixture.root,
+            supportedFormats: ["epub"]
+        )
+        let source = try resolver.resolve(
+            rawRelativeBookPath: "Book",
+            rawFileName: "book",
+            declaredFormat: "epub"
+        )
+
+        try FileManager.default.removeItem(at: bookURL)
+        try FileManager.default.createSymbolicLink(at: bookURL, withDestinationURL: outside)
+
+        #expect(throws: CalibrePathError.symbolicLink) {
+            try source.revalidatedURL()
+        }
+    }
+
+    @Test func rejectsPathSeparatorsInFileNameAndUnsupportedFormat() throws {
+        let fixture = try makeSandbox()
+        defer { try? FileManager.default.removeItem(at: fixture.base) }
+        let directory = fixture.root.appending(path: "Book", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let resolver = try CalibrePathResolver(
+            libraryRoot: fixture.root,
+            supportedFormats: ["epub"]
+        )
+
+        #expect(throws: CalibrePathError.invalidFileName) {
+            try resolver.resolve(
+                rawRelativeBookPath: "Book",
+                rawFileName: "../outside",
+                declaredFormat: "epub"
+            )
+        }
+        #expect(throws: CalibrePathError.unsupportedFormat) {
+            try resolver.resolve(
+                rawRelativeBookPath: "Book",
+                rawFileName: "book",
+                declaredFormat: "exe"
+            )
+        }
+    }
+}
+
 // MARK: - End-to-end read against a fixture metadata.db
 
 struct CalibreLibraryReaderTests {
@@ -110,14 +288,35 @@ struct CalibreLibraryReaderTests {
         return root
     }
 
-    @Test func readsAllMetadataAndPicksPreferredFormat() throws {
+    private func execute(_ sql: String, in root: URL) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(
+            root.appending(path: "metadata.db").path(percentEncoded: false),
+            &db
+        ) == SQLITE_OK, let db else {
+            throw CalibreImportError.cannotOpen
+        }
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+            throw CalibreImportError.stepFailed(
+                code: sqlite3_errcode(db),
+                message: String(cString: sqlite3_errmsg(db))
+            )
+        }
+    }
+
+    @Test func readsAllMetadataAndPicksPreferredFormat() async throws {
         let root = try makeFixture()
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let books = try CalibreLibraryReader.read(libraryRoot: root,
-                                                  formatPreference: CalibreImportService.kindlePreference)
+        let readResult = try await CalibreLibraryReader.read(
+            libraryRoot: root,
+            formatPreference: CalibreImportService.kindlePreference
+        )
+        let books = readResult.books
         let book = try #require(books.first)
         #expect(books.count == 1)
+        #expect(readResult.rejectedSources.isEmpty)
         #expect(book.title == "The Hobbit")
         #expect(book.authors == ["J.R.R. Tolkien"])
         #expect(book.series == "Middle-earth")
@@ -135,10 +334,184 @@ struct CalibreLibraryReaderTests {
         #expect(book.coverURL?.lastPathComponent == "cover.jpg")
     }
 
-    @Test func missingDatabaseThrowsNoLibrary() {
+    @Test func missingDatabaseThrowsNoLibrary() async {
         let empty = FileManager.default.temporaryDirectory.appending(path: "NotALibrary-\(UUID().uuidString)")
-        #expect(throws: CalibreImportError.noLibrary) {
-            try CalibreLibraryReader.read(libraryRoot: empty, formatPreference: CalibreImportService.kindlePreference)
+        await #expect(throws: CalibreImportError.noLibrary) {
+            try await CalibreLibraryReader.read(
+                libraryRoot: empty,
+                formatPreference: CalibreImportService.kindlePreference
+            )
+        }
+    }
+
+    @Test func symlinkedMetadataDatabaseIsRejected() async throws {
+        let sourceLibrary = try makeFixture()
+        let selectedRoot = FileManager.default.temporaryDirectory.appending(
+            path: "CalibreLinkedDB-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer {
+            try? FileManager.default.removeItem(at: sourceLibrary)
+            try? FileManager.default.removeItem(at: selectedRoot)
+        }
+        try FileManager.default.createDirectory(at: selectedRoot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: selectedRoot.appending(path: "metadata.db"),
+            withDestinationURL: sourceLibrary.appending(path: "metadata.db")
+        )
+
+        await #expect(throws: CalibreImportError.unsafeLibraryPath(.symbolicLink)) {
+            try await CalibreLibraryReader.read(
+                libraryRoot: selectedRoot,
+                formatPreference: CalibreImportService.kindlePreference
+            )
+        }
+    }
+
+    @Test func traversalFromDatabaseIsExplicitlyRejectedAndNeverReturned() async throws {
+        let root = try makeFixture()
+        let outside = root.deletingLastPathComponent().appending(
+            path: "CalibreOutside-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try Data("outside".utf8).write(to: outside.appending(path: "book.azw3"))
+        try Data("outside".utf8).write(to: outside.appending(path: "book.epub"))
+        try execute(
+            "UPDATE books SET path = '../\(outside.lastPathComponent)' WHERE id = 1",
+            in: root
+        )
+
+        let result = try await CalibreLibraryReader.read(
+            libraryRoot: root,
+            formatPreference: CalibreImportService.kindlePreference
+        )
+
+        #expect(result.books.isEmpty)
+        #expect(!result.rejectedSources.isEmpty)
+        #expect(result.rejectedSources.allSatisfy { $0.reason == .traversalComponent })
+        #expect(result.unsafeRejectionCount == result.rejectedSources.count)
+    }
+
+    @Test func symlinkedAdditionalFormatIsRejectedWhileSafePrimaryRemains() async throws {
+        let root = try makeFixture()
+        let outside = root.deletingLastPathComponent().appending(
+            path: "CalibreOutside-\(UUID().uuidString).epub"
+        )
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try Data("outside".utf8).write(to: outside)
+        let linkedFormat = root.appending(path: "Tolkien/The Hobbit (1)/book.epub")
+        try FileManager.default.removeItem(at: linkedFormat)
+        try FileManager.default.createSymbolicLink(at: linkedFormat, withDestinationURL: outside)
+
+        let result = try await CalibreLibraryReader.read(
+            libraryRoot: root,
+            formatPreference: CalibreImportService.kindlePreference
+        )
+        let book = try #require(result.books.first)
+
+        #expect(book.fileURL.lastPathComponent == "book.azw3")
+        #expect(book.additionalSourceFiles.isEmpty)
+        #expect(result.rejectedSources.contains {
+            $0.role == .bookFormat("epub") && $0.reason == .symbolicLink
+        })
+    }
+
+    @Test func missingSchemaIsReportedInsteadOfLookingLikeEmptyImport() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "CalibreMissingSchema-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var db: OpaquePointer?
+        #expect(sqlite3_open(root.appending(path: "metadata.db").path(percentEncoded: false), &db) == SQLITE_OK)
+        sqlite3_close(db)
+
+        do {
+            _ = try await CalibreLibraryReader.read(
+                libraryRoot: root,
+                formatPreference: CalibreImportService.kindlePreference
+            )
+            Issue.record("missing Calibre schema should throw")
+        } catch let error as CalibreImportError {
+            guard case .missingSchema = error else {
+                Issue.record("expected missingSchema, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
+    @Test func sqlitePrepareFailureIsReported() throws {
+        var db: OpaquePointer?
+        #expect(sqlite3_open(":memory:", &db) == SQLITE_OK)
+        let connection = try #require(db)
+        defer { sqlite3_close(connection) }
+
+        do {
+            try CalibreLibraryReader.eachRow(connection, "SELECT FROM") { _ in }
+            Issue.record("invalid SQL should fail during prepare")
+        } catch let error as CalibreImportError {
+            guard case .prepareFailed = error else {
+                Issue.record("expected prepareFailed, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
+    @Test func sqliteStepFailureIsReported() throws {
+        var db: OpaquePointer?
+        #expect(sqlite3_open(":memory:", &db) == SQLITE_OK)
+        let connection = try #require(db)
+        defer { sqlite3_close(connection) }
+
+        do {
+            try CalibreLibraryReader.eachRow(
+                connection,
+                "SELECT abs(-9223372036854775808)"
+            ) { _ in }
+            Issue.record("integer overflow should fail during step")
+        } catch let error as CalibreImportError {
+            guard case .stepFailed = error else {
+                Issue.record("expected stepFailed, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
+    @Test func corruptDatabaseIsAnExplicitDatabaseFailure() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "CalibreCorruptDB-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("not a sqlite database".utf8).write(to: root.appending(path: "metadata.db"))
+
+        do {
+            _ = try await CalibreLibraryReader.read(
+                libraryRoot: root,
+                formatPreference: CalibreImportService.kindlePreference
+            )
+            Issue.record("corrupt database should throw")
+        } catch let error as CalibreImportError {
+            switch error {
+            case .prepareFailed, .stepFailed:
+                break
+            default:
+                Issue.record("expected a typed database failure, got \(error)")
+            }
+        } catch {
+            Issue.record("unexpected error: \(error)")
         }
     }
 }
