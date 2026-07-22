@@ -102,7 +102,7 @@ struct EditMetadataSheet: View {
                 Spacer()
 
                 Button("Save") {
-                    viewModel.updateMetadata(
+                    if viewModel.updateMetadata(
                         for: book,
                         title: title.isEmpty ? nil : title,
                         author: author.isEmpty ? nil : author,
@@ -116,8 +116,9 @@ struct EditMetadataSheet: View {
                         description: bookDescription.isEmpty ? nil : bookDescription,
                         tags: tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty },
                         shelfLocation: shelfLocation.isEmpty ? nil : shelfLocation
-                    )
-                    dismiss()
+                    ) {
+                        dismiss()
+                    }
                 }
                 .buttonStyle(.plain)
                 .font(theme.label(size: 12, weight: .bold))

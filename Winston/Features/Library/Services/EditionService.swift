@@ -23,6 +23,8 @@ final class EditionService {
     private let modelContext: ModelContext
     private let defaults: UserDefaults
     private let covers: CoverRepository
+    private let mutations: CatalogMutationService
+    private let toasts: ToastCenter?
     private let dismissedDefaultsKey = "editionMatcherDismissedPairKeys"
 
     private(set) var pendingProposals: [EditionMatchProposal] = []
@@ -32,11 +34,15 @@ final class EditionService {
     init(
         modelContext: ModelContext,
         defaults: UserDefaults = .standard,
-        covers: CoverRepository = .shared
+        covers: CoverRepository = .shared,
+        mutations: CatalogMutationService? = nil,
+        toasts: ToastCenter? = nil
     ) {
         self.modelContext = modelContext
         self.defaults = defaults
         self.covers = covers
+        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
+        self.toasts = toasts
         self.dismissedPairKeys = Set(defaults.stringArray(forKey: dismissedDefaultsKey) ?? [])
         refreshEditionCounts()
     }
@@ -56,17 +62,48 @@ final class EditionService {
         editionCounts = counts
     }
 
-    func updateWork(_ work: Work, title: String, author: String) {
+    @discardableResult
+    func updateWork(_ work: Work, title: String, author: String) -> Bool {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedAuthor = author.trimmingCharacters(in: .whitespacesAndNewlines)
-        work.title = trimmedTitle.isEmpty ? nil : trimmedTitle
-        work.author = trimmedAuthor.isEmpty ? nil : trimmedAuthor
-        work.refreshMatchKey()
-        modelContext.saveQuietly()
+        let workID = work.uuid
+        do {
+            try mutations.commit(
+                .updateWork(workID: workID),
+                affectedWorkIDs: [workID]
+            ) {
+                let storedWork = try mutations.work(id: workID)
+                storedWork.title = trimmedTitle.isEmpty ? nil : trimmedTitle
+                storedWork.author = trimmedAuthor.isEmpty ? nil : trimmedAuthor
+                storedWork.refreshMatchKey()
+            }
+            return true
+        } catch {
+            return reportMutationFailure()
+        }
     }
 
-    func setPreferred(_ book: Book, in work: Work) {
-        WorkService.setPreferred(book, in: work, context: modelContext)
+    @discardableResult
+    func setPreferred(_ book: Book, in work: Work) -> Bool {
+        let bookID = book.uuid
+        let workID = work.uuid
+        do {
+            try mutations.commit(
+                .updateWork(workID: workID),
+                affectedBookIDs: [bookID],
+                affectedWorkIDs: [workID]
+            ) {
+                let storedBook = try mutations.book(id: bookID)
+                let storedWork = try mutations.work(id: workID)
+                guard storedBook.work?.uuid == storedWork.uuid else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                storedWork.preferredEditionUUID = storedBook.uuid
+            }
+            return true
+        } catch {
+            return reportMutationFailure()
+        }
     }
 
     func scanLibrary() async {
@@ -148,8 +185,7 @@ final class EditionService {
            ),
            let target = other.work {
             let undo = assignmentUndo(for: book)
-            assign(book, to: target)
-            guard book.work?.uuid == target.uuid else { return nil }
+            guard assign(book, to: target) != nil else { return nil }
             index.update(Self.candidate(book))
             pendingProposals.removeAll { $0.memberUUIDs.contains(book.uuid) }
             return undo
@@ -251,14 +287,29 @@ final class EditionService {
     }
 
     @discardableResult
-    func assign(_ book: Book, to work: Work) -> Work {
-        guard book.modelContext != nil, work.modelContext != nil else { return work }
-        let previous = book.work
-        book.work = work
-        fillEmptyWorkMetadata(work, from: book)
-        work.preferredEditionUUID = WorkService.preferredEdition(in: work)?.uuid ?? book.uuid
-        modelContext.saveQuietly()
-        WorkService.pruneIfOrphaned(previous, context: modelContext)
+    func assign(_ book: Book, to work: Work) -> Work? {
+        guard book.modelContext != nil, work.modelContext != nil else { return nil }
+        let bookID = book.uuid
+        let workID = work.uuid
+        let previousWorkID = book.work?.uuid
+        do {
+            try mutations.commit(
+                .assignEdition(bookIDs: [bookID], workID: workID),
+                affectedBookIDs: [bookID],
+                affectedWorkIDs: Set([workID, previousWorkID].compactMap { $0 })
+            ) {
+                let storedBook = try mutations.book(id: bookID)
+                let storedWork = try mutations.work(id: workID)
+                let previous = storedBook.work
+                storedBook.work = storedWork
+                fillEmptyWorkMetadata(storedWork, from: storedBook)
+                storedWork.preferredEditionUUID = WorkService.preferredEdition(in: storedWork)?.uuid ?? storedBook.uuid
+                WorkService.pruneIfOrphaned(previous, context: modelContext, save: false)
+            }
+        } catch {
+            _ = reportMutationFailure()
+            return nil
+        }
         refreshEditionCounts()
         removeResolvedProposals()
         return work
@@ -267,42 +318,84 @@ final class EditionService {
     @discardableResult
     func groupIntoWork(_ books: [Book]) -> Work? {
         let books = books.filter { $0.modelContext != nil }
-        guard Set(books.map(\.uuid)).count > 1 else { return nil }
+        let bookIDs = Set(books.map(\.uuid))
+        guard bookIDs.count > 1 else { return nil }
         guard let winner = preferredBook(in: books) else { return nil }
-        let target = winner.work ?? {
-            let work = Work(title: winner.title, author: winner.author, dateCreated: winner.dateAdded)
-            modelContext.insert(work)
-            winner.work = work
-            return work
-        }()
-        var seenWorkUUIDs: Set<UUID> = []
-        let previousWorks = books.compactMap(\.work).filter {
-            $0.uuid != target.uuid && seenWorkUUIDs.insert($0.uuid).inserted
+        let winnerID = winner.uuid
+        let pendingWork = winner.work == nil
+            ? Work(title: winner.title, author: winner.author, dateCreated: winner.dateAdded)
+            : nil
+        let targetWorkID = winner.work?.uuid ?? pendingWork?.uuid
+        let originalWorkIDs = Set(books.compactMap { $0.work?.uuid })
+        var target: Work?
+        do {
+            try mutations.commit(
+                .assignEdition(bookIDs: Array(bookIDs), workID: targetWorkID),
+                affectedBookIDs: bookIDs,
+                affectedWorkIDs: originalWorkIDs.union(Set([targetWorkID].compactMap { $0 }))
+            ) {
+                let storedBooks = try mutations.books(ids: bookIDs)
+                guard let storedWinner = storedBooks.first(where: { $0.uuid == winnerID }) else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                let storedTarget: Work
+                if let targetWorkID = storedWinner.work?.uuid {
+                    storedTarget = try mutations.work(id: targetWorkID)
+                } else if let pendingWork {
+                    modelContext.insert(pendingWork)
+                    storedWinner.work = pendingWork
+                    storedTarget = pendingWork
+                } else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                var seenWorkIDs: Set<UUID> = []
+                let previousWorks = storedBooks.compactMap(\.work).filter {
+                    $0.uuid != storedTarget.uuid && seenWorkIDs.insert($0.uuid).inserted
+                }
+                for storedBook in storedBooks {
+                    storedBook.work = storedTarget
+                    fillEmptyWorkMetadata(storedTarget, from: storedBook)
+                }
+                storedTarget.preferredEditionUUID = WorkService.preferredEdition(in: storedTarget)?.uuid ?? storedWinner.uuid
+                for previous in previousWorks {
+                    WorkService.pruneIfOrphaned(previous, context: modelContext, save: false)
+                }
+                target = storedTarget
+            }
+        } catch {
+            _ = reportMutationFailure()
+            return nil
         }
-        for book in books {
-            book.work = target
-            fillEmptyWorkMetadata(target, from: book)
-        }
-        target.preferredEditionUUID = WorkService.preferredEdition(in: target)?.uuid ?? winner.uuid
-        modelContext.saveQuietly()
-        for work in previousWorks { WorkService.pruneIfOrphaned(work, context: modelContext, save: false) }
-        modelContext.saveQuietly()
         refreshEditionCounts()
         removeResolvedProposals()
         return target
     }
 
     @discardableResult
-    func mergeWorks(_ source: Work, into destination: Work) -> Work {
+    func mergeWorks(_ source: Work, into destination: Work) -> Work? {
         guard source.uuid != destination.uuid,
               source.modelContext != nil,
-              destination.modelContext != nil else { return destination }
-        fillEmptyWorkMetadata(destination, from: source)
-        let editions = source.editions
-        for book in editions { book.work = destination }
-        destination.preferredEditionUUID = WorkService.preferredEdition(in: destination)?.uuid
-        modelContext.saveQuietly()
-        WorkService.pruneIfOrphaned(source, context: modelContext)
+              destination.modelContext != nil else { return nil }
+        let sourceID = source.uuid
+        let destinationID = destination.uuid
+        let bookIDs = Set(source.editions.map(\.uuid))
+        do {
+            try mutations.commit(
+                .assignEdition(bookIDs: Array(bookIDs), workID: destinationID),
+                affectedBookIDs: bookIDs,
+                affectedWorkIDs: [sourceID, destinationID]
+            ) {
+                let storedSource = try mutations.work(id: sourceID)
+                let storedDestination = try mutations.work(id: destinationID)
+                fillEmptyWorkMetadata(storedDestination, from: storedSource)
+                for book in storedSource.editions { book.work = storedDestination }
+                storedDestination.preferredEditionUUID = WorkService.preferredEdition(in: storedDestination)?.uuid
+                WorkService.pruneIfOrphaned(storedSource, context: modelContext, save: false)
+            }
+        } catch {
+            _ = reportMutationFailure()
+            return nil
+        }
         refreshEditionCounts()
         removeResolvedProposals()
         return destination
@@ -311,14 +404,27 @@ final class EditionService {
     @discardableResult
     func detach(_ book: Book) -> Work? {
         guard book.modelContext != nil else { return nil }
-        let previous = book.work
+        let bookID = book.uuid
+        let previousWorkID = book.work?.uuid
         let work = Work(title: book.title, author: book.author, dateCreated: Date())
         work.originalLanguage = book.language
         work.preferredEditionUUID = book.uuid
-        modelContext.insert(work)
-        book.work = work
-        modelContext.saveQuietly()
-        WorkService.pruneIfOrphaned(previous, context: modelContext)
+        do {
+            try mutations.commit(
+                .assignEdition(bookIDs: [bookID], workID: work.uuid),
+                affectedBookIDs: [bookID],
+                affectedWorkIDs: Set([work.uuid, previousWorkID].compactMap { $0 })
+            ) {
+                let storedBook = try mutations.book(id: bookID)
+                let previous = storedBook.work
+                modelContext.insert(work)
+                storedBook.work = work
+                WorkService.pruneIfOrphaned(previous, context: modelContext, save: false)
+            }
+        } catch {
+            _ = reportMutationFailure()
+            return nil
+        }
         refreshEditionCounts()
         return work
     }
@@ -419,9 +525,10 @@ final class EditionService {
         return true
     }
 
-    func undo(_ undo: AssignmentUndo) {
-        guard let book = lookupBook(uuid: undo.bookUUID) else { return }
-        let current = book.work
+    @discardableResult
+    func undo(_ undo: AssignmentUndo) -> Bool {
+        guard let book = lookupBook(uuid: undo.bookUUID) else { return false }
+        let currentWorkID = book.work?.uuid
         let snapshot = undo.previousWork
         let restored = Work(title: snapshot.title, author: snapshot.author)
         restored.originalTitle = snapshot.originalTitle
@@ -430,11 +537,29 @@ final class EditionService {
         restored.hardcoverBookID = snapshot.hardcoverBookID
         restored.notes = snapshot.notes
         restored.preferredEditionUUID = book.uuid
-        modelContext.insert(restored)
-        book.work = restored
-        modelContext.saveQuietly()
-        WorkService.pruneIfOrphaned(current, context: modelContext)
+        do {
+            try mutations.commit(
+                .assignEdition(bookIDs: [undo.bookUUID], workID: restored.uuid),
+                affectedBookIDs: [undo.bookUUID],
+                affectedWorkIDs: Set([restored.uuid, currentWorkID].compactMap { $0 })
+            ) {
+                let storedBook = try mutations.book(id: undo.bookUUID)
+                let current = storedBook.work
+                modelContext.insert(restored)
+                storedBook.work = restored
+                WorkService.pruneIfOrphaned(current, context: modelContext, save: false)
+            }
+        } catch {
+            return reportMutationFailure()
+        }
         refreshEditionCounts()
+        return true
+    }
+
+    @discardableResult
+    private func reportMutationFailure() -> Bool {
+        toasts?.error(String(localized: "Couldn’t save library changes."))
+        return false
     }
 
     private func assignmentUndo(for book: Book) -> AssignmentUndo {

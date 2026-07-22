@@ -10,6 +10,7 @@ final class MetadataService {
     private let settings: AppSettings
     private let online: any OnlineMetadataFetching
     private let covers: CoverRepository
+    private let mutations: CatalogMutationService
 
     private(set) var enrichingUUIDs: Set<UUID> = []
     private(set) var metadataFetchSummary: String?
@@ -18,48 +19,66 @@ final class MetadataService {
         modelContext: ModelContext,
         settings: AppSettings,
         online: any OnlineMetadataFetching = OnlineMetadataService(),
-        covers: CoverRepository = .shared
+        covers: CoverRepository = .shared,
+        mutations: CatalogMutationService? = nil
     ) {
         self.modelContext = modelContext
         self.settings = settings
         self.online = online
         self.covers = covers
+        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
     }
 
     var isFetchingOnline: Bool { !enrichingUUIDs.isEmpty }
 
     // MARK: - Manual edits
 
+    @discardableResult
     func updateMetadata(
         for book: Book,
         title: String?, author: String?, publisher: String?, year: String?,
         series: String?, seriesIndex: String?, language: String?, translator: String?, isbn: String?,
         description: String?, tags: [String], shelfLocation: String?
-    ) {
-        book.title = title
-        book.author = author
-        book.publisher = publisher
-        book.year = year
-        book.series = series
-        book.seriesIndex = seriesIndex
-        book.language = language
-        book.translator = translator
-        book.isbn = isbn
-        book.bookDescription = description
-        book.tags = tags
-        book.shelfLocation = shelfLocation
-        modelContext.saveQuietly()
+    ) -> Bool {
+        let bookID = book.uuid
+        let fields: Set<String> = [
+            "title", "author", "publisher", "year", "series", "seriesIndex",
+            "language", "translator", "isbn", "description", "tags", "shelfLocation",
+        ]
+        return commit(.updateMetadata(bookID: bookID, fields: fields), bookIDs: [bookID]) {
+            let book = try mutations.book(id: bookID)
+            book.title = title
+            book.author = author
+            book.publisher = publisher
+            book.year = year
+            book.series = series
+            book.seriesIndex = seriesIndex
+            book.language = language
+            book.translator = translator
+            book.isbn = isbn
+            book.bookDescription = description
+            book.tags = tags
+            book.shelfLocation = shelfLocation
+        }
     }
 
-    func updateRating(for book: Book, rating: Int?) {
-        book.rating = rating
-        modelContext.saveQuietly()
+    @discardableResult
+    func updateRating(for book: Book, rating: Int?) -> Bool {
+        let bookID = book.uuid
+        return commit(.updateMetadata(bookID: bookID, fields: ["rating"]), bookIDs: [bookID]) {
+            let storedBook = try mutations.book(id: bookID)
+            storedBook.rating = rating
+        }
     }
 
-    func updateNotes(_ notes: String, for book: Book) {
+    @discardableResult
+    func updateNotes(_ notes: String, for book: Book) -> Bool {
         let trimmed = notes.trimmingCharacters(in: .whitespacesAndNewlines)
-        book.notes = trimmed.isEmpty ? nil : notes
-        modelContext.saveQuietly()
+        let bookID = book.uuid
+        return commit(.updateMetadata(bookID: bookID, fields: ["notes"]), bookIDs: [bookID]) {
+            let storedBook = try mutations.book(id: bookID)
+            storedBook.notes = trimmed.isEmpty ? nil : notes
+        }
     }
 
     // MARK: - Page count
@@ -75,67 +94,106 @@ final class MetadataService {
         modelContext.saveQuietly()
     }
 
-    func markNotSample(_ book: Book) {
-        book.sampleNoticeDismissed = true
-        modelContext.saveQuietly()
+    @discardableResult
+    func markNotSample(_ book: Book) -> Bool {
+        let bookID = book.uuid
+        return commit(.updateMetadata(bookID: bookID, fields: ["sampleNoticeDismissed"]), bookIDs: [bookID]) {
+            let storedBook = try mutations.book(id: bookID)
+            storedBook.sampleNoticeDismissed = true
+        }
     }
 
-    func bulkUpdate(_ books: [Book], _ edit: BulkEdit) {
-        for book in books {
-            if let author = edit.author       { book.author = author.isEmpty ? nil : author }
-            if let publisher = edit.publisher { book.publisher = publisher.isEmpty ? nil : publisher }
-            if let year = edit.year           { book.year = year.isEmpty ? nil : year }
-            if let series = edit.series       { book.series = series.isEmpty ? nil : series }
-            if let language = edit.language   { book.language = language.isEmpty ? nil : language }
-            if let translator = edit.translator { book.translator = translator.isEmpty ? nil : translator }
-            if let status = edit.status       { book.setStatus(status) }
-            if let tags = edit.tags {
-                switch edit.tagMode {
-                case .replace: book.tags = tags
-                case .add:     book.tags = (book.tags + tags).uniquedSorted()
+    @discardableResult
+    func bulkUpdate(_ books: [Book], _ edit: BulkEdit) -> Bool {
+        let ids = Set(books.map(\.uuid))
+        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "bulkEdit"), bookIDs: ids) {
+            for book in try mutations.books(ids: ids) {
+                if let author = edit.author       { book.author = author.isEmpty ? nil : author }
+                if let publisher = edit.publisher { book.publisher = publisher.isEmpty ? nil : publisher }
+                if let year = edit.year           { book.year = year.isEmpty ? nil : year }
+                if let series = edit.series       { book.series = series.isEmpty ? nil : series }
+                if let language = edit.language   { book.language = language.isEmpty ? nil : language }
+                if let translator = edit.translator { book.translator = translator.isEmpty ? nil : translator }
+                if let status = edit.status       { book.setStatus(status) }
+                if let tags = edit.tags {
+                    switch edit.tagMode {
+                    case .replace: book.tags = tags
+                    case .add:     book.tags = (book.tags + tags).uniquedSorted()
+                    }
                 }
             }
         }
-        modelContext.saveQuietly()
     }
 
     // MARK: - Tag / series / author management
 
-    func renameTag(_ old: String, to new: String) {
+    @discardableResult
+    func renameTag(_ old: String, to new: String) -> Bool {
         let name = new.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, name != old else { return }
-        for book in modelContext.allBooks() where book.tags.contains(old) {
-            book.tags = (book.tags.filter { $0 != old } + [name]).uniquedSorted()
+        guard !name.isEmpty, name != old else { return true }
+        let ids = Set(modelContext.allBooks().filter { $0.tags.contains(old) }.map(\.uuid))
+        guard !ids.isEmpty else { return true }
+        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "renameTag"), bookIDs: ids) {
+            for book in try mutations.books(ids: ids) {
+                book.tags = (book.tags.filter { $0 != old } + [name]).uniquedSorted()
+            }
         }
-        modelContext.saveQuietly()
     }
 
-    func deleteTag(_ tag: String) {
-        for book in modelContext.allBooks() where book.tags.contains(tag) {
-            book.tags.removeAll { $0 == tag }
+    @discardableResult
+    func deleteTag(_ tag: String) -> Bool {
+        let ids = Set(modelContext.allBooks().filter { $0.tags.contains(tag) }.map(\.uuid))
+        guard !ids.isEmpty else { return true }
+        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "deleteTag"), bookIDs: ids) {
+            for book in try mutations.books(ids: ids) {
+                book.tags.removeAll { $0 == tag }
+            }
         }
-        modelContext.saveQuietly()
     }
 
-    func renameSeries(_ old: String, to new: String) {
-        applySeriesRename(old, to: new)
-        modelContext.saveQuietly()
+    @discardableResult
+    func renameSeries(_ old: String, to new: String) -> Bool {
+        let ids = Set(modelContext.allBooks().filter { $0.series == old }.map(\.uuid))
+        guard !ids.isEmpty else { return true }
+        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "renameSeries"), bookIDs: ids) {
+            applySeriesRename(old, to: new)
+        }
     }
 
-    func renameAuthor(_ old: String, to new: String) {
-        applyAuthorRename(old, to: new)
-        modelContext.saveQuietly()
+    @discardableResult
+    func renameAuthor(_ old: String, to new: String) -> Bool {
+        let ids = Set(modelContext.allBooks().filter { $0.displayAuthor == old }.map(\.uuid))
+        guard !ids.isEmpty else { return true }
+        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "renameAuthor"), bookIDs: ids) {
+            applyAuthorRename(old, to: new)
+        }
     }
 
-    func applyMetadataFix(_ fix: MetadataFix) {
-        applyMetadataFixCore(fix)
-        modelContext.saveQuietly()
+    @discardableResult
+    func applyMetadataFix(_ fix: MetadataFix) -> Bool {
+        applyMetadataFixes([fix])
     }
 
-    func applyMetadataFixes(_ fixes: [MetadataFix]) {
-        guard !fixes.isEmpty else { return }
-        for fix in fixes { applyMetadataFixCore(fix) }
-        modelContext.saveQuietly()
+    @discardableResult
+    func applyMetadataFixes(_ fixes: [MetadataFix]) -> Bool {
+        guard !fixes.isEmpty else { return true }
+        let ids = Set(modelContext.allBooks().map(\.uuid))
+        return commit(.updateMetadataBatch(bookIDs: Array(ids), operation: "metadataFixes"), bookIDs: ids) {
+            for fix in fixes { applyMetadataFixCore(fix) }
+        }
+    }
+
+    private func commit(
+        _ command: CatalogMutationCommand,
+        bookIDs: Set<UUID>,
+        applying mutation: () throws -> Void
+    ) -> Bool {
+        do {
+            try mutations.commit(command, affectedBookIDs: bookIDs, applying: mutation)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func applyMetadataFixCore(_ fix: MetadataFix) {

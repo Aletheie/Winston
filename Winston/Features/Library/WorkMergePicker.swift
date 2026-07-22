@@ -82,7 +82,8 @@ struct WorkMergePicker: View {
     }
 
     private func merge(_ candidate: Work) {
-        _ = service.mergeWorks(candidate, into: work)
-        dismiss()
+        if service.mergeWorks(candidate, into: work) != nil {
+            dismiss()
+        }
     }
 }

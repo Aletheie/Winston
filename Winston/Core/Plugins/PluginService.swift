@@ -39,10 +39,12 @@ final class PluginService {
     private let maxFaults = 5
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
-         online: any OnlineMetadataFetching = OnlineMetadataService()) {
+         online: any OnlineMetadataFetching = OnlineMetadataService(),
+         saveAdapter: CatalogSaveAdapter = .live) {
         self.settings = settings
+        let mutations = CatalogMutationService(modelContext: modelContext, saveAdapter: saveAdapter)
         self.hostAPI = PluginHostAPI(modelContext: modelContext, settings: settings,
-                                     toasts: toasts, online: online)
+                                     toasts: toasts, online: online, mutations: mutations)
     }
 
     // MARK: - Discovery

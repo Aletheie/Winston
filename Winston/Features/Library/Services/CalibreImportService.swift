@@ -32,6 +32,7 @@ final class CalibreImportService {
     private let toasts: ToastCenter
     private let editions: EditionService?
     private let covers: CoverRepository
+    private let mutations: CatalogMutationService
 
     nonisolated static let kindlePreference = ["azw3", "mobi", "azw", "epub", "pdf", "txt"]
 
@@ -46,7 +47,8 @@ final class CalibreImportService {
         wishlist: WishlistService,
         toasts: ToastCenter,
         editions: EditionService? = nil,
-        covers: CoverRepository = .shared
+        covers: CoverRepository = .shared,
+        mutations: CatalogMutationService? = nil
     ) {
         self.modelContext = modelContext
         self.settings = settings
@@ -55,6 +57,7 @@ final class CalibreImportService {
         self.toasts = toasts
         self.editions = editions
         self.covers = covers
+        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
     }
 
     var progressText: String? {
@@ -102,6 +105,8 @@ final class CalibreImportService {
             progress = (0, total)
             var imported: [Book] = []
             var skipped = 0
+            var stagedBookIDs: Set<UUID> = []
+            var stagedFileNames: Set<String> = []
 
             for (index, cb) in calibreBooks.enumerated() {
                 progress = (Self.displayedPosition(for: index), total)
@@ -139,6 +144,8 @@ final class CalibreImportService {
                 modelContext.insert(book)
                 modelContext.insert(primaryAsset)
                 book.work = work
+                stagedBookIDs.insert(uuid)
+                stagedFileNames.insert(fileName)
 
                 for siblingURL in cb.additionalFileURLs {
                     let assetUUID = UUID()
@@ -156,6 +163,7 @@ final class CalibreImportService {
                         book: book
                     )
                     modelContext.insert(asset)
+                    stagedFileNames.insert(siblingFile.fileName)
                 }
                 imported.append(book)
 
@@ -175,7 +183,19 @@ final class CalibreImportService {
                     }
                 }
 
-                if imported.count % 25 == 0 { modelContext.saveQuietly() }
+                if imported.count % 25 == 0 {
+                    guard commitImportBatch(bookIDs: stagedBookIDs) else {
+                        await discardStagedArtifacts(
+                            bookIDs: stagedBookIDs,
+                            fileNames: stagedFileNames
+                        )
+                        progress = nil
+                        toasts.error(String(localized: "Couldn’t save library changes."))
+                        return
+                    }
+                    stagedBookIDs.removeAll(keepingCapacity: true)
+                    stagedFileNames.removeAll(keepingCapacity: true)
+                }
             }
 
             if !imported.isEmpty {
@@ -183,7 +203,17 @@ final class CalibreImportService {
                 collection.books = imported
                 modelContext.insert(collection)
             }
-            modelContext.saveQuietly()
+            if !imported.isEmpty {
+                guard commitImportBatch(bookIDs: Set(imported.map(\.uuid))) else {
+                    await discardStagedArtifacts(
+                        bookIDs: stagedBookIDs,
+                        fileNames: stagedFileNames
+                    )
+                    progress = nil
+                    toasts.error(String(localized: "Couldn’t save library changes."))
+                    return
+                }
+            }
             wishlist.fulfil(with: imported)
             if let editions {
                 let previousKeys = Set(editions.pendingProposals.map(\.pairKey))
@@ -213,6 +243,27 @@ final class CalibreImportService {
     }
 
     // MARK: - Helpers
+
+    private func commitImportBatch(bookIDs: Set<UUID>) -> Bool {
+        do {
+            try mutations.commitStaged(
+                .calibreImport(bookIDs: Array(bookIDs)),
+                affectedBookIDs: bookIDs
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func discardStagedArtifacts(bookIDs: Set<UUID>, fileNames: Set<String>) async {
+        await Task.detached(priority: .utility) {
+            for fileName in fileNames { BookFileStore.delete(fileName: fileName) }
+        }.value
+        for bookID in bookIDs {
+            _ = await covers.deletePermanently(for: bookID)
+        }
+    }
 
     private func finish(summary: String) {
         self.summary = summary

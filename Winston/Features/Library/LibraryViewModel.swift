@@ -56,7 +56,7 @@ final class LibraryViewModel {
             toasts: toasts,
             wishlist: wishlist
         )
-        let editions = EditionService(modelContext: modelContext, mutations: mutations)
+        let editions = EditionService(modelContext: modelContext, mutations: mutations, toasts: toasts)
         self.editions = editions
         self.importer = ImportService(
             modelContext: modelContext,
@@ -64,8 +64,7 @@ final class LibraryViewModel {
             metadata: metadata,
             wishlist: wishlist,
             toasts: toasts,
-            editions: editions,
-            mutations: mutations
+            editions: editions
         )
         self.calibreImporter = CalibreImportService(
             modelContext: modelContext,
@@ -73,7 +72,8 @@ final class LibraryViewModel {
             metadata: metadata,
             wishlist: wishlist,
             toasts: toasts,
-            editions: editions
+            editions: editions,
+            mutations: mutations
         )
         self.conversion = ConversionService(modelContext: modelContext, toasts: toasts)
         self.highlights = HighlightsService(modelContext: modelContext)
@@ -204,29 +204,60 @@ final class LibraryViewModel {
 
     // MARK: - Metadata (forwarded)
 
+    @discardableResult
     func updateMetadata(
         for book: Book,
         title: String?, author: String?, publisher: String?, year: String?,
         series: String?, seriesIndex: String?, language: String?, translator: String?, isbn: String?,
         description: String?, tags: [String], shelfLocation: String?
-    ) {
-        metadata.updateMetadata(
+    ) -> Bool {
+        reportMutationResult(metadata.updateMetadata(
             for: book, title: title, author: author, publisher: publisher, year: year,
             series: series, seriesIndex: seriesIndex, language: language, translator: translator, isbn: isbn,
             description: description, tags: tags, shelfLocation: shelfLocation
-        )
+        ))
     }
-    func updateRating(for book: Book, rating: Int?) { metadata.updateRating(for: book, rating: rating) }
-    func updateNotes(_ notes: String, for book: Book) { metadata.updateNotes(notes, for: book) }
-    func bulkUpdate(_ books: [Book], _ edit: BulkEdit) { metadata.bulkUpdate(books, edit) }
-    func renameTag(_ old: String, to new: String) { metadata.renameTag(old, to: new) }
-    func deleteTag(_ tag: String) { metadata.deleteTag(tag) }
-    func renameSeries(_ old: String, to new: String) { metadata.renameSeries(old, to: new) }
-    func renameAuthor(_ old: String, to new: String) { metadata.renameAuthor(old, to: new) }
-    func applyMetadataFix(_ fix: MetadataFix) { metadata.applyMetadataFix(fix) }
-    func applyMetadataFixes(_ fixes: [MetadataFix]) { metadata.applyMetadataFixes(fixes) }
+    @discardableResult
+    func updateRating(for book: Book, rating: Int?) -> Bool {
+        reportMutationResult(metadata.updateRating(for: book, rating: rating))
+    }
+    @discardableResult
+    func updateNotes(_ notes: String, for book: Book) -> Bool {
+        reportMutationResult(metadata.updateNotes(notes, for: book))
+    }
+    @discardableResult
+    func bulkUpdate(_ books: [Book], _ edit: BulkEdit) -> Bool {
+        reportMutationResult(metadata.bulkUpdate(books, edit))
+    }
+    @discardableResult
+    func renameTag(_ old: String, to new: String) -> Bool {
+        reportMutationResult(metadata.renameTag(old, to: new))
+    }
+    @discardableResult
+    func deleteTag(_ tag: String) -> Bool {
+        reportMutationResult(metadata.deleteTag(tag))
+    }
+    @discardableResult
+    func renameSeries(_ old: String, to new: String) -> Bool {
+        reportMutationResult(metadata.renameSeries(old, to: new))
+    }
+    @discardableResult
+    func renameAuthor(_ old: String, to new: String) -> Bool {
+        reportMutationResult(metadata.renameAuthor(old, to: new))
+    }
+    @discardableResult
+    func applyMetadataFix(_ fix: MetadataFix) -> Bool {
+        reportMutationResult(metadata.applyMetadataFix(fix))
+    }
+    @discardableResult
+    func applyMetadataFixes(_ fixes: [MetadataFix]) -> Bool {
+        reportMutationResult(metadata.applyMetadataFixes(fixes))
+    }
     func backfillPageCount(for book: Book) async { await metadata.backfillPageCount(for: book) }
-    func markNotSample(_ book: Book) { metadata.markNotSample(book) }
+    @discardableResult
+    func markNotSample(_ book: Book) -> Bool {
+        reportMutationResult(metadata.markNotSample(book))
+    }
     func fetchOnlineMetadata(for book: Book) { metadata.fetchOnlineMetadata(for: book) }
     func fetchOnlineMetadata(for books: [Book]) { metadata.fetchOnlineMetadata(for: books) }
     func backfillOnlineMetadata() { metadata.backfillMissingOnlineMetadata() }
@@ -483,74 +514,173 @@ final class LibraryViewModel {
 
     // MARK: - Reading status
 
-    func setReadingStatus(_ status: ReadingStatus, for books: [Book]) {
-        let newlyFinished = status == .finished
-            ? books.filter { $0.readingStatus != .finished }
+    @discardableResult
+    func setReadingStatus(_ status: ReadingStatus, for books: [Book]) -> Bool {
+        let ids = Set(books.map(\.uuid))
+        guard !ids.isEmpty else { return true }
+        let newlyFinishedIDs = status == .finished
+            ? Set(books.filter { $0.readingStatus != .finished }.map(\.uuid))
             : []
-        for book in books { book.setStatus(status) }
-        modelContext.saveQuietly()
-        notices.booksDidFinish(newlyFinished)
+        do {
+            try mutations.commit(
+                .setReadingStatus(bookIDs: Array(ids), status: status),
+                affectedBookIDs: ids
+            ) {
+                for book in try mutations.books(ids: ids) { book.setStatus(status) }
+            }
+            let newlyFinished = books.filter { newlyFinishedIDs.contains($0.uuid) }
+            notices.booksDidFinish(newlyFinished)
+            return true
+        } catch {
+            return reportMutationResult(false)
+        }
     }
 
-    func updateReadingProgress(_ progress: Double, for book: Book) {
-        guard book.updateReadingProgress(progress) else { return }
-        modelContext.saveQuietly()
+    @discardableResult
+    func updateReadingProgress(_ progress: Double, for book: Book) -> Bool {
+        guard book.activeReadingSession != nil else { return false }
+        let bookID = book.uuid
+        do {
+            try mutations.commit(
+                .setReadingProgress(bookID: bookID, progress: progress),
+                affectedBookIDs: [bookID]
+            ) {
+                let storedBook = try mutations.book(id: bookID)
+                guard storedBook.updateReadingProgress(progress) else {
+                    throw CatalogMutationError.modelNotFound
+                }
+            }
+            return true
+        } catch {
+            return reportMutationResult(false)
+        }
     }
 
     // MARK: - Collections
 
     @discardableResult
-    func createCollection(named name: String, adding books: [Book] = [], savedSearch: String? = nil) -> BookCollection {
+    func createCollection(
+        named name: String,
+        adding books: [Book] = [],
+        savedSearch: String? = nil
+    ) -> BookCollection? {
         let collection = BookCollection(name: name, savedSearch: savedSearch)
-        collection.books = books
-        modelContext.insert(collection)
-        modelContext.saveQuietly()
-        return collection
+        let bookIDs = Set(books.map(\.uuid))
+        do {
+            try mutations.commit(
+                .createCollection(collectionID: collection.id, bookIDs: Array(bookIDs)),
+                affectedBookIDs: bookIDs,
+                affectedCollectionIDs: [collection.id]
+            ) {
+                collection.books = try mutations.books(ids: bookIDs)
+                modelContext.insert(collection)
+            }
+            return collection
+        } catch {
+            _ = reportMutationResult(false)
+            return nil
+        }
     }
 
     @discardableResult
-    func createSmartShelf(named name: String, definition: SmartShelfDefinition) -> BookCollection {
+    func createSmartShelf(named name: String, definition: SmartShelfDefinition) -> BookCollection? {
         let collection = BookCollection(name: name)
-        collection.smartShelfDefinition = definition
-        modelContext.insert(collection)
-        modelContext.saveQuietly()
-        return collection
+        do {
+            try mutations.commit(
+                .createCollection(collectionID: collection.id, bookIDs: []),
+                affectedCollectionIDs: [collection.id]
+            ) {
+                collection.smartShelfDefinition = definition
+                modelContext.insert(collection)
+            }
+            return collection
+        } catch {
+            _ = reportMutationResult(false)
+            return nil
+        }
     }
 
+    @discardableResult
     func updateSmartShelf(
         _ collection: BookCollection,
         name: String,
         definition: SmartShelfDefinition
-    ) {
-        guard !collection.isSystem else { return }
-        collection.name = name
-        collection.savedSearch = nil
-        collection.smartShelfDefinition = definition
-        modelContext.saveQuietly()
-    }
-
-    func renameCollection(_ collection: BookCollection, to name: String) {
-        guard !collection.isSystem else { return }
-        collection.name = name
-        modelContext.saveQuietly()
-    }
-
-    func deleteCollection(_ collection: BookCollection) {
-        guard !collection.isSystem else { return }
-        modelContext.delete(collection)
-        modelContext.saveQuietly()
-    }
-
-    func add(_ books: [Book], to collection: BookCollection) {
-        for book in books where !collection.books.contains(where: { $0.uuid == book.uuid }) {
-            collection.books.append(book)
+    ) -> Bool {
+        guard !collection.isSystem else { return false }
+        let collectionID = collection.id
+        return commitCollectionMutation(collectionID: collectionID) { storedCollection in
+            storedCollection.name = name
+            storedCollection.savedSearch = nil
+            storedCollection.smartShelfDefinition = definition
         }
-        modelContext.saveQuietly()
     }
 
-    func remove(_ books: [Book], from collection: BookCollection) {
-        let ids = Set(books.map(\.uuid))
-        collection.books.removeAll { ids.contains($0.uuid) }
-        modelContext.saveQuietly()
+    @discardableResult
+    func renameCollection(_ collection: BookCollection, to name: String) -> Bool {
+        guard !collection.isSystem else { return false }
+        return commitCollectionMutation(collectionID: collection.id) { $0.name = name }
+    }
+
+    @discardableResult
+    func deleteCollection(_ collection: BookCollection) -> Bool {
+        guard !collection.isSystem else { return false }
+        let collectionID = collection.id
+        do {
+            try mutations.commit(
+                .deleteCollection(collectionID: collectionID),
+                affectedCollectionIDs: [collectionID]
+            ) {
+                modelContext.delete(try mutations.collection(id: collectionID))
+            }
+            return true
+        } catch {
+            return reportMutationResult(false)
+        }
+    }
+
+    @discardableResult
+    func add(_ books: [Book], to collection: BookCollection) -> Bool {
+        let bookIDs = Set(books.map(\.uuid))
+        return commitCollectionMutation(collectionID: collection.id, bookIDs: bookIDs) { storedCollection in
+            for book in try mutations.books(ids: bookIDs)
+            where !storedCollection.books.contains(where: { $0.uuid == book.uuid }) {
+                storedCollection.books.append(book)
+            }
+        }
+    }
+
+    @discardableResult
+    func remove(_ books: [Book], from collection: BookCollection) -> Bool {
+        let bookIDs = Set(books.map(\.uuid))
+        return commitCollectionMutation(collectionID: collection.id, bookIDs: bookIDs) { storedCollection in
+            storedCollection.books.removeAll { bookIDs.contains($0.uuid) }
+        }
+    }
+
+    private func commitCollectionMutation(
+        collectionID: UUID,
+        bookIDs: Set<UUID> = [],
+        applying mutation: (BookCollection) throws -> Void
+    ) -> Bool {
+        do {
+            try mutations.commit(
+                .updateCollection(collectionID: collectionID),
+                affectedBookIDs: bookIDs,
+                affectedCollectionIDs: [collectionID]
+            ) {
+                try mutation(mutations.collection(id: collectionID))
+            }
+            return true
+        } catch {
+            return reportMutationResult(false)
+        }
+    }
+
+    @discardableResult
+    private func reportMutationResult(_ succeeded: Bool) -> Bool {
+        if !succeeded {
+            toasts.error(String(localized: "Couldn’t save library changes."))
+        }
+        return succeeded
     }
 }

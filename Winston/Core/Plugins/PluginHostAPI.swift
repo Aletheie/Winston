@@ -196,14 +196,17 @@ final class PluginHostAPI {
     private let settings: AppSettings
     private let toasts: ToastCenter
     private let online: any OnlineMetadataFetching
+    private let mutations: CatalogMutationService
     private let storage = PluginStorageRepository()
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
-         online: any OnlineMetadataFetching = OnlineMetadataService()) {
+         online: any OnlineMetadataFetching = OnlineMetadataService(),
+         mutations: CatalogMutationService? = nil) {
         self.modelContext = modelContext
         self.settings = settings
         self.toasts = toasts
         self.online = online
+        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
     }
 
     func makeHandler(for manifest: PluginManifest, granted: Set<PluginPermission>) -> PluginHostHandler {
@@ -297,6 +300,46 @@ final class PluginHostAPI {
         _ patch: PluginMetadataPatch,
         to book: Book
     ) -> Result<PluginApplyResultDTO, PluginError> {
+        let bookID = book.uuid
+        let expectedFields = applicableFields(in: patch, to: book)
+        guard !expectedFields.isEmpty else {
+            return .success(PluginApplyResultDTO(applied: []))
+        }
+        var applied: [String] = []
+        do {
+            try mutations.commit(
+                .pluginUpdate(bookID: bookID, fields: Set(expectedFields)),
+                affectedBookIDs: [bookID]
+            ) {
+                applied = applyFields(in: patch, to: try mutations.book(id: bookID))
+            }
+            return .success(PluginApplyResultDTO(applied: applied))
+        } catch {
+            return .failure(.unavailable("could not persist library changes"))
+        }
+    }
+
+    private func applicableFields(in patch: PluginMetadataPatch, to book: Book) -> [String] {
+        var fields: [String] = []
+        func check(_ keyPath: KeyPath<Book, String?>, _ value: String?, _ name: String) {
+            guard let value, !value.isEmpty, (book[keyPath: keyPath] ?? "").isEmpty else { return }
+            fields.append(name)
+        }
+        check(\.title, patch.title, "title")
+        check(\.author, patch.author, "author")
+        check(\.publisher, patch.publisher, "publisher")
+        check(\.year, patch.year, "year")
+        check(\.language, patch.language, "language")
+        check(\.translator, patch.translator, "translator")
+        check(\.isbn, patch.isbn, "isbn")
+        check(\.series, patch.series, "series")
+        check(\.seriesIndex, patch.seriesIndex, "seriesIndex")
+        check(\.bookDescription, patch.description, "description")
+        if let tags = patch.tags, !tags.isEmpty, book.tags.isEmpty { fields.append("tags") }
+        return fields
+    }
+
+    private func applyFields(in patch: PluginMetadataPatch, to book: Book) -> [String] {
         var applied: [String] = []
         func fill(_ keyPath: ReferenceWritableKeyPath<Book, String?>, _ value: String?, _ name: String) {
             guard let value, !value.isEmpty, (book[keyPath: keyPath] ?? "").isEmpty else { return }
@@ -317,11 +360,7 @@ final class PluginHostAPI {
             book.tags = tags
             applied.append("tags")
         }
-        if !applied.isEmpty,
-           !modelContext.saveQuietly(rollbackOnFailure: true) {
-            return .failure(.unavailable("could not persist library changes"))
-        }
-        return .success(PluginApplyResultDTO(applied: applied))
+        return applied
     }
 
     // MARK: - Encoding

@@ -83,7 +83,7 @@ struct SmartShelfEditorSheet: View {
     let formats: [String]
     let deviceFileNames: Set<String>
     let deviceIsConnected: Bool
-    let onSave: (String, SmartShelfDefinition) -> Void
+    let onSave: (String, SmartShelfDefinition) -> Bool
 
     @Environment(\.dismiss) private var dismiss
     @State private var model: SmartShelfEditorModel
@@ -94,7 +94,7 @@ struct SmartShelfEditorSheet: View {
         formats: [String],
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool,
-        onSave: @escaping (String, SmartShelfDefinition) -> Void
+        onSave: @escaping (String, SmartShelfDefinition) -> Bool
     ) {
         self.request = request
         self.books = books
@@ -165,8 +165,9 @@ struct SmartShelfEditorSheet: View {
         guard model.canSave else { return }
         let name = model.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let definition = model.definition
-        dismiss()
-        onSave(name, definition)
+        if onSave(name, definition) {
+            dismiss()
+        }
     }
 }
 
@@ -582,7 +583,7 @@ private struct SmartShelfEditorFooter: View {
         formats: ["EPUB"],
         deviceFileNames: [],
         deviceIsConnected: false,
-        onSave: { _, _ in }
+        onSave: { _, _ in true }
     )
     .modelContainer(container)
     .frame(width: 900, height: 640)

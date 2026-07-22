@@ -395,15 +395,20 @@ struct SidebarView: View {
         request: SmartShelfEditorRequest,
         name: String,
         definition: SmartShelfDefinition
-    ) {
+    ) -> Bool {
         if let id = request.collectionID,
            let collection = collections.first(where: { $0.id == id }) {
-            viewModel.updateSmartShelf(collection, name: name, definition: definition)
+            guard viewModel.updateSmartShelf(collection, name: name, definition: definition) else {
+                return false
+            }
             selection = .collection(collection.id)
-        } else {
-            let collection = viewModel.createSmartShelf(named: name, definition: definition)
-            selection = .collection(collection.id)
+            return true
         }
+        guard let collection = viewModel.createSmartShelf(named: name, definition: definition) else {
+            return false
+        }
+        selection = .collection(collection.id)
+        return true
     }
 
     // MARK: - Author tip
