@@ -65,7 +65,7 @@ never wipes the user's saved data.
   "version": "1.0.0",
   "api": "1",
   "entry": "index.js",
-  "permissions": ["library.read", "library.write", "ui.toast"],
+  "permissions": ["library.read", "library.write", "metadata.fetch", "ui.toast"],
   "description": "Fills in missing publisher/description/tags from online metadata.",
   "author": "Your Name"
 }
@@ -89,8 +89,9 @@ in JavaScript — there is no back door.
 
 | Permission | Unlocks |
 |---|---|
-| `library.read` | `Winston.library.list()`, `Winston.library.get()`, and `Winston.metadata.fetch()` |
+| `library.read` | `Winston.library.list()` and `Winston.library.get()` |
 | `library.write` | `Winston.library.update()` (fills **empty fields only** — never overwrites) |
+| `metadata.fetch` | `Winston.metadata.fetch()` through Winston's online catalog service |
 | `ui.toast` | `Winston.ui.toast()` |
 
 `Winston.storage` and `console` need **no** permission — both are scoped to your
@@ -156,7 +157,7 @@ exports.activate = async () => {
         // capability, its namespace is `undefined`. capabilities.has() lets
         // you degrade gracefully rather than throw a TypeError.
         if (!Winston.capabilities.has("metadata.fetch")) {
-            console.error("This plugin needs the 'library.read' permission.");
+            console.error("This plugin needs the 'metadata.fetch' permission.");
             return;
         }
 

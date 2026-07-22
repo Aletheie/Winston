@@ -46,8 +46,9 @@ the plugin folder (an update) never touches its data.
 
 | Permission | Grants |
 |---|---|
-| `library.read` | `Winston.library.list/get`, `Winston.metadata.fetch` |
+| `library.read` | `Winston.library.list/get` |
 | `library.write` | `Winston.library.update` (fills **empty fields only**) |
+| `metadata.fetch` | `Winston.metadata.fetch` through Winston's online catalog service |
 | `ui.toast` | `Winston.ui.toast` |
 
 `Winston.storage` and `console` need no permission (both are scoped to the
@@ -108,7 +109,7 @@ A `Book` is a snapshot (changing it does nothing — use `library.update`):
 uuid, title, author, displayTitle, displayAuthor, publisher, year, language, translator,
 isbn, series, seriesIndex, tags, description, rating, communityRating,
 readingStatus, format, fileSizeBytes, dateAdded, workUUID, workTitle,
-editionCount, formats
+editionCount, formats, physicalCopy, shelfLocation
 ```
 
 ## Rules of the sandbox

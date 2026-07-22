@@ -3,6 +3,13 @@ import SwiftData
 import AppKit
 import CryptoKit
 
+nonisolated struct OnlineEnrichmentProposal: Sendable {
+    let outcome: OnlineMetadataFetchResult
+    let coverJPEGData: Data?
+    let lookupConfiguration: String
+    let completedAt: Date
+}
+
 @MainActor
 @Observable
 final class MetadataService {
@@ -11,22 +18,38 @@ final class MetadataService {
     private let online: any OnlineMetadataFetching
     private let covers: CoverRepository
     private let mutations: CatalogMutationService
+    let analysisCoordinator: CatalogAnalysisCoordinator
+    private let estimatePageCount: @Sendable (URL, String) async -> Int?
 
     private(set) var enrichingUUIDs: Set<UUID> = []
     private(set) var metadataFetchSummary: String?
+    private var enrichmentRuns: [UUID: UUID] = [:]
 
     init(
         modelContext: ModelContext,
         settings: AppSettings,
         online: any OnlineMetadataFetching = OnlineMetadataService(),
         covers: CoverRepository = .shared,
-        mutations: CatalogMutationService? = nil
+        mutations: CatalogMutationService? = nil,
+        analysisCoordinator: CatalogAnalysisCoordinator? = nil,
+        estimatePageCount: @escaping @Sendable (URL, String) async -> Int? = {
+            await PageCountEstimator.pageCount(at: $0, format: $1)
+        }
     ) {
+        let coordinator = mutations?.analysisCoordinator
+            ?? analysisCoordinator
+            ?? CatalogAnalysisCoordinator()
+        let resolvedMutations = mutations ?? CatalogMutationService(
+            modelContext: modelContext,
+            analysisCoordinator: coordinator
+        )
         self.modelContext = modelContext
         self.settings = settings
         self.online = online
         self.covers = covers
-        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
+        self.mutations = resolvedMutations
+        self.analysisCoordinator = resolvedMutations.analysisCoordinator
+        self.estimatePageCount = estimatePageCount
     }
 
     var isFetchingOnline: Bool { !enrichingUUIDs.isEmpty }
@@ -85,13 +108,45 @@ final class MetadataService {
 
     /// Books imported before page counts existed get theirs the first time the panel shows them.
     func backfillPageCount(for book: Book) async {
-        guard book.pageCount == nil, book.modelContext != nil,
-              let url = book.primaryFileURL else { return }
-        let format = book.format
-        guard let pages = await PageCountEstimator.pageCount(at: url, format: format) else { return }
-        guard book.modelContext != nil, book.pageCount == nil else { return }
-        book.pageCount = pages
-        modelContext.saveQuietly()
+        guard book.pageCount == nil,
+              let snapshot = BookAnalysisSnapshot(book: book),
+              snapshot.fileURL != nil else { return }
+        let estimator = estimatePageCount
+        let format = (snapshot.fileName as NSString).pathExtension
+        let job = analysisCoordinator.start(snapshot: snapshot, kind: .pageCount) { snapshot in
+            await CatalogAnalysisWorker.inspect(snapshot: snapshot) { url in
+                await estimator(url, format)
+            }
+        }
+        defer { analysisCoordinator.finish(job.ticket) }
+
+        guard let proposal = await analysisCoordinator.value(for: job),
+              proposal.value > 0,
+              proposal.sourceIsCurrent(for: snapshot),
+              analysisCoordinator.isCurrent(job.ticket),
+              let liveBook = try? mutations.book(id: snapshot.bookID),
+              snapshot.matches(liveBook),
+              liveBook.pageCount == nil else { return }
+
+        let preimage = CatalogBookMetadataPreimage(liveBook)
+        do {
+            try mutations.commit(
+                .applyAnalysis(bookID: snapshot.bookID, kind: .pageCount),
+                affectedBookIDs: [snapshot.bookID],
+                revertingOnFailure: preimage.restore
+            ) {
+                let storedBook = try mutations.book(id: snapshot.bookID)
+                guard analysisCoordinator.isCurrent(job.ticket),
+                      snapshot.matches(storedBook),
+                      proposal.sourceIsCurrent(for: snapshot),
+                      storedBook.pageCount == nil else {
+                    throw CatalogMutationError.staleAnalysis
+                }
+                storedBook.pageCount = proposal.value
+            }
+        } catch {
+            return
+        }
     }
 
     @discardableResult

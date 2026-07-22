@@ -13,7 +13,7 @@ under `Plugins/`, with `Winston.library.update(uuid, {...})` and **no arbitrary
 network** — plugins reach the network only through the gated `Winston.metadata.fetch`.
 Everything below audits the real code.
 
-**Verdict: sound.** No must-fix concurrency or security defect. Three residual
+**Verdict: sound.** No must-fix concurrency or security defect. Two residual
 edges are *by design* and documented below so they are chosen, not accidental.
 
 ---
@@ -126,10 +126,7 @@ code meets it exactly:
    the wedge. It is contained but silent. Fixing it fully needs the unavailable
    interruption API; a partial mitigation (a watchdog around each `complete`
    dispatch that quarantines on overrun) is possible if desired.
-2. **`Winston.storage.set` is unbounded.** `saveStorage` (`PluginHostAPI.swift:233`)
-   writes whatever the plugin serialized to its own `PluginData/<id>/storage.json`
-   with no size cap. Self-scoped disk growth only.
-3. **Silent async rejection.** A rejection escaping an `async activate` is
+2. **Silent async rejection.** A rejection escaping an `async activate` is
    invisible — JSC has no unhandled-rejection hook. This is a plugin-author
    caveat, already called out in `PluginAPI.md` and enforced by convention
    (`try/catch` around the `activate` body).
@@ -154,8 +151,8 @@ The app runs with the sandbox off (for raw USB / libmtp), but plugins get a real
 - **No data-loss primitive.** `library.update` is fill-empty-only and routed
   through `saveQuietly()` (`PluginHostAPI.apply`, `:198–220`) — a plugin can
   complete a record but never overwrite a user edit.
-- **Network is gated, not granted.** `metadata.fetch` is the *only* path off the
-  machine, it rides on `library.read`, and it refuses to run unless
+- **Network is separately granted and gated.** `metadata.fetch` is the *only* path off the
+  machine, requires `metadata.fetch`, and refuses to run unless
   `AppSettings.onlineMetadataEnabled` is on (`:132–143`) — off ⇒ zero network,
   matching the app-wide guarantee.
 - **No impersonation.** Toasts are prefixed with the plugin name
@@ -165,12 +162,11 @@ The app runs with the sandbox off (for raw USB / libmtp), but plugins get a real
   so a plugin written against a newer surface is rejected up front with a visible
   reason rather than half-working.
 
+Host calls are capped at 64 pending promises per runtime, storage values and files
+have explicit quotas, and storage I/O is serialized off the main actor.
+
 ## Optional hardening (not required)
 
-- Cap value/total size in `PluginHostAPI.saveStorage` (edge #2).
-- Give `metadata.fetch` its own permission instead of folding it into
-  `library.read`, so "read my library" and "look things up online" are separate
-  consents.
 - A per-dispatch watchdog around `complete` to quarantine a post-activation wedge
   (edge #1), accepting it still leaks the one thread.
 
