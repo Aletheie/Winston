@@ -1,29 +1,152 @@
+import AppKit
 import Foundation
 import SwiftData
-import AppKit
+
+typealias ConversionWorker = @Sendable (
+    URL,
+    EbookConverter.OutputFormat
+) async throws -> URL
+
+nonisolated enum ConversionCheckpoint: Sendable {
+    case artifactReady
+}
+
+typealias ConversionCheckpointHandler = @Sendable (ConversionCheckpoint) async -> Void
+
+nonisolated enum ConversionArtifactAdoptionResult: Sendable, Equatable {
+    case adopted
+    case conflict
+    case failed
+    case pendingRecovery
+}
 
 @MainActor
 @Observable
 final class ConversionService {
-    private struct Request {
-        let book: Book
+    /// Catalog identity of the source file. Derived inspection fields are
+    /// deliberately excluded: hash/size/validation backfills may finish while
+    /// conversion is running without replacing the source bytes. The physical
+    /// digest is captured and checked separately around every long phase.
+    private struct SourceGeneration: Equatable, Sendable {
+        let uuid: UUID
+        let fileName: String
+        let dateAdded: Date
+        let isPrimary: Bool
+    }
+
+    private struct AssetGeneration: Equatable, Sendable {
+        let uuid: UUID
+        let fileName: String
+        let dateAdded: Date
+        let contentHash: String?
+        let generatedFromContentHash: String?
+        let sizeBytes: Int64
+        let originRaw: String?
+        let validationStatusRaw: String?
+        let isPrimary: Bool
+    }
+
+    private struct TargetGeneration: Equatable, Sendable {
+        let format: String
+        let assets: [AssetGeneration]
+        let replacementAssetUUID: UUID?
+
+        var replacementAsset: AssetGeneration? {
+            guard let replacementAssetUUID else { return nil }
+            return assets.first { $0.uuid == replacementAssetUUID }
+        }
+    }
+
+    /// Contains no live SwiftData models. Both sides of the conversion are
+    /// immutable generations captured before the first suspension point.
+    private struct Request: Sendable {
         let uuid: UUID
         let sourceURL: URL
         let sourceFileName: String
-        let sourceAssetUUID: UUID?
-        let sourceAssetDateAdded: Date?
-        let sourceContentHash: String?
+        let sourceAsset: SourceGeneration?
         let coverVersion: Int
-        let assetUUID: UUID
-        let existingAssetUUID: UUID?
+        let newAssetUUID: UUID
+        let target: TargetGeneration
         let title: String
         let format: EbookConverter.OutputFormat
+    }
+
+    private enum TargetFileIdentity: Equatable, Sendable {
+        case none
+        case missing
+        case sha256(String)
+    }
+
+    private enum SnapshotConflict: Sendable {
+        case sourceChanged
+        case targetChanged
+    }
+
+    private enum InstallResult: Sendable {
+        case installed
+        case conflict(SnapshotConflict)
+        case failed
+        case pendingRecovery
+    }
+
+    private struct AssetPreimage {
+        let asset: BookAsset
+        let fileName: String
+        let dateAdded: Date
+        let contentHash: String?
+        let generatedFromContentHash: String?
+        let sizeBytes: Int64
+        let originRaw: String?
+        let validationStatusRaw: String?
+
+        init(_ asset: BookAsset) {
+            self.asset = asset
+            fileName = asset.fileName
+            dateAdded = asset.dateAdded
+            contentHash = asset.contentHash
+            generatedFromContentHash = asset.generatedFromContentHash
+            sizeBytes = asset.sizeBytes
+            originRaw = asset.originRaw
+            validationStatusRaw = asset.validationStatusRaw
+        }
+
+        func restore() {
+            asset.fileName = fileName
+            asset.dateAdded = dateAdded
+            asset.contentHash = contentHash
+            asset.generatedFromContentHash = generatedFromContentHash
+            asset.sizeBytes = sizeBytes
+            asset.originRaw = originRaw
+            asset.validationStatusRaw = validationStatusRaw
+        }
+    }
+
+    private struct BookPreimage {
+        let book: Book
+        let fileName: String
+        let fileSizeBytes: Int64
+        let coverVersion: Int
+
+        init(_ book: Book) {
+            self.book = book
+            fileName = book.fileName
+            fileSizeBytes = book.fileSizeBytes
+            coverVersion = book.coverVersion
+        }
+
+        func restore() {
+            book.fileName = fileName
+            book.fileSizeBytes = fileSizeBytes
+            book.coverVersion = coverVersion
+        }
     }
 
     private let modelContext: ModelContext
     private let toasts: ToastCenter
     private let mutations: CatalogMutationService
     private let managedFiles: ManagedFileCoordinator
+    private let worker: ConversionWorker
+    private let checkpoint: ConversionCheckpointHandler
 
     private(set) var convertingUUIDs: Set<UUID> = []
 
@@ -31,7 +154,11 @@ final class ConversionService {
         modelContext: ModelContext,
         toasts: ToastCenter,
         mutations: CatalogMutationService? = nil,
-        managedFiles: ManagedFileCoordinator = .shared
+        managedFiles: ManagedFileCoordinator = .shared,
+        worker: @escaping ConversionWorker = { source, format in
+            try await EbookConverter.convert(source, to: format)
+        },
+        checkpoint: @escaping ConversionCheckpointHandler = { _ in }
     ) {
         self.modelContext = modelContext
         self.toasts = toasts
@@ -40,6 +167,8 @@ final class ConversionService {
             managedFiles: managedFiles
         )
         self.managedFiles = managedFiles
+        self.worker = worker
+        self.checkpoint = checkpoint
     }
 
     func isConverting(_ book: Book) -> Bool { convertingUUIDs.contains(book.uuid) }
@@ -60,7 +189,13 @@ final class ConversionService {
             toasts.error(String(localized: "Install calibre to convert books"))
             return
         }
-        let request = makeRequest(for: book, to: format)
+        guard let request = makeRequest(for: book, to: format) else {
+            toasts.error(String(
+                localized: "Couldn\u{2019}t prepare \u{201C}\(book.displayTitle)\u{201D} for conversion.",
+                comment: "Conversion setup error; the placeholder is the book title."
+            ))
+            return
+        }
         convertingUUIDs.insert(request.uuid)
         Task { await performConvert(request) }
     }
@@ -83,7 +218,7 @@ final class ConversionService {
             }
             return
         }
-        let requests = targets.map {
+        let requests = targets.compactMap {
             makeRequest(for: $0, to: EbookConverter.kindleTarget(forFormat: $0.format))
         }
         for request in requests { convertingUUIDs.insert(request.uuid) }
@@ -108,190 +243,288 @@ final class ConversionService {
             toasts.error(String(localized: "Install calibre to convert books"))
             return
         }
-        let requests = targets.map { makeRequest(for: $0, to: format) }
+        let requests = targets.compactMap { makeRequest(for: $0, to: format) }
         for request in requests { convertingUUIDs.insert(request.uuid) }
         Task {
             for request in requests { await performConvert(request) }
         }
     }
 
-    private func makeRequest(for book: Book, to format: EbookConverter.OutputFormat) -> Request {
-        let sourceAsset = book.assets.first { $0.fileName == book.fileName }
-        let existing = book.assets.first {
-            $0.origin == .generated && $0.format.lowercased() == format.ext
+    @discardableResult
+    func adoptArtifact(for bookUUID: UUID, from url: URL) async -> ConversionArtifactAdoptionResult {
+        guard let book = lookupBook(uuid: bookUUID), book.hasDigitalFile,
+              let format = EbookConverter.OutputFormat(rawValue: url.pathExtension.lowercased()),
+              let request = makeRequest(for: book, to: format) else {
+            return .failed
+        }
+        guard snapshotConflict(for: request) == nil else { return .conflict }
+        guard let sourceHash = await hash(of: request.sourceURL) else { return .failed }
+        guard let targetIdentity = await captureTargetFileIdentity(for: request) else {
+            notify(.targetChanged, request: request)
+            return .conflict
+        }
+        if let conflict = snapshotConflict(for: request) {
+            notify(conflict, request: request)
+            return .conflict
+        }
+
+        let result = await installArtifact(
+            at: url,
+            for: request,
+            sourceHash: sourceHash,
+            targetIdentity: targetIdentity,
+            extractedCover: nil
+        )
+        switch result {
+        case .installed:
+            return .adopted
+        case .conflict(let conflict):
+            notify(conflict, request: request)
+            return .conflict
+        case .failed:
+            toasts.error(String(localized: "Couldn\u{2019}t save \u{201C}\(request.title)\u{201D}."))
+            return .failed
+        case .pendingRecovery:
+            toasts.error(String(localized: "Converted file is waiting for recovery."))
+            return .pendingRecovery
+        }
+    }
+
+    private func makeRequest(
+        for book: Book,
+        to format: EbookConverter.OutputFormat
+    ) -> Request? {
+        let sourceAsset = primaryAsset(in: book).map {
+            Self.sourceGeneration(of: $0, primaryFileName: book.fileName)
+        }
+        let target = Self.targetGeneration(for: book, format: format.ext)
+        if let replacementAssetUUID = target.replacementAssetUUID,
+           replacementAssetUUID == sourceAsset?.uuid {
+            return nil
         }
         return Request(
-            book: book,
             uuid: book.uuid,
             sourceURL: book.fileURL,
             sourceFileName: book.fileName,
-            sourceAssetUUID: sourceAsset?.uuid,
-            sourceAssetDateAdded: sourceAsset?.dateAdded,
-            sourceContentHash: sourceAsset?.contentHash,
+            sourceAsset: sourceAsset,
             coverVersion: book.coverVersion,
-            assetUUID: existing?.uuid ?? UUID(),
-            existingAssetUUID: existing?.uuid,
+            newAssetUUID: UUID(),
+            target: target,
             title: book.displayTitle,
             format: format
         )
     }
 
     private func performConvert(_ request: Request) async {
-        let book = request.book
-        let uuid = request.uuid
-        let sourceURL = request.sourceURL
-        defer { convertingUUIDs.remove(uuid) }
-        guard sourceSnapshotIsCurrent(request) else { return }
+        defer { convertingUUIDs.remove(request.uuid) }
+        guard snapshotConflict(for: request) == nil else { return }
 
-        let resolvedSourceHash: String?
-        if let sourceContentHash = request.sourceContentHash {
-            resolvedSourceHash = sourceContentHash
-        } else {
-            resolvedSourceHash = await Task.detached(priority: .utility) {
-                try? ContentHasher.sha256(of: sourceURL)
-            }.value
-        }
-        guard let sourceHash = resolvedSourceHash else {
-            toasts.error(String(localized: "Couldn’t convert “\(request.title)”."))
+        guard let sourceHash = await hash(of: request.sourceURL) else {
+            toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
-        guard sourceSnapshotIsCurrent(request) else { return }
+        guard let targetIdentity = await captureTargetFileIdentity(for: request) else {
+            notify(.targetChanged, request: request)
+            return
+        }
+        if let conflict = snapshotConflict(for: request) {
+            notify(conflict, request: request)
+            return
+        }
 
         let extractedCover = await Task.detached(priority: .utility) { () -> (NSImage, Data)? in
-            if !CoverStore.exists(for: uuid),
-               let cover = CoverExtractor.extractCover(from: sourceURL),
+            if !CoverStore.exists(for: request.uuid),
+               let cover = CoverExtractor.extractCover(from: request.sourceURL),
                let data = ImageTranscoder.jpegData(from: cover) {
                 return (cover, data)
             }
             return nil
         }.value
-
-        guard sourceSnapshotIsCurrent(request) else { return }
-        let converted: URL? = try? await EbookConverter.convert(sourceURL, to: request.format)
-        guard sourceSnapshotIsCurrent(request) else {
-            if let converted { try? FileManager.default.removeItem(at: converted) }
+        if let conflict = snapshotConflict(for: request) {
+            notify(conflict, request: request)
             return
         }
-        guard let converted else {
+
+        let converted: URL
+        do {
+            converted = try await worker(request.sourceURL, request.format)
+        } catch {
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
         defer { try? FileManager.default.removeItem(at: converted) }
 
-        let existingAsset = request.existingAssetUUID.flatMap { existingUUID in
-            book.assets.first { $0.uuid == existingUUID }
+        let result = await installArtifact(
+            at: converted,
+            for: request,
+            sourceHash: sourceHash,
+            targetIdentity: targetIdentity,
+            extractedCover: extractedCover
+        )
+        switch result {
+        case .installed:
+            if let image = extractedCover?.0 {
+                await CoverCache.shared.replace(image, for: request.sourceURL)
+            }
+            toasts.success(String(localized: "Created \(request.format.label) copy."))
+        case .conflict(let conflict):
+            notify(conflict, request: request)
+        case .failed:
+            toasts.error(String(localized: "Couldn\u{2019}t save \u{201C}\(request.title)\u{201D}."))
+        case .pendingRecovery:
+            toasts.error(String(localized: "Converted file is waiting for recovery."))
         }
-        let oldFileName = existingAsset?.fileName
-        let oldAssetDate = existingAsset?.dateAdded
-        let retiredNames = Set(oldFileName.map { [$0] } ?? [])
-        let bookSource: ManagedFileSource
-        do {
-            bookSource = try .book(sourceURL: converted)
-        } catch {
-            toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
-            return
+    }
+
+    private func installArtifact(
+        at artifactURL: URL,
+        for request: Request,
+        sourceHash: String,
+        targetIdentity: TargetFileIdentity,
+        extractedCover: (NSImage, Data)?
+    ) async -> InstallResult {
+        await checkpoint(.artifactReady)
+        if let conflict = snapshotConflict(for: request) {
+            return .conflict(conflict)
+        }
+        guard await hash(of: request.sourceURL) == sourceHash else {
+            return .conflict(.sourceChanged)
+        }
+        guard await targetFileIdentityIsCurrent(targetIdentity, request: request) else {
+            return .conflict(.targetChanged)
         }
 
-        let shouldInstallCover = extractedCover != nil
-            && book.coverVersion == request.coverVersion
-            && !CoverStore.exists(for: uuid)
-        var sources = [bookSource]
-        if shouldInstallCover, let coverData = extractedCover?.1 {
-            sources.append(.cover(data: coverData, bookID: uuid))
+        let replacement: AssetGeneration?
+        let expectedTargetHash: String?
+        switch targetIdentity {
+        case .sha256(let hash):
+            replacement = request.target.replacementAsset
+            expectedTargetHash = hash
+        case .none, .missing:
+            // A missing target is retained as a recoverable catalog record. A
+            // new generated asset is safer than reusing a generation whose
+            // physical bytes did not exist when conversion began.
+            replacement = nil
+            expectedTargetHash = nil
+        }
+        let installedAssetUUID = replacement?.uuid ?? request.newAssetUUID
+
+        let bookSource: ManagedFileSource
+        do {
+            bookSource = try .book(sourceURL: artifactURL)
+        } catch {
+            return .failed
         }
         let newFileName = bookSource.finalRelativeName
+        let oldFileName = replacement?.fileName
+        let retiredNames = Set(oldFileName.map { [$0] } ?? [])
+
+        let shouldInstallCover = extractedCover != nil
+            && lookupBook(uuid: request.uuid)?.coverVersion == request.coverVersion
+            && !CoverStore.exists(for: request.uuid)
         let expectedCoverVersion = request.coverVersion + (shouldInstallCover ? 1 : 0)
+        var sources = [bookSource]
+        if shouldInstallCover, let coverData = extractedCover?.1 {
+            sources.append(.cover(data: coverData, bookID: request.uuid))
+        }
+        let cleanups: [ManagedFileCleanup]
+        if let oldFileName, let expectedTargetHash {
+            cleanups = [.book(oldFileName, expectedSHA256: expectedTargetHash)]
+        } else {
+            cleanups = []
+        }
+
         let transaction: ManagedFileTransaction
         do {
             transaction = try await managedFiles.stage(
                 intent: .conversionOutput,
                 sources: sources,
                 requirement: ManagedFileRequirement(
-                    presentBookIDs: [uuid],
+                    presentBookIDs: [request.uuid],
                     referencedBookFileNames: [newFileName],
                     unreferencedBookFileNames: retiredNames,
-                    coverVersions: shouldInstallCover ? [uuid: expectedCoverVersion] : [:]
+                    coverVersions: shouldInstallCover ? [request.uuid: expectedCoverVersion] : [:]
                 ),
-                cleanups: oldFileName.map { [.book($0)] } ?? []
+                cleanups: cleanups
             )
         } catch {
-            toasts.error(String(localized: "Couldn\u{2019}t save \u{201C}\(request.title)\u{201D}."))
-            return
+            return .failed
         }
 
-        let currentExisting = request.existingAssetUUID.flatMap { existingUUID in
-            book.assets.first { $0.uuid == existingUUID }
+        if let conflict = snapshotConflict(for: request) {
+            await managedFiles.abort(transaction)
+            return .conflict(conflict)
         }
-        guard sourceSnapshotIsCurrent(request),
-              currentExisting?.fileName == oldFileName,
-              currentExisting?.dateAdded == oldAssetDate,
+        guard await hash(of: request.sourceURL) == sourceHash else {
+            await managedFiles.abort(transaction)
+            return .conflict(.sourceChanged)
+        }
+        guard await targetFileIdentityIsCurrent(targetIdentity, request: request),
               let stagedBook = transaction.files.first(where: { $0.kind == .book }) else {
             await managedFiles.abort(transaction)
-            return
+            return .conflict(.targetChanged)
         }
 
-        let sourceAsset = request.sourceAssetUUID.flatMap { sourceAssetUUID in
-            book.assets.first { $0.uuid == sourceAssetUUID }
-        }
-        let originalSourceHash = sourceAsset?.contentHash
-        let oldSize = currentExisting?.sizeBytes
-        let oldHash = currentExisting?.contentHash
-        let oldGeneratedFromHash = currentExisting?.generatedFromContentHash
-        let oldValidation = currentExisting?.validationStatus
-        let replacementDate = Date()
+        var mutationWasApplied = false
         var insertedAsset: BookAsset?
+        var bookPreimage: BookPreimage?
+        var sourcePreimage: AssetPreimage?
+        var targetPreimage: AssetPreimage?
+        let replacementDate = Date()
         do {
             let result = try await mutations.commitFileMutation(
-                .conversionOutput(bookID: uuid, assetID: request.assetUUID),
+                .conversionOutput(bookID: request.uuid, assetID: installedAssetUUID),
                 transaction: transaction,
-                affectedBookIDs: [uuid],
+                affectedBookIDs: [request.uuid],
                 revertingOnFailure: {
-                    book.coverVersion = request.coverVersion
-                    sourceAsset?.contentHash = originalSourceHash
-                    if let currentExisting {
-                        currentExisting.fileName = oldFileName ?? currentExisting.fileName
-                        currentExisting.sizeBytes = oldSize ?? currentExisting.sizeBytes
-                        currentExisting.contentHash = oldHash
-                        currentExisting.generatedFromContentHash = oldGeneratedFromHash
-                        currentExisting.validationStatus = oldValidation
-                        currentExisting.dateAdded = oldAssetDate ?? currentExisting.dateAdded
-                    }
+                    guard mutationWasApplied else { return }
                     if let insertedAsset {
-                        book.assets.removeAll { $0 === insertedAsset }
+                        insertedAsset.book?.assets.removeAll { $0 === insertedAsset }
                         if insertedAsset.modelContext != nil {
                             modelContext.delete(insertedAsset)
                         }
                     }
+                    targetPreimage?.restore()
+                    sourcePreimage?.restore()
+                    bookPreimage?.restore()
                 }
             ) {
-                let liveBook = try mutations.book(id: uuid)
-                guard sourceSnapshotIsCurrent(request),
-                      liveBook.coverVersion == request.coverVersion else {
-                    throw CatalogMutationError.modelNotFound
+                let liveBook = try mutations.book(id: request.uuid)
+                guard snapshotConflict(for: request, in: liveBook) == nil else {
+                    throw CatalogMutationError.staleConversion
                 }
-                if let sourceAssetUUID = request.sourceAssetUUID,
-                   let sourceAsset = liveBook.assets.first(where: { $0.uuid == sourceAssetUUID }),
-                   sourceAsset.contentHash == nil {
-                    sourceAsset.contentHash = sourceHash
+                let liveSource = request.sourceAsset.flatMap { source in
+                    liveBook.assets.first { $0.uuid == source.uuid }
                 }
-                if let existingAssetUUID = request.existingAssetUUID,
-                   let asset = liveBook.assets.first(where: { $0.uuid == existingAssetUUID }) {
-                    guard asset.fileName == oldFileName,
-                          asset.dateAdded == oldAssetDate else {
-                        throw CatalogMutationError.modelNotFound
-                    }
-                    asset.fileName = newFileName
-                    asset.sizeBytes = stagedBook.byteCount
-                    asset.contentHash = stagedBook.sha256
-                    asset.generatedFromContentHash = sourceHash
-                    asset.validationStatus = .ok
-                    asset.dateAdded = replacementDate
+                if request.sourceAsset != nil, liveSource == nil {
+                    throw CatalogMutationError.staleConversion
+                }
+                let liveTarget = replacement.flatMap { target in
+                    liveBook.assets.first { $0.uuid == target.uuid }
+                }
+                if replacement != nil, liveTarget == nil {
+                    throw CatalogMutationError.staleConversion
+                }
+                guard liveBook.assets.allSatisfy({ $0.uuid != request.newAssetUUID }) else {
+                    throw CatalogMutationError.staleConversion
+                }
+
+                bookPreimage = BookPreimage(liveBook)
+                sourcePreimage = liveSource.map(AssetPreimage.init)
+                targetPreimage = liveTarget.map(AssetPreimage.init)
+                mutationWasApplied = true
+
+                liveSource?.contentHash = sourceHash
+                if let liveTarget {
+                    liveTarget.fileName = newFileName
+                    liveTarget.sizeBytes = stagedBook.byteCount
+                    liveTarget.contentHash = stagedBook.sha256
+                    liveTarget.generatedFromContentHash = sourceHash
+                    liveTarget.validationStatus = .ok
+                    liveTarget.dateAdded = replacementDate
                 } else {
-                    guard request.existingAssetUUID == nil else {
-                        throw CatalogMutationError.modelNotFound
-                    }
                     let asset = BookAsset(
-                        uuid: request.assetUUID,
+                        uuid: request.newAssetUUID,
                         fileName: newFileName,
                         origin: .generated,
                         contentHash: stagedBook.sha256,
@@ -303,36 +536,152 @@ final class ConversionService {
                     modelContext.insert(asset)
                     insertedAsset = asset
                 }
+                if replacement?.isPrimary == true {
+                    liveBook.fileName = newFileName
+                    liveBook.fileSizeBytes = stagedBook.byteCount
+                }
                 if shouldInstallCover {
                     liveBook.coverVersion = expectedCoverVersion
                 }
             }
-            guard result.isFullyPublished else {
-                toasts.error(String(localized: "Converted file is waiting for recovery."))
-                return
-            }
+            return result.isFullyPublished ? .installed : .pendingRecovery
         } catch {
-            toasts.error(String(localized: "Couldn\u{2019}t save \u{201C}\(request.title)\u{201D}."))
-            return
+            if let conflict = snapshotConflict(for: request) {
+                return .conflict(conflict)
+            }
+            if await hash(of: request.sourceURL) != sourceHash {
+                return .conflict(.sourceChanged)
+            }
+            if !(await targetFileIdentityIsCurrent(targetIdentity, request: request)) {
+                return .conflict(.targetChanged)
+            }
+            return .failed
         }
-
-        if shouldInstallCover, let image = extractedCover?.0 {
-            await CoverCache.shared.replace(image, for: sourceURL)
-        }
-        toasts.success(String(localized: "Created \(request.format.label) copy."))
     }
 
-    private func sourceSnapshotIsCurrent(_ request: Request) -> Bool {
-        guard request.book.modelContext != nil,
-              request.book.fileName == request.sourceFileName,
-              request.book.coverVersion == request.coverVersion else { return false }
-        guard let sourceAssetUUID = request.sourceAssetUUID else { return true }
-        guard let sourceAsset = request.book.assets.first(where: { $0.uuid == sourceAssetUUID }),
-              sourceAsset.fileName == request.sourceFileName,
-              sourceAsset.dateAdded == request.sourceAssetDateAdded else { return false }
-        if let expected = request.sourceContentHash,
-           let current = sourceAsset.contentHash,
-           current != expected { return false }
-        return true
+    private func snapshotConflict(for request: Request) -> SnapshotConflict? {
+        guard let book = lookupBook(uuid: request.uuid) else { return .sourceChanged }
+        return snapshotConflict(for: request, in: book)
+    }
+
+    private func snapshotConflict(for request: Request, in book: Book) -> SnapshotConflict? {
+        if Self.targetGeneration(for: book, format: request.target.format) != request.target {
+            return .targetChanged
+        }
+        guard book.fileName == request.sourceFileName,
+              book.coverVersion == request.coverVersion else {
+            return .sourceChanged
+        }
+        if let expectedSource = request.sourceAsset {
+            guard let source = book.assets.first(where: { $0.uuid == expectedSource.uuid }),
+                  Self.sourceGeneration(of: source, primaryFileName: book.fileName) == expectedSource else {
+                return .sourceChanged
+            }
+        } else if book.assets.contains(where: { $0.fileName == request.sourceFileName }) {
+            return .sourceChanged
+        }
+        return nil
+    }
+
+    private func captureTargetFileIdentity(for request: Request) async -> TargetFileIdentity? {
+        guard let target = request.target.replacementAsset else {
+            return TargetFileIdentity.none
+        }
+        guard let url = BookFileStore.validatedURL(for: target.fileName) else { return nil }
+        return await Task.detached(priority: .utility) { () -> TargetFileIdentity? in
+            let path = url.path(percentEncoded: false)
+            guard FileManager.default.fileExists(atPath: path) else { return .missing }
+            guard let digest = try? ContentHasher.sha256Cancellable(of: url) else { return nil }
+            return .sha256(digest)
+        }.value
+    }
+
+    private func targetFileIdentityIsCurrent(
+        _ identity: TargetFileIdentity,
+        request: Request
+    ) async -> Bool {
+        switch identity {
+        case .none, .missing:
+            return true
+        case .sha256(let expected):
+            guard let target = request.target.replacementAsset,
+                  let url = BookFileStore.validatedURL(for: target.fileName) else { return false }
+            return await hash(of: url) == expected
+        }
+    }
+
+    private func hash(of url: URL) async -> String? {
+        await Task.detached(priority: .utility) {
+            try? ContentHasher.sha256Cancellable(of: url)
+        }.value
+    }
+
+    private func notify(_ conflict: SnapshotConflict, request: Request) {
+        switch conflict {
+        case .sourceChanged:
+            toasts.info(String(
+                localized: "\u{201C}\(request.title)\u{201D} changed during conversion. The conversion result was not installed.",
+                comment: "Stale conversion warning; the placeholder is the book title."
+            ))
+        case .targetChanged:
+            toasts.info(String(
+                localized: "The \(request.format.label) destination for \u{201C}\(request.title)\u{201D} changed during conversion. The conversion result was not installed.",
+                comment: "Stale conversion warning; the first placeholder is a file format and the second is the book title."
+            ))
+        }
+    }
+
+    private func lookupBook(uuid: UUID) -> Book? {
+        try? mutations.book(id: uuid)
+    }
+
+    private func primaryAsset(in book: Book) -> BookAsset? {
+        let candidates = book.assets.filter { $0.fileName == book.fileName }
+        return candidates.first(where: { $0.uuid == book.uuid })
+            ?? candidates.min { $0.uuid.uuidString < $1.uuid.uuidString }
+    }
+
+    private static func targetGeneration(for book: Book, format: String) -> TargetGeneration {
+        let assets = book.assets
+            .filter { $0.format.lowercased() == format }
+            .map { generation(of: $0, primaryFileName: book.fileName) }
+            .sorted { $0.uuid.uuidString < $1.uuid.uuidString }
+        let replacement = assets
+            .filter { $0.originRaw == AssetOrigin.generated.rawValue }
+            .min { $0.uuid.uuidString < $1.uuid.uuidString }
+        return TargetGeneration(
+            format: format,
+            assets: assets,
+            replacementAssetUUID: replacement?.uuid
+        )
+    }
+
+    private static func generation(
+        of asset: BookAsset,
+        primaryFileName: String
+    ) -> AssetGeneration {
+        AssetGeneration(
+            uuid: asset.uuid,
+            fileName: asset.fileName,
+            dateAdded: asset.dateAdded,
+            contentHash: asset.contentHash,
+            generatedFromContentHash: asset.generatedFromContentHash,
+            sizeBytes: asset.sizeBytes,
+            originRaw: asset.originRaw,
+            validationStatusRaw: asset.validationStatusRaw,
+            isPrimary: asset.fileName == primaryFileName
+        )
+    }
+
+    private static func sourceGeneration(
+        of asset: BookAsset,
+        primaryFileName: String
+    ) -> SourceGeneration {
+        SourceGeneration(
+            uuid: asset.uuid,
+            fileName: asset.fileName,
+            dateAdded: asset.dateAdded,
+            isPrimary: asset.fileName == primaryFileName
+        )
     }
 }

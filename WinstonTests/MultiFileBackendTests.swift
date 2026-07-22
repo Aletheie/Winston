@@ -3,14 +3,159 @@ import SwiftData
 import Testing
 @testable import Winston
 
+private actor SuspendedConversionWorker {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func run(_ source: URL, _ format: EbookConverter.OutputFormat) async throws -> URL {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { releaseContinuation = $0 }
+        return try Self.makeOutput(format: format, contents: "converted artifact")
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func resume() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+
+    private nonisolated static func makeOutput(
+        format: EbookConverter.OutputFormat,
+        contents: String
+    ) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonConversion-\(UUID().uuidString).\(format.ext)")
+        try Data(contents.utf8).write(to: url)
+        return url
+    }
+}
+
+private actor ImmediateConversionWorker {
+    func run(_ source: URL, _ format: EbookConverter.OutputFormat) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonConversion-\(UUID().uuidString).\(format.ext)")
+        try Data("converted artifact".utf8).write(to: url)
+        return url
+    }
+}
+
+private actor ConversionCheckpointGate {
+    private var reached = false
+    private var reachWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func pause(at checkpoint: ConversionCheckpoint) async {
+        reached = true
+        let waiters = reachWaiters
+        reachWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitUntilReached() async {
+        guard !reached else { return }
+        await withCheckedContinuation { reachWaiters.append($0) }
+    }
+
+    func resume() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 @Suite("Multi-file backend", .serialized)
 @MainActor
 struct MultiFileBackendTests {
+    private struct ConversionFixture {
+        let book: Book
+        let primary: BookAsset
+        let target: BookAsset
+        let sourceHash: String
+        let targetBytes: Data
+    }
+
+    private struct InjectedConversionFailure: Error {}
+
     private func waitForConversion(_ service: ConversionService, book: Book) async {
         let deadline = Date.now.addingTimeInterval(4)
         while service.convertingUUIDs.contains(book.uuid), Date.now < deadline {
             try? await Task.sleep(for: .milliseconds(20))
         }
+        #expect(!service.convertingUUIDs.contains(book.uuid))
+    }
+
+    private func makeConversionFixture(in library: TestLibrary) throws -> ConversionFixture {
+        let sourceURL = library.root.appending(path: "conversion-source.epub")
+        let targetURL = library.root.appending(path: "conversion-target.mobi")
+        let sourceBytes = Data("source generation".utf8)
+        let targetBytes = Data("old generated target".utf8)
+        try sourceBytes.write(to: sourceURL)
+        try targetBytes.write(to: targetURL)
+
+        let bookID = UUID()
+        let sourceName = try BookFileStore.importCopy(of: sourceURL, uuid: bookID)
+        let targetName = try BookFileStore.importCopy(of: targetURL, uuid: UUID())
+        let sourceHash = try ContentHasher.sha256(of: BookFileStore.url(for: sourceName))
+        let targetHash = try ContentHasher.sha256(of: BookFileStore.url(for: targetName))
+        let book = Book(uuid: bookID, fileName: sourceName, originalFileName: "Conversion Race.epub")
+        book.title = "Conversion Race"
+        let primary = BookAsset(
+            uuid: bookID,
+            fileName: sourceName,
+            contentHash: sourceHash,
+            sizeBytes: Int64(sourceBytes.count),
+            validationStatus: .ok,
+            book: book
+        )
+        let target = BookAsset(
+            fileName: targetName,
+            origin: .generated,
+            contentHash: targetHash,
+            generatedFromContentHash: sourceHash,
+            sizeBytes: Int64(targetBytes.count),
+            validationStatus: .ok,
+            book: book
+        )
+        library.context.insert(book)
+        library.context.insert(primary)
+        library.context.insert(target)
+        try library.context.save()
+        return ConversionFixture(
+            book: book,
+            primary: primary,
+            target: target,
+            sourceHash: sourceHash,
+            targetBytes: targetBytes
+        )
+    }
+
+    private func replacementFile(
+        in library: TestLibrary,
+        name: String = "user-replacement.mobi",
+        contents: String = "newer user file"
+    ) throws -> URL {
+        let url = library.root.appending(path: name)
+        try Data(contents.utf8).write(to: url)
+        return url
+    }
+
+    private func makeCoordinator(
+        faultInjector: @escaping ManagedFileCoordinator.FaultInjector = { _ in }
+    ) -> ManagedFileCoordinator {
+        ManagedFileCoordinator(
+            booksDirectory: AppPaths.booksDirectory,
+            coversDirectory: AppPaths.coversDirectory,
+            stateDirectory: AppPaths.managedFilesDirectory,
+            faultInjector: faultInjector
+        )
     }
 
     @Test func nativeConversionCreatesAndReusesGeneratedSibling() async throws {
@@ -46,6 +191,265 @@ struct MultiFileBackendTests {
         await waitForConversion(service, book: book)
         #expect(book.assets.filter { $0.origin == .generated && $0.format == "MOBI" }.count == 1)
         #expect(book.assets.first(where: { $0.origin == .generated })?.uuid == generatedUUID)
+    }
+
+    @Test func changedTargetDuringConversionIsKeptAndResultIsRejected() async throws {
+        let library = try await TestLibrary()
+        let fixture = try makeConversionFixture(in: library)
+        let worker = SuspendedConversionWorker()
+        let toasts = ToastCenter()
+        let service = ConversionService(
+            modelContext: library.context,
+            toasts: toasts,
+            worker: { try await worker.run($0, $1) }
+        )
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: ToastCenter()
+        )
+
+        service.convert(fixture.book, to: .mobi)
+        await worker.waitUntilStarted()
+        let replacement = try replacementFile(in: library)
+        await viewModel.replace(fixture.target, in: fixture.book, from: replacement)
+        let replacementName = fixture.target.fileName
+        let replacementHash = fixture.target.contentHash
+        await worker.resume()
+        await waitForConversion(service, book: fixture.book)
+
+        #expect(fixture.target.fileName == replacementName)
+        #expect(fixture.target.contentHash == replacementHash)
+        #expect(fixture.target.origin == .imported)
+        #expect(try Data(contentsOf: fixture.target.fileURL) == Data("newer user file".utf8))
+        #expect(fixture.book.assets.filter { $0.format == "MOBI" }.count == 1)
+        #expect(toasts.messages.contains { $0.style == .info && $0.text.contains("changed during conversion") })
+    }
+
+    @Test func deletedTargetDuringConversionIsNotRecreatedByStaleResult() async throws {
+        let library = try await TestLibrary()
+        let fixture = try makeConversionFixture(in: library)
+        let worker = SuspendedConversionWorker()
+        let service = ConversionService(
+            modelContext: library.context,
+            toasts: ToastCenter(),
+            worker: { try await worker.run($0, $1) }
+        )
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: ToastCenter()
+        )
+
+        service.convert(fixture.book, to: .mobi)
+        await worker.waitUntilStarted()
+        #expect(await viewModel.removeFile(fixture.target, from: fixture.book))
+        await worker.resume()
+        await waitForConversion(service, book: fixture.book)
+
+        #expect(fixture.target.modelContext == nil)
+        #expect(fixture.book.assets.allSatisfy { $0.format != "MOBI" })
+    }
+
+    @Test func targetMadePrimaryDuringConversionIsNeverOverwritten() async throws {
+        let library = try await TestLibrary()
+        let fixture = try makeConversionFixture(in: library)
+        let worker = SuspendedConversionWorker()
+        let service = ConversionService(
+            modelContext: library.context,
+            toasts: ToastCenter(),
+            worker: { try await worker.run($0, $1) }
+        )
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: ToastCenter()
+        )
+
+        service.convert(fixture.book, to: .mobi)
+        await worker.waitUntilStarted()
+        await viewModel.makePrimary(fixture.target, for: fixture.book)
+        let primaryName = fixture.target.fileName
+        await worker.resume()
+        await waitForConversion(service, book: fixture.book)
+
+        #expect(fixture.book.fileName == primaryName)
+        #expect(fixture.target.fileName == primaryName)
+        #expect(try Data(contentsOf: fixture.target.fileURL) == fixture.targetBytes)
+        #expect(fixture.book.assets.filter { $0.format == "MOBI" }.count == 1)
+    }
+
+    @Test func recreatedTargetDuringConversionKeepsTheNewAssetGeneration() async throws {
+        let library = try await TestLibrary()
+        let fixture = try makeConversionFixture(in: library)
+        let worker = SuspendedConversionWorker()
+        let service = ConversionService(
+            modelContext: library.context,
+            toasts: ToastCenter(),
+            worker: { try await worker.run($0, $1) }
+        )
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: ToastCenter()
+        )
+
+        service.convert(fixture.book, to: .mobi)
+        await worker.waitUntilStarted()
+        #expect(await viewModel.removeFile(fixture.target, from: fixture.book))
+        let replacement = try replacementFile(in: library, name: "recreated.mobi")
+        let recreated = try #require(await viewModel.addFile(to: fixture.book, from: replacement))
+        let recreatedID = recreated.uuid
+        let recreatedName = recreated.fileName
+        await worker.resume()
+        await waitForConversion(service, book: fixture.book)
+
+        #expect(recreated.modelContext != nil)
+        #expect(recreated.uuid == recreatedID)
+        #expect(recreated.fileName == recreatedName)
+        #expect(try Data(contentsOf: recreated.fileURL) == Data("newer user file".utf8))
+        #expect(fixture.book.assets.filter { $0.format == "MOBI" }.count == 1)
+    }
+
+    @Test func inPlaceTargetEditDuringConversionIsProtectedByPhysicalHash() async throws {
+        let library = try await TestLibrary()
+        let fixture = try makeConversionFixture(in: library)
+        let worker = SuspendedConversionWorker()
+        let service = ConversionService(
+            modelContext: library.context,
+            toasts: ToastCenter(),
+            worker: { try await worker.run($0, $1) }
+        )
+
+        service.convert(fixture.book, to: .mobi)
+        await worker.waitUntilStarted()
+        let externalBytes = Data("externally replaced bytes".utf8)
+        try externalBytes.write(to: fixture.target.fileURL)
+        await worker.resume()
+        await waitForConversion(service, book: fixture.book)
+
+        #expect(fixture.target.modelContext != nil)
+        #expect(try Data(contentsOf: fixture.target.fileURL) == externalBytes)
+        #expect(fixture.book.assets.filter { $0.format == "MOBI" }.count == 1)
+    }
+
+    @Test func adoptedArtifactUsesTheSameTargetGenerationValidation() async throws {
+        let library = try await TestLibrary()
+        let fixture = try makeConversionFixture(in: library)
+        let gate = ConversionCheckpointGate()
+        let service = ConversionService(
+            modelContext: library.context,
+            toasts: ToastCenter(),
+            checkpoint: { await gate.pause(at: $0) }
+        )
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: ToastCenter()
+        )
+        let artifact = try replacementFile(
+            in: library,
+            name: "queue-artifact.mobi",
+            contents: "queue conversion"
+        )
+        let adoption = Task {
+            await service.adoptArtifact(for: fixture.book.uuid, from: artifact)
+        }
+
+        await gate.waitUntilReached()
+        let replacement = try replacementFile(
+            in: library,
+            name: "adoption-race.mobi",
+            contents: "user wins adoption race"
+        )
+        await viewModel.replace(fixture.target, in: fixture.book, from: replacement)
+        let replacementName = fixture.target.fileName
+        await gate.resume()
+
+        #expect(await adoption.value == .conflict)
+        #expect(fixture.target.fileName == replacementName)
+        #expect(try Data(contentsOf: fixture.target.fileURL) == Data("user wins adoption race".utf8))
+        #expect(fixture.book.assets.filter { $0.format == "MOBI" }.count == 1)
+    }
+
+    @Test func conversionSaveFailureRestoresBothAssetGenerations() async throws {
+        let library = try await TestLibrary()
+        let fixture = try makeConversionFixture(in: library)
+        let targetName = fixture.target.fileName
+        let targetDate = fixture.target.dateAdded
+        let targetHash = fixture.target.contentHash
+        let coordinator = makeCoordinator()
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            saveAdapter: CatalogSaveAdapter { _ in throw InjectedConversionFailure() },
+            managedFiles: coordinator
+        )
+        let worker = ImmediateConversionWorker()
+        let service = ConversionService(
+            modelContext: library.context,
+            toasts: ToastCenter(),
+            mutations: mutations,
+            managedFiles: coordinator,
+            worker: { try await worker.run($0, $1) }
+        )
+
+        service.convert(fixture.book, to: .mobi)
+        await waitForConversion(service, book: fixture.book)
+
+        #expect(fixture.target.fileName == targetName)
+        #expect(fixture.target.dateAdded == targetDate)
+        #expect(fixture.target.contentHash == targetHash)
+        #expect(fixture.primary.contentHash == fixture.sourceHash)
+        #expect(try Data(contentsOf: fixture.target.fileURL) == fixture.targetBytes)
+        #expect(!library.context.hasChanges)
+        #expect(await coordinator.pendingTransactions().isEmpty)
+    }
+
+    @Test func conversionPublishFailureKeepsOldBytesUntilJournalRecovery() async throws {
+        let library = try await TestLibrary()
+        let fixture = try makeConversionFixture(in: library)
+        let targetID = fixture.target.uuid
+        let oldTargetName = fixture.target.fileName
+        let oldTargetURL = fixture.target.fileURL
+        let coordinator = makeCoordinator {
+            if case .duringPublish = $0 { throw InjectedConversionFailure() }
+        }
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            managedFiles: coordinator
+        )
+        let worker = ImmediateConversionWorker()
+        let service = ConversionService(
+            modelContext: library.context,
+            toasts: ToastCenter(),
+            mutations: mutations,
+            managedFiles: coordinator,
+            worker: { try await worker.run($0, $1) }
+        )
+
+        service.convert(fixture.book, to: .mobi)
+        await waitForConversion(service, book: fixture.book)
+
+        let committedName = fixture.target.fileName
+        #expect(fixture.target.uuid == targetID)
+        #expect(committedName != oldTargetName)
+        #expect(FileManager.default.fileExists(atPath: oldTargetURL.path(percentEncoded: false)))
+        #expect(!FileManager.default.fileExists(
+            atPath: BookFileStore.url(for: committedName).path(percentEncoded: false)
+        ))
+        #expect(await coordinator.pendingTransactions().count == 1)
+
+        let restarted = makeCoordinator()
+        let recovery = CatalogMutationService(
+            modelContext: library.context,
+            managedFiles: restarted
+        )
+        let report = await recovery.recoverManagedFiles()
+
+        #expect(!report.hasPendingWork)
+        #expect(!FileManager.default.fileExists(atPath: oldTargetURL.path(percentEncoded: false)))
+        #expect(try Data(contentsOf: BookFileStore.url(for: committedName)) == Data("converted artifact".utf8))
+        #expect(await restarted.pendingTransactions().isEmpty)
     }
 
     @Test func missingFileScanUpdatesEveryAssetStatus() async throws {
