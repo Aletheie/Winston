@@ -20,7 +20,7 @@ enum CatalogMutationCommand {
     case updateMetadata(bookID: UUID, fields: Set<String>)
     case updateMetadataBatch(bookIDs: [UUID], operation: String)
     case assignEdition(bookIDs: [UUID], workID: UUID?)
-    case updateWork(workID: UUID)
+    case updateWork(workID: UUID, fields: Set<String>)
     case pluginUpdate(bookID: UUID, fields: Set<String>)
     case importBooks(bookIDs: [UUID])
     case calibreImport(bookIDs: [UUID])
@@ -31,6 +31,8 @@ enum CatalogMutationCommand {
     case conversionOutput(bookID: UUID, assetID: UUID)
     case legacyMigration(bookIDs: [UUID])
     case updateCover(bookID: UUID, version: Int)
+    case applyAnalysis(bookID: UUID, kind: CatalogAnalysisJobKind)
+    case applyAnalysisBatch(bookIDs: [UUID], kind: CatalogAnalysisJobKind)
 }
 
 struct CatalogChangeSet {
@@ -43,6 +45,7 @@ struct CatalogChangeSet {
 enum CatalogMutationError: Error, Equatable {
     case dirtyContext
     case modelNotFound
+    case staleAnalysis
     case saveFailed(String)
     case fileTransactionFailed(String)
 }
@@ -71,9 +74,18 @@ struct CatalogBookMetadataPreimage {
     let tags: [String]
     let bookDescription: String?
     let rating: Int?
+    let communityRating: Double?
+    let communityRatingCount: Int?
+    let communityRatingSource: String?
+    let onlineLookupAt: Date?
+    let onlineLookupConfiguration: String?
     let notes: String?
     let shelfLocation: String?
     let sampleNoticeDismissed: Bool?
+    let drmProtected: Bool?
+    let fileSizeBytes: Int64
+    let coverVersion: Int
+    let pageCount: Int?
 
     init(_ book: Book) {
         self.book = book
@@ -89,9 +101,18 @@ struct CatalogBookMetadataPreimage {
         tags = book.tags
         bookDescription = book.bookDescription
         rating = book.rating
+        communityRating = book.communityRating
+        communityRatingCount = book.communityRatingCount
+        communityRatingSource = book.communityRatingSource
+        onlineLookupAt = book.onlineLookupAt
+        onlineLookupConfiguration = book.onlineLookupConfiguration
         notes = book.notes
         shelfLocation = book.shelfLocation
         sampleNoticeDismissed = book.sampleNoticeDismissed
+        drmProtected = book.drmProtected
+        fileSizeBytes = book.fileSizeBytes
+        coverVersion = book.coverVersion
+        pageCount = book.pageCount
     }
 
     func restore() {
@@ -107,9 +128,38 @@ struct CatalogBookMetadataPreimage {
         book.tags = tags
         book.bookDescription = bookDescription
         book.rating = rating
+        book.communityRating = communityRating
+        book.communityRatingCount = communityRatingCount
+        book.communityRatingSource = communityRatingSource
+        book.onlineLookupAt = onlineLookupAt
+        book.onlineLookupConfiguration = onlineLookupConfiguration
         book.notes = notes
         book.shelfLocation = shelfLocation
         book.sampleNoticeDismissed = sampleNoticeDismissed
+        book.drmProtected = drmProtected
+        book.fileSizeBytes = fileSizeBytes
+        book.coverVersion = coverVersion
+        book.pageCount = pageCount
+    }
+}
+
+struct CatalogBookAssetPreimage {
+    let asset: BookAsset
+    let contentHash: String?
+    let sizeBytes: Int64
+    let validationStatusRaw: String?
+
+    init(_ asset: BookAsset) {
+        self.asset = asset
+        contentHash = asset.contentHash
+        sizeBytes = asset.sizeBytes
+        validationStatusRaw = asset.validationStatusRaw
+    }
+
+    func restore() {
+        asset.contentHash = contentHash
+        asset.sizeBytes = sizeBytes
+        asset.validationStatusRaw = validationStatusRaw
     }
 }
 
@@ -156,15 +206,18 @@ final class CatalogMutationService {
     private let modelContext: ModelContext
     private let saveAdapter: CatalogSaveAdapter
     private let managedFiles: ManagedFileCoordinator
+    let analysisCoordinator: CatalogAnalysisCoordinator
 
     init(
         modelContext: ModelContext,
         saveAdapter: CatalogSaveAdapter = .live,
-        managedFiles: ManagedFileCoordinator = .shared
+        managedFiles: ManagedFileCoordinator = .shared,
+        analysisCoordinator: CatalogAnalysisCoordinator? = nil
     ) {
         self.modelContext = modelContext
         self.saveAdapter = saveAdapter
         self.managedFiles = managedFiles
+        self.analysisCoordinator = analysisCoordinator ?? CatalogAnalysisCoordinator()
     }
 
     @discardableResult
@@ -187,13 +240,12 @@ final class CatalogMutationService {
             try mutation()
             modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
-            LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
-            return CatalogChangeSet(
+            return publish(CatalogChangeSet(
                 command: command,
                 affectedBookIDs: affectedBookIDs,
                 affectedWorkIDs: affectedWorkIDs,
                 affectedCollectionIDs: affectedCollectionIDs
-            )
+            ), catalogChanged: catalogChanged)
         } catch let error as CatalogMutationError {
             rollbackMutation()
             modelContext.rollback()
@@ -220,13 +272,12 @@ final class CatalogMutationService {
         do {
             modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
-            LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
-            return CatalogChangeSet(
+            return publish(CatalogChangeSet(
                 command: command,
                 affectedBookIDs: affectedBookIDs,
                 affectedWorkIDs: affectedWorkIDs,
                 affectedCollectionIDs: affectedCollectionIDs
-            )
+            ), catalogChanged: catalogChanged)
         } catch {
             modelContext.rollback()
             Log.persistence.error("Staged catalog mutation save failed and rolled back: \(error.localizedDescription, privacy: .public)")
@@ -279,13 +330,12 @@ final class CatalogMutationService {
             throw CatalogMutationError.saveFailed(error.localizedDescription)
         }
 
-        LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
-        let changeSet = CatalogChangeSet(
+        let changeSet = publish(CatalogChangeSet(
             command: command,
             affectedBookIDs: affectedBookIDs,
             affectedWorkIDs: affectedWorkIDs,
             affectedCollectionIDs: affectedCollectionIDs
-        )
+        ), catalogChanged: catalogChanged)
         let pending = await finalizeCommittedTransactions([transaction])
         return CatalogFileCommitResult(changeSet: changeSet, pendingTransactionIDs: pending)
     }
@@ -321,13 +371,12 @@ final class CatalogMutationService {
             throw CatalogMutationError.saveFailed(error.localizedDescription)
         }
 
-        LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
-        let changeSet = CatalogChangeSet(
+        let changeSet = publish(CatalogChangeSet(
             command: command,
             affectedBookIDs: affectedBookIDs,
             affectedWorkIDs: affectedWorkIDs,
             affectedCollectionIDs: affectedCollectionIDs
-        )
+        ), catalogChanged: catalogChanged)
         let pending = await finalizeCommittedTransactions(transactions)
         return CatalogFileCommitResult(changeSet: changeSet, pendingTransactionIDs: pending)
     }
@@ -399,6 +448,64 @@ final class CatalogMutationService {
         modelContext.rollback()
         modelContext.processPendingChanges()
         if modelContext.hasChanges { modelContext.rollback() }
+    }
+
+    private func publish(
+        _ changeSet: CatalogChangeSet,
+        catalogChanged: Bool
+    ) -> CatalogChangeSet {
+        invalidateAnalysis(for: changeSet)
+        LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
+        return changeSet
+    }
+
+    private func invalidateAnalysis(for changeSet: CatalogChangeSet) {
+        let identityFields: Set<String> = [
+            "title", "author", "publisher", "year", "language", "translator",
+            "isbn", "series", "seriesIndex", "editionStatement", "editionType",
+            "originalFileName", "originalTitle", "originalLanguage",
+            "openLibraryWorkKey", "hardcoverBookID",
+        ]
+        var invalidatedBookIDs: Set<UUID> = []
+
+        switch changeSet.command {
+        case .updateMetadata(let bookID, let fields),
+             .pluginUpdate(let bookID, let fields):
+            if !fields.isDisjoint(with: identityFields) { invalidatedBookIDs.insert(bookID) }
+
+        case .updateMetadataBatch(let bookIDs, let operation):
+            if ["bulkEdit", "renameSeries", "renameAuthor", "metadataFixes"].contains(operation) {
+                invalidatedBookIDs.formUnion(bookIDs)
+            }
+
+        case .assignEdition(let bookIDs, _):
+            invalidatedBookIDs.formUnion(bookIDs)
+
+        case .updateWork(_, let fields):
+            if !fields.isDisjoint(with: identityFields) {
+                for workID in changeSet.affectedWorkIDs {
+                    if let work = try? work(id: workID) {
+                        invalidatedBookIDs.formUnion(work.editions.map(\.uuid))
+                    }
+                }
+            }
+
+        case .addFile(let bookID, _),
+             .replaceFile(let bookID, _),
+             .removeFile(let bookID, _):
+            invalidatedBookIDs.insert(bookID)
+
+        case .removeBooks(let bookIDs):
+            invalidatedBookIDs.formUnion(bookIDs)
+
+        case .setReadingStatus, .setReadingProgress,
+             .createCollection, .updateCollection, .deleteCollection,
+             .importBooks, .calibreImport, .conversionOutput, .legacyMigration,
+             .updateCover, .applyAnalysis, .applyAnalysisBatch:
+            break
+        }
+
+        analysisCoordinator.cancelAll(for: invalidatedBookIDs)
     }
 
     func book(id: UUID) throws -> Book {

@@ -69,7 +69,7 @@ final class EditionService {
         let workID = work.uuid
         do {
             try mutations.commit(
-                .updateWork(workID: workID),
+                .updateWork(workID: workID, fields: ["title", "author"]),
                 affectedWorkIDs: [workID]
             ) {
                 let storedWork = try mutations.work(id: workID)
@@ -89,7 +89,7 @@ final class EditionService {
         let workID = work.uuid
         do {
             try mutations.commit(
-                .updateWork(workID: workID),
+                .updateWork(workID: workID, fields: ["preferredEditionUUID"]),
                 affectedBookIDs: [bookID],
                 affectedWorkIDs: [workID]
             ) {
