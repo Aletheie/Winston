@@ -111,7 +111,8 @@ struct LibraryMutationTests {
             viewModel.renameTag("scifi", to: "sci-fi")
         }
         expectBump("createCollection") { _ = viewModel.createCollection(named: "Shelf") }
-        expectBump("removeBooks") { viewModel.removeBooks([book]) }
+        await viewModel.removeBooks([book])
+        #expect(LibraryMutationLog.shared.revision > last, "removeBooks did not bump the revision")
     }
 
     @Test func duplicateScanGroupsReorderedAuthorsOffMain() async throws {
@@ -157,7 +158,7 @@ struct LibraryMutationTests {
             settings: AppSettings(),
             toasts: ToastCenter()
         )
-        viewModel.remove(book)
+        await viewModel.remove(book)
 
         #expect(!FileManager.default.fileExists(atPath: primary.fileURL.path(percentEncoded: false)))
         #expect(!FileManager.default.fileExists(atPath: sibling.fileURL.path(percentEncoded: false)))

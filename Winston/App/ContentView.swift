@@ -254,11 +254,10 @@ struct ContentView: View {
         let folder = URL(fileURLWithPath: path)
         Task {
             do {
-                _ = try await Task.detached(priority: .utility) {
-                    try LibraryBackup.backup(storeURL: PersistenceController.storeURL,
-                                             coversDirectory: AppPaths.coversDirectory,
-                                             to: folder)
-                }.value
+                _ = try await ManagedFileCoordinator.shared.createBackup(
+                    storeURL: PersistenceController.storeURL,
+                    to: folder
+                )
                 settings.lastBackupAt = .now
                 toasts.info(String(localized: "Library backed up."))
             } catch {

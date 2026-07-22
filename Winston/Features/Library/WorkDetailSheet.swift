@@ -102,7 +102,7 @@ struct WorkDetailSheet: View {
                 presenting: deleteTarget
             ) { book in
                 Button("Delete Edition and Files", role: .destructive) {
-                    viewModel.remove(book)
+                    Task { await viewModel.remove(book) }
                 }
             } message: { _ in
                 Text("All files belonging to this edition are deleted. Other editions stay intact.")

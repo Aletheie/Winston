@@ -20,6 +20,7 @@ final class LibraryViewModel {
     private let settings: AppSettings
     private let toasts: ToastCenter
     private let mutations: CatalogMutationService
+    private let managedFiles: ManagedFileCoordinator
 
     let metadata: MetadataService
     let importer: ImportService
@@ -35,12 +36,18 @@ final class LibraryViewModel {
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
          online: any OnlineMetadataFetching = OnlineMetadataService(),
-         saveAdapter: CatalogSaveAdapter = .live) {
+         saveAdapter: CatalogSaveAdapter = .live,
+         managedFiles: ManagedFileCoordinator = .shared) {
         self.modelContext = modelContext
         self.settings = settings
         self.toasts = toasts
-        let mutations = CatalogMutationService(modelContext: modelContext, saveAdapter: saveAdapter)
+        let mutations = CatalogMutationService(
+            modelContext: modelContext,
+            saveAdapter: saveAdapter,
+            managedFiles: managedFiles
+        )
         self.mutations = mutations
+        self.managedFiles = managedFiles
         let wishlist = WishlistService(modelContext: modelContext, toasts: toasts)
         let metadata = MetadataService(
             modelContext: modelContext,
@@ -64,7 +71,9 @@ final class LibraryViewModel {
             metadata: metadata,
             wishlist: wishlist,
             toasts: toasts,
-            editions: editions
+            editions: editions,
+            mutations: mutations,
+            managedFiles: managedFiles
         )
         self.calibreImporter = CalibreImportService(
             modelContext: modelContext,
@@ -73,12 +82,22 @@ final class LibraryViewModel {
             wishlist: wishlist,
             toasts: toasts,
             editions: editions,
-            mutations: mutations
+            mutations: mutations,
+            managedFiles: managedFiles
         )
-        self.conversion = ConversionService(modelContext: modelContext, toasts: toasts)
+        self.conversion = ConversionService(
+            modelContext: modelContext,
+            toasts: toasts,
+            mutations: mutations,
+            managedFiles: managedFiles
+        )
         self.highlights = HighlightsService(modelContext: modelContext)
         self.exporter = ExportService(modelContext: modelContext)
-        self.covers = CoverService(modelContext: modelContext)
+        self.covers = CoverService(
+            modelContext: modelContext,
+            mutations: mutations,
+            managedFiles: managedFiles
+        )
         self.health = LibraryHealthService(modelContext: modelContext)
     }
 
@@ -160,46 +179,123 @@ final class LibraryViewModel {
     func scanForMissingFiles() async -> Int { await health.scanForMissingFiles() }
     func relink(_ book: Book, from url: URL) async { await health.relink(book, from: url) }
 
-    func remove(_ book: Book) {
-        guard let cleanup = forget(book),
-              modelContext.saveQuietly(rollbackOnFailure: true) else { return }
-        finishRemoval(cleanup)
-        editions.refreshEditionCounts()
+    func remove(_ book: Book) async {
+        await removeBooks([book])
     }
 
-    func removeBooks(_ books: [Book]) {
+    func removeBooks(_ books: [Book]) async {
         var seen: Set<UUID> = []
-        let cleanups = books.compactMap { book -> RemovedBook? in
+        let removals = books.compactMap { book -> RemovedBook? in
             guard seen.insert(book.uuid).inserted else { return nil }
-            return forget(book)
+            return removalSnapshot(for: book)
         }
-        guard !cleanups.isEmpty,
-              modelContext.saveQuietly(rollbackOnFailure: true) else { return }
-        cleanups.forEach(finishRemoval)
+        guard !removals.isEmpty else { return }
+
+        let fileNames = Set(removals.flatMap(\.fileNames))
+        let bookIDs = Set(removals.map(\.uuid))
+        let cleanup = fileNames.map {
+            ManagedFileCleanup.book($0, disposition: .trash)
+        } + removals.map { ManagedFileCleanup.cover(bookID: $0.uuid) }
+        let transaction: ManagedFileTransaction
+        do {
+            transaction = try await managedFiles.prepareCleanup(
+                intent: .deleteBook,
+                requirement: ManagedFileRequirement(
+                    absentBookIDs: bookIDs,
+                    unreferencedBookFileNames: fileNames
+                ),
+                cleanups: cleanup
+            )
+        } catch {
+            toasts.error(String(localized: "Couldn’t remove the selected books."))
+            return
+        }
+
+        guard removals.allSatisfy(removalSnapshotIsCurrent) else {
+            await managedFiles.abort(transaction)
+            return
+        }
+        let removalPreimages = removals.compactMap { removal -> (Book, Work?, UUID?)? in
+            guard let book = try? mutations.book(id: removal.uuid) else { return nil }
+            return (book, book.work, book.work?.preferredEditionUUID)
+        }
+        do {
+            let result = try await mutations.commitFileMutation(
+                .removeBooks(bookIDs: Array(bookIDs)),
+                transaction: transaction,
+                affectedBookIDs: bookIDs,
+                revertingOnFailure: {
+                    for (book, work, preferredEditionUUID) in removalPreimages {
+                        if let work, work.modelContext == nil { modelContext.insert(work) }
+                        if book.modelContext == nil { modelContext.insert(book) }
+                        book.work = work
+                        if let work {
+                            work.preferredEditionUUID = preferredEditionUUID
+                            if !work.editions.contains(where: { $0 === book }) {
+                                work.editions.append(book)
+                            }
+                        }
+                    }
+                }
+            ) {
+                for removal in removals {
+                    guard let book = try? mutations.book(id: removal.uuid),
+                          removalSnapshot(for: book) == removal else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    forget(book)
+                }
+            }
+            removals.forEach(finishRemoval)
+            if !result.isFullyPublished {
+                toasts.error(String(localized: "Book removal is waiting for file cleanup."))
+            }
+        } catch {
+            toasts.error(String(localized: "Couldn’t remove the selected books."))
+            return
+        }
         editions.refreshEditionCounts()
     }
 
-    private struct RemovedBook {
+    private struct RemovedBook: Equatable {
         let uuid: UUID
         let fileNames: Set<String>
     }
 
-    private func forget(_ book: Book) -> RemovedBook? {
+    private func removalSnapshot(for book: Book) -> RemovedBook? {
         guard book.modelContext != nil else { return nil }
-        let work = book.work
         let assetNames = (book.assets.isEmpty ? [book.fileName] : book.assets.map(\.fileName))
             .filter { BookFileStore.validatedURL(for: $0) != nil }
-        book.work = nil
-        modelContext.delete(book)
-        WorkService.pruneIfOrphaned(work, context: modelContext, save: false)
         return RemovedBook(uuid: book.uuid, fileNames: Set(assetNames))
     }
 
+    private func removalSnapshotIsCurrent(_ removal: RemovedBook) -> Bool {
+        guard let book = try? mutations.book(id: removal.uuid) else { return false }
+        return removalSnapshot(for: book) == removal
+    }
+
+    private func forget(_ book: Book) {
+        let work = book.work
+        book.work = nil
+        modelContext.delete(book)
+        WorkService.pruneIfOrphaned(work, context: modelContext, save: false)
+    }
+
     private func finishRemoval(_ removed: RemovedBook) {
-        removed.fileNames.forEach { BookFileStore.trash(fileName: $0) }
-        covers.deletePermanently(for: removed.uuid)
         importer.cancelPending(removed.uuid)
         editions.removeProposals(referencing: removed.uuid)
+    }
+
+    func recoverManagedFiles() async -> ManagedFileRecoveryReport {
+        await mutations.recoverManagedFiles()
+    }
+
+    func migrateLegacyLibraryIfNeeded() async -> Bool {
+        await LegacyLibraryMigrator.migrateIfNeeded(
+            context: modelContext,
+            mutations: mutations,
+            managedFiles: managedFiles
+        )
     }
 
     // MARK: - Metadata (forwarded)
@@ -296,6 +392,7 @@ final class LibraryViewModel {
         let format = url.pathExtension.lowercased()
         let primary = book.assets.first { $0.fileName == book.fileName }
         let primaryFileName = book.fileName
+        let primaryAssetUUID = primary?.uuid
         let primaryDateAdded = primary?.dateAdded
         let primaryURL = book.fileURL
         let sourceHash: String?
@@ -308,104 +405,216 @@ final class LibraryViewModel {
         }
         guard book.modelContext != nil, book.fileName == primaryFileName,
               primary?.dateAdded == primaryDateAdded else { return }
-        let artifactHash = await Task.detached(priority: .utility) {
-            try? ContentHasher.sha256(of: url)
-        }.value
-        guard book.modelContext != nil, book.fileName == primaryFileName,
-              primary?.dateAdded == primaryDateAdded else { return }
         let existing = book.assets.first {
             $0.origin == .generated && $0.format.lowercased() == format
         }
         let assetUUID = existing?.uuid ?? UUID()
         let oldFileName = existing?.fileName
-        let fileName: String
+        let oldDateAdded = existing?.dateAdded
+        let source: ManagedFileSource
         do {
-            if let oldFileName {
-                fileName = try BookFileStore.replacementCopy(
-                    of: url, replacing: oldFileName, uuid: assetUUID
-                )
-            } else {
-                fileName = try BookFileStore.importCopy(of: url, uuid: assetUUID)
-            }
+            source = try .book(sourceURL: url)
         } catch {
             return
         }
-        let size = BookFileStore.size(of: fileName)
-        if primary?.contentHash == nil { primary?.contentHash = sourceHash }
-        if let existing {
-            let wasPrimary = book.fileName == existing.fileName
-            existing.fileName = fileName
-            existing.sizeBytes = size
-            existing.contentHash = artifactHash
-            existing.generatedFromContentHash = sourceHash
-            existing.validationStatus = .ok
-            existing.dateAdded = Date()
-            if wasPrimary {
-                book.fileName = fileName
-                book.fileSizeBytes = size
-            }
-        } else {
-            let asset = BookAsset(
-                uuid: assetUUID,
-                fileName: fileName,
-                origin: .generated,
-                contentHash: artifactHash,
-                generatedFromContentHash: sourceHash,
-                sizeBytes: size,
-                validationStatus: .ok,
-                book: book
+        let newFileName = source.finalRelativeName
+        let wasPrimary = oldFileName == primaryFileName
+        let transaction: ManagedFileTransaction
+        do {
+            transaction = try await managedFiles.stage(
+                intent: .conversionOutput,
+                sources: [source],
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [bookUUID],
+                    referencedBookFileNames: [newFileName],
+                    unreferencedBookFileNames: Set(oldFileName.map { [$0] } ?? [])
+                ),
+                cleanups: oldFileName.map { [.book($0)] } ?? []
             )
-            modelContext.insert(asset)
-        }
-        guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-            BookFileStore.delete(fileName: fileName)
+        } catch {
             return
         }
-        if let oldFileName, oldFileName != fileName {
-            BookFileStore.delete(fileName: oldFileName)
+
+        guard let liveBook = try? mutations.book(id: bookUUID),
+              liveBook.fileName == primaryFileName,
+              liveBook.assets.first(where: { $0.uuid == primaryAssetUUID })?.dateAdded == primaryDateAdded,
+              liveBook.assets.first(where: { $0.uuid == assetUUID })?.fileName == oldFileName,
+              liveBook.assets.first(where: { $0.uuid == assetUUID })?.dateAdded == oldDateAdded else {
+            await managedFiles.abort(transaction)
+            return
+        }
+
+        let livePrimary = liveBook.assets.first { $0.uuid == primaryAssetUUID }
+        let originalPrimaryHash = livePrimary?.contentHash
+        let liveExisting = liveBook.assets.first { $0.uuid == assetUUID }
+        let oldSize = liveExisting?.sizeBytes
+        let oldHash = liveExisting?.contentHash
+        let oldGeneratedFromHash = liveExisting?.generatedFromContentHash
+        let oldValidation = liveExisting?.validationStatus
+        let originalBookSize = liveBook.fileSizeBytes
+        let staged = transaction.files[0]
+        var insertedAsset: BookAsset?
+        do {
+            let result = try await mutations.commitFileMutation(
+                .conversionOutput(bookID: bookUUID, assetID: assetUUID),
+                transaction: transaction,
+                affectedBookIDs: [bookUUID],
+                revertingOnFailure: {
+                    liveBook.fileName = primaryFileName
+                    liveBook.fileSizeBytes = originalBookSize
+                    livePrimary?.contentHash = originalPrimaryHash
+                    if let liveExisting {
+                        liveExisting.fileName = oldFileName ?? liveExisting.fileName
+                        liveExisting.sizeBytes = oldSize ?? liveExisting.sizeBytes
+                        liveExisting.contentHash = oldHash
+                        liveExisting.generatedFromContentHash = oldGeneratedFromHash
+                        liveExisting.validationStatus = oldValidation
+                        liveExisting.dateAdded = oldDateAdded ?? liveExisting.dateAdded
+                    }
+                    if let insertedAsset {
+                        liveBook.assets.removeAll { $0 === insertedAsset }
+                        if insertedAsset.modelContext != nil {
+                            modelContext.delete(insertedAsset)
+                        }
+                    }
+                }
+            ) {
+                let liveBook = try mutations.book(id: bookUUID)
+                guard liveBook.fileName == primaryFileName,
+                      liveBook.assets.first(where: { $0.uuid == primaryAssetUUID })?.dateAdded == primaryDateAdded else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                if let livePrimary = liveBook.assets.first(where: { $0.uuid == primaryAssetUUID }),
+                   livePrimary.contentHash == nil {
+                    livePrimary.contentHash = sourceHash
+                }
+                if let liveAsset = liveBook.assets.first(where: { $0.uuid == assetUUID }) {
+                    guard liveAsset.fileName == oldFileName,
+                          liveAsset.dateAdded == oldDateAdded else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    liveAsset.fileName = newFileName
+                    liveAsset.sizeBytes = staged.byteCount
+                    liveAsset.contentHash = staged.sha256
+                    liveAsset.generatedFromContentHash = sourceHash
+                    liveAsset.validationStatus = .ok
+                    liveAsset.dateAdded = Date()
+                } else {
+                    guard oldFileName == nil else { throw CatalogMutationError.modelNotFound }
+                    let asset = BookAsset(
+                        uuid: assetUUID,
+                        fileName: newFileName,
+                        origin: .generated,
+                        contentHash: staged.sha256,
+                        generatedFromContentHash: sourceHash,
+                        sizeBytes: staged.byteCount,
+                        validationStatus: .ok,
+                        book: liveBook
+                    )
+                    modelContext.insert(asset)
+                    insertedAsset = asset
+                }
+                if wasPrimary {
+                    liveBook.fileName = newFileName
+                    liveBook.fileSizeBytes = staged.byteCount
+                }
+            }
+            if !result.isFullyPublished {
+                toasts.error(String(localized: "Converted file is waiting for recovery."))
+            }
+        } catch {
+            return
         }
     }
 
     @discardableResult
     func addFile(to book: Book, from url: URL, origin: AssetOrigin = .imported) async -> BookAsset? {
         let shouldBecomePrimary = !book.hasDigitalFile
-        let uuid = UUID()
-        guard let fileName = try? BookFileStore.importCopy(of: url, uuid: uuid) else { return nil }
-        let managedURL = BookFileStore.url(for: fileName)
-        let contentHash = await Task.detached(priority: .utility) {
-            try? ContentHasher.sha256(of: managedURL)
-        }.value
-        guard book.modelContext != nil else {
-            BookFileStore.delete(fileName: fileName)
+        let bookID = book.uuid
+        let originalPrimaryName = book.fileName
+        let originalFileSize = book.fileSizeBytes
+        let originalDRMProtected = book.drmProtected
+        let originalCoverVersion = book.coverVersion
+        let assetID = UUID()
+        guard let source = try? ManagedFileSource.book(sourceURL: url, fileID: assetID) else { return nil }
+        let fileName = source.finalRelativeName
+        let expectedCoverVersion = shouldBecomePrimary ? originalCoverVersion + 1 : originalCoverVersion
+        let transaction: ManagedFileTransaction
+        do {
+            transaction = try await managedFiles.stage(
+                intent: .importBook,
+                sources: [source],
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [bookID],
+                    referencedBookFileNames: [fileName],
+                    coverVersions: shouldBecomePrimary ? [bookID: expectedCoverVersion] : [:]
+                )
+            )
+        } catch {
             return nil
         }
-        if let contentHash,
-           let existing = book.assets.first(where: { $0.contentHash == contentHash }) {
-            BookFileStore.delete(fileName: fileName)
+
+        guard let liveBook = try? mutations.book(id: bookID),
+              liveBook.fileName == originalPrimaryName,
+              liveBook.coverVersion == originalCoverVersion else {
+            await managedFiles.abort(transaction)
+            return nil
+        }
+        let staged = transaction.files[0]
+        if let existing = liveBook.assets.first(where: { $0.contentHash == staged.sha256 }) {
+            await managedFiles.abort(transaction)
             return existing
         }
-        let asset = BookAsset(
-            uuid: uuid,
-            fileName: fileName,
-            origin: origin,
-            contentHash: contentHash,
-            sizeBytes: BookFileStore.size(of: fileName),
-            validationStatus: .ok,
-            book: book
-        )
-        modelContext.insert(asset)
-        if shouldBecomePrimary {
-            book.fileName = fileName
-            book.fileSizeBytes = asset.sizeBytes
-            book.drmProtected = nil
-            book.coverVersion += 1
-        }
+
+        var insertedAsset: BookAsset?
         do {
-            try modelContext.saveAndPublish()
-            return asset
+            let result = try await mutations.commitFileMutation(
+                .addFile(bookID: bookID, assetID: assetID),
+                transaction: transaction,
+                affectedBookIDs: [bookID],
+                revertingOnFailure: {
+                    liveBook.fileName = originalPrimaryName
+                    liveBook.fileSizeBytes = originalFileSize
+                    liveBook.drmProtected = originalDRMProtected
+                    liveBook.coverVersion = originalCoverVersion
+                    if let insertedAsset {
+                        liveBook.assets.removeAll { $0 === insertedAsset }
+                        if insertedAsset.modelContext != nil {
+                            modelContext.delete(insertedAsset)
+                        }
+                    }
+                }
+            ) {
+                let liveBook = try mutations.book(id: bookID)
+                guard liveBook.fileName == originalPrimaryName,
+                      liveBook.coverVersion == originalCoverVersion,
+                      !liveBook.assets.contains(where: { $0.contentHash == staged.sha256 }) else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                let asset = BookAsset(
+                    uuid: assetID,
+                    fileName: fileName,
+                    origin: origin,
+                    contentHash: staged.sha256,
+                    sizeBytes: staged.byteCount,
+                    validationStatus: .ok,
+                    book: liveBook
+                )
+                modelContext.insert(asset)
+                if shouldBecomePrimary {
+                    liveBook.fileName = fileName
+                    liveBook.fileSizeBytes = asset.sizeBytes
+                    liveBook.drmProtected = nil
+                    liveBook.coverVersion = expectedCoverVersion
+                }
+                insertedAsset = asset
+            }
+            guard result.isFullyPublished else {
+                toasts.error(String(localized: "Added file is waiting for recovery."))
+                return nil
+            }
+            return insertedAsset
         } catch {
-            modelContext.rollback()
-            BookFileStore.delete(fileName: fileName)
             return nil
         }
     }
@@ -413,47 +622,99 @@ final class LibraryViewModel {
     func replace(_ asset: BookAsset, in book: Book, from url: URL) async {
         guard asset.modelContext != nil, book.modelContext != nil,
               asset.book?.uuid == book.uuid else { return }
+        let bookID = book.uuid
+        let assetID = asset.uuid
         let oldName = asset.fileName
+        let oldDateAdded = asset.dateAdded
+        let originalCoverVersion = book.coverVersion
+        let originalBookFileName = book.fileName
+        let originalBookFileSize = book.fileSizeBytes
+        let originalDRMProtected = book.drmProtected
         let wasPrimary = book.fileName == oldName
-        guard let fileName = try? BookFileStore.replacementCopy(
-            of: url, replacing: oldName, uuid: asset.uuid
-        ) else { return }
-        let replacementDate = Date()
-        asset.fileName = fileName
-        asset.sizeBytes = BookFileStore.size(of: fileName)
-        asset.contentHash = nil
-        asset.generatedFromContentHash = nil
-        asset.origin = .imported
-        asset.validationStatus = .ok
-        asset.dateAdded = replacementDate
-        if wasPrimary {
-            book.fileName = fileName
-            book.fileSizeBytes = asset.sizeBytes
-            book.drmProtected = nil
-            book.coverVersion += 1
-        }
-        guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-            BookFileStore.delete(fileName: fileName)
+        guard let source = try? ManagedFileSource.book(sourceURL: url) else { return }
+        let fileName = source.finalRelativeName
+        let expectedCoverVersion = wasPrimary ? originalCoverVersion + 1 : originalCoverVersion
+        let transaction: ManagedFileTransaction
+        do {
+            transaction = try await managedFiles.stage(
+                intent: .replaceBookFile,
+                sources: [source],
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [bookID],
+                    referencedBookFileNames: [fileName],
+                    unreferencedBookFileNames: [oldName],
+                    coverVersions: wasPrimary ? [bookID: expectedCoverVersion] : [:]
+                ),
+                cleanups: [.book(oldName)]
+            )
+        } catch {
             return
         }
-        if fileName != oldName { BookFileStore.delete(fileName: oldName) }
-
-        let managedURL = BookFileStore.url(for: fileName)
-        let analysis = await Task.detached(priority: .utility) {
-            (
-                try? ContentHasher.sha256(of: managedURL),
-                DRMDetector.isProtected(url: managedURL)
-            )
-        }.value
-        guard asset.modelContext != nil, book.modelContext != nil,
-              asset.book?.uuid == book.uuid,
-              asset.fileName == fileName,
-              asset.dateAdded == replacementDate else { return }
-        asset.contentHash = analysis.0
-        if wasPrimary, book.fileName == fileName {
-            book.drmProtected = analysis.1
+        let staged = transaction.files[0]
+        let drmProtected = wasPrimary
+            ? await Task.detached(priority: .utility) { DRMDetector.isProtected(url: staged.stagedURL) }.value
+            : nil
+        guard let liveBook = try? mutations.book(id: bookID),
+              liveBook.coverVersion == originalCoverVersion,
+              let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
+              liveAsset.fileName == oldName,
+              liveAsset.dateAdded == oldDateAdded else {
+            await managedFiles.abort(transaction)
+            return
         }
-        modelContext.saveQuietly()
+        let oldSize = liveAsset.sizeBytes
+        let oldHash = liveAsset.contentHash
+        let oldGeneratedFromHash = liveAsset.generatedFromContentHash
+        let oldOrigin = liveAsset.origin
+        let oldValidation = liveAsset.validationStatus
+        let replacementDate = Date()
+        do {
+            let result = try await mutations.commitFileMutation(
+                .replaceFile(bookID: bookID, assetID: assetID),
+                transaction: transaction,
+                affectedBookIDs: [bookID],
+                revertingOnFailure: {
+                    liveAsset.fileName = oldName
+                    liveAsset.sizeBytes = oldSize
+                    liveAsset.contentHash = oldHash
+                    liveAsset.generatedFromContentHash = oldGeneratedFromHash
+                    liveAsset.origin = oldOrigin
+                    liveAsset.validationStatus = oldValidation
+                    liveAsset.dateAdded = oldDateAdded
+                    liveBook.fileName = originalBookFileName
+                    liveBook.fileSizeBytes = originalBookFileSize
+                    liveBook.drmProtected = originalDRMProtected
+                    liveBook.coverVersion = originalCoverVersion
+                }
+            ) {
+                let liveBook = try mutations.book(id: bookID)
+                guard liveBook.coverVersion == originalCoverVersion,
+                      let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
+                      liveAsset.fileName == oldName,
+                      liveAsset.dateAdded == oldDateAdded else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                liveAsset.fileName = fileName
+                liveAsset.sizeBytes = staged.byteCount
+                liveAsset.contentHash = staged.sha256
+                liveAsset.generatedFromContentHash = nil
+                liveAsset.origin = .imported
+                liveAsset.validationStatus = .ok
+                liveAsset.dateAdded = replacementDate
+                if wasPrimary {
+                    guard liveBook.fileName == oldName else { throw CatalogMutationError.modelNotFound }
+                    liveBook.fileName = fileName
+                    liveBook.fileSizeBytes = staged.byteCount
+                    liveBook.drmProtected = drmProtected
+                    liveBook.coverVersion = expectedCoverVersion
+                }
+            }
+            if !result.isFullyPublished {
+                toasts.error(String(localized: "Replacement file is waiting for recovery."))
+            }
+        } catch {
+            return
+        }
     }
 
     func makePrimary(_ asset: BookAsset, for book: Book) async {
@@ -484,16 +745,62 @@ final class LibraryViewModel {
     }
 
     @discardableResult
-    func removeFile(_ asset: BookAsset, from book: Book) -> Bool {
+    func removeFile(_ asset: BookAsset, from book: Book) async -> Bool {
         guard asset.book?.uuid == book.uuid, book.assets.count > 1, asset.fileName != book.fileName else { return false }
+        let bookID = book.uuid
+        let assetID = asset.uuid
         let fileName = asset.fileName
-        modelContext.delete(asset)
+        let dateAdded = asset.dateAdded
+        let transaction: ManagedFileTransaction
         do {
-            try modelContext.saveAndPublish()
-            BookFileStore.delete(fileName: fileName)
-            return true
+            transaction = try await managedFiles.prepareCleanup(
+                intent: .deleteBookFile,
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [bookID],
+                    unreferencedBookFileNames: [fileName]
+                ),
+                cleanups: [.book(fileName)]
+            )
         } catch {
-            modelContext.rollback()
+            return false
+        }
+        guard let liveBook = try? mutations.book(id: bookID),
+              liveBook.assets.count > 1,
+              let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
+              liveAsset.fileName == fileName,
+              liveAsset.dateAdded == dateAdded,
+              liveBook.fileName != fileName else {
+            await managedFiles.abort(transaction)
+            return false
+        }
+        do {
+            let result = try await mutations.commitFileMutation(
+                .removeFile(bookID: bookID, assetID: assetID),
+                transaction: transaction,
+                affectedBookIDs: [bookID],
+                revertingOnFailure: {
+                    if liveAsset.modelContext == nil { modelContext.insert(liveAsset) }
+                    liveAsset.book = liveBook
+                    if !liveBook.assets.contains(where: { $0 === liveAsset }) {
+                        liveBook.assets.append(liveAsset)
+                    }
+                }
+            ) {
+                let liveBook = try mutations.book(id: bookID)
+                guard liveBook.assets.count > 1,
+                      let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
+                      liveAsset.fileName == fileName,
+                      liveAsset.dateAdded == dateAdded,
+                      liveBook.fileName != fileName else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                modelContext.delete(liveAsset)
+            }
+            if !result.isFullyPublished {
+                toasts.error(String(localized: "File removal is waiting for cleanup."))
+            }
+            return result.isFullyPublished
+        } catch {
             return false
         }
     }

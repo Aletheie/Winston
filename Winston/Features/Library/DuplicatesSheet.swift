@@ -84,15 +84,19 @@ struct DuplicatesSheet: View {
 
     private func delete(_ book: Book, from group: DuplicateGroup) {
         groups.removeAll { $0.id == group.id }
-        viewModel.remove(book)
-        Task { await rescan() }
+        Task {
+            await viewModel.remove(book)
+            await rescan()
+        }
     }
 
     private func keepOnly(_ book: Book, in group: DuplicateGroup) {
         let others = group.books.filter { $0.id != book.id }
         groups.removeAll { $0.id == group.id }
-        viewModel.removeBooks(others)
-        Task { await rescan() }
+        Task {
+            await viewModel.removeBooks(others)
+            await rescan()
+        }
     }
 }
 

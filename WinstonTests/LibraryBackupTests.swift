@@ -31,16 +31,22 @@ struct LibraryBackupTests {
         return String(cString: text)
     }
 
-    @Test func copiesStoreAndCovers() throws {
+    @Test func copiesStoreBooksCoversAndRecoveryJournal() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appending(path: "BackupTest-\(UUID().uuidString)", directoryHint: .isDirectory)
         let store = root.appending(path: "Winston.store")
         let covers = root.appending(path: "covers", directoryHint: .isDirectory)
+        let books = root.appending(path: "Books", directoryHint: .isDirectory)
+        let managedFiles = root.appending(path: "ManagedFiles/Journal", directoryHint: .isDirectory)
         let dest = root.appending(path: "backups", directoryHint: .isDirectory)
         try fm.createDirectory(at: covers, withIntermediateDirectories: true)
+        try fm.createDirectory(at: books, withIntermediateDirectories: true)
+        try fm.createDirectory(at: managedFiles, withIntermediateDirectories: true)
         try fm.createDirectory(at: dest, withIntermediateDirectories: true)
         try makeDatabase(at: store, value: "store")
         try Data("img".utf8).write(to: covers.appending(path: "a.jpg"))
+        try Data("book".utf8).write(to: books.appending(path: "a.epub"))
+        try Data("journal".utf8).write(to: managedFiles.appending(path: "pending.json"))
         defer { try? fm.removeItem(at: root) }
 
         let made = try LibraryBackup.backup(storeURL: store, coversDirectory: covers, to: dest, keepLast: 5)
@@ -48,6 +54,9 @@ struct LibraryBackupTests {
         #expect(fm.fileExists(atPath: made.appending(path: "Winston.store").path(percentEncoded: false)))
         #expect(try databaseValue(at: made.appending(path: "Winston.store")) == "store")
         #expect(fm.fileExists(atPath: made.appending(path: "covers/a.jpg").path(percentEncoded: false)))
+        #expect(fm.fileExists(atPath: made.appending(path: "Books/a.epub").path(percentEncoded: false)))
+        #expect(fm.fileExists(atPath: made.appending(path: "ManagedFiles/Journal/pending.json").path(percentEncoded: false)))
+        #expect(fm.fileExists(atPath: made.appending(path: LibraryBackup.manifestName).path(percentEncoded: false)))
     }
 
     @Test func snapshotIncludesCommittedWALStateWithoutCopyingSidecars() throws {
@@ -55,8 +64,10 @@ struct LibraryBackupTests {
         let root = fm.temporaryDirectory.appending(path: "BackupWAL-\(UUID().uuidString)", directoryHint: .isDirectory)
         let store = root.appending(path: "Winston.store")
         let covers = root.appending(path: "covers", directoryHint: .isDirectory)
+        let books = root.appending(path: "Books", directoryHint: .isDirectory)
         let destination = root.appending(path: "backups", directoryHint: .isDirectory)
         try fm.createDirectory(at: covers, withIntermediateDirectories: true)
+        try fm.createDirectory(at: books, withIntermediateDirectories: true)
         try fm.createDirectory(at: destination, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: root) }
 
@@ -132,11 +143,14 @@ struct LibraryBackupTests {
         let root = fm.temporaryDirectory.appending(path: "RestoreTest-\(UUID().uuidString)", directoryHint: .isDirectory)
         let store = root.appending(path: "Winston.store")
         let covers = root.appending(path: "covers", directoryHint: .isDirectory)
+        let books = root.appending(path: "Books", directoryHint: .isDirectory)
         let backupsFolder = root.appending(path: "backups", directoryHint: .isDirectory)
         try fm.createDirectory(at: covers, withIntermediateDirectories: true)
+        try fm.createDirectory(at: books, withIntermediateDirectories: true)
         try fm.createDirectory(at: backupsFolder, withIntermediateDirectories: true)
         try makeDatabase(at: store, value: "old")
         try Data("old-img".utf8).write(to: covers.appending(path: "a.jpg"))
+        try Data("current-book".utf8).write(to: books.appending(path: "current.epub"))
         defer { try? fm.removeItem(at: root); LibraryBackup.cancelPendingRestore() }
 
         let backup = backupsFolder.appending(path: "Winston Backup 2026-01-01-000000", directoryHint: .isDirectory)
@@ -151,6 +165,7 @@ struct LibraryBackupTests {
         #expect(try databaseValue(at: store) == "restored")
         #expect(fm.fileExists(atPath: covers.appending(path: "b.jpg").path(percentEncoded: false)))
         #expect(!fm.fileExists(atPath: covers.appending(path: "a.jpg").path(percentEncoded: false)))
+        #expect(fm.fileExists(atPath: books.appending(path: "current.epub").path(percentEncoded: false)))
         let snapshots = LibraryBackup.availableBackups(in: backupsFolder)
             .filter { $0.lastPathComponent != backup.lastPathComponent }
         #expect(snapshots.count == 1)
@@ -158,6 +173,63 @@ struct LibraryBackupTests {
             #expect(try databaseValue(at: snapshot.appending(path: "Winston.store")) == "old")
         }
         #expect(!LibraryBackup.applyPendingRestoreIfNeeded(storeURL: store, coversDirectory: covers))
+    }
+
+    @Test func versionTwoRestoreReplacesBooksCoversAndJournalTogether() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appending(
+            path: "RestoreManagedFiles-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let store = root.appending(path: "Winston.store")
+        let covers = root.appending(path: "covers", directoryHint: .isDirectory)
+        let books = root.appending(path: "Books", directoryHint: .isDirectory)
+        let managedFiles = root.appending(path: "ManagedFiles", directoryHint: .isDirectory)
+        let journal = managedFiles.appending(path: "Journal", directoryHint: .isDirectory)
+        let backups = root.appending(path: "backups", directoryHint: .isDirectory)
+        for directory in [covers, books, journal, backups] {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? fm.removeItem(at: root); LibraryBackup.cancelPendingRestore() }
+
+        try makeDatabase(at: store, value: "backed-up")
+        try Data("backed-cover".utf8).write(to: covers.appending(path: "book.jpg"))
+        try Data("backed-book".utf8).write(to: books.appending(path: "book.epub"))
+        try Data("backed-journal".utf8).write(to: journal.appending(path: "pending.json"))
+        let backup = try LibraryBackup.backup(
+            storeURL: store,
+            coversDirectory: covers,
+            to: backups,
+            booksDirectory: books,
+            managedFilesDirectory: managedFiles
+        )
+
+        try fm.removeItem(at: store)
+        try makeDatabase(at: store, value: "current")
+        try fm.removeItem(at: covers)
+        try fm.removeItem(at: books)
+        try fm.removeItem(at: managedFiles)
+        try fm.createDirectory(at: covers, withIntermediateDirectories: true)
+        try fm.createDirectory(at: books, withIntermediateDirectories: true)
+        try fm.createDirectory(at: journal, withIntermediateDirectories: true)
+        try Data("current-cover".utf8).write(to: covers.appending(path: "current.jpg"))
+        try Data("current-book".utf8).write(to: books.appending(path: "current.epub"))
+        try Data("current-journal".utf8).write(to: journal.appending(path: "current.json"))
+
+        LibraryBackup.requestRestore(from: backup)
+        #expect(LibraryBackup.applyPendingRestoreIfNeeded(
+            storeURL: store,
+            coversDirectory: covers,
+            booksDirectory: books,
+            managedFilesDirectory: managedFiles
+        ))
+
+        #expect(try databaseValue(at: store) == "backed-up")
+        #expect(try Data(contentsOf: covers.appending(path: "book.jpg")) == Data("backed-cover".utf8))
+        #expect(try Data(contentsOf: books.appending(path: "book.epub")) == Data("backed-book".utf8))
+        #expect(try Data(contentsOf: journal.appending(path: "pending.json")) == Data("backed-journal".utf8))
+        #expect(!fm.fileExists(atPath: books.appending(path: "current.epub").path(percentEncoded: false)))
+        #expect(!fm.fileExists(atPath: journal.appending(path: "current.json").path(percentEncoded: false)))
     }
 
     @Test func listsAndRestoresPreRenameKalibreBackups() throws {

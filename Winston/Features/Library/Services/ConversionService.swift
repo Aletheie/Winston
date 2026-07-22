@@ -5,11 +5,6 @@ import AppKit
 @MainActor
 @Observable
 final class ConversionService {
-    private struct InstalledCover {
-        let rollback: CoverRollbackTicket
-        let version: Int
-    }
-
     private struct Request {
         let book: Book
         let uuid: UUID
@@ -27,18 +22,24 @@ final class ConversionService {
 
     private let modelContext: ModelContext
     private let toasts: ToastCenter
-    private let covers: CoverRepository
+    private let mutations: CatalogMutationService
+    private let managedFiles: ManagedFileCoordinator
 
     private(set) var convertingUUIDs: Set<UUID> = []
 
     init(
         modelContext: ModelContext,
         toasts: ToastCenter,
-        covers: CoverRepository = .shared
+        mutations: CatalogMutationService? = nil,
+        managedFiles: ManagedFileCoordinator = .shared
     ) {
         self.modelContext = modelContext
         self.toasts = toasts
-        self.covers = covers
+        self.mutations = mutations ?? CatalogMutationService(
+            modelContext: modelContext,
+            managedFiles: managedFiles
+        )
+        self.managedFiles = managedFiles
     }
 
     func isConverting(_ book: Book) -> Bool { convertingUUIDs.contains(book.uuid) }
@@ -139,7 +140,6 @@ final class ConversionService {
         let book = request.book
         let uuid = request.uuid
         let sourceURL = request.sourceURL
-        let coverToken = await covers.beginBackgroundMutation(for: uuid)
         defer { convertingUUIDs.remove(uuid) }
         guard sourceSnapshotIsCurrent(request) else { return }
 
@@ -156,11 +156,6 @@ final class ConversionService {
             return
         }
         guard sourceSnapshotIsCurrent(request) else { return }
-        if let sourceAssetUUID = request.sourceAssetUUID,
-           let sourceAsset = book.assets.first(where: { $0.uuid == sourceAssetUUID }),
-           sourceAsset.contentHash == nil {
-            sourceAsset.contentHash = sourceHash
-        }
 
         let extractedCover = await Task.detached(priority: .utility) { () -> (NSImage, Data)? in
             if !CoverStore.exists(for: uuid),
@@ -172,133 +167,165 @@ final class ConversionService {
         }.value
 
         guard sourceSnapshotIsCurrent(request) else { return }
-        var installedCover: InstalledCover?
-        if let (_, coverData) = extractedCover,
-           book.coverVersion == request.coverVersion {
-            let rollback = await covers.install(coverData, using: coverToken, onlyIfMissing: true)
-            guard sourceSnapshotIsCurrent(request) else {
-                if let rollback { _ = await covers.rollback(rollback) }
-                return
-            }
-            if let rollback,
-               await covers.isCurrent(coverToken),
-               book.coverVersion == request.coverVersion {
-                book.coverVersion += 1
-                installedCover = InstalledCover(rollback: rollback, version: book.coverVersion)
-            }
-        }
-
         let converted: URL? = try? await EbookConverter.convert(sourceURL, to: request.format)
         guard sourceSnapshotIsCurrent(request) else {
             if let converted { try? FileManager.default.removeItem(at: converted) }
-            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
             return
         }
         guard let converted else {
-            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
         defer { try? FileManager.default.removeItem(at: converted) }
 
-        let contentHash = await Task.detached(priority: .utility) {
-            try? ContentHasher.sha256(of: converted)
-        }.value
-        guard sourceSnapshotIsCurrent(request) else {
-            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
-            return
-        }
-
         let existingAsset = request.existingAssetUUID.flatMap { existingUUID in
             book.assets.first { $0.uuid == existingUUID }
         }
         let oldFileName = existingAsset?.fileName
-        let storedFile: (name: String, size: Int64)? = await Task.detached(priority: .userInitiated) {
-            do {
-                let name: String
-                if let oldFileName {
-                    name = try BookFileStore.replacementCopy(
-                        of: converted,
-                        replacing: oldFileName,
-                        uuid: request.assetUUID
-                    )
-                } else {
-                    name = try BookFileStore.importCopy(of: converted, uuid: request.assetUUID)
-                }
-                return (name, BookFileStore.size(of: name))
-            } catch {
-                return nil
-            }
-        }.value
-        guard let storedFile else {
-            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
+        let oldAssetDate = existingAsset?.dateAdded
+        let retiredNames = Set(oldFileName.map { [$0] } ?? [])
+        let bookSource: ManagedFileSource
+        do {
+            bookSource = try .book(sourceURL: converted)
+        } catch {
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
-        let newFileName = storedFile.name
-        let size = storedFile.size
-        guard sourceSnapshotIsCurrent(request) else {
-            Task.detached(priority: .utility) {
-                BookFileStore.delete(fileName: newFileName)
-            }
-            await removeInstalledCover(for: book, url: sourceURL, installed: installedCover)
-            return
+
+        let shouldInstallCover = extractedCover != nil
+            && book.coverVersion == request.coverVersion
+            && !CoverStore.exists(for: uuid)
+        var sources = [bookSource]
+        if shouldInstallCover, let coverData = extractedCover?.1 {
+            sources.append(.cover(data: coverData, bookID: uuid))
         }
-        if let asset = existingAsset {
-            asset.fileName = newFileName
-            asset.sizeBytes = size
-            asset.contentHash = contentHash
-            asset.generatedFromContentHash = sourceHash
-            asset.validationStatus = .ok
-            asset.dateAdded = Date()
-        } else {
-            let asset = BookAsset(
-                uuid: request.assetUUID,
-                fileName: newFileName,
-                origin: .generated,
-                contentHash: contentHash,
-                generatedFromContentHash: sourceHash,
-                sizeBytes: size,
-                validationStatus: .ok,
-                book: book
+        let newFileName = bookSource.finalRelativeName
+        let expectedCoverVersion = request.coverVersion + (shouldInstallCover ? 1 : 0)
+        let transaction: ManagedFileTransaction
+        do {
+            transaction = try await managedFiles.stage(
+                intent: .conversionOutput,
+                sources: sources,
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [uuid],
+                    referencedBookFileNames: [newFileName],
+                    unreferencedBookFileNames: retiredNames,
+                    coverVersions: shouldInstallCover ? [uuid: expectedCoverVersion] : [:]
+                ),
+                cleanups: oldFileName.map { [.book($0)] } ?? []
             )
-            modelContext.insert(asset)
-        }
-        guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-            Task.detached(priority: .utility) {
-                BookFileStore.delete(fileName: newFileName)
-            }
-            await removeInstalledCover(
-                for: book, url: sourceURL, installed: installedCover, force: true
-            )
+        } catch {
             toasts.error(String(localized: "Couldn\u{2019}t save \u{201C}\(request.title)\u{201D}."))
             return
         }
-        if let oldFileName, oldFileName != newFileName {
-            Task.detached(priority: .utility) {
-                BookFileStore.delete(fileName: oldFileName)
+
+        let currentExisting = request.existingAssetUUID.flatMap { existingUUID in
+            book.assets.first { $0.uuid == existingUUID }
+        }
+        guard sourceSnapshotIsCurrent(request),
+              currentExisting?.fileName == oldFileName,
+              currentExisting?.dateAdded == oldAssetDate,
+              let stagedBook = transaction.files.first(where: { $0.kind == .book }) else {
+            await managedFiles.abort(transaction)
+            return
+        }
+
+        let sourceAsset = request.sourceAssetUUID.flatMap { sourceAssetUUID in
+            book.assets.first { $0.uuid == sourceAssetUUID }
+        }
+        let originalSourceHash = sourceAsset?.contentHash
+        let oldSize = currentExisting?.sizeBytes
+        let oldHash = currentExisting?.contentHash
+        let oldGeneratedFromHash = currentExisting?.generatedFromContentHash
+        let oldValidation = currentExisting?.validationStatus
+        let replacementDate = Date()
+        var insertedAsset: BookAsset?
+        do {
+            let result = try await mutations.commitFileMutation(
+                .conversionOutput(bookID: uuid, assetID: request.assetUUID),
+                transaction: transaction,
+                affectedBookIDs: [uuid],
+                revertingOnFailure: {
+                    book.coverVersion = request.coverVersion
+                    sourceAsset?.contentHash = originalSourceHash
+                    if let currentExisting {
+                        currentExisting.fileName = oldFileName ?? currentExisting.fileName
+                        currentExisting.sizeBytes = oldSize ?? currentExisting.sizeBytes
+                        currentExisting.contentHash = oldHash
+                        currentExisting.generatedFromContentHash = oldGeneratedFromHash
+                        currentExisting.validationStatus = oldValidation
+                        currentExisting.dateAdded = oldAssetDate ?? currentExisting.dateAdded
+                    }
+                    if let insertedAsset {
+                        book.assets.removeAll { $0 === insertedAsset }
+                        if insertedAsset.modelContext != nil {
+                            modelContext.delete(insertedAsset)
+                        }
+                    }
+                }
+            ) {
+                let liveBook = try mutations.book(id: uuid)
+                guard sourceSnapshotIsCurrent(request),
+                      liveBook.coverVersion == request.coverVersion else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                if let sourceAssetUUID = request.sourceAssetUUID,
+                   let sourceAsset = liveBook.assets.first(where: { $0.uuid == sourceAssetUUID }),
+                   sourceAsset.contentHash == nil {
+                    sourceAsset.contentHash = sourceHash
+                }
+                if let existingAssetUUID = request.existingAssetUUID,
+                   let asset = liveBook.assets.first(where: { $0.uuid == existingAssetUUID }) {
+                    guard asset.fileName == oldFileName,
+                          asset.dateAdded == oldAssetDate else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    asset.fileName = newFileName
+                    asset.sizeBytes = stagedBook.byteCount
+                    asset.contentHash = stagedBook.sha256
+                    asset.generatedFromContentHash = sourceHash
+                    asset.validationStatus = .ok
+                    asset.dateAdded = replacementDate
+                } else {
+                    guard request.existingAssetUUID == nil else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    let asset = BookAsset(
+                        uuid: request.assetUUID,
+                        fileName: newFileName,
+                        origin: .generated,
+                        contentHash: stagedBook.sha256,
+                        generatedFromContentHash: sourceHash,
+                        sizeBytes: stagedBook.byteCount,
+                        validationStatus: .ok,
+                        book: liveBook
+                    )
+                    modelContext.insert(asset)
+                    insertedAsset = asset
+                }
+                if shouldInstallCover {
+                    liveBook.coverVersion = expectedCoverVersion
+                }
             }
+            guard result.isFullyPublished else {
+                toasts.error(String(localized: "Converted file is waiting for recovery."))
+                return
+            }
+        } catch {
+            toasts.error(String(localized: "Couldn\u{2019}t save \u{201C}\(request.title)\u{201D}."))
+            return
+        }
+
+        if shouldInstallCover, let image = extractedCover?.0 {
+            await CoverCache.shared.replace(image, for: sourceURL)
         }
         toasts.success(String(localized: "Created \(request.format.label) copy."))
     }
 
-    private func removeInstalledCover(
-        for book: Book,
-        url: URL,
-        installed: InstalledCover?,
-        force: Bool = false
-    ) async {
-        guard let installed, force || book.coverVersion == installed.version else { return }
-        guard await covers.rollback(installed.rollback) else { return }
-        if book.coverVersion == installed.version {
-            book.coverVersion = max(0, installed.version - 1)
-        }
-        await CoverCache.shared.replace(nil, for: url)
-    }
-
     private func sourceSnapshotIsCurrent(_ request: Request) -> Bool {
         guard request.book.modelContext != nil,
-              request.book.fileName == request.sourceFileName else { return false }
+              request.book.fileName == request.sourceFileName,
+              request.book.coverVersion == request.coverVersion else { return false }
         guard let sourceAssetUUID = request.sourceAssetUUID else { return true }
         guard let sourceAsset = request.book.assets.first(where: { $0.uuid == sourceAssetUUID }),
               sourceAsset.fileName == request.sourceFileName,

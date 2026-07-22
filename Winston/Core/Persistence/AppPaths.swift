@@ -17,6 +17,18 @@ enum AppPaths {
         appSupportDirectory.appending(path: "covers", directoryHint: .isDirectory)
     }
 
+    nonisolated static var managedFilesDirectory: URL {
+        appSupportDirectory.appending(path: "ManagedFiles", directoryHint: .isDirectory)
+    }
+
+    nonisolated static var managedFileStagingDirectory: URL {
+        managedFilesDirectory.appending(path: "Staging", directoryHint: .isDirectory)
+    }
+
+    nonisolated static var managedFileJournalDirectory: URL {
+        managedFilesDirectory.appending(path: "Journal", directoryHint: .isDirectory)
+    }
+
     nonisolated static var pluginsDirectory: URL {
         appSupportDirectory.appending(path: "Plugins", directoryHint: .isDirectory)
     }
@@ -35,7 +47,9 @@ enum AppPaths {
 
     nonisolated static func ensureRequiredDirectories() throws {
         for directory in [appSupportDirectory, booksDirectory, coversDirectory,
-                          pluginsDirectory, pluginDataRootDirectory, fullTextIndexDirectory] {
+                          managedFilesDirectory, managedFileStagingDirectory,
+                          managedFileJournalDirectory, pluginsDirectory,
+                          pluginDataRootDirectory, fullTextIndexDirectory] {
             try ensureDirectory(directory)
         }
     }

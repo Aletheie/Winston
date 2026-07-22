@@ -2,26 +2,6 @@ import Foundation
 import SwiftData
 import AppKit
 
-private nonisolated struct CalibreManagedFile: Sendable {
-    let fileName: String
-    let contentHash: String?
-    let sizeBytes: Int64
-}
-
-private nonisolated enum CalibreFileImporter {
-    static func copy(_ source: URL, uuid: UUID) -> CalibreManagedFile? {
-        guard let fileName = try? BookFileStore.importCopy(of: source, uuid: uuid) else {
-            return nil
-        }
-        let managedURL = BookFileStore.url(for: fileName)
-        return CalibreManagedFile(
-            fileName: fileName,
-            contentHash: try? ContentHasher.sha256(of: managedURL),
-            sizeBytes: BookFileStore.size(of: fileName)
-        )
-    }
-}
-
 @MainActor
 @Observable
 final class CalibreImportService {
@@ -31,8 +11,8 @@ final class CalibreImportService {
     private let wishlist: WishlistService
     private let toasts: ToastCenter
     private let editions: EditionService?
-    private let covers: CoverRepository
     private let mutations: CatalogMutationService
+    private let managedFiles: ManagedFileCoordinator
 
     nonisolated static let kindlePreference = ["azw3", "mobi", "azw", "epub", "pdf", "txt"]
 
@@ -47,8 +27,8 @@ final class CalibreImportService {
         wishlist: WishlistService,
         toasts: ToastCenter,
         editions: EditionService? = nil,
-        covers: CoverRepository = .shared,
-        mutations: CatalogMutationService? = nil
+        mutations: CatalogMutationService? = nil,
+        managedFiles: ManagedFileCoordinator = .shared
     ) {
         self.modelContext = modelContext
         self.settings = settings
@@ -56,8 +36,11 @@ final class CalibreImportService {
         self.wishlist = wishlist
         self.toasts = toasts
         self.editions = editions
-        self.covers = covers
-        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
+        self.mutations = mutations ?? CatalogMutationService(
+            modelContext: modelContext,
+            managedFiles: managedFiles
+        )
+        self.managedFiles = managedFiles
     }
 
     var progressText: String? {
@@ -105,115 +88,61 @@ final class CalibreImportService {
             progress = (0, total)
             var imported: [Book] = []
             var skipped = 0
-            var stagedBookIDs: Set<UUID> = []
-            var stagedFileNames: Set<String> = []
 
-            for (index, cb) in calibreBooks.enumerated() {
+            for (index, calibreBook) in calibreBooks.enumerated() {
                 progress = (Self.displayedPosition(for: index), total)
 
-                let isbn = cb.isbn?.lowercased()
-                let key = Self.titleAuthorKey(cb.title, cb.authors.joined(separator: ", "))
-                if let isbn, !isbn.isEmpty, seenISBNs.contains(isbn) { skipped += 1; continue }
-                if seenKeys.contains(key) { skipped += 1; continue }
-
-                let uuid = UUID()
-                let source = cb.fileURL
-                guard let managedFile = await Task.detached(priority: .userInitiated, operation: {
-                    CalibreFileImporter.copy(source, uuid: uuid)
-                }).value else { skipped += 1; continue }
-                let fileName = managedFile.fileName
-
-                let book = Book(uuid: uuid, fileName: fileName, originalFileName: source.lastPathComponent)
-                book.apply(Self.metadata(from: cb))
-                book.rating = cb.rating
-                if let dateAdded = cb.dateAdded { book.dateAdded = dateAdded }
-                book.fileSizeBytes = managedFile.sizeBytes
-                let work = Work(title: book.title, author: book.author, dateCreated: book.dateAdded)
-                work.preferredEditionUUID = book.uuid
-                let primaryAsset = BookAsset(
-                    uuid: uuid,
-                    fileName: fileName,
-                    origin: .imported,
-                    contentHash: managedFile.contentHash,
-                    sizeBytes: book.fileSizeBytes,
-                    dateAdded: book.dateAdded,
-                    validationStatus: .ok,
-                    book: book
+                let isbn = calibreBook.isbn?.lowercased()
+                let key = Self.titleAuthorKey(
+                    calibreBook.title,
+                    calibreBook.authors.joined(separator: ", ")
                 )
-                modelContext.insert(work)
-                modelContext.insert(book)
-                modelContext.insert(primaryAsset)
-                book.work = work
-                stagedBookIDs.insert(uuid)
-                stagedFileNames.insert(fileName)
-
-                for siblingURL in cb.additionalFileURLs {
-                    let assetUUID = UUID()
-                    guard let siblingFile = await Task.detached(priority: .userInitiated, operation: {
-                        CalibreFileImporter.copy(siblingURL, uuid: assetUUID)
-                    }).value else { continue }
-                    let asset = BookAsset(
-                        uuid: assetUUID,
-                        fileName: siblingFile.fileName,
-                        origin: .imported,
-                        contentHash: siblingFile.contentHash,
-                        sizeBytes: siblingFile.sizeBytes,
-                        dateAdded: book.dateAdded,
-                        validationStatus: .ok,
-                        book: book
-                    )
-                    modelContext.insert(asset)
-                    stagedFileNames.insert(siblingFile.fileName)
+                if let isbn, !isbn.isEmpty, seenISBNs.contains(isbn) {
+                    skipped += 1
+                    continue
                 }
-                imported.append(book)
+                if seenKeys.contains(key) {
+                    skipped += 1
+                    continue
+                }
 
-                if let isbn, !isbn.isEmpty { seenISBNs.insert(isbn) }
-                seenKeys.insert(key)
-
-                if let coverURL = cb.coverURL {
-                    let token = await covers.beginBackgroundMutation(for: uuid)
-                    let prepared = await Task.detached(priority: .utility) { () -> (NSImage, Data)? in
-                        guard let image = NSImage(contentsOf: coverURL),
-                              let data = ImageTranscoder.jpegData(from: image) else { return nil }
-                        return (image, data)
-                    }.value
-                    if let (image, data) = prepared,
-                       await covers.install(data, using: token, onlyIfMissing: true) != nil {
-                        await CoverCache.shared.replace(image, for: book.fileURL)
+                do {
+                    guard let book = try await importOne(calibreBook) else {
+                        skipped += 1
+                        continue
                     }
-                }
-
-                if imported.count % 25 == 0 {
-                    guard commitImportBatch(bookIDs: stagedBookIDs) else {
-                        await discardStagedArtifacts(
-                            bookIDs: stagedBookIDs,
-                            fileNames: stagedFileNames
-                        )
-                        progress = nil
-                        toasts.error(String(localized: "Couldn’t save library changes."))
-                        return
-                    }
-                    stagedBookIDs.removeAll(keepingCapacity: true)
-                    stagedFileNames.removeAll(keepingCapacity: true)
-                }
-            }
-
-            if !imported.isEmpty {
-                let collection = BookCollection(name: Self.collectionName())
-                collection.books = imported
-                modelContext.insert(collection)
-            }
-            if !imported.isEmpty {
-                guard commitImportBatch(bookIDs: Set(imported.map(\.uuid))) else {
-                    await discardStagedArtifacts(
-                        bookIDs: stagedBookIDs,
-                        fileNames: stagedFileNames
-                    )
+                    imported.append(book)
+                    if let isbn, !isbn.isEmpty { seenISBNs.insert(isbn) }
+                    seenKeys.insert(key)
+                } catch {
                     progress = nil
                     toasts.error(String(localized: "Couldn’t save library changes."))
                     return
                 }
             }
+
+            if !imported.isEmpty {
+                do {
+                    let collection = BookCollection(name: Self.collectionName())
+                    let collectionID = collection.id
+                    try mutations.commit(
+                        .createCollection(
+                            collectionID: collectionID,
+                            bookIDs: imported.map(\.uuid)
+                        ),
+                        affectedBookIDs: Set(imported.map(\.uuid)),
+                        affectedCollectionIDs: [collectionID]
+                    ) {
+                        collection.books = imported
+                        modelContext.insert(collection)
+                    }
+                } catch {
+                    progress = nil
+                    toasts.error(String(localized: "Couldn’t save library changes."))
+                    return
+                }
+            }
+
             wishlist.fulfil(with: imported)
             if let editions {
                 let previousKeys = Set(editions.pendingProposals.map(\.pairKey))
@@ -242,27 +171,107 @@ final class CalibreImportService {
         zeroBasedIndex + 1
     }
 
-    // MARK: - Helpers
-
-    private func commitImportBatch(bookIDs: Set<UUID>) -> Bool {
-        do {
-            try mutations.commitStaged(
-                .calibreImport(bookIDs: Array(bookIDs)),
-                affectedBookIDs: bookIDs
-            )
-            return true
-        } catch {
-            return false
+    private func importOne(_ calibreBook: CalibreBook) async throws -> Book? {
+        let bookID = UUID()
+        var assetSources: [(id: UUID, source: ManagedFileSource)] = []
+        assetSources.append((
+            bookID,
+            try .book(sourceURL: calibreBook.fileURL, fileID: bookID)
+        ))
+        for url in calibreBook.additionalFileURLs {
+            let assetID = UUID()
+            assetSources.append((assetID, try .book(sourceURL: url, fileID: assetID)))
         }
-    }
 
-    private func discardStagedArtifacts(bookIDs: Set<UUID>, fileNames: Set<String>) async {
-        await Task.detached(priority: .utility) {
-            for fileName in fileNames { BookFileStore.delete(fileName: fileName) }
+        let preparedCover = await Task.detached(priority: .utility) { () -> (NSImage, Data)? in
+            guard let coverURL = calibreBook.coverURL,
+                  let image = NSImage(contentsOf: coverURL),
+                  let data = ImageTranscoder.jpegData(from: image) else { return nil }
+            return (image, data)
         }.value
-        for bookID in bookIDs {
-            _ = await covers.deletePermanently(for: bookID)
+
+        var sources = assetSources.map(\.source)
+        if let coverData = preparedCover?.1 {
+            sources.append(.cover(data: coverData, bookID: bookID))
         }
+        let fileNames = Set(assetSources.map { $0.source.finalRelativeName })
+        let transaction = try await managedFiles.stage(
+            intent: .calibreImport,
+            sources: sources,
+            requirement: ManagedFileRequirement(
+                presentBookIDs: [bookID],
+                referencedBookFileNames: fileNames,
+                coverVersions: preparedCover == nil ? [:] : [bookID: 1]
+            )
+        )
+
+        let stagedByName = Dictionary(
+            uniqueKeysWithValues: transaction.files.map { ($0.finalRelativeName, $0) }
+        )
+        guard let primary = stagedByName[assetSources[0].source.finalRelativeName] else {
+            await managedFiles.abort(transaction)
+            return nil
+        }
+
+        let book = Book(
+            uuid: bookID,
+            fileName: primary.finalRelativeName,
+            originalFileName: calibreBook.fileURL.lastPathComponent
+        )
+        book.apply(Self.metadata(from: calibreBook))
+        book.rating = calibreBook.rating
+        if let dateAdded = calibreBook.dateAdded { book.dateAdded = dateAdded }
+        book.fileSizeBytes = primary.byteCount
+        if preparedCover != nil { book.coverVersion = 1 }
+
+        let work = Work(title: book.title, author: book.author, dateCreated: book.dateAdded)
+        work.preferredEditionUUID = book.uuid
+        modelContext.insert(work)
+        modelContext.insert(book)
+        book.work = work
+
+        var insertedAssets: [BookAsset] = []
+        for assetSource in assetSources {
+            guard let staged = stagedByName[assetSource.source.finalRelativeName] else {
+                modelContext.rollback()
+                await managedFiles.abort(transaction)
+                return nil
+            }
+            let asset = BookAsset(
+                uuid: assetSource.id,
+                fileName: staged.finalRelativeName,
+                origin: .imported,
+                contentHash: staged.sha256,
+                sizeBytes: staged.byteCount,
+                dateAdded: book.dateAdded,
+                validationStatus: .ok,
+                book: book
+            )
+            modelContext.insert(asset)
+            insertedAssets.append(asset)
+        }
+
+        let result = try await mutations.commitStagedFiles(
+            .calibreImport(bookIDs: [bookID]),
+            transactions: [transaction],
+            affectedBookIDs: [bookID],
+            revertingOnFailure: {
+                book.assets.removeAll()
+                book.work = nil
+                for asset in insertedAssets where asset.modelContext != nil {
+                    modelContext.delete(asset)
+                }
+                if book.modelContext != nil { modelContext.delete(book) }
+                if work.modelContext != nil { modelContext.delete(work) }
+            }
+        )
+        guard result.isFullyPublished else {
+            throw CatalogMutationError.fileTransactionFailed(transaction.id.uuidString)
+        }
+        if let image = preparedCover?.0 {
+            await CoverCache.shared.replace(image, for: book.fileURL)
+        }
+        return book
     }
 
     private func finish(summary: String) {

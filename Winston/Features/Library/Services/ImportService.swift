@@ -39,9 +39,11 @@ final class ImportService {
         let originalName: String
     }
 
-    nonisolated private enum CopyResult: Sendable {
-        case copied(uuid: UUID, originalName: String, fileName: String, size: Int64, contentHash: String?)
-        case failed(originalName: String)
+    private enum ManagedImportResult {
+        case imported(Book, contentHash: String)
+        case duplicate
+        case pending(contentHash: String)
+        case targetUnavailable
     }
 
     nonisolated private struct MaintenanceCandidate: Sendable {
@@ -55,6 +57,8 @@ final class ImportService {
     private let wishlist: WishlistService
     private let toasts: ToastCenter
     private let editions: EditionService?
+    private let mutations: CatalogMutationService
+    private let managedFiles: ManagedFileCoordinator
     private let analyzeBook: @Sendable (URL) async -> ImportBookAnalysis
     private let maximumConcurrentMetadataJobs: Int
 
@@ -71,6 +75,8 @@ final class ImportService {
         wishlist: WishlistService,
         toasts: ToastCenter,
         editions: EditionService? = nil,
+        mutations: CatalogMutationService? = nil,
+        managedFiles: ManagedFileCoordinator = .shared,
         maximumConcurrentMetadataJobs: Int = BookDoctorService.defaultMaximumConcurrentInspections,
         analyzeBook: @escaping @Sendable (URL) async -> ImportBookAnalysis = ImportService.defaultAnalysis
     ) {
@@ -80,6 +86,11 @@ final class ImportService {
         self.wishlist = wishlist
         self.toasts = toasts
         self.editions = editions
+        self.mutations = mutations ?? CatalogMutationService(
+            modelContext: modelContext,
+            managedFiles: managedFiles
+        )
+        self.managedFiles = managedFiles
         self.maximumConcurrentMetadataJobs = max(1, maximumConcurrentMetadataJobs)
         self.analyzeBook = analyzeBook
     }
@@ -120,106 +131,70 @@ final class ImportService {
                 completion?([])
                 return
             }
-            let results = await Self.copyToManagedStore(requests)
-            for request in requests {
-                pendingSourcePaths.remove(request.source.standardizedFileURL.path(percentEncoded: false))
-            }
-            if let targetWork, targetWork.modelContext == nil {
-                let fileNames = results.compactMap { result -> String? in
-                    if case .copied(_, _, let fileName, _, _) = result { return fileName }
-                    return nil
-                }
-                Task.detached(priority: .utility) {
-                    for fileName in fileNames { BookFileStore.delete(fileName: fileName) }
-                }
-                completion?([])
-                return
-            }
 
             var imported: [Book] = []
-            var successfulImports: [Book] = []
-            var redundantFileNames: [String] = []
             var failureCount = validationFailures
+            var pendingRecoveryCount = 0
             var knownHashes: Set<String> = targetWork == nil ? [] : Set(
                 ((try? modelContext.fetch(FetchDescriptor<BookAsset>())) ?? [])
                     .compactMap(\.contentHash)
             )
-            for (index, result) in results.enumerated() {
-                switch result {
-                case .copied(let uuid, let originalName, let fileName, let size, let contentHash):
-                    if targetWork != nil,
-                       let contentHash,
-                       knownHashes.contains(contentHash) {
-                        redundantFileNames.append(fileName)
-                        continue
+
+            for (index, request) in requests.enumerated() {
+                let sourcePath = request.source.standardizedFileURL.path(percentEncoded: false)
+                defer { pendingSourcePaths.remove(sourcePath) }
+                do {
+                    switch try await importOne(
+                        request,
+                        assigningTo: targetWork,
+                        knownHashes: knownHashes
+                    ) {
+                    case .imported(let book, let contentHash):
+                        imported.append(book)
+                        knownHashes.insert(contentHash)
+                    case .pending(let contentHash):
+                        knownHashes.insert(contentHash)
+                        pendingRecoveryCount += 1
+                    case .duplicate:
+                        break
+                    case .targetUnavailable:
+                        failureCount += requests.count - index
+                        break
                     }
-                    let book = Book(uuid: uuid, fileName: fileName, originalFileName: originalName)
-                    book.fileSizeBytes = size
-                    let work = targetWork ?? Work(dateCreated: book.dateAdded)
-                    let asset = BookAsset(
-                        uuid: uuid,
-                        fileName: fileName,
-                        origin: .original,
-                        contentHash: contentHash,
-                        sizeBytes: size,
-                        dateAdded: book.dateAdded,
-                        validationStatus: nil,
-                        book: book
-                    )
-                    if targetWork == nil { modelContext.insert(work) }
-                    modelContext.insert(book)
-                    modelContext.insert(asset)
-                    book.work = work
-                    if work.preferredEditionUUID == nil { work.preferredEditionUUID = book.uuid }
-                    imported.append(book)
-                    if let contentHash { knownHashes.insert(contentHash) }
-                case .failed:
+                } catch {
                     failureCount += 1
                 }
-                if (index + 1).isMultiple(of: 128) {
-                    await Task.yield()
-                }
-            }
-            if !redundantFileNames.isEmpty {
-                Task.detached(priority: .utility) {
-                    for fileName in redundantFileNames {
-                        BookFileStore.delete(fileName: fileName)
-                    }
-                }
+                if let targetWork, targetWork.modelContext == nil { break }
+                if (index + 1).isMultiple(of: 32) { await Task.yield() }
             }
 
-            if !imported.isEmpty {
-                if modelContext.saveQuietly(rollbackOnFailure: true) {
-                    if targetWork != nil { editions?.refreshEditionCounts() }
-                    let batchID: UUID?
-                    if targetWork == nil, editions != nil {
-                        let id = UUID()
-                        matchBatches[id] = MatchBatch(
-                            books: imported,
-                            remaining: Set(imported.map(\.uuid))
-                        )
-                        batchID = id
-                    } else {
-                        batchID = nil
-                    }
-                    for book in imported {
-                        extractMetadata(
-                            for: book,
-                            evaluateMatch: targetWork == nil && batchID == nil,
-                            matchBatchID: batchID
-                        )
-                    }
-                    successfulImports = imported
-                } else {
-                    let fileNames = imported.map(\.fileName)
-                    Task.detached(priority: .utility) {
-                        for fileName in fileNames { BookFileStore.delete(fileName: fileName) }
-                    }
-                    failureCount += imported.count
-                }
+            if targetWork != nil, !imported.isEmpty { editions?.refreshEditionCounts() }
+            let batchID: UUID?
+            if targetWork == nil, editions != nil, !imported.isEmpty {
+                let id = UUID()
+                matchBatches[id] = MatchBatch(
+                    books: imported,
+                    remaining: Set(imported.map(\.uuid))
+                )
+                batchID = id
+            } else {
+                batchID = nil
             }
+            for book in imported {
+                extractMetadata(
+                    for: book,
+                    evaluateMatch: targetWork == nil && batchID == nil,
+                    matchBatchID: batchID
+                )
+            }
+
             reportImportFailures(failureCount)
-            completion?(successfulImports)
+            if pendingRecoveryCount > 0 {
+                toasts.error(String(
+                    localized: "Some imported files are waiting for recovery (\(pendingRecoveryCount))."
+                ))
+            }
+            completion?(imported)
         }
     }
 
@@ -321,6 +296,92 @@ final class ImportService {
             if let batchID { finishMatchBatch(batchID, completed: book.uuid) }
             await Task.yield()
         }
+    }
+
+    // MARK: - Managed import commit
+
+    private func importOne(
+        _ request: CopyRequest,
+        assigningTo targetWork: Work?,
+        knownHashes: Set<String>
+    ) async throws -> ManagedImportResult {
+        guard !modelContext.hasChanges else {
+            modelContext.rollback()
+            throw CatalogMutationError.dirtyContext
+        }
+        if let targetWork, targetWork.modelContext == nil { return .targetUnavailable }
+
+        let accessing = request.source.startAccessingSecurityScopedResource()
+        defer {
+            if accessing { request.source.stopAccessingSecurityScopedResource() }
+        }
+
+        let source = try ManagedFileSource.book(sourceURL: request.source, fileID: request.uuid)
+        let transaction = try await managedFiles.stage(
+            intent: .importBook,
+            sources: [source],
+            requirement: ManagedFileRequirement(
+                presentBookIDs: [request.uuid],
+                referencedBookFileNames: [source.finalRelativeName]
+            )
+        )
+        guard let staged = transaction.files.first else {
+            await managedFiles.abort(transaction)
+            throw CocoaError(.fileReadUnknown)
+        }
+        if targetWork != nil, knownHashes.contains(staged.sha256) {
+            await managedFiles.abort(transaction)
+            return .duplicate
+        }
+        if let targetWork, targetWork.modelContext == nil {
+            await managedFiles.abort(transaction)
+            return .targetUnavailable
+        }
+
+        let book = Book(
+            uuid: request.uuid,
+            fileName: staged.finalRelativeName,
+            originalFileName: request.originalName
+        )
+        book.fileSizeBytes = staged.byteCount
+        let work = targetWork ?? Work(dateCreated: book.dateAdded)
+        let insertedWork = targetWork == nil
+        let previousPreferredEdition = work.preferredEditionUUID
+        let asset = BookAsset(
+            uuid: request.uuid,
+            fileName: staged.finalRelativeName,
+            origin: .original,
+            contentHash: staged.sha256,
+            sizeBytes: staged.byteCount,
+            dateAdded: book.dateAdded,
+            validationStatus: nil,
+            book: book
+        )
+        if insertedWork { modelContext.insert(work) }
+        modelContext.insert(book)
+        modelContext.insert(asset)
+        book.work = work
+        if work.preferredEditionUUID == nil { work.preferredEditionUUID = book.uuid }
+
+        let result = try await mutations.commitStagedFiles(
+            .importBooks(bookIDs: [book.uuid]),
+            transactions: [transaction],
+            affectedBookIDs: [book.uuid],
+            affectedWorkIDs: [work.uuid],
+            revertingOnFailure: {
+                book.assets.removeAll()
+                work.editions.removeAll { $0 === book }
+                book.work = nil
+                work.preferredEditionUUID = previousPreferredEdition
+                if asset.modelContext != nil { modelContext.delete(asset) }
+                if book.modelContext != nil { modelContext.delete(book) }
+                if insertedWork, work.modelContext != nil { modelContext.delete(work) }
+            }
+        )
+        guard result.isFullyPublished else {
+            return .pending(contentHash: staged.sha256)
+        }
+        return .imported(book, contentHash: staged.sha256)
     }
 
     // MARK: - Background extraction
@@ -463,52 +524,6 @@ final class ImportService {
             work.author = book.displayAuthor
         }
         work.refreshMatchKey()
-    }
-
-    private nonisolated static func copyToManagedStore(_ request: CopyRequest) -> CopyResult {
-        let accessing = request.source.startAccessingSecurityScopedResource()
-        defer { if accessing { request.source.stopAccessingSecurityScopedResource() } }
-        do {
-            let fileName = try BookFileStore.importCopy(of: request.source, uuid: request.uuid)
-            return .copied(
-                uuid: request.uuid,
-                originalName: request.originalName,
-                fileName: fileName,
-                size: BookFileStore.size(of: fileName),
-                contentHash: try? ContentHasher.sha256(of: BookFileStore.url(for: fileName))
-            )
-        } catch {
-            return .failed(originalName: request.originalName)
-        }
-    }
-
-    @concurrent
-    private static func copyToManagedStore(_ requests: [CopyRequest]) async -> [CopyResult] {
-        guard !requests.isEmpty else { return [] }
-        let concurrency = min(3, requests.count)
-        var results = Array<CopyResult?>(repeating: nil, count: requests.count)
-        await withTaskGroup(of: (Int, CopyResult).self) { group in
-            var nextIndex = 0
-            while nextIndex < concurrency {
-                let index = nextIndex
-                group.addTask(priority: .userInitiated) {
-                    (index, copyToManagedStore(requests[index]))
-                }
-                nextIndex += 1
-            }
-            while let (index, result) = await group.next() {
-                results[index] = result
-                guard nextIndex < requests.count, !Task.isCancelled else { continue }
-                let pendingIndex = nextIndex
-                group.addTask(priority: .userInitiated) {
-                    (pendingIndex, copyToManagedStore(requests[pendingIndex]))
-                }
-                nextIndex += 1
-            }
-        }
-        return results.enumerated().map { index, result in
-            result ?? .failed(originalName: requests[index].originalName)
-        }
     }
 
     private func reportImportFailures(_ count: Int) {

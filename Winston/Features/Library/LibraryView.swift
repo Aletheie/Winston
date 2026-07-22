@@ -606,7 +606,7 @@ struct LibraryView: View {
         pendingDeletion = []
         guard !toDelete.isEmpty else { return }
         animateNextDisplayChange = viewMode == .grid
-        viewModel.removeBooks(toDelete)
+        Task { await viewModel.removeBooks(toDelete) }
         toDelete.forEach { selection.remove($0.id) }
     }
 

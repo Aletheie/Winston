@@ -25,6 +25,13 @@ private enum StartupMigrationCheckpoint {
     }
 }
 
+private enum LibraryStartupState: Equatable {
+    case preparing
+    case ready
+    case managedFileRecoveryFailed(pendingItemCount: Int)
+    case legacyMigrationFailed
+}
+
 @main
 struct WinstonApp: App {
     private let container: ModelContainer
@@ -40,6 +47,7 @@ struct WinstonApp: App {
     @State private var discoveryViewModel: DiscoveryViewModel
     @State private var opdsViewModel: OPDSViewModel
     @State private var showStoreRecoveryNotice: Bool
+    @State private var libraryStartupState: LibraryStartupState
 
     init() {
         let isRunningUnitTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
@@ -53,16 +61,9 @@ struct WinstonApp: App {
         )
         let context = container.mainContext
         let mayUseLibrary = PersistenceController.lastRecovery?.allowsLibraryAccess ?? true
-        if !isRunningUnitTests && mayUseLibrary {
-            let signposter = Log.persistenceSignposter
-            let interval = signposter.beginInterval(
-                "StartupMigrations",
-                id: signposter.makeSignpostID()
-            )
-            LegacyLibraryMigrator.migrateIfNeeded(context: context)
-            StartupMigrationCheckpoint.runIfNeeded(context: context)
-            signposter.endInterval("StartupMigrations", interval)
-        }
+        _libraryStartupState = State(
+            initialValue: !isRunningUnitTests && mayUseLibrary ? .preparing : .ready
+        )
         let settings = AppSettings()
         let toastCenter = ToastCenter()
         _settings = State(initialValue: settings)
@@ -93,8 +94,23 @@ struct WinstonApp: App {
                    !recovery.allowsLibraryAccess {
                     StoreUnavailableView(recovery: recovery)
                 } else {
-                    ContentView(viewModel: viewModel)
-                        .task { await pluginService.refresh() }
+                    switch libraryStartupState {
+                    case .preparing:
+                        LibraryStartupProgressView()
+                            .task { await prepareLibrary() }
+                    case .ready:
+                        ContentView(viewModel: viewModel)
+                            .task { await pluginService.refresh() }
+                    case .managedFileRecoveryFailed(let pendingItemCount):
+                        ManagedFileRecoveryUnavailableView(
+                            pendingItemCount: pendingItemCount,
+                            onRetry: { libraryStartupState = .preparing }
+                        )
+                    case .legacyMigrationFailed:
+                        LegacyMigrationUnavailableView(
+                            onRetry: { libraryStartupState = .preparing }
+                        )
+                    }
                 }
             }
                 .environment(themeManager)
@@ -130,8 +146,10 @@ struct WinstonApp: App {
                 if let recovery = PersistenceController.lastRecovery,
                    !recovery.allowsLibraryAccess {
                     StoreUnavailableView(recovery: recovery)
-                } else {
+                } else if libraryStartupState == .ready {
                     SettingsView()
+                } else {
+                    LibraryStartupProgressView()
                 }
             }
                 .modelContainer(container)
@@ -142,6 +160,100 @@ struct WinstonApp: App {
                 .font(themeManager.defaultFont)
                 .preferredColorScheme(themeManager.theme.colorScheme)
         }
+    }
+
+    @MainActor
+    private func prepareLibrary() async {
+        let signposter = Log.persistenceSignposter
+        let interval = signposter.beginInterval(
+            "StartupMigrations",
+            id: signposter.makeSignpostID()
+        )
+        defer { signposter.endInterval("StartupMigrations", interval) }
+
+        let recovery = await viewModel.recoverManagedFiles()
+        guard !recovery.hasPendingWork else {
+            libraryStartupState = .managedFileRecoveryFailed(
+                pendingItemCount: recovery.failedTransactionIDs.count
+                    + recovery.unreadableJournalURLs.count
+                    + recovery.failureMessages.count
+            )
+            return
+        }
+        guard await viewModel.migrateLegacyLibraryIfNeeded() else {
+            libraryStartupState = .legacyMigrationFailed
+            return
+        }
+        StartupMigrationCheckpoint.runIfNeeded(context: container.mainContext)
+        libraryStartupState = .ready
+    }
+}
+
+private struct LibraryStartupProgressView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Preparing Library")
+                .font(.headline)
+            Text("Winston is completing pending file operations before opening the catalog.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct ManagedFileRecoveryUnavailableView: View {
+    let pendingItemCount: Int
+    let onRetry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .font(.largeTitle)
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            Text("Library Files Need Attention")
+                .font(.title2.bold())
+            Text("Winston could not safely finish \(pendingItemCount) pending file operation(s). The catalog remains closed so it cannot expose incomplete books or covers.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 560)
+            HStack {
+                Button("Retry", action: onRetry)
+                Button("Quit Winston") { NSApplication.shared.terminate(nil) }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct LegacyMigrationUnavailableView: View {
+    let onRetry: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .font(.largeTitle)
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            Text("Legacy Library Migration Paused")
+                .font(.title2.bold())
+            Text("The original legacy catalog remains untouched. Resolve the file access problem, then retry the migration.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 560)
+            HStack {
+                Button("Retry", action: onRetry)
+                Button("Quit Winston") { NSApplication.shared.terminate(nil) }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

@@ -51,7 +51,7 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) { restoreCandidate = nil }
         } message: {
-            Text("Winston relaunches and replaces the current catalog (metadata, collections, reading status, covers) with this backup. The current state is saved as a new backup first. Book files are not touched.")
+            Text("Winston relaunches and restores the catalog, book files, covers, and pending file operations from this backup. The current state is saved as a new backup first. Legacy backups keep the current book files.")
         }
         .sheet(isPresented: $showLibraryTimeMachine, onDismiss: reloadBackups) {
             if let path = settings.backupFolderPath {

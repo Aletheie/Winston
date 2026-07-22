@@ -6,12 +6,21 @@ import AppKit
 @Observable
 final class CoverService {
     private let modelContext: ModelContext
-    private let covers: CoverRepository
+    private let mutations: CatalogMutationService
+    private let managedFiles: ManagedFileCoordinator
     private var operationTokens: [UUID: UUID] = [:]
 
-    init(modelContext: ModelContext, covers: CoverRepository = .shared) {
+    init(
+        modelContext: ModelContext,
+        mutations: CatalogMutationService? = nil,
+        managedFiles: ManagedFileCoordinator = .shared
+    ) {
         self.modelContext = modelContext
-        self.covers = covers
+        self.mutations = mutations ?? CatalogMutationService(
+            modelContext: modelContext,
+            managedFiles: managedFiles
+        )
+        self.managedFiles = managedFiles
     }
 
     // MARK: - Custom covers
@@ -32,12 +41,12 @@ final class CoverService {
         for book: Book,
         loadImage: @escaping @Sendable () -> NSImage?
     ) {
-        let uuid = book.uuid
-        let token = beginOperation(for: uuid)
+        let bookID = book.uuid
+        let originalVersion = book.coverVersion
+        let cacheURL = book.coverCacheURL
+        let token = beginOperation(for: bookID)
         Task {
-            defer { finishOperation(token, for: uuid) }
-            let repositoryToken = await covers.beginUserMutation(for: uuid)
-            guard operationIsCurrent(token, for: book) else { return }
+            defer { finishOperation(token, for: bookID) }
             let prepared = await Task.detached(priority: .userInitiated) { () -> (NSImage, Data)? in
                 guard let image = loadImage(),
                       let data = ImageTranscoder.jpegData(from: image) else { return nil }
@@ -45,64 +54,120 @@ final class CoverService {
             }.value
             guard let (image, data) = prepared,
                   operationIsCurrent(token, for: book),
-                  let rollback = await covers.install(data, using: repositoryToken),
-                  operationIsCurrent(token, for: book),
-                  await covers.isCurrent(repositoryToken) else { return }
-            book.coverVersion += 1
-            guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-                _ = await covers.rollback(rollback)
+                  book.coverVersion == originalVersion else { return }
+            let expectedVersion = originalVersion + 1
+            let transaction: ManagedFileTransaction
+            do {
+                transaction = try await managedFiles.stage(
+                    intent: .coverUpdate,
+                    sources: [.cover(data: data, bookID: bookID)],
+                    requirement: ManagedFileRequirement(
+                        presentBookIDs: [bookID],
+                        coverVersions: [bookID: expectedVersion]
+                    )
+                )
+            } catch {
                 return
             }
-            await CoverCache.shared.replace(image, for: book.coverCacheURL)
+            guard operationIsCurrent(token, for: book),
+                  book.coverVersion == originalVersion else {
+                await managedFiles.abort(transaction)
+                return
+            }
+            do {
+                let result = try await mutations.commitFileMutation(
+                    .updateCover(bookID: bookID, version: expectedVersion),
+                    transaction: transaction,
+                    affectedBookIDs: [bookID],
+                    revertingOnFailure: {
+                        book.coverVersion = originalVersion
+                    }
+                ) {
+                    let liveBook = try mutations.book(id: bookID)
+                    guard liveBook.coverVersion == originalVersion else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    liveBook.coverVersion = expectedVersion
+                }
+                guard result.isFullyPublished else { return }
+                await CoverCache.shared.replace(image, for: cacheURL)
+            } catch {
+                return
+            }
         }
     }
 
     func resetCover(for book: Book) {
-        let uuid = book.uuid
+        let bookID = book.uuid
+        let originalVersion = book.coverVersion
         let fileURL = book.coverCacheURL
-        let token = beginOperation(for: uuid)
+        let token = beginOperation(for: bookID)
         Task {
-            defer { finishOperation(token, for: uuid) }
-            let repositoryToken = await covers.beginUserMutation(for: uuid)
-            guard operationIsCurrent(token, for: book),
-                  let rollback = await covers.remove(using: repositoryToken),
-                  operationIsCurrent(token, for: book),
-                  await covers.isCurrent(repositoryToken) else { return }
-            book.coverVersion += 1
-            guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-                _ = await covers.rollback(rollback)
-                return
-            }
-            guard operationIsCurrent(token, for: book) else { return }
-            await CoverCache.shared.replace(nil, for: fileURL)
+            defer { finishOperation(token, for: bookID) }
             let prepared = await Task.detached(priority: .userInitiated) { () -> (NSImage, Data)? in
                 guard let image = CoverExtractor.extractCover(from: fileURL),
                       let data = ImageTranscoder.jpegData(from: image) else { return nil }
                 return (image, data)
             }.value
-            guard operationIsCurrent(token, for: book), book.coverCacheURL == fileURL else { return }
-            guard let (image, data) = prepared,
-                  let extractionRollback = await covers.install(data, using: repositoryToken),
-                  operationIsCurrent(token, for: book),
-                  book.coverCacheURL == fileURL,
-                  await covers.isCurrent(repositoryToken) else { return }
-            book.coverVersion += 1
-            guard modelContext.saveQuietly(rollbackOnFailure: true) else {
-                _ = await covers.rollback(extractionRollback)
+            guard operationIsCurrent(token, for: book),
+                  book.coverVersion == originalVersion,
+                  book.coverCacheURL == fileURL else { return }
+
+            let expectedVersion = originalVersion + 1
+            let requirement = ManagedFileRequirement(
+                presentBookIDs: [bookID],
+                coverVersions: [bookID: expectedVersion]
+            )
+            let transaction: ManagedFileTransaction
+            do {
+                if let data = prepared?.1 {
+                    transaction = try await managedFiles.stage(
+                        intent: .coverUpdate,
+                        sources: [.cover(data: data, bookID: bookID)],
+                        requirement: requirement
+                    )
+                } else {
+                    transaction = try await managedFiles.prepareCleanup(
+                        intent: .coverUpdate,
+                        requirement: requirement,
+                        cleanups: [.cover(bookID: bookID)]
+                    )
+                }
+            } catch {
                 return
             }
-            await CoverCache.shared.replace(image, for: fileURL)
+            guard operationIsCurrent(token, for: book),
+                  book.coverVersion == originalVersion,
+                  book.coverCacheURL == fileURL else {
+                await managedFiles.abort(transaction)
+                return
+            }
+            do {
+                let result = try await mutations.commitFileMutation(
+                    .updateCover(bookID: bookID, version: expectedVersion),
+                    transaction: transaction,
+                    affectedBookIDs: [bookID],
+                    revertingOnFailure: {
+                        book.coverVersion = originalVersion
+                    }
+                ) {
+                    let liveBook = try mutations.book(id: bookID)
+                    guard liveBook.coverVersion == originalVersion,
+                          liveBook.coverCacheURL == fileURL else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    liveBook.coverVersion = expectedVersion
+                }
+                guard result.isFullyPublished else { return }
+                await CoverCache.shared.replace(prepared?.0, for: fileURL)
+            } catch {
+                return
+            }
         }
     }
 
     func cancelPending(for uuid: UUID) {
         operationTokens.removeValue(forKey: uuid)
-        Task { await covers.invalidate(for: uuid) }
-    }
-
-    func deletePermanently(for uuid: UUID) {
-        operationTokens.removeValue(forKey: uuid)
-        Task { await covers.deletePermanently(for: uuid) }
     }
 
     private func beginOperation(for uuid: UUID) -> UUID {

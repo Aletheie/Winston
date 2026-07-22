@@ -922,7 +922,9 @@ struct DetailFiles: View {
             isPresented: $isConfirmingRemove,
             presenting: removeTarget
         ) { asset in
-            Button("Remove File", role: .destructive) { _ = viewModel.removeFile(asset, from: book) }
+            Button("Remove File", role: .destructive) {
+                Task { _ = await viewModel.removeFile(asset, from: book) }
+            }
         } message: { _ in
             Text("The file is deleted from Winston’s managed library.")
         }

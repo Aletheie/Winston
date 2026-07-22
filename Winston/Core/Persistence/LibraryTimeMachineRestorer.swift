@@ -106,16 +106,24 @@ struct LibraryTimeMachineRestorer {
         if let createSafetyBackup {
             self.createSafetyBackup = createSafetyBackup
         } else {
+            let backupCoordinator: ManagedFileCoordinator
+            if coversDirectory.standardizedFileURL == AppPaths.coversDirectory.standardizedFileURL {
+                backupCoordinator = .shared
+            } else {
+                let root = coversDirectory.deletingLastPathComponent()
+                backupCoordinator = ManagedFileCoordinator(
+                    booksDirectory: root.appending(path: "Books", directoryHint: .isDirectory),
+                    coversDirectory: coversDirectory,
+                    stateDirectory: root.appending(path: "ManagedFiles", directoryHint: .isDirectory)
+                )
+            }
             self.createSafetyBackup = { sourceBackup in
                 do {
-                    return try await Task.detached(priority: .utility) {
-                        try LibraryBackup.backup(
-                            storeURL: liveStoreURL,
-                            coversDirectory: coversDirectory,
-                            to: sourceBackup.deletingLastPathComponent(),
-                            keepLast: Int.max
-                        )
-                    }.value
+                    return try await backupCoordinator.createBackup(
+                        storeURL: liveStoreURL,
+                        to: sourceBackup.deletingLastPathComponent(),
+                        keepLast: Int.max
+                    )
                 } catch {
                     throw LibraryTimeMachineRestoreError.safetyBackupFailed(
                         error.localizedDescription
