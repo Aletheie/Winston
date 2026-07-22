@@ -105,8 +105,9 @@ struct LibraryMutationTests {
 
         expectBump("updateRating") { viewModel.updateRating(for: book, rating: 4) }
         expectBump("setReadingStatus") { viewModel.setReadingStatus(.reading, for: [book]) }
+        book.tags = ["scifi"]
+        try lib.context.save()
         expectBump("renameTag") {
-            book.tags = ["scifi"]
             viewModel.renameTag("scifi", to: "sci-fi")
         }
         expectBump("createCollection") { _ = viewModel.createCollection(named: "Shelf") }
