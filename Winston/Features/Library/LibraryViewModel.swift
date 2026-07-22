@@ -19,6 +19,7 @@ final class LibraryViewModel {
     private let modelContext: ModelContext
     private let settings: AppSettings
     private let toasts: ToastCenter
+    private let mutations: CatalogMutationService
 
     let metadata: MetadataService
     let importer: ImportService
@@ -33,12 +34,20 @@ final class LibraryViewModel {
     let notices: NoticeService
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
-         online: any OnlineMetadataFetching = OnlineMetadataService()) {
+         online: any OnlineMetadataFetching = OnlineMetadataService(),
+         saveAdapter: CatalogSaveAdapter = .live) {
         self.modelContext = modelContext
         self.settings = settings
         self.toasts = toasts
+        let mutations = CatalogMutationService(modelContext: modelContext, saveAdapter: saveAdapter)
+        self.mutations = mutations
         let wishlist = WishlistService(modelContext: modelContext, toasts: toasts)
-        let metadata = MetadataService(modelContext: modelContext, settings: settings, online: online)
+        let metadata = MetadataService(
+            modelContext: modelContext,
+            settings: settings,
+            online: online,
+            mutations: mutations
+        )
         self.wishlist = wishlist
         self.metadata = metadata
         self.notices = NoticeService(
@@ -47,7 +56,7 @@ final class LibraryViewModel {
             toasts: toasts,
             wishlist: wishlist
         )
-        let editions = EditionService(modelContext: modelContext)
+        let editions = EditionService(modelContext: modelContext, mutations: mutations)
         self.editions = editions
         self.importer = ImportService(
             modelContext: modelContext,
@@ -55,7 +64,8 @@ final class LibraryViewModel {
             metadata: metadata,
             wishlist: wishlist,
             toasts: toasts,
-            editions: editions
+            editions: editions,
+            mutations: mutations
         )
         self.calibreImporter = CalibreImportService(
             modelContext: modelContext,

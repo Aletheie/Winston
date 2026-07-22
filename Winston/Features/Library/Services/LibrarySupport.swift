@@ -14,17 +14,13 @@ extension ModelContext {
     }
 
     @discardableResult
-    func saveQuietly(rollbackOnFailure: Bool = false, catalogChanged: Bool = true) -> Bool {
+    func saveQuietly(rollbackOnFailure _: Bool = true, catalogChanged: Bool = true) -> Bool {
         do {
             try saveAndPublish(catalogChanged: catalogChanged)
             return true
         } catch {
-            if rollbackOnFailure {
-                rollback()
-                Log.persistence.error("SwiftData save failed; rolled back: \(error.localizedDescription, privacy: .public)")
-            } else {
-                Log.persistence.error("SwiftData save failed; changes remain pending: \(error.localizedDescription, privacy: .public)")
-            }
+            rollback()
+            Log.persistence.error("Best-effort SwiftData save failed and rolled back: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }
