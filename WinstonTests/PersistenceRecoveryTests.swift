@@ -192,6 +192,17 @@ struct PersistenceRecoveryTests {
         #expect(try Data(contentsOf: storeURL) == original)
         #expect(FileManager.default.fileExists(atPath: snapshotURL.appending(path: storeURL.lastPathComponent).path(percentEncoded: false)))
         #expect(FileManager.default.fileExists(atPath: snapshotURL.appending(path: "manifest.json").path(percentEncoded: false)))
+
+        let relaunchedOutcome = StoreRecoveryCoordinator().open(storeURL: storeURL) { _ in
+            openCount += 1
+            throw NSError(domain: "ShouldNotOpen", code: 1)
+        }
+        guard case .readOnlyRecovery(let relaunchedSnapshot, _) = relaunchedOutcome else {
+            Issue.record("Expected the persisted recovery checkpoint to block relaunch")
+            return
+        }
+        #expect(relaunchedSnapshot?.lastPathComponent == snapshotURL.lastPathComponent)
+        #expect(openCount == 1)
     }
 
     private func decodeManifest(at snapshotURL: URL) throws -> StoreQuarantineManifest {

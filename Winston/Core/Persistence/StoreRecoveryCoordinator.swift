@@ -20,7 +20,7 @@ nonisolated struct StoreOpenFailure: Equatable, Sendable {
 nonisolated struct StoreQuarantineManifest: Codable, Equatable, Sendable {
     struct FileRecord: Codable, Equatable, Sendable {
         let originalPath: String
-        let snapshotPath: String
+        var snapshotPath: String
         var checksum: String?
         var copySucceeded: Bool
         var originalRemovalSucceeded: Bool
@@ -32,6 +32,7 @@ nonisolated struct StoreQuarantineManifest: Codable, Equatable, Sendable {
         case copyFailed
         case preserved
         case cleanupFailed
+        case readyForFreshStore
         case completed
     }
 
@@ -49,6 +50,8 @@ nonisolated struct StoreRecoveryFileSystem: Sendable {
     var removeItem: @Sendable (URL) throws -> Void
     var checksum: @Sendable (URL) throws -> String
     var writeManifest: @Sendable (StoreQuarantineManifest, URL) throws -> Void
+    var readManifest: @Sendable (URL) throws -> StoreQuarantineManifest
+    var unresolvedRecovery: @Sendable (URL) -> URL?
 
     static let live = StoreRecoveryFileSystem(
         fileExists: { FileManager.default.fileExists(atPath: $0) },
@@ -72,6 +75,38 @@ nonisolated struct StoreRecoveryFileSystem: Sendable {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
             try encoder.encode(manifest).write(to: url, options: .atomic)
+        },
+        readManifest: { url in
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(StoreQuarantineManifest.self, from: Data(contentsOf: url))
+        },
+        unresolvedRecovery: { storeURL in
+            let parent = storeURL.deletingLastPathComponent()
+            let prefix = storeURL.lastPathComponent + ".recovery-"
+            let partialPrefix = "." + prefix
+            let candidates = (try? FileManager.default.contentsOfDirectory(
+                at: parent,
+                includingPropertiesForKeys: [.contentModificationDateKey]
+            )) ?? []
+            return candidates
+                .filter {
+                    $0.lastPathComponent.hasPrefix(prefix)
+                        || $0.lastPathComponent.hasPrefix(partialPrefix)
+                }
+                .sorted { lhs, rhs in
+                    let left = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                    let right = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                    return left > right
+                }
+                .first { directory in
+                    let manifestURL = directory.appending(path: "manifest.json")
+                    guard let data = try? Data(contentsOf: manifestURL) else { return true }
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    guard let manifest = try? decoder.decode(StoreQuarantineManifest.self, from: data) else { return true }
+                    return manifest.status != .completed
+                }
         }
     )
 }
@@ -151,7 +186,7 @@ struct StoreRecoveryCoordinator {
     }
 
     private enum QuarantineOutcome: Sendable {
-        case ready(snapshotURL: URL)
+        case ready(snapshotURL: URL, manifest: StoreQuarantineManifest)
         case incomplete(snapshotURL: URL?, message: String)
     }
 
@@ -173,6 +208,20 @@ struct StoreRecoveryCoordinator {
     }
 
     func open(storeURL: URL, opener: StoreOpener) -> Outcome {
+        let fileSystem = fileSystem
+        if let unresolved = DispatchQueue.global(qos: .userInitiated).sync(execute: {
+            fileSystem.unresolvedRecovery(storeURL)
+        }) {
+            return .readOnlyRecovery(
+                snapshotURL: unresolved,
+                failure: StoreOpenFailure(
+                    kind: .retryable,
+                    domain: "Winston.StoreRecovery",
+                    code: 1,
+                    message: "A previous store recovery did not reach its completion checkpoint."
+                )
+            )
+        }
         do {
             return .opened(try opener(storeURL))
         } catch {
@@ -204,7 +253,6 @@ struct StoreRecoveryCoordinator {
             }
 
             Log.persistence.error("Store corruption was identified at \(storeURL.lastPathComponent, privacy: .public): \(confirmedFailure.message, privacy: .public)")
-            let fileSystem = fileSystem
             let now = now()
             let uuid = uuid()
             let quarantine = DispatchQueue.global(qos: .userInitiated).sync {
@@ -227,9 +275,26 @@ struct StoreRecoveryCoordinator {
                         message: message
                     )
                 )
-            case .ready(let snapshotURL):
+            case .ready(let snapshotURL, var manifest):
                 do {
-                    return .quarantined(try opener(storeURL), snapshotURL: snapshotURL)
+                    let container = try opener(storeURL)
+                    manifest.status = .completed
+                    do {
+                        try DispatchQueue.global(qos: .userInitiated).sync {
+                            try fileSystem.writeManifest(manifest, snapshotURL.appending(path: "manifest.json"))
+                        }
+                    } catch {
+                        return .readOnlyRecovery(
+                            snapshotURL: snapshotURL,
+                            failure: StoreOpenFailure(
+                                kind: .retryable,
+                                domain: "Winston.StoreRecovery",
+                                code: 2,
+                                message: "The fresh store opened, but its recovery completion checkpoint could not be saved: \(error.localizedDescription)"
+                            )
+                        )
+                    }
+                    return .quarantined(container, snapshotURL: snapshotURL)
                 } catch {
                     let freshFailure = Self.classify(error)
                     return .readOnlyRecovery(snapshotURL: snapshotURL, failure: freshFailure)
@@ -329,6 +394,11 @@ struct StoreRecoveryCoordinator {
         }
 
         for index in manifest.files.indices {
+            let fileName = URL(filePath: manifest.files[index].snapshotPath).lastPathComponent
+            manifest.files[index].snapshotPath = finalURL.appending(path: fileName).path(percentEncoded: false)
+        }
+
+        for index in manifest.files.indices {
             let source = URL(filePath: manifest.files[index].originalPath)
             do {
                 try fileSystem.removeItem(source)
@@ -338,7 +408,7 @@ struct StoreRecoveryCoordinator {
             }
         }
 
-        manifest.status = manifest.files.allSatisfy(\.originalRemovalSucceeded) ? .completed : .cleanupFailed
+        manifest.status = manifest.files.allSatisfy(\.originalRemovalSucceeded) ? .readyForFreshStore : .cleanupFailed
         let finalManifestURL = finalURL.appending(path: manifestName)
         do {
             try fileSystem.writeManifest(manifest, finalManifestURL)
@@ -346,10 +416,10 @@ struct StoreRecoveryCoordinator {
             return .incomplete(snapshotURL: finalURL, message: "Updating the recovery manifest failed: \(error.localizedDescription)")
         }
 
-        guard manifest.status == .completed else {
+        guard manifest.status == .readyForFreshStore else {
             return .incomplete(snapshotURL: finalURL, message: "The recovery snapshot is complete, but one or more original store files could not be removed.")
         }
-        return .ready(snapshotURL: finalURL)
+        return .ready(snapshotURL: finalURL, manifest: manifest)
     }
 
     private nonisolated static func flattenedErrors(_ error: any Error) -> [NSError] {
