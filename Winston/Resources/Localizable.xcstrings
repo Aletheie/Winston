@@ -11,136 +11,6 @@
         }
       }
     },
-    "Add Book" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Přidat knihu"
-          }
-        }
-      }
-    },
-    "Add books" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Přidat knihy"
-          }
-        }
-      }
-    },
-    "Add Physical Book" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Přidat fyzickou knihu"
-          }
-        }
-      }
-    },
-    "Add Physical Book…" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Přidat fyzickou knihu…"
-          }
-        }
-      }
-    },
-    "Added physical book “%@”" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fyzická kniha „%@“ byla přidána"
-          }
-        }
-      }
-    },
-    "Attach Digital File" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Připojit digitální soubor"
-          }
-        }
-      }
-    },
-    "Attach Digital File…" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Připojit digitální soubor…"
-          }
-        }
-      }
-    },
-    "Copy" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Kopie"
-          }
-        }
-      }
-    },
-    "Couldn’t add the physical book." : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fyzickou knihu se nepodařilo přidat."
-          }
-        }
-      }
-    },
-    "Import Book Files…" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Importovat soubory knih…"
-          }
-        }
-      }
-    },
-    "Physical" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fyzická"
-          }
-        }
-      }
-    },
-    "Physical copy without a digital file" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Fyzická kopie bez digitálního souboru"
-          }
-        }
-      }
-    },
-    "Shelf" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Police"
-          }
-        }
-      }
-    },
     "—" : {
       "localizations" : {
         "cs" : {
@@ -1445,6 +1315,26 @@
         }
       }
     },
+    "Add Book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat knihu"
+          }
+        }
+      }
+    },
+    "Add books" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat knihy"
+          }
+        }
+      }
+    },
     "Add books from Discover and they’ll wait here until you import them." : {
       "localizations" : {
         "cs" : {
@@ -1481,6 +1371,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Přidat soubory"
+          }
+        }
+      }
+    },
+    "Add Physical Book" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat fyzickou knihu"
+          }
+        }
+      }
+    },
+    "Add Physical Book…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidat fyzickou knihu…"
           }
         }
       }
@@ -1601,6 +1511,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Přidáno později"
+          }
+        }
+      }
+    },
+    "Added physical book “%@”" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fyzická kniha „%@“ byla přidána"
           }
         }
       }
@@ -1890,6 +1810,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Schválit skupinu"
+          }
+        }
+      }
+    },
+    "Attach Digital File" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Připojit digitální soubor"
+          }
+        }
+      }
+    },
+    "Attach Digital File…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Připojit digitální soubor…"
           }
         }
       }
@@ -3194,6 +3134,16 @@
         }
       }
     },
+    "Copy" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kopie"
+          }
+        }
+      }
+    },
     "Copy %lld to Library" : {
       "comment" : "A context menu action that copies one or more books to the user's library.",
       "isCommentAutoGenerated" : true,
@@ -3248,6 +3198,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "„%@“ se nepodařilo přidat do knihovny."
+          }
+        }
+      }
+    },
+    "Couldn’t add the physical book." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fyzickou knihu se nepodařilo přidat."
           }
         }
       }
@@ -4342,22 +4302,22 @@
         }
       }
     },
-    "Fetch metadata online" : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Načítat metadata online"
-          }
-        }
-      }
-    },
     "Fetch metadata from online catalogs" : {
       "localizations" : {
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Načítání metadat z online katalogů"
+          }
+        }
+      }
+    },
+    "Fetch metadata online" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Načítat metadata online"
           }
         }
       }
@@ -4966,12 +4926,23 @@
     },
     "Import book files" : {
       "comment" : "A button that imports book files.",
+      "extractionState" : "stale",
       "isCommentAutoGenerated" : true,
       "localizations" : {
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Importovat soubory knih"
+          }
+        }
+      }
+    },
+    "Import Book Files…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Importovat soubory knih…"
           }
         }
       }
@@ -7269,6 +7240,30 @@
         }
       }
     },
+    "Physical" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fyzická"
+          }
+        }
+      }
+    },
+    "Physical copy" : {
+      "comment" : "Label for a library book's physical copy property.",
+      "isCommentAutoGenerated" : true
+    },
+    "Physical copy without a digital file" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fyzická kopie bez digitálního souboru"
+          }
+        }
+      }
+    },
     "Pick %lld of %lld" : {
       "comment" : "Recommendation position; first placeholder is the current pick, second is total matches.",
       "localizations" : {
@@ -7852,6 +7847,10 @@
           }
         }
       }
+    },
+    "Remove" : {
+      "comment" : "A button that removes a cover image.",
+      "isCommentAutoGenerated" : true
     },
     "Remove %lld books from Kindle?" : {
       "localizations" : {
@@ -9264,6 +9263,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Sdílet…"
+          }
+        }
+      }
+    },
+    "Shelf" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Police"
           }
         }
       }

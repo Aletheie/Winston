@@ -44,7 +44,10 @@ struct SendSeriesButton: View {
 
     static func pendingSend(in books: [Book], deviceFileNames: Set<String>) -> [Book] {
         books
-            .filter { $0.drmProtected != true && !deviceFileNames.contains($0.deviceMatchKey) }
+            .filter {
+                $0.hasDigitalFile && $0.drmProtected != true
+                    && !deviceFileNames.contains($0.deviceMatchKey)
+            }
             .sorted {
                 let lhs = $0.seriesIndex.flatMap(Double.init) ?? .greatestFiniteMagnitude
                 let rhs = $1.seriesIndex.flatMap(Double.init) ?? .greatestFiniteMagnitude
@@ -54,7 +57,9 @@ struct SendSeriesButton: View {
     }
 
     static func entireSeriesIsOnDevice(_ books: [Book], deviceFileNames: Set<String>) -> Bool {
-        !books.isEmpty && books.allSatisfy { deviceFileNames.contains($0.deviceMatchKey) }
+        let digitalBooks = books.filter(\.hasDigitalFile)
+        return !digitalBooks.isEmpty
+            && digitalBooks.allSatisfy { deviceFileNames.contains($0.deviceMatchKey) }
     }
 
     private var helpText: String {

@@ -503,9 +503,12 @@ enum LibraryTimeMachineDiffBuilder {
                 resolved[index].coverURL = cover
             }
             let bookFile = booksDirectory.appending(path: resolved[index].fileName)
-            resolved[index].bookFileExists = FileManager.default.fileExists(
-                atPath: bookFile.path(percentEncoded: false)
-            )
+            resolved[index].bookFileExists = if resolved[index].metadata.hasPhysicalCopyRaw == true
+                && resolved[index].fileName.isEmpty {
+                true
+            } else {
+                FileManager.default.fileExists(atPath: bookFile.path(percentEncoded: false))
+            }
         }
         return resolved
     }

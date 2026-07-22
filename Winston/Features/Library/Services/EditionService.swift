@@ -348,6 +348,11 @@ final class EditionService {
         let winningFileNames = Set(winner.assets.map(\.fileName))
         let losingAssets = loser.assets
         var discardedFileNames: [String] = []
+        if !winner.hasDigitalFile, loser.hasDigitalFile {
+            winner.fileName = loser.fileName
+            winner.fileSizeBytes = loser.fileSizeBytes
+            winner.drmProtected = loser.drmProtected
+        }
         if losingAssets.isEmpty, loser.hasDigitalFile, !winningFileNames.contains(loser.fileName) {
             let asset = BookAsset(
                 uuid: loser.uuid,

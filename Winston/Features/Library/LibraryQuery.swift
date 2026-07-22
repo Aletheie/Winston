@@ -421,6 +421,7 @@ enum LibraryQuery {
         let translator: String
         let language: String
         let format: String
+        let shelf: String
         let year: Int?
 
         @MainActor init(_ book: Book) {
@@ -432,6 +433,7 @@ enum LibraryQuery {
             translator = book.translator?.lowercased() ?? ""
             language = book.language?.lowercased() ?? ""
             format = book.format.lowercased()
+            shelf = book.shelfLocation?.lowercased() ?? ""
             year = book.year.flatMap { Int($0.prefix(4)) }
         }
 
@@ -440,6 +442,7 @@ enum LibraryQuery {
                 let q = query.freeText
                 let hit = title.contains(q) || author.contains(q) || tags.contains { $0.contains(q) }
                     || series.contains(q) || notes.contains(q) || translator.contains(q) || language.contains(q)
+                    || shelf.contains(q)
                 if !hit { return false }
             }
             for value in query.authors where !author.contains(value) { return false }
@@ -471,6 +474,7 @@ enum LibraryQuery {
                 || (book.notes?.lowercased().contains(q) ?? false)
                 || (book.translator?.lowercased().contains(q) ?? false)
                 || (book.language?.lowercased().contains(q) ?? false)
+                || (book.shelfLocation?.lowercased().contains(q) ?? false)
             if !hit { return false }
         }
         for value in query.authors

@@ -250,7 +250,8 @@ final class LibraryViewModel {
 
     func adoptConversionArtifact(for bookUUID: UUID, from url: URL) async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == bookUUID })
-        guard let book = try? modelContext.fetch(descriptor).first else { return }
+        guard let book = try? modelContext.fetch(descriptor).first,
+              book.hasDigitalFile else { return }
         let format = url.pathExtension.lowercased()
         let primary = book.assets.first { $0.fileName == book.fileName }
         let primaryFileName = book.fileName

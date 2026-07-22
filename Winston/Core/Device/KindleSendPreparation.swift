@@ -122,7 +122,8 @@ enum KindleSendPreparation {
         }
         let staleTarget = !generatedTargets.isEmpty && !hasCurrentTarget
         let validatedSourceURL = BookFileStore.validatedURL(for: chosen.fileName)
-        let sourceURL = validatedSourceURL ?? BookFileStore.url(for: chosen.fileName)
+        let sourceURL = validatedSourceURL
+            ?? AppPaths.booksDirectory.appending(path: ".invalid-managed-reference")
         let unavailable = chosen.validation == .missing
             || chosen.validation == .corrupt
             || validatedSourceURL == nil

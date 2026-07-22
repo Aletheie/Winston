@@ -88,7 +88,8 @@ final class TransferQueue {
 
     func beginSend(books: [Book], via monitor: DeviceMonitor) {
         guard !isTransferring else { return }
-        let requests = books.map(Self.makeRequest)
+        let requests = books.filter(\.hasDigitalFile).map(Self.makeRequest)
+        guard !requests.isEmpty else { return }
         clearTask?.cancel()
         clearTask = nil
         isTransferring = true
@@ -142,7 +143,8 @@ final class TransferQueue {
 
     func send(books: [Book], via monitor: DeviceMonitor, announcesResult: Bool) async {
         guard !isTransferring else { return }
-        let requests = books.map(Self.makeRequest)
+        let requests = books.filter(\.hasDigitalFile).map(Self.makeRequest)
+        guard !requests.isEmpty else { return }
         clearTask?.cancel()
         clearTask = nil
         isTransferring = true

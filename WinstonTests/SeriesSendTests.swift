@@ -41,6 +41,21 @@ struct SeriesSendTests {
         ))
     }
 
+    @Test func physicalOnlyCopiesAreNotSentOrCountedAsMissingFromKindle() {
+        let wizard = book("wizard", index: "1")
+        let physical = Book(fileName: "", originalFileName: "Tombs")
+        physical.hasPhysicalCopy = true
+
+        #expect(SendSeriesButton.pendingSend(
+            in: [wizard, physical],
+            deviceFileNames: []
+        ).map(\.uuid) == [wizard.uuid])
+        #expect(SendSeriesButton.entireSeriesIsOnDevice(
+            [wizard, physical],
+            deviceFileNames: ["wizard"]
+        ))
+    }
+
     @Test func inspectorShowsSingletonOnlyAfterOnlineCatalogConfirmsMoreBooks() {
         #expect(!DetailSeries.shouldDisplay(
             localBookCount: 1,

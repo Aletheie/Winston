@@ -26,6 +26,8 @@ nonisolated struct PluginBookDTO: Codable, Sendable {
     let workTitle: String?
     let editionCount: Int
     let formats: [String]
+    let physicalCopy: Bool
+    let shelfLocation: String?
 
     @MainActor init(_ book: Book) {
         uuid = book.uuid.uuidString
@@ -45,13 +47,15 @@ nonisolated struct PluginBookDTO: Codable, Sendable {
         rating = book.rating
         communityRating = book.communityRating
         readingStatus = book.readingStatusRaw
-        format = (book.fileName as NSString).pathExtension.lowercased()
+        format = book.format.lowercased()
         fileSizeBytes = book.fileSizeBytes
         dateAdded = book.dateAdded
         workUUID = book.work?.uuid.uuidString
         workTitle = book.work?.title
         editionCount = max(book.work?.editions.count ?? 1, 1)
         formats = book.assetFormats.map { $0.lowercased() }
+        physicalCopy = book.hasPhysicalCopy
+        shelfLocation = book.shelfLocation
     }
 }
 
