@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import SwiftData
 import OSLog
@@ -45,10 +46,14 @@ struct WinstonApp: App {
         let container = isRunningUnitTests ? PersistenceController.inMemory() : PersistenceController.shared
         self.container = container
         _showStoreRecoveryNotice = State(
-            initialValue: !isRunningUnitTests && PersistenceController.lastRecovery != nil
+            initialValue: !isRunningUnitTests && {
+                if case .quarantined = PersistenceController.lastRecovery { return true }
+                return false
+            }()
         )
         let context = container.mainContext
-        if !isRunningUnitTests {
+        let mayUseLibrary = PersistenceController.lastRecovery?.allowsLibraryAccess ?? true
+        if !isRunningUnitTests && mayUseLibrary {
             let signposter = Log.persistenceSignposter
             let interval = signposter.beginInterval(
                 "StartupMigrations",
@@ -83,7 +88,15 @@ struct WinstonApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(viewModel: viewModel)
+            Group {
+                if let recovery = PersistenceController.lastRecovery,
+                   !recovery.allowsLibraryAccess {
+                    StoreUnavailableView(recovery: recovery)
+                } else {
+                    ContentView(viewModel: viewModel)
+                        .task { await pluginService.refresh() }
+                }
+            }
                 .environment(themeManager)
                 .environment(settings)
                 .environment(deviceMonitor)
@@ -96,15 +109,11 @@ struct WinstonApp: App {
                 .accessibleTheme(themeManager.theme)
                 .font(themeManager.defaultFont)
                 .preferredColorScheme(themeManager.theme.colorScheme)
-                .task { await pluginService.refresh() }
-                .alert("Library Database Reset", isPresented: $showStoreRecoveryNotice) {
+                .alert("Library Database Recovered", isPresented: $showStoreRecoveryNotice) {
                     Button("OK", role: .cancel) {}
                 } message: {
-                    if case .recreatedAfterCorruption(let backupPath) = PersistenceController.lastRecovery,
-                       let backupPath {
-                        Text("Your library database couldn’t be opened, so Winston started with a fresh one. The old file was kept at \(backupPath) — restoring a backup from Settings may bring your catalog back.")
-                    } else {
-                        Text("Your library database couldn’t be opened, so Winston started with a fresh one. Restoring a backup from Settings may bring your catalog back.")
+                    if case .quarantined(let snapshotURL) = PersistenceController.lastRecovery {
+                        Text("Winston confirmed that the library database was corrupt and preserved a verified recovery snapshot at \(snapshotURL.path(percentEncoded: false)) before creating a fresh database.")
                     }
                 }
         }
@@ -117,7 +126,14 @@ struct WinstonApp: App {
         }
 
         Settings {
-            SettingsView()
+            Group {
+                if let recovery = PersistenceController.lastRecovery,
+                   !recovery.allowsLibraryAccess {
+                    StoreUnavailableView(recovery: recovery)
+                } else {
+                    SettingsView()
+                }
+            }
                 .modelContainer(container)
                 .environment(themeManager)
                 .environment(settings)
@@ -125,6 +141,79 @@ struct WinstonApp: App {
                 .accessibleTheme(themeManager.theme)
                 .font(themeManager.defaultFont)
                 .preferredColorScheme(themeManager.theme.colorScheme)
+        }
+    }
+}
+
+private struct StoreUnavailableView: View {
+    let recovery: PersistenceController.Recovery
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "externaldrive.badge.exclamationmark")
+                .font(.largeTitle)
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            Text("Library Unavailable")
+                .font(.title2.bold())
+            Text(message)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 560)
+            if let snapshotURL {
+                Text("Recovery files: \(snapshotURL.path(percentEncoded: false))")
+                    .font(.caption)
+                    .textSelection(.enabled)
+                    .foregroundStyle(.secondary)
+            }
+            Text(failureMessage)
+                .font(.caption)
+                .textSelection(.enabled)
+                .foregroundStyle(.secondary)
+            HStack {
+                if let snapshotURL {
+                    Button("Show Recovery Files") {
+                        NSWorkspace.shared.activateFileViewerSelecting([snapshotURL])
+                    }
+                }
+                Button("Quit Winston") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var message: LocalizedStringResource {
+        switch recovery {
+        case .retryableFailure:
+            "Winston couldn’t open your library because of a storage or access problem. The original database was left untouched. Resolve the problem and reopen Winston."
+        case .migrationRequired:
+            "This library needs a compatible database migration. The original database was left untouched and no empty library was created."
+        case .readOnlyRecovery:
+            "Recovery could not finish safely. Winston did not activate an empty persistent library; use the preserved files or a backup to recover your catalog."
+        case .quarantined:
+            "The library is available."
+        }
+    }
+
+    private var snapshotURL: URL? {
+        switch recovery {
+        case .readOnlyRecovery(let snapshotURL, _): snapshotURL
+        default: nil
+        }
+    }
+
+    private var failureMessage: String {
+        switch recovery {
+        case .retryableFailure(let failure),
+             .migrationRequired(let failure),
+             .readOnlyRecovery(_, let failure):
+            "\(failure.domain) (\(failure.code)): \(failure.message)"
+        case .quarantined:
+            ""
         }
     }
 }

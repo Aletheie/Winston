@@ -8,7 +8,15 @@ enum PersistenceController {
     }
 
     enum Recovery: Equatable {
-        case recreatedAfterCorruption(backupPath: String?)
+        case retryableFailure(StoreOpenFailure)
+        case migrationRequired(StoreOpenFailure)
+        case quarantined(snapshotURL: URL)
+        case readOnlyRecovery(snapshotURL: URL?, failure: StoreOpenFailure)
+
+        var allowsLibraryAccess: Bool {
+            if case .quarantined = self { return true }
+            return false
+        }
     }
 
     private(set) static var lastRecovery: Recovery?
@@ -26,54 +34,37 @@ enum PersistenceController {
         return container
     }()
 
-    static func makeContainer(storeURL: URL) -> (ModelContainer, Recovery?) {
+    static func makeContainer(
+        storeURL: URL,
+        coordinator: StoreRecoveryCoordinator = StoreRecoveryCoordinator(),
+        opener: StoreRecoveryCoordinator.StoreOpener? = nil
+    ) -> (ModelContainer, Recovery?) {
         try? AppPaths.ensureDirectory(storeURL.deletingLastPathComponent())
-        let configuration = ModelConfiguration(url: storeURL)
-        do {
-            let container = try ModelContainer(
-                for: Work.self, Book.self, ReadingSession.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
-                LibraryNotice.self, SeriesCatalogSnapshot.self,
-                configurations: configuration
-            )
+        let storeOpener = opener ?? { url in try persistentContainer(at: url) }
+        switch coordinator.open(storeURL: storeURL, opener: storeOpener) {
+        case .opened(let container):
             return (container, nil)
-        } catch {
-            Log.persistence.error("Opening the store at \(storeURL.lastPathComponent, privacy: .public) failed: \(error.localizedDescription, privacy: .public) — moving it aside and starting fresh")
-            let backupPath = moveBrokenStoreAside(storeURL: storeURL)
-            do {
-                let container = try ModelContainer(
-                    for: Work.self, Book.self, ReadingSession.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
-                    LibraryNotice.self, SeriesCatalogSnapshot.self,
-                    configurations: configuration
-                )
-                return (container, .recreatedAfterCorruption(backupPath: backupPath))
-            } catch {
-                fatalError("Failed to create a fresh model container after store recovery: \(error)")
-            }
+        case .retryableFailure(let failure):
+            Log.persistence.error("Opening the store failed with a retryable error; the original store was left untouched: \(failure.message, privacy: .public)")
+            return (inMemory(), .retryableFailure(failure))
+        case .migrationRequired(let failure):
+            Log.persistence.error("Opening the store requires migration; the original store was left untouched: \(failure.message, privacy: .public)")
+            return (inMemory(), .migrationRequired(failure))
+        case .quarantined(let container, let snapshotURL):
+            return (container, .quarantined(snapshotURL: snapshotURL))
+        case .readOnlyRecovery(let snapshotURL, let failure):
+            Log.persistence.error("Store recovery stopped without activating an empty persistent library: \(failure.message, privacy: .public)")
+            return (inMemory(), .readOnlyRecovery(snapshotURL: snapshotURL, failure: failure))
         }
     }
 
-    // Move (not delete) so a corrupt store stays recoverable instead of crash-looping the launch.
-    private static func moveBrokenStoreAside(storeURL: URL) -> String? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let suffix = ".broken-\(formatter.string(from: .now))-\(UUID().uuidString)"
-
-        let fileManager = FileManager.default
-        let base = storeURL.path(percentEncoded: false)
-        var movedTo: String?
-        for sidecar in ["", "-wal", "-shm"] {
-            let source = URL(filePath: base + sidecar)
-            guard fileManager.fileExists(atPath: base + sidecar) else { continue }
-            let destination = URL(filePath: base + suffix + sidecar)
-            do {
-                try fileManager.moveItem(at: source, to: destination)
-                if sidecar.isEmpty { movedTo = base + suffix }
-            } catch {
-                Log.persistence.error("Preserving \(source.lastPathComponent, privacy: .public) after recovery move failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-        return movedTo
+    private static func persistentContainer(at storeURL: URL) throws -> ModelContainer {
+        let configuration = ModelConfiguration(url: storeURL)
+        return try ModelContainer(
+            for: Work.self, Book.self, ReadingSession.self, BookAsset.self, BookCollection.self, Highlight.self, WishlistItem.self,
+            LibraryNotice.self, SeriesCatalogSnapshot.self,
+            configurations: configuration
+        )
     }
 
     static func inMemory() -> ModelContainer {

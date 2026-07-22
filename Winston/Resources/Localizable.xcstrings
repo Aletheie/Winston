@@ -5599,12 +5599,112 @@
         }
       }
     },
+    "Library Database Recovered" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Databáze knihovny byla obnovena"
+          }
+        }
+      }
+    },
     "Library Database Reset" : {
       "localizations" : {
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "Databáze knihovny byla resetována"
+          }
+        }
+      }
+    },
+    "Library Unavailable" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Knihovna není dostupná"
+          }
+        }
+      }
+    },
+    "Quit Winston" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ukončit Winston"
+          }
+        }
+      }
+    },
+    "Recovery could not finish safely. Winston did not activate an empty persistent library; use the preserved files or a backup to recover your catalog." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Obnovu se nepodařilo bezpečně dokončit. Winston neaktivoval prázdnou trvalou knihovnu; katalog obnovte ze zachovaných souborů nebo ze zálohy."
+          }
+        }
+      }
+    },
+    "Recovery files: %@" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Soubory pro obnovu: %@"
+          }
+        }
+      }
+    },
+    "Show Recovery Files" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zobrazit soubory pro obnovu"
+          }
+        }
+      }
+    },
+    "The library is available." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Knihovna je dostupná."
+          }
+        }
+      }
+    },
+    "This library needs a compatible database migration. The original database was left untouched and no empty library was created." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato knihovna vyžaduje kompatibilní migraci databáze. Původní databáze zůstala beze změny a nevznikla žádná prázdná knihovna."
+          }
+        }
+      }
+    },
+    "Winston confirmed that the library database was corrupt and preserved a verified recovery snapshot at %@ before creating a fresh database." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Winston potvrdil poškození databáze knihovny a před vytvořením nové databáze uchoval ověřený snímek pro obnovu v %@."
+          }
+        }
+      }
+    },
+    "Winston couldn’t open your library because of a storage or access problem. The original database was left untouched. Resolve the problem and reopen Winston." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Winston nemohl knihovnu otevřít kvůli problému s úložištěm nebo přístupem. Původní databáze zůstala beze změny. Vyřešte problém a spusťte Winston znovu."
           }
         }
       }
