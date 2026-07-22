@@ -289,6 +289,163 @@ struct ManagedFileCoordinatorTests {
         #expect(await restarted.pendingTransactions().isEmpty)
     }
 
+    @Test func replacementSaveFailureRestoresCatalogAndKeepsOriginalFile() async throws {
+        let library = try await TestLibrary()
+        let oldName = "original.epub"
+        let oldURL = BookFileStore.url(for: oldName)
+        try Data("original".utf8).write(to: oldURL)
+        let book = Book(fileName: oldName, originalFileName: oldName)
+        book.fileSizeBytes = 8
+        book.drmProtected = false
+        book.coverVersion = 4
+        let asset = BookAsset(
+            fileName: oldName,
+            origin: .original,
+            contentHash: "old-hash",
+            sizeBytes: 8,
+            validationStatus: .ok,
+            book: book
+        )
+        library.context.insert(book)
+        library.context.insert(asset)
+        try library.context.save()
+        let replacement = try sourceFile(in: library.root, contents: "replacement")
+        let coordinator = makeCoordinator()
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: ToastCenter(),
+            saveAdapter: CatalogSaveAdapter { _ in throw InjectedFailure() },
+            managedFiles: coordinator
+        )
+
+        await viewModel.replace(asset, in: book, from: replacement)
+
+        #expect(book.fileName == oldName)
+        #expect(book.fileSizeBytes == 8)
+        #expect(book.drmProtected == false)
+        #expect(book.coverVersion == 4)
+        #expect(asset.fileName == oldName)
+        #expect(asset.contentHash == "old-hash")
+        #expect(asset.sizeBytes == 8)
+        #expect(asset.origin == .original)
+        #expect(asset.validationStatus == .ok)
+        #expect(try Data(contentsOf: oldURL) == Data("original".utf8))
+        #expect(try managedBookFiles().map(\.lastPathComponent) == [oldName])
+        #expect(!library.context.hasChanges)
+        #expect(await coordinator.pendingTransactions().isEmpty)
+    }
+
+    @Test func removeFileSaveFailureRestoresAssetRelationshipAndFile() async throws {
+        let library = try await TestLibrary()
+        let primaryName = "primary.epub"
+        let secondaryName = "secondary.mobi"
+        try Data("primary".utf8).write(to: BookFileStore.url(for: primaryName))
+        try Data("secondary".utf8).write(to: BookFileStore.url(for: secondaryName))
+        let book = Book(fileName: primaryName, originalFileName: primaryName)
+        let primary = BookAsset(fileName: primaryName, book: book)
+        let secondary = BookAsset(fileName: secondaryName, origin: .generated, book: book)
+        library.context.insert(book)
+        library.context.insert(primary)
+        library.context.insert(secondary)
+        try library.context.save()
+        let coordinator = makeCoordinator()
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: ToastCenter(),
+            saveAdapter: CatalogSaveAdapter { _ in throw InjectedFailure() },
+            managedFiles: coordinator
+        )
+
+        #expect(await viewModel.removeFile(secondary, from: book) == false)
+
+        #expect(book.assets.count == 2)
+        #expect(book.assets.contains(where: { $0 === secondary }))
+        #expect(secondary.book === book)
+        #expect(try library.context.fetch(FetchDescriptor<BookAsset>()).count == 2)
+        #expect(FileManager.default.fileExists(
+            atPath: BookFileStore.url(for: secondaryName).path(percentEncoded: false)
+        ))
+        #expect(!library.context.hasChanges)
+        #expect(await coordinator.pendingTransactions().isEmpty)
+    }
+
+    @Test func deleteBookSaveFailureRestoresBookWorkAndFiles() async throws {
+        let library = try await TestLibrary()
+        let fileName = "keep.epub"
+        try Data("keep".utf8).write(to: BookFileStore.url(for: fileName))
+        let book = Book(fileName: fileName, originalFileName: fileName)
+        let work = Work(title: "Keep")
+        work.preferredEditionUUID = book.uuid
+        let asset = BookAsset(fileName: fileName, book: book)
+        library.context.insert(work)
+        library.context.insert(book)
+        library.context.insert(asset)
+        book.work = work
+        try library.context.save()
+        let coordinator = makeCoordinator()
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: ToastCenter(),
+            saveAdapter: CatalogSaveAdapter { _ in throw InjectedFailure() },
+            managedFiles: coordinator
+        )
+
+        await viewModel.remove(book)
+
+        #expect(try library.context.fetch(FetchDescriptor<Book>()).count == 1)
+        #expect(try library.context.fetch(FetchDescriptor<Work>()).count == 1)
+        #expect(try library.context.fetch(FetchDescriptor<BookAsset>()).count == 1)
+        #expect(book.work === work)
+        #expect(work.editions.contains(where: { $0 === book }))
+        #expect(work.preferredEditionUUID == book.uuid)
+        #expect(FileManager.default.fileExists(
+            atPath: BookFileStore.url(for: fileName).path(percentEncoded: false)
+        ))
+        #expect(!library.context.hasChanges)
+        #expect(await coordinator.pendingTransactions().isEmpty)
+    }
+
+    @Test func standardImportSaveFailureLeavesNoCatalogRowOrManagedFile() async throws {
+        let library = try await TestLibrary()
+        let source = try sourceFile(in: library.root, contents: "import")
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let coordinator = makeCoordinator()
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            saveAdapter: CatalogSaveAdapter { _ in throw InjectedFailure() },
+            managedFiles: coordinator
+        )
+        let toasts = ToastCenter()
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: library.context, settings: settings),
+            wishlist: WishlistService(modelContext: library.context, toasts: toasts),
+            toasts: toasts,
+            mutations: mutations,
+            managedFiles: coordinator
+        )
+
+        let importedCount = await withCheckedContinuation { continuation in
+            importer.addBooks(from: [source]) { books in
+                continuation.resume(returning: books.count)
+            }
+        }
+
+        #expect(importedCount == 0)
+        #expect(try library.context.fetch(FetchDescriptor<Book>()).isEmpty)
+        #expect(try library.context.fetch(FetchDescriptor<Work>()).isEmpty)
+        #expect(try library.context.fetch(FetchDescriptor<BookAsset>()).isEmpty)
+        #expect(try managedBookFiles().isEmpty)
+        let contextHasChanges = library.context.hasChanges
+        #expect(contextHasChanges == false)
+        #expect(await coordinator.pendingTransactions().isEmpty)
+    }
+
     @Test func oneThousandInterruptedStagesProduceZeroOrphans() async throws {
         let library = try await TestLibrary()
         let source = try sourceFile(in: library.root, contents: "x")

@@ -11596,6 +11596,146 @@
         }
       }
     },
+    "Added file is waiting for recovery." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přidaný soubor čeká na dokončení obnovy."
+          }
+        }
+      }
+    },
+    "Book removal is waiting for file cleanup." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Odstranění knih čeká na úklid souborů."
+          }
+        }
+      }
+    },
+    "Converted file is waiting for recovery." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Převedený soubor čeká na dokončení obnovy."
+          }
+        }
+      }
+    },
+    "Couldn’t remove the selected books." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vybrané knihy se nepodařilo odstranit."
+          }
+        }
+      }
+    },
+    "File removal is waiting for cleanup." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Odstranění souboru čeká na úklid."
+          }
+        }
+      }
+    },
+    "Legacy Library Migration Paused" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Migrace starší knihovny pozastavena"
+          }
+        }
+      }
+    },
+    "Library Files Need Attention" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Soubory knihovny vyžadují pozornost"
+          }
+        }
+      }
+    },
+    "Preparing Library" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Příprava knihovny"
+          }
+        }
+      }
+    },
+    "Replacement file is waiting for recovery." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Náhradní soubor čeká na dokončení obnovy."
+          }
+        }
+      }
+    },
+    "Some imported files are waiting for recovery (%lld)." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Některé importované soubory čekají na dokončení obnovy (%lld)."
+          }
+        }
+      }
+    },
+    "The original legacy catalog remains untouched. Resolve the file access problem, then retry the migration." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Původní starší katalog zůstal beze změny. Vyřešte problém s přístupem k souborům a potom migraci zopakujte."
+          }
+        }
+      }
+    },
+    "Winston could not safely finish %lld pending file operation(s). The catalog remains closed so it cannot expose incomplete books or covers." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Počet bezpečně nedokončených souborových operací: %lld. Katalog zůstává zavřený, aby nemohl zobrazit neúplné knihy nebo obálky."
+          }
+        }
+      }
+    },
+    "Winston is completing pending file operations before opening the catalog." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Winston před otevřením katalogu dokončuje čekající souborové operace."
+          }
+        }
+      }
+    },
+    "Winston relaunches and restores the catalog, book files, covers, and pending file operations from this backup. The current state is saved as a new backup first. Legacy backups keep the current book files." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Winston se znovu spustí a z této zálohy obnoví katalog, soubory knih, obálky a čekající souborové operace. Aktuální stav se nejprve uloží jako nová záloha. Starší zálohy zachovají současné soubory knih."
+          }
+        }
+      }
+    },
     "Zoom Out" : {
       "localizations" : {
         "cs" : {

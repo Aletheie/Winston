@@ -230,7 +230,6 @@ final class CalibreImportService {
         modelContext.insert(book)
         book.work = work
 
-        var insertedAssets: [BookAsset] = []
         for assetSource in assetSources {
             guard let staged = stagedByName[assetSource.source.finalRelativeName] else {
                 modelContext.rollback()
@@ -248,22 +247,12 @@ final class CalibreImportService {
                 book: book
             )
             modelContext.insert(asset)
-            insertedAssets.append(asset)
         }
 
         let result = try await mutations.commitStagedFiles(
             .calibreImport(bookIDs: [bookID]),
             transactions: [transaction],
-            affectedBookIDs: [bookID],
-            revertingOnFailure: {
-                book.assets.removeAll()
-                book.work = nil
-                for asset in insertedAssets where asset.modelContext != nil {
-                    modelContext.delete(asset)
-                }
-                if book.modelContext != nil { modelContext.delete(book) }
-                if work.modelContext != nil { modelContext.delete(work) }
-            }
+            affectedBookIDs: [bookID]
         )
         guard result.isFullyPublished else {
             throw CatalogMutationError.fileTransactionFailed(transaction.id.uuidString)

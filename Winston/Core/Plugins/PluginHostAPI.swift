@@ -306,10 +306,12 @@ final class PluginHostAPI {
             return .success(PluginApplyResultDTO(applied: []))
         }
         var applied: [String] = []
+        let preimage = CatalogBookMetadataPreimage(book)
         do {
             try mutations.commit(
                 .pluginUpdate(bookID: bookID, fields: Set(expectedFields)),
-                affectedBookIDs: [bookID]
+                affectedBookIDs: [bookID],
+                revertingOnFailure: preimage.restore
             ) {
                 applied = applyFields(in: patch, to: try mutations.book(id: bookID))
             }

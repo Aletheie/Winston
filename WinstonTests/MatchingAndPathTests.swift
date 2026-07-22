@@ -116,7 +116,7 @@ struct CoverServiceTests {
         service.setCustomCover(for: book, from: EPUBFixture.jpegData())
 
         let deadline = Date.now.addingTimeInterval(2)
-        while book.coverVersion == 0, Date.now < deadline {
+        while (book.coverVersion == 0 || !CoverStore.exists(for: book.uuid)), Date.now < deadline {
             try? await Task.sleep(for: .milliseconds(10))
         }
 

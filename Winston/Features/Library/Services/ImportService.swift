@@ -369,13 +369,13 @@ final class ImportService {
             affectedBookIDs: [book.uuid],
             affectedWorkIDs: [work.uuid],
             revertingOnFailure: {
+                guard !insertedWork else { return }
                 book.assets.removeAll()
                 work.editions.removeAll { $0 === book }
                 book.work = nil
                 work.preferredEditionUUID = previousPreferredEdition
                 if asset.modelContext != nil { modelContext.delete(asset) }
                 if book.modelContext != nil { modelContext.delete(book) }
-                if insertedWork, work.modelContext != nil { modelContext.delete(work) }
             }
         )
         guard result.isFullyPublished else {

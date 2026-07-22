@@ -54,6 +54,103 @@ struct CatalogFileCommitResult {
     var isFullyPublished: Bool { pendingTransactionIDs.isEmpty }
 }
 
+/// Explicit preimage for the scalar catalog fields changed by metadata and
+/// plugin commands. SwiftData rollback clears persistence bookkeeping but does
+/// not reliably restore values on already-materialized model instances.
+struct CatalogBookMetadataPreimage {
+    let book: Book
+    let title: String?
+    let author: String?
+    let publisher: String?
+    let year: String?
+    let language: String?
+    let translator: String?
+    let isbn: String?
+    let series: String?
+    let seriesIndex: String?
+    let tags: [String]
+    let bookDescription: String?
+    let rating: Int?
+    let notes: String?
+    let shelfLocation: String?
+    let sampleNoticeDismissed: Bool?
+
+    init(_ book: Book) {
+        self.book = book
+        title = book.title
+        author = book.author
+        publisher = book.publisher
+        year = book.year
+        language = book.language
+        translator = book.translator
+        isbn = book.isbn
+        series = book.series
+        seriesIndex = book.seriesIndex
+        tags = book.tags
+        bookDescription = book.bookDescription
+        rating = book.rating
+        notes = book.notes
+        shelfLocation = book.shelfLocation
+        sampleNoticeDismissed = book.sampleNoticeDismissed
+    }
+
+    func restore() {
+        book.title = title
+        book.author = author
+        book.publisher = publisher
+        book.year = year
+        book.language = language
+        book.translator = translator
+        book.isbn = isbn
+        book.series = series
+        book.seriesIndex = seriesIndex
+        book.tags = tags
+        book.bookDescription = bookDescription
+        book.rating = rating
+        book.notes = notes
+        book.shelfLocation = shelfLocation
+        book.sampleNoticeDismissed = sampleNoticeDismissed
+    }
+}
+
+struct CatalogWorkPreimage {
+    let work: Work
+    let title: String?
+    let author: String?
+    let originalTitle: String?
+    let originalLanguage: String?
+    let matchKey: String?
+    let openLibraryWorkKey: String?
+    let hardcoverBookID: String?
+    let preferredEditionUUID: UUID?
+    let notes: String?
+
+    init(_ work: Work) {
+        self.work = work
+        title = work.title
+        author = work.author
+        originalTitle = work.originalTitle
+        originalLanguage = work.originalLanguage
+        matchKey = work.matchKey
+        openLibraryWorkKey = work.openLibraryWorkKey
+        hardcoverBookID = work.hardcoverBookID
+        preferredEditionUUID = work.preferredEditionUUID
+        notes = work.notes
+    }
+
+    func restore() {
+        work.title = title
+        work.author = author
+        work.originalTitle = originalTitle
+        work.originalLanguage = originalLanguage
+        work.matchKey = matchKey
+        work.openLibraryWorkKey = openLibraryWorkKey
+        work.hardcoverBookID = hardcoverBookID
+        work.preferredEditionUUID = preferredEditionUUID
+        work.notes = notes
+    }
+}
+
 @MainActor
 final class CatalogMutationService {
     private let modelContext: ModelContext
@@ -77,6 +174,7 @@ final class CatalogMutationService {
         affectedWorkIDs: Set<UUID> = [],
         affectedCollectionIDs: Set<UUID> = [],
         catalogChanged: Bool = true,
+        revertingOnFailure rollbackMutation: () -> Void = {},
         applying mutation: () throws -> Void
     ) throws -> CatalogChangeSet {
         guard !modelContext.hasChanges else {
@@ -87,6 +185,7 @@ final class CatalogMutationService {
 
         do {
             try mutation()
+            modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
             LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
             return CatalogChangeSet(
@@ -96,10 +195,12 @@ final class CatalogMutationService {
                 affectedCollectionIDs: affectedCollectionIDs
             )
         } catch let error as CatalogMutationError {
+            rollbackMutation()
             modelContext.rollback()
             Log.persistence.error("Catalog mutation rolled back: \(String(describing: error), privacy: .public)")
             throw error
         } catch {
+            rollbackMutation()
             modelContext.rollback()
             Log.persistence.error("Catalog mutation save failed and rolled back: \(error.localizedDescription, privacy: .public)")
             throw CatalogMutationError.saveFailed(error.localizedDescription)
@@ -117,6 +218,7 @@ final class CatalogMutationService {
         catalogChanged: Bool = true
     ) throws -> CatalogChangeSet {
         do {
+            modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
             LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
             return CatalogChangeSet(
@@ -146,8 +248,9 @@ final class CatalogMutationService {
         applying mutation: () throws -> Void
     ) async throws -> CatalogFileCommitResult {
         guard !modelContext.hasChanges else {
-            modelContext.rollback()
+            discardPendingChanges()
             await managedFiles.abort(transaction)
+            discardPendingChanges()
             Log.persistence.error("Managed catalog mutation refused a dirty context and rolled it back")
             throw CatalogMutationError.dirtyContext
         }
@@ -157,16 +260,19 @@ final class CatalogMutationService {
             try await managedFiles.willCommitCatalog(transaction)
             mutationStarted = true
             try mutation()
+            modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
         } catch let error as CatalogMutationError {
             if mutationStarted { rollbackMutation() }
-            modelContext.rollback()
+            discardPendingChanges()
             await managedFiles.abort(transaction)
+            discardPendingChanges()
             throw error
         } catch {
             if mutationStarted { rollbackMutation() }
-            modelContext.rollback()
+            discardPendingChanges()
             await managedFiles.abort(transaction)
+            discardPendingChanges()
             Log.persistence.error(
                 "Managed catalog mutation failed before commit and rolled back: \(error.localizedDescription, privacy: .public)"
             )
@@ -200,13 +306,15 @@ final class CatalogMutationService {
             for transaction in transactions {
                 try await managedFiles.willCommitCatalog(transaction)
             }
+            modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
         } catch {
             rollbackMutation()
-            modelContext.rollback()
+            discardPendingChanges()
             for transaction in transactions {
                 await managedFiles.abort(transaction)
             }
+            discardPendingChanges()
             Log.persistence.error(
                 "Staged managed catalog mutation failed before commit and rolled back: \(error.localizedDescription, privacy: .public)"
             )
@@ -280,6 +388,17 @@ final class CatalogMutationService {
             }
         }
         return pending
+    }
+
+    /// SwiftData can enqueue inverse-relationship updates while a compensator
+    /// removes freshly inserted models. Flush those callbacks before and after
+    /// rollback so the main context cannot become dirty again on the next run
+    /// loop turn and leak a failed mutation into an unrelated save.
+    private func discardPendingChanges() {
+        modelContext.processPendingChanges()
+        modelContext.rollback()
+        modelContext.processPendingChanges()
+        if modelContext.hasChanges { modelContext.rollback() }
     }
 
     func book(id: UUID) throws -> Book {

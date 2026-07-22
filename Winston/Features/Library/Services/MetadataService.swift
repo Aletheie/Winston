@@ -188,8 +188,15 @@ final class MetadataService {
         bookIDs: Set<UUID>,
         applying mutation: () throws -> Void
     ) -> Bool {
+        let preimages = ((try? mutations.books(ids: bookIDs)) ?? [])
+            .map(CatalogBookMetadataPreimage.init)
         do {
-            try mutations.commit(command, affectedBookIDs: bookIDs, applying: mutation)
+            try mutations.commit(
+                command,
+                affectedBookIDs: bookIDs,
+                revertingOnFailure: { preimages.forEach { $0.restore() } },
+                applying: mutation
+            )
             return true
         } catch {
             return false

@@ -821,6 +821,58 @@ final class LibraryViewModel {
 
     // MARK: - Reading status
 
+    private struct ReadingSessionPreimage {
+        let session: ReadingSession
+        let startedAt: Date
+        let endedAt: Date?
+        let statusRaw: String
+        let progress: Double
+    }
+
+    private struct ReadingStatePreimage {
+        let book: Book
+        let readingStatusRaw: String?
+        let dateStarted: Date?
+        let dateFinished: Date?
+        let sessions: [ReadingSessionPreimage]
+
+        init(_ book: Book) {
+            self.book = book
+            readingStatusRaw = book.readingStatusRaw
+            dateStarted = book.dateStarted
+            dateFinished = book.dateFinished
+            sessions = book.readingSessions.map {
+                ReadingSessionPreimage(
+                    session: $0,
+                    startedAt: $0.startedAt,
+                    endedAt: $0.endedAt,
+                    statusRaw: $0.statusRaw,
+                    progress: $0.progress
+                )
+            }
+        }
+
+        func restore(in context: ModelContext) {
+            let originalSessions = Set(sessions.map { ObjectIdentifier($0.session) })
+            for session in book.readingSessions
+            where !originalSessions.contains(ObjectIdentifier(session)) {
+                session.book = nil
+                if session.modelContext != nil { context.delete(session) }
+            }
+            book.readingSessions = sessions.map(\.session)
+            for preimage in sessions {
+                preimage.session.startedAt = preimage.startedAt
+                preimage.session.endedAt = preimage.endedAt
+                preimage.session.statusRaw = preimage.statusRaw
+                preimage.session.progress = preimage.progress
+                preimage.session.book = book
+            }
+            book.readingStatusRaw = readingStatusRaw
+            book.dateStarted = dateStarted
+            book.dateFinished = dateFinished
+        }
+    }
+
     @discardableResult
     func setReadingStatus(_ status: ReadingStatus, for books: [Book]) -> Bool {
         let ids = Set(books.map(\.uuid))
@@ -828,10 +880,14 @@ final class LibraryViewModel {
         let newlyFinishedIDs = status == .finished
             ? Set(books.filter { $0.readingStatus != .finished }.map(\.uuid))
             : []
+        let preimages = books.filter { ids.contains($0.uuid) }.map(ReadingStatePreimage.init)
         do {
             try mutations.commit(
                 .setReadingStatus(bookIDs: Array(ids), status: status),
-                affectedBookIDs: ids
+                affectedBookIDs: ids,
+                revertingOnFailure: {
+                    preimages.forEach { $0.restore(in: modelContext) }
+                }
             ) {
                 for book in try mutations.books(ids: ids) { book.setStatus(status) }
             }
@@ -847,10 +903,12 @@ final class LibraryViewModel {
     func updateReadingProgress(_ progress: Double, for book: Book) -> Bool {
         guard book.activeReadingSession != nil else { return false }
         let bookID = book.uuid
+        let preimage = ReadingStatePreimage(book)
         do {
             try mutations.commit(
                 .setReadingProgress(bookID: bookID, progress: progress),
-                affectedBookIDs: [bookID]
+                affectedBookIDs: [bookID],
+                revertingOnFailure: { preimage.restore(in: modelContext) }
             ) {
                 let storedBook = try mutations.book(id: bookID)
                 guard storedBook.updateReadingProgress(progress) else {
@@ -877,7 +935,14 @@ final class LibraryViewModel {
             try mutations.commit(
                 .createCollection(collectionID: collection.id, bookIDs: Array(bookIDs)),
                 affectedBookIDs: bookIDs,
-                affectedCollectionIDs: [collection.id]
+                affectedCollectionIDs: [collection.id],
+                revertingOnFailure: {
+                    for book in collection.books {
+                        book.collections.removeAll { $0 === collection }
+                    }
+                    collection.books.removeAll()
+                    if collection.modelContext != nil { modelContext.delete(collection) }
+                }
             ) {
                 collection.books = try mutations.books(ids: bookIDs)
                 modelContext.insert(collection)

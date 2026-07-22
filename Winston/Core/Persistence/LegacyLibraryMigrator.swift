@@ -124,12 +124,7 @@ enum LegacyLibraryMigrator {
                 let result = try await mutations.commitStagedFiles(
                     .legacyMigration(bookIDs: [legacy.id]),
                     transactions: [transaction],
-                    affectedBookIDs: [legacy.id],
-                    revertingOnFailure: {
-                        book.assets.removeAll()
-                        if asset.modelContext != nil { context.delete(asset) }
-                        if book.modelContext != nil { context.delete(book) }
-                    }
+                    affectedBookIDs: [legacy.id]
                 )
                 guard result.isFullyPublished else { return false }
             } catch {

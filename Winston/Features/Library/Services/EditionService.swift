@@ -291,12 +291,30 @@ final class EditionService {
         guard book.modelContext != nil, work.modelContext != nil else { return nil }
         let bookID = book.uuid
         let workID = work.uuid
-        let previousWorkID = book.work?.uuid
+        let previousWork = book.work
+        let previousWorkID = previousWork?.uuid
+        let targetPreimage = CatalogWorkPreimage(work)
+        let previousPreimage = previousWork.map(CatalogWorkPreimage.init)
         do {
             try mutations.commit(
                 .assignEdition(bookIDs: [bookID], workID: workID),
                 affectedBookIDs: [bookID],
-                affectedWorkIDs: Set([workID, previousWorkID].compactMap { $0 })
+                affectedWorkIDs: Set([workID, previousWorkID].compactMap { $0 }),
+                revertingOnFailure: {
+                    targetPreimage.restore()
+                    previousPreimage?.restore()
+                    if let previousWork, previousWork.modelContext == nil {
+                        modelContext.insert(previousWork)
+                    }
+                    if previousWork !== work {
+                        work.editions.removeAll { $0 === book }
+                    }
+                    book.work = previousWork
+                    if let previousWork,
+                       !previousWork.editions.contains(where: { $0 === book }) {
+                        previousWork.editions.append(book)
+                    }
+                }
             ) {
                 let storedBook = try mutations.book(id: bookID)
                 let storedWork = try mutations.work(id: workID)
