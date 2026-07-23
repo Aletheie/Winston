@@ -1,7 +1,8 @@
 # Winston Plugin API (v1)
 
-Winston plugins are plain JavaScript, run in-process in JavaScriptCore. A bare
-JS context has **no** I/O of any kind — a plugin can only do what the `Winston`
+Winston plugins are plain JavaScript. Each enabled session runs in a separate,
+killable JavaScriptCore worker process. Its bare JS context has **no** I/O of
+any kind — a plugin can only do what the `Winston`
 API grants it, and each namespace exists only if its permission is declared in
 the manifest *and* confirmed by the user in **Settings → Plugins**. Plugins are
 disabled by default.
@@ -53,6 +54,8 @@ the plugin folder (an update) never touches its data.
 
 `Winston.storage` and `console` need no permission (both are scoped to the
 plugin itself). Unknown permission strings make the whole manifest invalid.
+Consent is keyed by the SHA-256 digest of the complete plugin bundle as well as
+its id and version. Changing any bundled file requires confirmation again.
 
 ## Entry script
 
@@ -67,8 +70,9 @@ exports.deactivate = () => {
 };
 ```
 
-`activate` has ~10 s to return — a plugin that hangs is quarantined and
-persistently disabled. Every API call returns a **Promise**; rejections carry
+Each synchronous JavaScript turn has ~10 s to return. A worker that hangs or
+exceeds its resource limits is terminated, quarantined, and persistently
+disabled. Every API call returns a **Promise**; rejections carry
 a stable `code` (`invalid-argument`, `permission-denied`, `unavailable`,
 `timeout`) plus a human-readable `message`.
 
@@ -84,8 +88,12 @@ await Winston.storage.set("key", value)  // value: anything JSON-serializable
 await Winston.storage.get("key")         // → value or null
 await Winston.storage.remove("key")
 
-await Winston.library.list()             // → [Book]
-await Winston.library.list({ text: "čapek" })  // filter on display title/author
+await Winston.library.list()             // → { items: [Book], nextCursor: string|null }
+await Winston.library.list({             // page size defaults to 50, maximum 100
+    text: "čapek",                       // optional display-title/author filter
+    cursor: previousPage.nextCursor,      // omit/null for the first page
+    limit: 100
+})
 await Winston.library.get(uuid)          // → Book or null
 await Winston.library.update(uuid, {     // fills empty fields only; returns
     publisher: "Argo",                   //   { applied: ["publisher", ...] }
@@ -117,7 +125,11 @@ editionCount, formats, physicalCopy, shelfLocation
 - No file paths in or out; books are addressed by `uuid` only.
 - No network access — `metadata.fetch` goes through Winston's own catalog
   service, which the user can switch off globally.
+- `library.list` is a bounded snapshot page, never a fetch of the full live
+  SwiftData catalog. Follow `nextCursor` only while you need more results.
 - `library.update` can never overwrite a non-empty field, so user edits win.
+- Disabling or quarantining a plugin invalidates its session lease before
+  shutdown; an already-started host request cannot commit a later write.
 - Uncaught exceptions are logged and counted; repeated faults quarantine the
   plugin. Note that a rejection you don't `catch` inside an `async` function
   is silent — wrap your `activate` body in `try/catch` and `console.error`.

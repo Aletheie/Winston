@@ -5,9 +5,9 @@ surface, see **[PluginAPI.md](PluginAPI.md)**. If you have never written
 JavaScript before, start here and read top to bottom.
 
 A Winston plugin is a small folder with a `manifest.json` and one JavaScript
-file. Winston runs it *in-process* in JavaScriptCore — a JavaScript engine with
-**no built-in I/O**. Your plugin cannot read files, open sockets, or run
-programs. The only things it can do are what the `Winston` object hands it, and
+file. Winston runs each enabled session in a separate, killable JavaScriptCore
+worker process with **no built-in I/O**. Your plugin cannot read files, open
+sockets, or run programs. The only things it can do are what the `Winston` object hands it, and
 each of those must be declared in the manifest **and** confirmed by the user.
 Plugins are **disabled by default**; nothing runs until someone switches yours on
 in **Settings → Plugins**.
@@ -75,7 +75,7 @@ never wipes the user's saved data.
 |---|---|
 | `id` | Reverse-DNS-style identifier, **lowercase** letters, digits, dots, hyphens (3–100 chars). Must equal the folder name. |
 | `name` | Human name shown in Settings and in your toast messages. |
-| `version` | Your plugin's own version. Bumping it **re-asks** the user for permissions — so a new version that wants more access can't inherit the old consent. |
+| `version` | Your plugin's own version. Keep bumping it for releases. Permission consent is also tied to a SHA-256 digest of the entire bundle, so changed code re-asks even if you forget the bump. |
 | `api` | Which Winston plugin-API major you target. This Winston implements **`"1"`**. A mismatch refuses to load (with a clear reason) rather than half-working. |
 | `entry` | The script file to run, e.g. `"index.js"`. Must be a plain filename inside your folder (no `/`, no `..`). |
 | `permissions` | The capabilities you request (see below). An **unknown** permission string makes the whole manifest invalid. |
@@ -98,7 +98,9 @@ in JavaScript — there is no back door.
 plugin alone.
 
 When the user first enables your plugin, Winston shows a consent sheet listing
-exactly what you asked for. Nothing runs until they confirm.
+exactly what you asked for. Nothing runs until they confirm. Any later change to
+the manifest, entry script, or another bundled file changes the content digest
+and requires fresh consent.
 
 ### The shape of a plugin
 
@@ -117,9 +119,9 @@ exports.deactivate = () => {
 };
 ```
 
-`activate` has about **10 seconds** to return. A plugin that hangs is
-*quarantined* and left disabled — so don't do slow work synchronously; `await`
-it (see below).
+Each synchronous JavaScript turn has about **10 seconds** to return. A plugin
+that hangs is terminated at the process boundary, *quarantined*, and left
+disabled. CPU and memory use are bounded too — still `await` slow host work.
 
 ---
 
@@ -162,18 +164,25 @@ exports.activate = async () => {
         }
 
         // 1. READ THE LIBRARY.
-        // Winston.library.list() returns a Promise, so we `await` it. Forget
-        // the await and `books` would be a Promise object, not an array —
-        // the #1 beginner bug.
-        const books = await Winston.library.list();
-        console.log(`library has ${books.length} books`);
+        // Winston.library.list() returns one bounded page. Follow nextCursor
+        // only until we have enough work instead of loading the whole catalog.
+        const needy = [];
+        let cursor = null;
+        let scanned = 0;
+        do {
+            const page = await Winston.library.list({ cursor, limit: 50 });
+            scanned += page.items.length;
+            for (const book of page.items) {
+                // Each book is a read-only snapshot. Changing it here does
+                // nothing — you must call library.update.
+                if (!book.publisher || !book.description) needy.push(book);
+                if (needy.length === MAX_PER_RUN) break;
+            }
+            cursor = page.nextCursor;
+        } while (needy.length < MAX_PER_RUN && cursor);
+        console.log(`scanned ${scanned} book snapshots`);
 
-        // 2. PICK THE ONES THAT NEED HELP.
-        // Each book is a read-only snapshot (see the field list in PluginAPI.md).
-        // Changing it here does nothing — you must call library.update.
-        const needy = books
-            .filter((b) => !b.publisher || !b.description)
-            .slice(0, MAX_PER_RUN);
+        // 2. PROCESS THE ONES THAT NEED HELP.
 
         if (needy.length === 0) {
             await Winston.ui.toast("Every book already has publisher and description.");
@@ -322,13 +331,13 @@ mistake looks like from your side:
 
 | Mistake | What you'll see |
 |---|---|
-| **Forgot `await`** | Your variable is a `Promise`, not the value — e.g. `books.length` is `undefined` and `.filter` throws. Look for a `TypeError` in the log. |
+| **Forgot `await`** | Your variable is a `Promise`, not the page value — e.g. `page.items` is `undefined`. Look for a `TypeError` in the log. |
 | **Bad `uuid`** | `library.get`/`update` reject with code `invalid-argument`. The book isn't found or the string isn't a UUID. |
 | **Called a capability you weren't granted** | The namespace is `undefined`, so you get `TypeError: undefined is not an object`. Declare the permission in the manifest and re-enable. Guard with `Winston.capabilities.has(...)`. |
 | **`metadata.fetch` while online metadata is off** | Rejects with code `unavailable`. Not an error in your code — the user has to enable it in Settings. |
 | **Syntax error / threw at load** | The plugin won't activate; its status in the pane reads **Failed: …** with the message. The app keeps running. |
 | **Uncaught exception at runtime** | Logged to your buffer and counted. **Five** uncaught exceptions ⇒ the plugin is **quarantined** and disabled until you re-enable it. |
-| **`activate` hangs / infinite loop** | After ~10 s the loader gives up and marks the plugin **Quarantined**. (Winston can't force-stop a runaway script, so avoid `while(true)` and always `await` slow work.) |
+| **`activate` hangs / infinite loop** | After ~10 s Winston terminates the worker process and marks the plugin **Quarantined**. No runaway JavaScript keeps executing in the app. |
 | **Rejection escaped an `async` function silently** | *Nothing* is logged — JavaScriptCore has no unhandled-rejection hook. This is why every example wraps its `activate` body in `try/catch` and `console.error`s. Do the same. |
 
 ### A minimal "is it even running?" plugin

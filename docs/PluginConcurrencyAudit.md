@@ -1,173 +1,117 @@
-# Plugin System — Concurrency & Security Verification
+# Plugin Runtime — Concurrency & Security Verification
 
-Audit of the JavaScriptCore plugin runtime against Swift 6 / `MainActor`-default
-isolation and the app's threat model. Scope: `Winston/Core/Plugins/` +
-`Winston/App/PluginsSettingsPane.swift`. Line references are current as of this
-writing; anchor on the symbol names if they drift.
+Scope: `Winston/Core/Plugins/`, `PluginService`, and the plugin-facing Settings
+UI. This document describes the process-isolated runtime introduced for plugin
+API 1.2; it intentionally avoids line-number references.
 
-**Reconciliation note.** The brief that prompted this audit describes an API that
-does not match what shipped — `AddonManager`, an `Addons/` folder,
-`Winston.book.updateTitle`, and a generic `await Winston.network.fetch(url)`. The
-shipped system is `PluginService` + per-plugin `PluginRuntime` + `PluginHostAPI`,
-under `Plugins/`, with `Winston.library.update(uuid, {...})` and **no arbitrary
-network** — plugins reach the network only through the gated `Winston.metadata.fetch`.
-Everything below audits the real code.
+## Security boundary
 
-**Verdict: sound.** No must-fix concurrency or security defect. Two residual
-edges are *by design* and documented below so they are chosen, not accidental.
+Each enabled plugin session owns a separate `Process`. The process runs the same
+signed Winston executable with the private `--winston-plugin-worker` argument,
+but enters the worker main before constructing the SwiftUI app, persistence
+stack, or `PluginService`. The worker environment is reduced to `TMPDIR` and its
+working directory is a temporary directory.
 
----
+Only the child process imports and owns JavaScriptCore runtime state. The host
+and worker exchange newline-delimited, size-bounded `Codable` messages over
+anonymous pipes:
 
-## 1. Thread safety / Swift 6 isolation — VERIFIED
+- host → worker: immutable manifest/source/configuration, host responses,
+  shutdown;
+- worker → host: lifecycle events, bounded logs, and typed `PluginAPICall`
+  values;
+- no `JSContext`, `JSValue`, SwiftData model, file URL, or host closure crosses
+  the process boundary.
 
-`JSContext` and `JSValue` are not `Sendable` and, in this design, never become a
-concurrency problem because **they never cross an actor or a queue boundary.**
+JavaScript receives a bare context with `console`, `exports`, and only the
+granted portions of `Winston`. It has no module loader, filesystem API, socket
+API, process API, Objective-C bridge, or generic network primitive.
 
-- **Single-queue confinement.** `PluginRuntime` is `@unchecked Sendable`
-  (`PluginRuntime.swift:52`) on one documented invariant: every access to JSC
-  state — `vm`, `context`, `pending`, `nextCallID`, `lastException` — happens on
-  the plugin's private serial `DispatchQueue` (`:57–73`). This is the same
-  `nonisolated(unsafe)` discipline `AppPaths` uses, but enforced at runtime:
-  `dispatchPrecondition(condition: .onQueue(queue))` guards `loadOnQueue` (:113),
-  `makePendingPromise` (:329), and `teardownOnQueue` (:161). JS only ever executes
-  on this queue, so a JS-invoked block is already on it.
+This boundary contains untrusted JavaScript and makes sessions killable. It is
+not a defense against a native-code exploit in JavaScriptCore itself: the worker
+uses the app's executable and code-signing identity. If that stronger attacker
+model becomes required, the wire protocol is ready to move unchanged into a
+separately signed, sandboxed helper/XPC target.
 
-- **The queue is deliberately not the cooperative pool.** Plugin JS must never
-  occupy a Swift Concurrency thread or the main actor. A dedicated `DispatchQueue`
-  means a wedged script costs one thread, isolated from both (see §3).
+## Time, CPU, memory, and IPC bounds
 
-- **The `MainActor` hop is correct and `JSValue`-free.** The round trip
-  (`PluginRuntime.swift:306–357`):
-  1. A JS call enters the `@convention(block)` installed by `installAsyncMethod`,
-     on the plugin queue.
-  2. `decode` turns raw `JSValue` arguments into a `Sendable` `PluginAPICall`
-     value (`PluginAPICall`/`PluginMetadataPatch` are `nonisolated ... Sendable`,
-     `PluginHostAPI.swift:8–34`) — still on the queue.
-  3. `makePendingPromise` creates the JS `Promise`, stores `(resolve, reject)` in
-     `pending`, and spawns `Task { await handler(call) }`. `handler` is
-     `@MainActor @Sendable` (`typealias PluginHostHandler`, `PluginHostAPI` line
-     region `:39`), so the `await` hops to the main actor to touch SwiftData.
-  4. The result comes back as `Result<Data?, PluginError>` — JSON bytes, fully
-     `Sendable`.
-  5. `complete(_:with:)` re-enters the plugin queue via `queue.async` and settles
-     the promise with a freshly built `JSValue`.
+`PluginRuntime` arms a wall-time watchdog for every synchronous JavaScript turn,
+including initial evaluation, `activate`, promise continuations, and
+`deactivate`. Expiry sends `SIGTERM`, then `SIGKILL` after a short grace period.
+The process is reaped; no wedged queue or thread remains in Winston.
 
-  No `JSValue` is ever captured by the `Task` or handed to the main actor. The
-  DTOs (`PluginBookDTO`, `PluginFetchedMetadataDTO`, `PluginApplyResultDTO`) are
-  the model firewall — a `@Model Book` is snapshotted on the main actor and only
-  its `Codable` projection travels.
+The worker also installs a process CPU rlimit. The host samples the worker's
+physical footprint and terminates it when the per-session memory budget is
+exceeded. Memory enforcement lives in the parent because macOS may reject a
+low `RLIMIT_AS`/`RLIMIT_DATA` after the executable and frameworks are mapped.
 
-- **Per-plugin VM.** Each runtime owns its own `JSVirtualMachine` + `JSContext`
-  (`:123–124`), so no `JSValue` from one plugin can be used in another's context.
+Additional bounds prevent moving a denial of service across IPC:
 
-- **No registration race.** `pending[id]` is populated *synchronously* inside the
-  `JSValue(newPromiseIn:)` executor, which runs during `makePendingPromise` before
-  it returns; `complete` re-enters via `queue.async` and therefore cannot run
-  until the current queue item finishes. The resolve/reject can never fire before
-  the promise is registered.
+- bundle, file-count, entry-source, and manifest size limits;
+- a maximum encoded IPC line size and a maximum retained log-message size;
+- at most 64 unresolved host promises per worker;
+- quotas for plugin storage keys, values, entries, and total bytes;
+- `library.list` pages of 1–100 results, bounded search text, at most 500
+  scanned catalog rows per filtered page, and a bounded cursor offset.
 
-## 2. Retain cycles in the Swift↔JS bridge — VERIFIED CLEAN
+Timeout, memory-limit, unexpected-exit, and protocol failures quarantine the
+plugin and remove it from persistent auto-enable state.
 
-A `JSContext` strongly retains its global object and every installed block. If a
-block captured `self` (the runtime) strongly, the cycle `runtime → context →
-block → runtime` would leak the entire VM, because JSC's garbage collector and
-ARC do not cooperate. The code avoids this everywhere it matters:
+## Content identity and permission grants
 
-- `installAsyncMethod`'s block is `{ [weak self] arg0, arg1 in … }`
-  (`PluginRuntime.swift:311`).
-- `context.exceptionHandler` is `{ [weak self] _, exception in … }` (:130).
-- The completion `Task` is `Task { [weak self] in … }` (:336).
-- The `console` blocks (:179) capture only `logBuffer` and `pluginID` — a sibling
-  object and a `String` — **not** `self` or `context`. `context → console block →
-  logBuffer` is a leaf; `PluginLogBuffer` holds no back-reference, so there is no
-  cycle.
+Discovery creates one immutable `PluginBundleSnapshot`. It recursively hashes
+the relative path and bytes of every regular file with SHA-256. Symbolic links,
+special files, traversal entry names, over-sized bundles, and folder/id
+mismatches are rejected.
 
-The handler chain is also weak on the host side: `PluginHostAPI.makeHandler`
-returns `{ [weak self] call in … }` (`PluginHostAPI.swift:104`), so the plugin's
-retained handler does not pin the `PluginHostAPI`.
+Permission consent is stored under `id@version#sha256:<bundle digest>`, not just
+the manifest version. `PluginRuntime.load` snapshots the bundle again and
+requires both the expected manifest and digest before sending source bytes to
+the worker. Therefore a changed `index.js` cannot inherit consent or reuse a
+runtime even when `id`, `version`, and the folder name stay unchanged.
 
-## 3. Infinite loops / watchdog — VERIFIED, with the limit stated honestly
+## Session leases and late host calls
 
-The brief asks for a timeout "so a plugin with `while(true)` cannot freeze a
-background thread forever." That exact guarantee **is not achievable with public
-JavaScriptCore**: the framework exposes no way to interrupt a running script. The
-private `JSContextGroupSetExecutionTimeLimit` (in `JSContextRefPrivate.h`) is not
-available in the shipping framework. So the honest design goal is weaker and the
-code meets it exactly:
+`PluginHostAPI.openSession` issues an unguessable lease containing the plugin id
+and content digest. Every handler is closed over that lease. Disable, refresh,
+quarantine, and runtime replacement invalidate it before shutdown begins.
 
-> The *caller* always gets an answer within a deadline and can quarantine the
-> plugin; a wedged script keeps only its own dedicated thread, never the main
-> actor or the cooperative pool.
+Host calls validate the lease at entry and again after suspension. Catalog
+writes validate it inside the `CatalogMutationService` commit closure. Storage
+writes linearize their final atomic save under the session-registry lock, so
+invalidation either happens before the write (which is refused) or after an
+already-authorized commit has completed. Tracked host tasks are also canceled
+when the runtime stops.
 
-- **`withPluginDeadline`** (`PluginDiagnostics.swift:75–91`) races the operation
-  against `Task.sleep(for:)`, arbitrated by a resume-once `ResumeGate` (:95–104)
-  so the continuation resumes exactly once and the loser's result is dropped. On
-  timeout the operation is **not** cancelled — it can't be — but the caller
-  receives `PluginError.timeout`.
-- **Quarantine.** `PluginService.activate` wraps `runtime.load` in
-  `withPluginDeadline(seconds: loadDeadline)` (default 10 s, `:55`). On timeout it
-  drops the runtime from the dictionary *without awaiting shutdown*, removes it
-  from `enabledPluginIDs` (persistently disabled), and sets `.quarantined`
-  (`:153–161`). The wedged queue thread is **leaked by design** — one thread.
-- **Fault-count quarantine.** Five uncaught JS exceptions
-  (`maxFaults`, `:57`) trip `recordFault` → quarantine (`:169–178`), independent
-  of the timeout path.
-- **Bounded teardown.** Even `deactivate()` runs under its own 5 s deadline
-  (`shutdownRuntime`, `:180–185`), so a plugin that hangs *on the way out* still
-  can't block the app.
+Consequences:
 
-### Residual edges (by design — not defects)
+- a metadata request that finishes after disable cannot apply a later catalog
+  update;
+- a response from an old worker generation cannot reach a replacement worker;
+- removing promise callbacks during teardown is not the only defense against
+  late side effects—the host independently rejects the invalid lease.
 
-1. **Post-activation wedge is not watchdogged.** Only `load`/`activate` runs under
-   `withPluginDeadline`. A `while(true)` inside a *promise callback* that fires
-   after activation (e.g. inside a `.then` on a resolved host call) wedges the
-   plugin's own queue thread with no timeout and no quarantine. Blast radius is
-   that single plugin's thread; subsequent host calls to it silently queue behind
-   the wedge. It is contained but silent. Fixing it fully needs the unavailable
-   interruption API; a partial mitigation (a watchdog around each `complete`
-   dispatch that quarantines on overrun) is possible if desired.
-2. **Silent async rejection.** A rejection escaping an `async activate` is
-   invisible — JSC has no unhandled-rejection hook. This is a plugin-author
-   caveat, already called out in `PluginAPI.md` and enforced by convention
-   (`try/catch` around the `activate` body).
+## Swift concurrency and model isolation
 
-## 4. Security posture — VERIFIED STRONG
+The parent `PluginRuntime` is an actor. Pipe callbacks decode only `Sendable`
+wire values and re-enter that actor. Host handlers are `@MainActor`, where
+SwiftData fetches and catalog commits occur. Results are encoded DTO snapshots;
+live `Book` models never cross actors or processes.
 
-The app runs with the sandbox off (for raw USB / libmtp), but plugins get a real
-**capability sandbox** inside a bare `JSContext` that has no ambient I/O:
+Inside the child, all JavaScriptCore objects remain confined to one private
+serial queue. Promise calls are decoded to `PluginAPICall` before crossing IPC,
+and host JSON is converted back to fresh JavaScript values only on that queue.
 
-- **Least privilege, doubly enforced.** Only granted namespaces are *installed*
-  in the context — an ungranted capability is `undefined` in JS, with no hidden
-  method to reach (`installWinston`, `PluginRuntime.swift:195–299`). Independently,
-  `PluginHostAPI.handle` re-checks the permission on every call
-  (`PluginHostAPI.swift:110–170`). Consent is per `id@version`
-  (`PluginManifest.grantKey`), so a permission expansion in an update re-prompts
-  instead of inheriting (`PluginService.needsConsent`, `:106–110`).
-- **Path traversal closed.** `manifest.entry` must be a plain filename (no `/`, no
-  `..`); `id` must equal the folder name and match
-  `^[a-z0-9][a-z0-9.-]{2,99}$`; the entry file is capped at 5 MB
-  (`PluginManifest.validationFailure`, `:105–130`). The storage path is derived
-  from that regex-constrained `id`, so `PluginData/<id>/` cannot escape either.
-- **No data-loss primitive.** `library.update` is fill-empty-only and routed
-  through `saveQuietly()` (`PluginHostAPI.apply`, `:198–220`) — a plugin can
-  complete a record but never overwrite a user edit.
-- **Network is separately granted and gated.** `metadata.fetch` is the *only* path off the
-  machine, requires `metadata.fetch`, and refuses to run unless
-  `AppSettings.onlineMetadataEnabled` is on (`:132–143`) — off ⇒ zero network,
-  matching the app-wide guarantee.
-- **No impersonation.** Toasts are prefixed with the plugin name
-  (`"\(manifest.name): \(message)"`, `:162`) so a plugin can't pose as Winston.
-- **Strict manifest decoding.** An unknown permission string fails the whole
-  manifest (`PluginPermission` is a closed `Codable` enum, `PluginManifest.swift:12`),
-  so a plugin written against a newer surface is rejected up front with a visible
-  reason rather than half-working.
+## Regression coverage
 
-Host calls are capped at 64 pending promises per runtime, storage values and files
-have explicit quotas, and storage I/O is serialized off the main actor.
+The focused suites verify:
 
-## Optional hardening (not required)
-
-- A per-dispatch watchdog around `complete` to quarantine a post-activation wedge
-  (edge #1), accepting it still leaks the one thread.
-
-These are refinements to an already-sound design; none is a fix for a live bug.
+- a code-byte change with an unchanged manifest invalidates consent and rebuilds
+  the runtime;
+- entry-point and bundle symlinks are rejected;
+- infinite loops are actually killed and repeated runaway sessions leave no
+  live worker PIDs;
+- a memory bomb is killed by the footprint watchdog;
+- host writes cannot commit after disable;
+- paginated list decoding, permission gating, storage quotas, fault quarantine,
+  and save/publish rollback paths.

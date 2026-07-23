@@ -4,18 +4,28 @@
 
 exports.activate = async () => {
     try {
-        const books = await Winston.library.list();
-        const noIsbn = books.filter((b) => !b.isbn).length;
-        const noDescription = books.filter((b) => !b.description).length;
+        let total = 0;
+        let noIsbn = 0;
+        let noDescription = 0;
+        let cursor = null;
+        do {
+            const page = await Winston.library.list({ cursor, limit: 100 });
+            for (const book of page.items) {
+                total++;
+                if (!book.isbn) noIsbn++;
+                if (!book.description) noDescription++;
+            }
+            cursor = page.nextCursor;
+        } while (cursor);
 
-        console.log(`scanned ${books.length} books: ${noIsbn} without ISBN, ${noDescription} without description`);
+        console.log(`scanned ${total} books: ${noIsbn} without ISBN, ${noDescription} without description`);
         await Winston.storage.set("lastReport", {
             at: new Date().toISOString(),
-            total: books.length,
+            total,
             noIsbn,
             noDescription,
         });
-        await Winston.ui.toast(`${books.length} books — ${noIsbn} without ISBN, ${noDescription} without description`);
+        await Winston.ui.toast(`${total} books — ${noIsbn} without ISBN, ${noDescription} without description`);
     } catch (e) {
         // Rejections that escape an async activate are silent — always report.
         console.error(`report failed: ${e.code ?? ""} ${e.message}`);

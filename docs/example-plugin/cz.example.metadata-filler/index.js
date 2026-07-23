@@ -24,18 +24,25 @@ exports.activate = async () => {
         }
 
         // 1. READ THE LIBRARY.
-        // Winston.library.list() returns a Promise, so we `await` it. Forget
-        // the await and `books` would be a Promise object, not an array —
-        // the #1 beginner bug.
-        const books = await Winston.library.list();
-        console.log(`library has ${books.length} books`);
+        // Winston.library.list() returns one bounded page. Follow nextCursor
+        // only until we have enough work instead of loading the whole catalog.
+        const needy = [];
+        let cursor = null;
+        let scanned = 0;
+        do {
+            const page = await Winston.library.list({ cursor, limit: 50 });
+            scanned += page.items.length;
+            for (const book of page.items) {
+                // Each book is a read-only snapshot. Changing it here does
+                // nothing — you must call library.update.
+                if (!book.publisher || !book.description) needy.push(book);
+                if (needy.length === MAX_PER_RUN) break;
+            }
+            cursor = page.nextCursor;
+        } while (needy.length < MAX_PER_RUN && cursor);
+        console.log(`scanned ${scanned} book snapshots`);
 
-        // 2. PICK THE ONES THAT NEED HELP.
-        // Each book is a read-only snapshot (see the field list in PluginAPI.md).
-        // Changing it here does nothing — you must call library.update.
-        const needy = books
-            .filter((b) => !b.publisher || !b.description)
-            .slice(0, MAX_PER_RUN);
+        // 2. PROCESS THE ONES THAT NEED HELP.
 
         if (needy.length === 0) {
             await Winston.ui.toast("Every book already has publisher and description.");

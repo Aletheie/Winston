@@ -17,11 +17,11 @@
 
     <h2>Jsou pluginy bezpečné?</h2>
     <ul>
-        <li>Plugin běží v <b>izolovaném prostředí</b> bez přímého přístupu k vašim souborům, síti nebo jiným aplikacím. Může používat jen konkrétní možnosti poskytované Winstonem.</li>
+        <li>Plugin běží v samostatném <b>ukončitelném worker procesu</b> bez přímého přístupu k vašim souborům, síti nebo jiným aplikacím. Může používat jen konkrétní možnosti poskytované Winstonem.</li>
         <li>Před prvním spuštěním Winston přesně ukáže, co chce plugin dělat, například „Číst metadata knihovny“, a <b>požádá vás o potvrzení</b>.</li>
         <li>Plugin nikdy nemůže přepsat metadata, která jste zadali nebo upravili; smí pouze <i>doplnit prázdná pole</i>.</li>
         <li>Online vyhledávání respektuje přepínač <b>Nastavení → Metadata</b>, takže při vypnutých online metadatech plugin neprovádí žádná síťová volání.</li>
-        <li>Pokud plugin opakovaně chybuje nebo se zasekne, Winston jej automaticky vypne a umístí do karantény, aniž by ovlivnil zbytek aplikace.</li>
+        <li>Pokud plugin opakovaně chybuje, zasekne se nebo překročí limit prostředků, Winston jeho proces ukončí a umístí jej do karantény; jeho kód dál neběží.</li>
     </ul>
 
     <h2 id="install">Instalace pluginu</h2>
@@ -36,7 +36,7 @@
         <li>Plugin zapnete jeho přepínačem.</li>
         <li>Winston zobrazí okno <b>Zapnout „…“?</b> se seznamem požadovaných oprávnění. Přečtěte si je a klikněte na <span class="badge">Zapnout</span> nebo Zrušit.</li>
         <li>Běžná oprávnění jsou <b>Číst metadata knihovny</b>, <b>Doplňovat chybějící metadata knih</b>, <b>Načítat metadata z online katalogů</b> a <b>Zobrazovat oznámení</b>.</li>
-        <li>Pokud novější verze pluginu požádá o další oprávnění, Winston si vyžádá nové potvrzení. Aktualizace nemůže potají získat větší přístup.</li>
+        <li>Souhlas s oprávněními je svázán s digestem celého obsahu pluginu. Změní-li se kterýkoli soubor, Winston požádá znovu o potvrzení i bez zvýšení verze; aktualizace tak nemůže potají zdědit přístup.</li>
     </ul>
 
     <h2 id="manage">Správa pluginů</h2>

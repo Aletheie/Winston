@@ -17,16 +17,17 @@
 
     <h2>Are plugins safe?</h2>
     <ul>
-        <li>A plugin runs in a <b>sandbox</b> with no direct access to your files, the
-        network, or other apps. It can only use the specific abilities Winston offers.</li>
+        <li>A plugin runs in a separate, <b>killable worker process</b> with no direct
+        access to your files, the network, or other apps. It can only use the specific
+        abilities Winston offers.</li>
         <li>Before a plugin runs for the first time, Winston shows you exactly what it
         wants to do (for example, “Read library metadata”) and <b>asks you to confirm</b>.</li>
         <li>It can never overwrite metadata you've entered or edited — it may only
         <i>fill in blanks</i>.</li>
         <li>Online look-ups still obey your <b>Settings → Metadata</b> switch, so a
         plugin makes no network calls while online metadata is off.</li>
-        <li>If a plugin misbehaves — errors repeatedly or hangs — Winston disables it
-        automatically (“quarantines” it) without affecting the rest of the app.</li>
+        <li>If a plugin misbehaves — errors repeatedly, hangs, or exceeds its resource
+        limits — Winston terminates and quarantines it without leaving its code running.</li>
     </ul>
 
     <h2 id="install">Installing a plugin</h2>
@@ -46,8 +47,9 @@
         Read them, then click <span class="badge">Enable</span> (or Cancel).</li>
         <li>Common permissions are <b>Read library metadata</b>, <b>Fill in missing book
         metadata</b>, <b>Fetch metadata from online catalogs</b>, and <b>Show notifications</b>.</li>
-        <li>If a later version of a plugin asks for more, Winston asks you to confirm
-        again — an update can't quietly gain new access.</li>
+        <li>Permission consent is tied to the plugin's complete content digest. If any
+        bundled code changes — even without a version bump — Winston asks you to confirm
+        again, so an update can't quietly inherit access.</li>
     </ul>
 
     <h2 id="manage">Managing plugins</h2>
