@@ -58,6 +58,7 @@ nonisolated enum PluginDiscovery {
     static let maxManifestBytes = 256 * 1024
     static let maxBundleBytes = 20 * 1024 * 1024
     static let maxBundleFiles = 256
+    static let maxBundleEntries = 512
 
     @concurrent
     static func scan(directory: URL) async -> [DiscoveredPlugin] {
@@ -126,19 +127,38 @@ nonisolated enum PluginDiscovery {
             .isSymbolicLinkKey,
             .fileSizeKey,
         ]
+        var enumerationFailed = false
         guard let enumerator = FileManager.default.enumerator(
             at: folder,
             includingPropertiesForKeys: Array(keys),
             options: [],
-            errorHandler: { _, _ in false }
+            errorHandler: { _, _ in
+                enumerationFailed = true
+                return false
+            }
         ) else {
             throw PluginBundleError.invalid("plugin folder could not be read")
         }
 
-        let rootPath = folder.standardizedFileURL.path(percentEncoded: false)
+        // FileManager can report descendants through the canonical `/private/var`
+        // spelling even when the caller used the system `/var` alias. Resolve only
+        // after rejecting bundle-local symlinks so both sides of the containment
+        // check use the same spelling without allowing a plugin to escape its root.
+        let canonicalRootPath = folder.resolvingSymlinksInPath()
+            .standardizedFileURL.path(percentEncoded: false)
+        let rootPath = canonicalRootPath.hasSuffix("/")
+            ? String(canonicalRootPath.dropLast())
+            : canonicalRootPath
         var files: [(path: String, data: Data)] = []
         var totalBytes = 0
+        var entryCount = 0
         for case let url as URL in enumerator {
+            entryCount += 1
+            guard entryCount <= maxBundleEntries else {
+                throw PluginBundleError.invalid(
+                    "plugin bundle contains more than \(maxBundleEntries) entries"
+                )
+            }
             let values = try url.resourceValues(forKeys: keys)
             guard values.isSymbolicLink != true else {
                 throw PluginBundleError.invalid("plugin bundle must not contain symbolic links")
@@ -151,7 +171,8 @@ nonisolated enum PluginDiscovery {
                 throw PluginBundleError.invalid("plugin bundle contains more than \(maxBundleFiles) files")
             }
 
-            let path = url.standardizedFileURL.path(percentEncoded: false)
+            let path = url.resolvingSymlinksInPath()
+                .standardizedFileURL.path(percentEncoded: false)
             guard path.hasPrefix(rootPath + "/") else {
                 throw PluginBundleError.invalid("plugin bundle contains an unsafe path")
             }
@@ -162,6 +183,9 @@ nonisolated enum PluginDiscovery {
                 throw PluginBundleError.invalid("plugin bundle exceeds its \(maxBundleBytes)-byte limit")
             }
             files.append((relativePath, data))
+        }
+        guard !enumerationFailed else {
+            throw PluginBundleError.invalid("plugin bundle could not be read completely")
         }
         files.sort { $0.path < $1.path }
 

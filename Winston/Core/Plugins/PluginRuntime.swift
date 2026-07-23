@@ -43,7 +43,6 @@ nonisolated struct PluginWorkerConfiguration: Codable, Sendable {
     let appVersion: String
     let locale: String
     let maximumCPUSeconds: Int
-    let maximumMemoryBytes: UInt64
 }
 
 nonisolated struct PluginHostResponse: Codable, Sendable {
@@ -85,8 +84,13 @@ nonisolated enum PluginWorkerEvent: Codable, Sendable {
 }
 
 nonisolated enum PluginWorkerWire {
+    static let maximumMessageBytes = 16 * 1_024 * 1_024
+
     static func encode<T: Encodable>(_ value: T) throws -> Data {
         var data = try JSONEncoder().encode(value)
+        guard data.count <= maximumMessageBytes else {
+            throw PluginError.unavailable("plugin IPC message exceeds its size limit")
+        }
         data.append(0x0A)
         return data
     }
@@ -99,13 +103,21 @@ nonisolated enum PluginWorkerWire {
 private nonisolated final class PluginLineFramer: Sendable {
     private let buffered = Mutex(Data())
 
-    func append(_ chunk: Data) -> [Data] {
+    func append(_ chunk: Data) -> [Data]? {
         buffered.withLock { buffer in
             buffer.append(chunk)
             var lines: [Data] = []
             while let newline = buffer.firstIndex(of: 0x0A) {
+                guard newline <= PluginWorkerWire.maximumMessageBytes else {
+                    buffer.removeAll(keepingCapacity: false)
+                    return nil
+                }
                 lines.append(Data(buffer[..<newline]))
                 buffer.removeSubrange(...newline)
+            }
+            guard buffer.count <= PluginWorkerWire.maximumMessageBytes else {
+                buffer.removeAll(keepingCapacity: false)
+                return nil
             }
             return lines
         }
@@ -128,6 +140,7 @@ actor PluginRuntime {
     private let onFault: @Sendable (PluginRuntimeFault) -> Void
     private let workerExecutableURL: URL?
     private let executionDeadline: TimeInterval
+    private let maximumMemoryBytes: UInt64
     private let outputFramer = PluginLineFramer()
     private let errorFramer = PluginLineFramer()
 
@@ -137,19 +150,22 @@ actor PluginRuntime {
     private var errorHandle: FileHandle?
     private var handler: PluginHostHandler?
     private var hostTasks: [UInt64: Task<Void, Never>] = [:]
+    private var lastHostCallID: UInt64 = 0
     private var loadContinuation: CheckedContinuation<Void, any Error>?
     private var executionWatchdog: Task<Void, Never>?
+    private var memoryWatchdog: Task<Void, Never>?
     private var executionToken: UInt64?
     private var loaded = false
     private var stopping = false
     private var expectedStop = false
-    private var timedOut = false
+    private var forcedTerminationError: PluginError?
 
     init(
         manifest: PluginManifest,
         folderURL: URL,
         contentDigest: String,
         executionDeadline: TimeInterval = PluginRuntime.defaultExecutionDeadline,
+        maximumMemoryBytes: UInt64 = PluginRuntime.defaultMaximumMemoryBytes,
         workerExecutableURL: URL? = nil,
         onFault: @escaping @Sendable (PluginRuntimeFault) -> Void
     ) {
@@ -157,6 +173,7 @@ actor PluginRuntime {
         self.folderURL = folderURL
         self.contentDigest = contentDigest
         self.executionDeadline = max(0.05, executionDeadline)
+        self.maximumMemoryBytes = max(32 * 1_024 * 1_024, maximumMemoryBytes)
         self.workerExecutableURL = workerExecutableURL
         self.onFault = onFault
     }
@@ -194,8 +211,7 @@ actor PluginRuntime {
                 forInfoDictionaryKey: "CFBundleShortVersionString"
             ) as? String ?? "0",
             locale: Locale.current.identifier,
-            maximumCPUSeconds: max(1, Int(ceil(executionDeadline * 2))),
-            maximumMemoryBytes: Self.defaultMaximumMemoryBytes
+            maximumCPUSeconds: max(1, Int(ceil(executionDeadline * 2)))
         )
 
         try await withCheckedThrowingContinuation { continuation in
@@ -255,6 +271,9 @@ actor PluginRuntime {
         process.executableURL = executable
         process.arguments = [Self.workerArgument]
         process.currentDirectoryURL = FileManager.default.temporaryDirectory
+        process.environment = [
+            "TMPDIR": FileManager.default.temporaryDirectory.path(percentEncoded: false),
+        ]
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
@@ -264,15 +283,30 @@ actor PluginRuntime {
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             guard let self else { return }
-            let lines = self.outputFramer.append(chunk)
+            guard let lines = self.outputFramer.append(chunk) else {
+                Task {
+                    await self.terminateForProtocolFailure(
+                        "plugin worker exceeded the IPC message limit"
+                    )
+                }
+                return
+            }
             guard !lines.isEmpty else { return }
             Task { await self.receive(lines: lines) }
         }
-        let error = errorPipe.fileHandleForReading
-        error.readabilityHandler = { [weak self] handle in
+        let standardErrorHandle = errorPipe.fileHandleForReading
+        standardErrorHandle.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty, let self else { return }
-            for line in self.errorFramer.append(chunk) where !line.isEmpty {
+            guard let lines = self.errorFramer.append(chunk) else {
+                Task {
+                    await self.terminateForProtocolFailure(
+                        "plugin worker exceeded the stderr message limit"
+                    )
+                }
+                return
+            }
+            for line in lines where !line.isEmpty {
                 let message = String(data: line, encoding: .utf8) ?? "plugin worker error"
                 self.logBuffer.append(.warning, message)
             }
@@ -287,19 +321,29 @@ actor PluginRuntime {
             }
         }
 
-        try process.run()
         self.process = process
         inputHandle = inputPipe.fileHandleForWriting
         outputHandle = output
-        errorHandle = error
+        errorHandle = standardErrorHandle
+        do {
+            try process.run()
+            armMemoryWatchdog(pid: process.processIdentifier)
+        } catch {
+            self.process = nil
+            inputHandle = nil
+            outputHandle = nil
+            errorHandle = nil
+            output.readabilityHandler = nil
+            standardErrorHandle.readabilityHandler = nil
+            try? inputPipe.fileHandleForWriting.close()
+            try? output.close()
+            try? standardErrorHandle.close()
+            throw error
+        }
     }
 
     private func resolvedWorkerExecutableURL() throws -> URL {
         if let workerExecutableURL { return workerExecutableURL }
-        if let override = ProcessInfo.processInfo.environment["WINSTON_PLUGIN_WORKER_EXECUTABLE"],
-           !override.isEmpty {
-            return URL(fileURLWithPath: override)
-        }
         if let executable = Bundle.main.executableURL { return executable }
         if let executable = Bundle.allBundles.first(where: {
             $0.bundleIdentifier == "cz.annajung.Winston"
@@ -322,10 +366,7 @@ actor PluginRuntime {
                 let event = try PluginWorkerWire.decode(PluginWorkerEvent.self, from: line)
                 await handle(event)
             } catch {
-                logBuffer.append(.error, "invalid response from plugin worker")
-                expectedStop = true
-                await terminateProcess()
-                resumeLoad(throwing: .workerTerminated("plugin worker sent an invalid response"))
+                await terminateForProtocolFailure("plugin worker sent an invalid response")
                 return
             }
         }
@@ -356,6 +397,12 @@ actor PluginRuntime {
                 ))
                 return
             }
+            guard id > lastHostCallID,
+                  hostTasks.count < Self.maximumPendingHostCalls else {
+                await terminateForProtocolFailure("plugin worker sent an invalid host call")
+                return
+            }
+            lastHostCallID = id
             let task = Task { @MainActor [weak self, handler] in
                 let result = await handler(call)
                 await self?.completeHostCall(id: id, result: result)
@@ -385,18 +432,27 @@ actor PluginRuntime {
         do {
             try send(.hostResponse(id: id, response: PluginHostResponse(result)))
         } catch {
-            expectedStop = true
-            await terminateProcess()
+            await terminateForProtocolFailure("plugin worker IPC failed")
         }
     }
 
     private func executionExpired(token: UInt64) async {
         guard executionToken == token, process?.isRunning == true else { return }
         executionToken = nil
-        timedOut = true
+        forcedTerminationError = .timeout
         expectedStop = true
         let message = "plugin execution exceeded its \(executionDeadline.formatted()) s limit"
         logBuffer.append(.error, message)
+        if loaded { onFault(.terminated(message)) }
+        await terminateProcess()
+    }
+
+    private func memoryLimitExceeded(pid: Int32, footprint: UInt64) async {
+        guard process?.processIdentifier == pid, process?.isRunning == true else { return }
+        let message = "plugin exceeded its \(Self.byteDescription(maximumMemoryBytes)) memory limit"
+        forcedTerminationError = .workerTerminated(message)
+        expectedStop = true
+        logBuffer.append(.error, "\(message) (footprint: \(Self.byteDescription(footprint)))")
         if loaded { onFault(.terminated(message)) }
         await terminateProcess()
     }
@@ -412,6 +468,25 @@ actor PluginRuntime {
                 return
             }
             await self?.executionExpired(token: token)
+        }
+    }
+
+    private func armMemoryWatchdog(pid: Int32) {
+        memoryWatchdog?.cancel()
+        let limit = maximumMemoryBytes
+        memoryWatchdog = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .milliseconds(25))
+                } catch {
+                    return
+                }
+                guard let footprint = Self.physicalFootprint(of: pid) else { continue }
+                if footprint > limit {
+                    await self?.memoryLimitExceeded(pid: pid, footprint: footprint)
+                    return
+                }
+            }
         }
     }
 
@@ -432,8 +507,8 @@ actor PluginRuntime {
         process = nil
         cancelOutstandingWork()
 
-        if timedOut {
-            resumeLoad(throwing: .timeout)
+        if let forcedTerminationError {
+            resumeLoad(throwing: forcedTerminationError)
         } else if loadContinuation != nil {
             resumeLoad(throwing: .workerTerminated(
                 "plugin worker exited unexpectedly (status \(status))"
@@ -462,6 +537,8 @@ actor PluginRuntime {
     private func cancelOutstandingWork() {
         executionWatchdog?.cancel()
         executionWatchdog = nil
+        memoryWatchdog?.cancel()
+        memoryWatchdog = nil
         executionToken = nil
         for task in hostTasks.values { task.cancel() }
         hostTasks.removeAll()
@@ -482,5 +559,32 @@ actor PluginRuntime {
             kill(process.processIdentifier, SIGKILL)
             await waitForExit(grace: 0.15)
         }
+    }
+
+    private func terminateForProtocolFailure(_ message: String) async {
+        guard process?.isRunning == true else { return }
+        logBuffer.append(.error, message)
+        expectedStop = true
+        if loaded {
+            onFault(.terminated(message))
+        } else {
+            resumeLoad(throwing: .workerTerminated(message))
+        }
+        await terminateProcess()
+    }
+
+    private nonisolated static func physicalFootprint(of pid: Int32) -> UInt64? {
+        var usage = rusage_info_v4()
+        let result = withUnsafeMutablePointer(to: &usage) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(pid, RUSAGE_INFO_V4, $0)
+            }
+        }
+        guard result == 0 else { return nil }
+        return usage.ri_phys_footprint
+    }
+
+    private nonisolated static func byteDescription(_ bytes: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .memory)
     }
 }

@@ -34,6 +34,11 @@ private nonisolated final class PluginWorkerWriter: @unchecked Sendable {
         do {
             try output.write(contentsOf: PluginWorkerWire.encode(event))
         } catch {
+            if let fallback = try? PluginWorkerWire.encode(
+                PluginWorkerEvent.fault("plugin worker emitted an oversized IPC message")
+            ) {
+                try? output.write(contentsOf: fallback)
+            }
             Darwin.exit(EXIT_FAILURE)
         }
     }
@@ -61,7 +66,9 @@ private nonisolated final class PluginWorkerEngine: @unchecked Sendable {
             do {
                 try PluginWorkerResourceLimits.apply(configuration)
             } catch {
-                writer.send(.loadFailed("could not apply plugin resource limits"))
+                writer.send(.loadFailed(
+                    "could not apply plugin resource limits: \(error.localizedDescription)"
+                ))
                 return
             }
             queue.async {
@@ -249,9 +256,20 @@ private nonisolated final class PluginWorkerEngine: @unchecked Sendable {
                             "library.list limit must be between 1 and \(PluginLibraryLimits.maximumPageSize)"
                         )
                     }
+                    let searchText = Self.optionalString(Self.property("text", of: arg0))
+                    let cursor = Self.optionalString(Self.property("cursor", of: arg0))
+                    guard PluginValueLimits.accepts(
+                        searchText,
+                        maximumBytes: PluginLibraryLimits.maximumSearchBytes
+                    ), PluginValueLimits.accepts(
+                        cursor,
+                        maximumBytes: PluginValueLimits.maximumCursorBytes
+                    ) else {
+                        throw PluginError.invalidArgument("library.list options exceed their size limit")
+                    }
                     return .libraryList(
-                        searchText: Self.optionalString(Self.property("text", of: arg0)),
-                        cursor: Self.optionalString(Self.property("cursor", of: arg0)),
+                        searchText: searchText,
+                        cursor: cursor,
                         limit: limit
                     )
                 }
@@ -288,6 +306,11 @@ private nonisolated final class PluginWorkerEngine: @unchecked Sendable {
                     if let tags = arg1.objectForKeyedSubscript("tags"), tags.isArray {
                         patch.tags = tags.toArray()?.compactMap { $0 as? String }
                     }
+                    guard PluginValueLimits.accepts(patch: patch) else {
+                        throw PluginError.invalidArgument(
+                            "library.update patch exceeds its size limit"
+                        )
+                    }
                     return .libraryUpdate(uuid: uuid, patch: patch)
                 }
             }
@@ -306,6 +329,18 @@ private nonisolated final class PluginWorkerEngine: @unchecked Sendable {
                 guard isbn != nil || title != nil else {
                     throw PluginError.invalidArgument("metadata.fetch needs an isbn or a title")
                 }
+                guard PluginValueLimits.accepts(
+                    isbn,
+                    maximumBytes: PluginValueLimits.maximumISBNBytes
+                ), PluginValueLimits.accepts(
+                    title,
+                    maximumBytes: PluginValueLimits.maximumQueryBytes
+                ), PluginValueLimits.accepts(
+                    author,
+                    maximumBytes: PluginValueLimits.maximumQueryBytes
+                ) else {
+                    throw PluginError.invalidArgument("metadata.fetch query exceeds its size limit")
+                }
                 return .metadataFetch(isbn: isbn, title: title, author: author)
             }
             winston.setObject(metadata, forKeyedSubscript: "metadata")
@@ -315,6 +350,12 @@ private nonisolated final class PluginWorkerEngine: @unchecked Sendable {
             let ui = JSValue(newObjectIn: context)!
             installAsyncMethod(named: "toast", on: ui) { arg0, arg1 in
                 let message = try Self.requireString(arg0, "ui.toast expects a message string")
+                guard PluginValueLimits.accepts(
+                    message,
+                    maximumBytes: PluginValueLimits.maximumToastBytes
+                ) else {
+                    throw PluginError.invalidArgument("ui.toast message exceeds its size limit")
+                }
                 let style = PluginToastStyle(
                     rawValue: Self.optionalString(arg1) ?? "info"
                 ) ?? .info
@@ -438,29 +479,38 @@ private nonisolated enum PluginWorkerResourceLimits {
     static func apply(_ configuration: PluginWorkerConfiguration) throws {
         signal(SIGXCPU, SIG_DFL)
         try lower(
+            name: "CPU",
             resource: RLIMIT_CPU,
             soft: rlim_t(configuration.maximumCPUSeconds),
             hard: rlim_t(configuration.maximumCPUSeconds + 1)
         )
-        try lower(
-            resource: RLIMIT_AS,
-            soft: rlim_t(configuration.maximumMemoryBytes),
-            hard: rlim_t(configuration.maximumMemoryBytes)
-        )
     }
 
     private static func lower(
+        name: String,
         resource: Int32,
         soft requestedSoft: rlim_t,
         hard requestedHard: rlim_t
     ) throws {
         var current = rlimit()
-        guard getrlimit(resource, &current) == 0 else { throw POSIXError(.EINVAL) }
+        guard getrlimit(resource, &current) == 0 else {
+            throw LimitError(name: name, operation: "read", code: errno)
+        }
         let hard = min(current.rlim_max, requestedHard)
         let soft = min(requestedSoft, hard)
         var proposed = rlimit(rlim_cur: soft, rlim_max: hard)
         guard setrlimit(resource, &proposed) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EINVAL)
+            throw LimitError(name: name, operation: "set", code: errno)
+        }
+    }
+
+    private struct LimitError: LocalizedError {
+        let name: String
+        let operation: String
+        let code: Int32
+
+        var errorDescription: String? {
+            "could not \(operation) \(name) limit (errno \(code))"
         }
     }
 }

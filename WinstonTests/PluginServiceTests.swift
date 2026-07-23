@@ -112,6 +112,25 @@ struct PluginServiceTests {
         #expect(await harness.loggedEventually("count:2 first:Alpha", in: "cz.test.sample"))
     }
 
+    @Test func libraryListUsesBoundedStableCursorPages() async throws {
+        let harness = try await Harness()
+        harness.seedBook(title: "Gamma")
+        harness.seedBook(title: "Alpha")
+        harness.seedBook(title: "Beta")
+        try harness.installPlugin(source: """
+            exports.activate = async () => {
+                const first = await Winston.library.list({ limit: 1 });
+                const second = await Winston.library.list({ limit: 1, cursor: first.nextCursor });
+                console.log("pages:" + first.items[0].displayTitle + "," +
+                    second.items[0].displayTitle + " next:" + (second.nextCursor !== null));
+            };
+            """)
+        await harness.service.refresh()
+        await harness.service.enable("cz.test.sample", grantingPermissions: true)
+
+        #expect(await harness.loggedEventually("pages:Alpha,Beta next:true", in: "cz.test.sample"))
+    }
+
     @Test func libraryUpdateFillsOnlyEmptyFields() async throws {
         let harness = try await Harness()
         let book = harness.seedBook(title: "Kept", publisher: nil)

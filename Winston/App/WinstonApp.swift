@@ -33,6 +33,15 @@ private enum LibraryStartupState: Equatable {
 }
 
 @main
+private enum WinstonEntryPoint {
+    static func main() {
+        if PluginWorkerProcessMain.isWorkerInvocation {
+            PluginWorkerProcessMain.run()
+        }
+        WinstonApp.main()
+    }
+}
+
 struct WinstonApp: App {
     private let container: ModelContainer
     @State private var themeManager = ThemeManager()
@@ -50,9 +59,6 @@ struct WinstonApp: App {
     @State private var libraryStartupState: LibraryStartupState
 
     init() {
-        if PluginWorkerProcessMain.isWorkerInvocation {
-            PluginWorkerProcessMain.run()
-        }
         let isRunningUnitTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         let container = isRunningUnitTests ? PersistenceController.inMemory() : PersistenceController.shared
         self.container = container

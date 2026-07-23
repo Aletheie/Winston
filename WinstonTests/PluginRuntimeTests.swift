@@ -35,6 +35,7 @@ struct PluginRuntimeTests {
         source: String,
         permissions: Set<PluginPermission> = [],
         executionDeadline: TimeInterval = PluginRuntime.defaultExecutionDeadline,
+        maximumMemoryBytes: UInt64 = PluginRuntime.defaultMaximumMemoryBytes,
         faults: FaultRecorder = FaultRecorder()
     ) throws -> PluginRuntime {
         let folder = FileManager.default.temporaryDirectory
@@ -52,6 +53,7 @@ struct PluginRuntimeTests {
             folderURL: folder,
             contentDigest: digest,
             executionDeadline: executionDeadline,
+            maximumMemoryBytes: maximumMemoryBytes,
             onFault: faults.callback
         )
     }
@@ -154,6 +156,20 @@ struct PluginRuntimeTests {
         #expect(recorder.calls.isEmpty)
     }
 
+    @Test func oversizedLibraryPageIsRejectedBeforeReachingTheHost() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            exports.activate = async () => {
+                try { await Winston.library.list({ limit: 101 }); }
+                catch (e) { console.log("code:" + e.code); }
+            };
+            """, permissions: [.libraryRead])
+        try await runtime.load(granted: [.libraryRead], handler: recorder.handler())
+
+        #expect(await logged("code:invalid-argument", in: runtime))
+        #expect(recorder.calls.isEmpty)
+    }
+
     @Test func oversizedStorageValueRejectsBeforeReachingTheHost() async throws {
         let recorder = HostRecorder()
         let runtime = try makeRuntime(source: """
@@ -163,6 +179,20 @@ struct PluginRuntimeTests {
             };
             """)
         try await runtime.load(granted: [], handler: recorder.handler())
+
+        #expect(await logged("code:invalid-argument", in: runtime))
+        #expect(recorder.calls.isEmpty)
+    }
+
+    @Test func oversizedToastRejectsBeforeReachingTheHost() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(source: """
+            exports.activate = async () => {
+                try { await Winston.ui.toast("x".repeat(5000)); }
+                catch (e) { console.log("code:" + e.code); }
+            };
+            """, permissions: [.uiToast])
+        try await runtime.load(granted: [.uiToast], handler: recorder.handler())
 
         #expect(await logged("code:invalid-argument", in: runtime))
         #expect(recorder.calls.isEmpty)
@@ -230,7 +260,7 @@ struct PluginRuntimeTests {
 
     @Test func optionsObjectsAreOptional() async throws {
         let recorder = HostRecorder()
-        recorder.result = .success(Data("[]".utf8))
+        recorder.result = .success(Data(#"{"items":[],"nextCursor":null}"#.utf8))
         let runtime = try makeRuntime(source: """
             exports.activate = async () => {
                 const page = await Winston.library.list();
@@ -313,6 +343,32 @@ struct PluginRuntimeTests {
         for pid in pids {
             #expect(kill(pid, 0) == -1)
         }
+    }
+
+    @Test func memoryBombWorkerIsTerminatedByTheFootprintLimit() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(
+            source: """
+                const blocks = [];
+                while (true) {
+                    const block = new Uint8Array(4 * 1024 * 1024);
+                    block.fill(1);
+                    blocks.push(block);
+                }
+                """,
+            executionDeadline: 5,
+            maximumMemoryBytes: 64 * 1_024 * 1_024
+        )
+
+        do {
+            try await runtime.load(granted: [], handler: recorder.handler())
+            Issue.record("memory bomb should have been terminated")
+        } catch PluginError.workerTerminated(let message) {
+            #expect(message.contains("memory limit"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(!(await runtime.isWorkerRunning()))
     }
 
     @Test func shutdownCallsDeactivate() async throws {

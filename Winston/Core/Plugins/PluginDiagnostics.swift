@@ -12,10 +12,18 @@ nonisolated struct PluginLogEntry: Sendable, Identifiable, Equatable {
 nonisolated final class PluginLogBuffer: Sendable {
     private let entries = Mutex<[PluginLogEntry]>([])
     private let capacity = 300
+    private let maximumMessageBytes = 16 * 1_024
 
     func append(_ level: PluginLogEntry.Level, _ message: String) {
+        let storedMessage: String
+        if message.utf8.count > maximumMessageBytes {
+            storedMessage = String(decoding: message.utf8.prefix(maximumMessageBytes), as: UTF8.self)
+                + "… [truncated]"
+        } else {
+            storedMessage = message
+        }
         entries.withLock { list in
-            list.append(PluginLogEntry(date: .now, level: level, message: message))
+            list.append(PluginLogEntry(date: .now, level: level, message: storedMessage))
             if list.count > capacity { list.removeFirst(list.count - capacity) }
         }
     }

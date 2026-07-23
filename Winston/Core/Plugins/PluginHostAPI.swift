@@ -2,6 +2,51 @@ import Foundation
 import SwiftData
 import Synchronization
 
+nonisolated enum PluginValueLimits {
+    static let maximumShortTextBytes = 4 * 1_024
+    static let maximumLongTextBytes = 64 * 1_024
+    static let maximumTagCount = 64
+    static let maximumTagBytes = 512
+    static let maximumFormatCount = 32
+    static let maximumToastBytes = 4 * 1_024
+    static let maximumQueryBytes = 4 * 1_024
+    static let maximumISBNBytes = 256
+    static let maximumCursorBytes = 64
+
+    static func accepts(_ value: String?, maximumBytes: Int) -> Bool {
+        value.map { $0.utf8.count <= maximumBytes } ?? true
+    }
+
+    static func bounded(_ value: String?, maximumBytes: Int) -> String? {
+        guard let value else { return nil }
+        guard value.utf8.count > maximumBytes else { return value }
+        return String(decoding: value.utf8.prefix(maximumBytes), as: UTF8.self)
+    }
+
+    static func bounded(_ values: [String]) -> [String] {
+        values.prefix(maximumTagCount).compactMap {
+            bounded($0, maximumBytes: maximumTagBytes)
+        }
+    }
+
+    static func accepts(tags: [String]?) -> Bool {
+        guard let tags else { return true }
+        return tags.count <= maximumTagCount
+            && tags.allSatisfy { $0.utf8.count <= maximumTagBytes }
+    }
+
+    static func accepts(patch: PluginMetadataPatch) -> Bool {
+        let shortValues = [
+            patch.title, patch.author, patch.publisher, patch.year, patch.language,
+            patch.translator, patch.series, patch.seriesIndex,
+        ]
+        return shortValues.allSatisfy { accepts($0, maximumBytes: maximumShortTextBytes) }
+            && accepts(patch.isbn, maximumBytes: maximumISBNBytes)
+            && accepts(patch.description, maximumBytes: maximumLongTextBytes)
+            && accepts(tags: patch.tags)
+    }
+}
+
 nonisolated struct PluginBookDTO: Codable, Sendable {
     let uuid: String
     let title: String?
@@ -32,19 +77,28 @@ nonisolated struct PluginBookDTO: Codable, Sendable {
 
     @MainActor init(_ book: Book) {
         uuid = book.uuid.uuidString
-        title = book.title
-        author = book.author
-        displayTitle = book.displayTitle
-        displayAuthor = book.displayAuthor
-        publisher = book.publisher
-        year = book.year
-        language = book.language
-        translator = book.translator
-        isbn = book.isbn
-        series = book.series
-        seriesIndex = book.seriesIndex
-        tags = book.tags
-        description = book.bookDescription
+        title = PluginValueLimits.bounded(book.title, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        author = PluginValueLimits.bounded(book.author, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        displayTitle = PluginValueLimits.bounded(
+            book.displayTitle,
+            maximumBytes: PluginValueLimits.maximumShortTextBytes
+        ) ?? ""
+        displayAuthor = PluginValueLimits.bounded(
+            book.displayAuthor,
+            maximumBytes: PluginValueLimits.maximumShortTextBytes
+        )
+        publisher = PluginValueLimits.bounded(book.publisher, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        year = PluginValueLimits.bounded(book.year, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        language = PluginValueLimits.bounded(book.language, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        translator = PluginValueLimits.bounded(book.translator, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        isbn = PluginValueLimits.bounded(book.isbn, maximumBytes: PluginValueLimits.maximumISBNBytes)
+        series = PluginValueLimits.bounded(book.series, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        seriesIndex = PluginValueLimits.bounded(book.seriesIndex, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        tags = PluginValueLimits.bounded(book.tags)
+        description = PluginValueLimits.bounded(
+            book.bookDescription,
+            maximumBytes: PluginValueLimits.maximumLongTextBytes
+        )
         rating = book.rating
         communityRating = book.communityRating
         readingStatus = book.readingStatusRaw
@@ -52,11 +106,22 @@ nonisolated struct PluginBookDTO: Codable, Sendable {
         fileSizeBytes = book.fileSizeBytes
         dateAdded = book.dateAdded
         workUUID = book.work?.uuid.uuidString
-        workTitle = book.work?.title
+        workTitle = PluginValueLimits.bounded(
+            book.work?.title,
+            maximumBytes: PluginValueLimits.maximumShortTextBytes
+        )
         editionCount = max(book.work?.editions.count ?? 1, 1)
-        formats = book.assetFormats.map { $0.lowercased() }
+        formats = book.assetFormats.prefix(PluginValueLimits.maximumFormatCount).compactMap {
+            PluginValueLimits.bounded(
+                $0.lowercased(),
+                maximumBytes: PluginValueLimits.maximumShortTextBytes
+            )
+        }
         physicalCopy = book.hasPhysicalCopy
-        shelfLocation = book.shelfLocation
+        shelfLocation = PluginValueLimits.bounded(
+            book.shelfLocation,
+            maximumBytes: PluginValueLimits.maximumShortTextBytes
+        )
     }
 }
 
@@ -72,12 +137,18 @@ nonisolated struct PluginFetchedMetadataDTO: Codable, Sendable {
     let ratingsSource: String?
 
     init(_ fetched: FetchedMetadata) {
-        title = fetched.title
-        authors = fetched.authors
-        publisher = fetched.publisher
-        year = fetched.year
-        description = fetched.bookDescription
-        subjects = fetched.subjects
+        title = PluginValueLimits.bounded(fetched.title, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        authors = PluginValueLimits.bounded(fetched.authors)
+        publisher = PluginValueLimits.bounded(
+            fetched.publisher,
+            maximumBytes: PluginValueLimits.maximumShortTextBytes
+        )
+        year = PluginValueLimits.bounded(fetched.year, maximumBytes: PluginValueLimits.maximumShortTextBytes)
+        description = PluginValueLimits.bounded(
+            fetched.bookDescription,
+            maximumBytes: PluginValueLimits.maximumLongTextBytes
+        )
+        subjects = PluginValueLimits.bounded(fetched.subjects)
         ratingsAverage = fetched.ratingsAverage
         ratingsCount = fetched.ratingsCount
         ratingsSource = fetched.ratingsSource
@@ -107,7 +178,7 @@ nonisolated struct PluginSessionLease: Hashable, Sendable {
     let contentDigest: String
 }
 
-private nonisolated final class PluginSessionRegistry: Sendable {
+nonisolated final class PluginSessionRegistry: Sendable {
     private let active = Mutex(Set<PluginSessionLease>())
 
     func issue(pluginID: String, contentDigest: String) -> PluginSessionLease {
@@ -116,16 +187,28 @@ private nonisolated final class PluginSessionRegistry: Sendable {
             pluginID: pluginID,
             contentDigest: contentDigest
         )
-        active.withLock { $0.insert(lease) }
+        _ = active.withLock { $0.insert(lease) }
         return lease
     }
 
     func invalidate(_ lease: PluginSessionLease) {
-        active.withLock { $0.remove(lease) }
+        _ = active.withLock { $0.remove(lease) }
     }
 
     func contains(_ lease: PluginSessionLease) -> Bool {
         active.withLock { $0.contains(lease) }
+    }
+
+    func commitIfActive(
+        _ lease: PluginSessionLease,
+        _ operation: @Sendable () -> Result<Data?, PluginError>
+    ) -> Result<Data?, PluginError> {
+        active.withLock { leases in
+            guard leases.contains(lease) else {
+                return .failure(.unavailable("plugin session is no longer active"))
+            }
+            return operation()
+        }
     }
 }
 
@@ -153,15 +236,18 @@ nonisolated final class PluginStorageRepository: @unchecked Sendable {
         _ valueJSON: String,
         for key: String,
         manifest: PluginManifest,
-        sessionIsValid: @escaping @Sendable () -> Bool
+        session: PluginSessionLease,
+        sessions: PluginSessionRegistry
     ) async -> Result<Data?, PluginError> {
         await perform {
-            guard sessionIsValid() else { return .failure(Self.inactiveSessionError) }
+            guard sessions.contains(session) else { return .failure(Self.inactiveSessionError) }
             do {
                 var store = try Self.load(for: manifest)
                 store[key] = valueJSON
-                guard sessionIsValid() else { return .failure(Self.inactiveSessionError) }
-                return Self.save(store, for: manifest)
+                let updatedStore = store
+                return sessions.commitIfActive(session) {
+                    Self.save(updatedStore, for: manifest)
+                }
             } catch let error as PluginError {
                 return .failure(error)
             } catch {
@@ -173,15 +259,18 @@ nonisolated final class PluginStorageRepository: @unchecked Sendable {
     func remove(
         _ key: String,
         for manifest: PluginManifest,
-        sessionIsValid: @escaping @Sendable () -> Bool
+        session: PluginSessionLease,
+        sessions: PluginSessionRegistry
     ) async -> Result<Data?, PluginError> {
         await perform {
-            guard sessionIsValid() else { return .failure(Self.inactiveSessionError) }
+            guard sessions.contains(session) else { return .failure(Self.inactiveSessionError) }
             do {
                 var store = try Self.load(for: manifest)
                 store.removeValue(forKey: key)
-                guard sessionIsValid() else { return .failure(Self.inactiveSessionError) }
-                return Self.save(store, for: manifest)
+                let updatedStore = store
+                return sessions.commitIfActive(session) {
+                    Self.save(updatedStore, for: manifest)
+                }
             } catch let error as PluginError {
                 return .failure(error)
             } catch {
@@ -331,6 +420,9 @@ final class PluginHostAPI {
 
         case .libraryUpdate(let uuid, let patch):
             if let denied = require(.libraryWrite) { return .failure(denied) }
+            guard PluginValueLimits.accepts(patch: patch) else {
+                return .failure(.invalidArgument("library.update patch exceeds its size limit"))
+            }
             guard let book = book(with: uuid) else {
                 return .failure(.invalidArgument("no book with uuid \(uuid.uuidString)"))
             }
@@ -341,6 +433,11 @@ final class PluginHostAPI {
 
         case .metadataFetch(let isbn, let title, let author):
             if let denied = require(.metadataFetch) { return .failure(denied) }
+            guard PluginValueLimits.accepts(isbn, maximumBytes: PluginValueLimits.maximumISBNBytes),
+                  PluginValueLimits.accepts(title, maximumBytes: PluginValueLimits.maximumQueryBytes),
+                  PluginValueLimits.accepts(author, maximumBytes: PluginValueLimits.maximumQueryBytes) else {
+                return .failure(.invalidArgument("metadata.fetch query exceeds its size limit"))
+            }
             guard settings.onlineMetadataEnabled else {
                 return .failure(.unavailable("online metadata is disabled in Settings"))
             }
@@ -363,14 +460,26 @@ final class PluginHostAPI {
                 valueJSON,
                 for: key,
                 manifest: manifest,
-                sessionIsValid: sessionIsValid
+                session: session,
+                sessions: sessions
             )
 
         case .storageRemove(let key):
-            return await storage.remove(key, for: manifest, sessionIsValid: sessionIsValid)
+            return await storage.remove(
+                key,
+                for: manifest,
+                session: session,
+                sessions: sessions
+            )
 
         case .toast(let message, let style):
             if let denied = require(.uiToast) { return .failure(denied) }
+            guard PluginValueLimits.accepts(
+                message,
+                maximumBytes: PluginValueLimits.maximumToastBytes
+            ) else {
+                return .failure(.invalidArgument("ui.toast message exceeds its size limit"))
+            }
             guard sessions.contains(session) else { return .failure(Self.inactiveSessionError) }
             let text = "\(manifest.name): \(message)"
             switch style {
@@ -397,6 +506,12 @@ final class PluginHostAPI {
         let needle = searchText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard needle.utf8.count <= PluginLibraryLimits.maximumSearchBytes else {
             return .failure(.invalidArgument("library.list search text is too long"))
+        }
+        guard PluginValueLimits.accepts(
+            cursor,
+            maximumBytes: PluginValueLimits.maximumCursorBytes
+        ) else {
+            return .failure(.invalidArgument("library.list cursor is invalid"))
         }
         guard let offset = Self.cursorOffset(cursor) else {
             return .failure(.invalidArgument("library.list cursor is invalid"))

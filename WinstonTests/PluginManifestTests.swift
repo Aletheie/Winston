@@ -100,6 +100,20 @@ struct PluginManifestTests {
         #expect(discovered.invalidReason?.contains("symbolic") == true)
     }
 
+    @Test func symbolicLinkPluginFolderIsRejected() throws {
+        let target = try makeFolder(
+            named: "cz.example.target",
+            manifestJSON: manifestJSON(id: "cz.example.target")
+        )
+        let link = target.deletingLastPathComponent().appending(path: "cz.example.link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let discovered = PluginDiscovery.examine(folder: link)
+
+        #expect(discovered.manifest == nil)
+        #expect(discovered.invalidReason?.contains("symbolic") == true)
+    }
+
     @Test func bundleDigestChangesWhenEntryChangesWithoutAManifestBump() throws {
         let folder = try makeFolder(
             named: "cz.example.tool",
@@ -113,6 +127,24 @@ struct PluginManifestTests {
 
         #expect(first.manifest == second.manifest)
         #expect(first.contentDigest != second.contentDigest)
+    }
+
+    @Test func bundleDigestCoversFilesBeyondTheEntryPoint() throws {
+        let folder = try makeFolder(
+            named: "cz.example.tool",
+            manifestJSON: manifestJSON(id: "cz.example.tool")
+        )
+        let auxiliary = folder.appending(path: "rules.json")
+        try Data(#"{"mode":"first"}"#.utf8).write(to: auxiliary)
+        let first = try PluginDiscovery.bundleSnapshot(in: folder)
+
+        try Data(#"{"mode":"second"}"#.utf8).write(to: auxiliary)
+        let second = try PluginDiscovery.bundleSnapshot(in: folder)
+
+        #expect(first.contentDigest != second.contentDigest)
+        #expect(throws: (any Error).self) {
+            try PluginDiscovery.bundleSnapshot(in: folder, expectedDigest: first.contentDigest)
+        }
     }
 
     @Test func unsupportedAPIMajorIsRefused() throws {
