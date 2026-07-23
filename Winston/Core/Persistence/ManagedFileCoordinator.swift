@@ -219,6 +219,88 @@ nonisolated enum ManagedFileCoordinatorError: Error, Equatable {
     case injectedFailure(ManagedFileFaultPoint)
 }
 
+nonisolated enum ManagedFileOperationPhase: Sendable, Equatable, Hashable {
+    case preparing
+    case copying
+    case hashing
+    case publishing
+    case cleaning
+    case finished
+}
+
+nonisolated struct ManagedFileProgress: Sendable, Equatable {
+    let transactionID: UUID
+    let intent: ManagedFileIntent
+    let phase: ManagedFileOperationPhase
+    let completedItems: Int
+    let totalItems: Int
+    let completedBytes: Int64
+    let totalBytes: Int64?
+
+    static func initial(
+        transactionID: UUID,
+        intent: ManagedFileIntent
+    ) -> ManagedFileProgress {
+        ManagedFileProgress(
+            transactionID: transactionID,
+            intent: intent,
+            phase: .preparing,
+            completedItems: 0,
+            totalItems: 1,
+            completedBytes: 0,
+            totalBytes: nil
+        )
+    }
+
+    var phaseFraction: Double {
+        if let totalBytes, totalBytes > 0 {
+            let currentItemFraction = min(1, max(0, Double(completedBytes) / Double(totalBytes)))
+            guard totalItems > 0 else { return currentItemFraction }
+            return min(
+                1,
+                max(0, (Double(completedItems) + currentItemFraction) / Double(totalItems))
+            )
+        }
+        guard totalItems > 0 else { return phase == .finished ? 1 : 0 }
+        return min(1, max(0, Double(completedItems) / Double(totalItems)))
+    }
+
+    /// Coarse end-to-end progress for UI. The byte-accurate part covers the
+    /// potentially long copy; commit, publication and cleanup use item counts.
+    var overallFraction: Double {
+        switch phase {
+        case .preparing:
+            0.02
+        case .copying:
+            0.02 + 0.67 * stagingFraction(baseWeight: 0, currentWeight: 0.8)
+        case .hashing:
+            0.02 + 0.67 * stagingFraction(baseWeight: 0.8, currentWeight: 0.2)
+        case .publishing:
+            0.70 + 0.15 * phaseFraction
+        case .cleaning:
+            0.85 + 0.14 * phaseFraction
+        case .finished:
+            1
+        }
+    }
+
+    private func stagingFraction(baseWeight: Double, currentWeight: Double) -> Double {
+        guard totalItems > 0 else { return 0 }
+        let byteFraction: Double
+        if let totalBytes, totalBytes > 0 {
+            byteFraction = min(1, max(0, Double(completedBytes) / Double(totalBytes)))
+        } else {
+            byteFraction = 0
+        }
+        let completed = Double(completedItems)
+            + baseWeight
+            + currentWeight * byteFraction
+        return min(1, max(0, completed / Double(totalItems)))
+    }
+}
+
+typealias ManagedFileProgressHandler = @Sendable (ManagedFileProgress) -> Void
+
 actor ManagedFileCoordinator {
     typealias FaultInjector = @Sendable (ManagedFileFaultPoint) throws -> Void
 
@@ -239,6 +321,11 @@ actor ManagedFileCoordinator {
     private let configuredStateDirectory: URL?
     private let fileManager: FileManager
     private let faultInjector: FaultInjector
+    private let executor = DispatchQueueSerialExecutor(label: "cz.annajung.Winston.managed-files")
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
 
     private var booksDirectory: URL {
         configuredBooksDirectory ?? AppPaths.booksDirectory
@@ -278,12 +365,24 @@ actor ManagedFileCoordinator {
         intent: ManagedFileIntent,
         sources: [ManagedFileSource],
         requirement: ManagedFileRequirement,
-        cleanups: [ManagedFileCleanup] = []
+        cleanups: [ManagedFileCleanup] = [],
+        operationID: UUID? = nil,
+        progress: ManagedFileProgressHandler? = nil
     ) throws -> ManagedFileTransaction {
+        let signposter = Log.persistenceSignposter
+        let interval = signposter.beginInterval(
+            "ManagedFileStage",
+            id: signposter.makeSignpostID(),
+            "items=\(sources.count)"
+        )
+        defer { signposter.endInterval("ManagedFileStage", interval) }
+
+        try Task.checkCancellation()
         try ensureDirectories()
         try validate(requirement: requirement, cleanups: cleanups)
 
-        let transactionID = UUID()
+        let transactionID = operationID ?? UUID()
+        progress?(ManagedFileProgress.initial(transactionID: transactionID, intent: intent))
         let transactionStaging = stagingDirectory.appending(
             path: transactionID.uuidString,
             directoryHint: .isDirectory
@@ -292,11 +391,16 @@ actor ManagedFileCoordinator {
 
         var stagedFiles: [StagedManagedFile] = []
         do {
-            for source in sources {
+            for (index, source) in sources.enumerated() {
+                try Task.checkCancellation()
                 let staged = try stage(
                     source,
+                    intent: intent,
                     transactionID: transactionID,
-                    transactionStaging: transactionStaging
+                    transactionStaging: transactionStaging,
+                    itemIndex: index,
+                    totalItems: sources.count,
+                    progress: progress
                 )
                 stagedFiles.append(staged)
             }
@@ -329,9 +433,18 @@ actor ManagedFileCoordinator {
     func prepareCleanup(
         intent: ManagedFileIntent,
         requirement: ManagedFileRequirement,
-        cleanups: [ManagedFileCleanup]
+        cleanups: [ManagedFileCleanup],
+        operationID: UUID? = nil,
+        progress: ManagedFileProgressHandler? = nil
     ) throws -> ManagedFileTransaction {
-        try stage(intent: intent, sources: [], requirement: requirement, cleanups: cleanups)
+        try stage(
+            intent: intent,
+            sources: [],
+            requirement: requirement,
+            cleanups: cleanups,
+            operationID: operationID,
+            progress: progress
+        )
     }
 
     func willCommitCatalog(_ transaction: ManagedFileTransaction) throws {
@@ -357,7 +470,8 @@ actor ManagedFileCoordinator {
 
     func reconcile(
         _ transaction: ManagedFileTransaction,
-        against snapshot: ManagedFileCatalogSnapshot
+        against snapshot: ManagedFileCatalogSnapshot,
+        progress: ManagedFileProgressHandler? = nil
     ) throws -> ManagedFileReconcileOutcome {
         var journal = try readJournal(id: transaction.id)
         guard snapshot.satisfies(transaction.requirement) else {
@@ -371,22 +485,77 @@ actor ManagedFileCoordinator {
             throw ManagedFileCoordinatorError.destinationConflict(transaction.id.uuidString)
         }
 
-        for file in transaction.files where !journal.publishedFileIDs.contains(file.id) {
-            try faultInjector(.duringPublish(fileID: file.id))
-            try publish(file)
-            try faultInjector(.afterPublishBeforeCheckpoint(fileID: file.id))
-            journal.publishedFileIDs.insert(file.id)
-            try write(journal)
+        let unpublished = transaction.files.filter { !journal.publishedFileIDs.contains($0.id) }
+        if !unpublished.isEmpty {
+            let signposter = Log.persistenceSignposter
+            let interval = signposter.beginInterval(
+                "ManagedFilePublish",
+                id: signposter.makeSignpostID(),
+                "items=\(unpublished.count)"
+            )
+            defer { signposter.endInterval("ManagedFilePublish", interval) }
+            for (index, file) in unpublished.enumerated() {
+                try Task.checkCancellation()
+                if shouldReportProgress(index: index, total: unpublished.count) {
+                    progress?(ManagedFileProgress(
+                        transactionID: transaction.id,
+                        intent: transaction.intent,
+                        phase: .publishing,
+                        completedItems: index,
+                        totalItems: unpublished.count,
+                        completedBytes: 0,
+                        totalBytes: nil
+                    ))
+                }
+                try faultInjector(.duringPublish(fileID: file.id))
+                try publish(file)
+                try faultInjector(.afterPublishBeforeCheckpoint(fileID: file.id))
+                journal.publishedFileIDs.insert(file.id)
+                try write(journal)
+            }
         }
 
-        for cleanup in transaction.cleanups where !journal.completedCleanupIDs.contains(cleanup.id) {
-            try faultInjector(.duringCleanup(cleanupID: cleanup.id))
-            try perform(cleanup, snapshot: snapshot)
-            try faultInjector(.afterCleanupBeforeCheckpoint(cleanupID: cleanup.id))
-            journal.completedCleanupIDs.insert(cleanup.id)
-            try write(journal)
+        let unfinishedCleanups = transaction.cleanups.filter {
+            !journal.completedCleanupIDs.contains($0.id)
+        }
+        if !unfinishedCleanups.isEmpty {
+            let signposter = Log.persistenceSignposter
+            let interval = signposter.beginInterval(
+                "ManagedFileCleanup",
+                id: signposter.makeSignpostID(),
+                "items=\(unfinishedCleanups.count)"
+            )
+            defer { signposter.endInterval("ManagedFileCleanup", interval) }
+            for (index, cleanup) in unfinishedCleanups.enumerated() {
+                try Task.checkCancellation()
+                if shouldReportProgress(index: index, total: unfinishedCleanups.count) {
+                    progress?(ManagedFileProgress(
+                        transactionID: transaction.id,
+                        intent: transaction.intent,
+                        phase: .cleaning,
+                        completedItems: index,
+                        totalItems: unfinishedCleanups.count,
+                        completedBytes: 0,
+                        totalBytes: nil
+                    ))
+                }
+                try faultInjector(.duringCleanup(cleanupID: cleanup.id))
+                try perform(cleanup, snapshot: snapshot)
+                try faultInjector(.afterCleanupBeforeCheckpoint(cleanupID: cleanup.id))
+                journal.completedCleanupIDs.insert(cleanup.id)
+                try write(journal)
+            }
         }
 
+        progress?(ManagedFileProgress(
+            transactionID: transaction.id,
+            intent: transaction.intent,
+            phase: .finished,
+            completedItems: 1,
+            totalItems: 1,
+            completedBytes: 0,
+            totalBytes: nil
+        ))
         removeTransactionFiles(transaction.id)
         return .completed
     }
@@ -459,10 +628,34 @@ actor ManagedFileCoordinator {
         )
     }
 
+    /// Removes an ephemeral artifact produced by a trusted in-process worker.
+    /// Keeping this on the managed-file executor prevents conversion teardown
+    /// from synchronously touching the filesystem on MainActor.
+    func removeTemporaryItem(at url: URL) {
+        let signposter = Log.persistenceSignposter
+        let interval = signposter.beginInterval(
+            "ManagedFileTemporaryCleanup",
+            id: signposter.makeSignpostID()
+        )
+        defer { signposter.endInterval("ManagedFileTemporaryCleanup", interval) }
+        guard fileManager.fileExists(atPath: url.path(percentEncoded: false)) else { return }
+        do {
+            try fileManager.removeItem(at: url)
+        } catch {
+            Log.persistence.error(
+                "Removing temporary managed-file artifact failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
     private func stage(
         _ source: ManagedFileSource,
+        intent: ManagedFileIntent,
         transactionID: UUID,
-        transactionStaging: URL
+        transactionStaging: URL,
+        itemIndex: Int,
+        totalItems: Int,
+        progress: ManagedFileProgressHandler?
     ) throws -> StagedManagedFile {
         guard ManagedLeafName(rawValue: source.finalRelativeName) != nil else {
             throw ManagedFileCoordinatorError.unsafeRelativeName(source.finalRelativeName)
@@ -472,31 +665,171 @@ actor ManagedFileCoordinator {
         case (.some(let sourceURL), nil):
             if source.kind == .book,
                let portableHTML = try HTMLAssetInliner.portableData(for: sourceURL) {
+                try Task.checkCancellation()
+                progress?(ManagedFileProgress(
+                    transactionID: transactionID,
+                    intent: intent,
+                    phase: .copying,
+                    completedItems: itemIndex,
+                    totalItems: totalItems,
+                    completedBytes: 0,
+                    totalBytes: Int64(portableHTML.count)
+                ))
                 try portableHTML.write(to: stagedURL, options: .atomic)
+                progress?(ManagedFileProgress(
+                    transactionID: transactionID,
+                    intent: intent,
+                    phase: .copying,
+                    completedItems: itemIndex,
+                    totalItems: totalItems,
+                    completedBytes: Int64(portableHTML.count),
+                    totalBytes: Int64(portableHTML.count)
+                ))
             } else {
-                try fileManager.copyItem(at: sourceURL, to: stagedURL)
+                try copyCancellable(
+                    from: sourceURL,
+                    to: stagedURL,
+                    intent: intent,
+                    transactionID: transactionID,
+                    itemIndex: itemIndex,
+                    totalItems: totalItems,
+                    progress: progress
+                )
             }
         case (nil, .some(let data)):
+            try Task.checkCancellation()
+            progress?(ManagedFileProgress(
+                transactionID: transactionID,
+                intent: intent,
+                phase: .copying,
+                completedItems: itemIndex,
+                totalItems: totalItems,
+                completedBytes: 0,
+                totalBytes: Int64(data.count)
+            ))
             try data.write(to: stagedURL, options: .atomic)
+            progress?(ManagedFileProgress(
+                transactionID: transactionID,
+                intent: intent,
+                phase: .copying,
+                completedItems: itemIndex,
+                totalItems: totalItems,
+                completedBytes: Int64(data.count),
+                totalBytes: Int64(data.count)
+            ))
         default:
             throw CocoaError(.fileReadUnknown)
         }
 
+        try Task.checkCancellation()
         let attributes = try fileManager.attributesOfItem(
             atPath: stagedURL.path(percentEncoded: false)
         )
         let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        progress?(ManagedFileProgress(
+            transactionID: transactionID,
+            intent: intent,
+            phase: .hashing,
+            completedItems: itemIndex,
+            totalItems: totalItems,
+            completedBytes: 0,
+            totalBytes: byteCount
+        ))
+        let digest = try ContentHasher.sha256Cancellable(of: stagedURL)
+        progress?(ManagedFileProgress(
+            transactionID: transactionID,
+            intent: intent,
+            phase: .hashing,
+            completedItems: itemIndex,
+            totalItems: totalItems,
+            completedBytes: byteCount,
+            totalBytes: byteCount
+        ))
         return StagedManagedFile(
             id: UUID(),
             kind: source.kind,
             originalSourceURL: source.sourceURL,
             stagedURL: stagedURL,
             finalRelativeName: source.finalRelativeName,
-            sha256: try ContentHasher.sha256(of: stagedURL),
+            sha256: digest,
             byteCount: byteCount,
             generation: transactionID,
             replacesExisting: source.replacesExisting
         )
+    }
+
+    private func copyCancellable(
+        from sourceURL: URL,
+        to destinationURL: URL,
+        intent: ManagedFileIntent,
+        transactionID: UUID,
+        itemIndex: Int,
+        totalItems: Int,
+        progress: ManagedFileProgressHandler?
+    ) throws {
+        let attributes = try fileManager.attributesOfItem(
+            atPath: sourceURL.path(percentEncoded: false)
+        )
+        let totalBytes = (attributes[.size] as? NSNumber)?.int64Value
+        guard fileManager.createFile(
+            atPath: destinationURL.path(percentEncoded: false),
+            contents: nil
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        let source = try FileHandle(forReadingFrom: sourceURL)
+        defer { try? source.close() }
+        let destination = try FileHandle(forWritingTo: destinationURL)
+        defer { try? destination.close() }
+
+        var copiedBytes: Int64 = 0
+        var lastReportedBytes: Int64 = 0
+        progress?(ManagedFileProgress(
+            transactionID: transactionID,
+            intent: intent,
+            phase: .copying,
+            completedItems: itemIndex,
+            totalItems: totalItems,
+            completedBytes: 0,
+            totalBytes: totalBytes
+        ))
+        while true {
+            try Task.checkCancellation()
+            guard let data = try source.read(upToCount: 1_048_576), !data.isEmpty else { break }
+            try destination.write(contentsOf: data)
+            copiedBytes += Int64(data.count)
+            if copiedBytes - lastReportedBytes >= 4 * 1_048_576
+                || totalBytes.map({ copiedBytes >= $0 }) == true {
+                lastReportedBytes = copiedBytes
+                progress?(ManagedFileProgress(
+                    transactionID: transactionID,
+                    intent: intent,
+                    phase: .copying,
+                    completedItems: itemIndex,
+                    totalItems: totalItems,
+                    completedBytes: copiedBytes,
+                    totalBytes: totalBytes
+                ))
+            }
+        }
+        try Task.checkCancellation()
+        if copiedBytes != lastReportedBytes {
+            progress?(ManagedFileProgress(
+                transactionID: transactionID,
+                intent: intent,
+                phase: .copying,
+                completedItems: itemIndex,
+                totalItems: totalItems,
+                completedBytes: copiedBytes,
+                totalBytes: totalBytes
+            ))
+        }
+    }
+
+    private func shouldReportProgress(index: Int, total: Int) -> Bool {
+        guard total > 100 else { return true }
+        return index == 0 || index.isMultiple(of: max(1, total / 100))
     }
 
     private func publish(_ file: StagedManagedFile) throws {

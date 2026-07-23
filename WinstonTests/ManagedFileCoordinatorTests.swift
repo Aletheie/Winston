@@ -21,6 +21,74 @@ struct ManagedFileCoordinatorTests {
         }
     }
 
+    private final class IOThreadRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var mainThreadValues: [Bool] = []
+
+        func recordCurrentThread() {
+            lock.lock()
+            mainThreadValues.append(Thread.isMainThread)
+            lock.unlock()
+        }
+
+        var snapshot: [Bool] {
+            lock.lock()
+            defer { lock.unlock() }
+            return mainThreadValues
+        }
+    }
+
+    private final class ManagedProgressRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [ManagedFileProgress] = []
+
+        func record(_ progress: ManagedFileProgress) {
+            lock.lock()
+            values.append(progress)
+            lock.unlock()
+        }
+
+        var snapshot: [ManagedFileProgress] {
+            lock.lock()
+            defer { lock.unlock() }
+            return values
+        }
+    }
+
+    private final class CopyCancellationLatch: @unchecked Sendable {
+        private let lock = NSLock()
+        private let started = DispatchSemaphore(value: 0)
+        private let resume = DispatchSemaphore(value: 0)
+        private var didBlock = false
+
+        func handle(_ progress: ManagedFileProgress) {
+            guard progress.phase == .copying, progress.completedBytes > 0 else { return }
+            lock.lock()
+            guard !didBlock else {
+                lock.unlock()
+                return
+            }
+            didBlock = true
+            lock.unlock()
+            started.signal()
+            resume.wait()
+        }
+
+        func waitUntilCopying() async {
+            await Task.detached(priority: .utility) {
+                self.blockUntilStarted()
+            }.value
+        }
+
+        func release() {
+            resume.signal()
+        }
+
+        private func blockUntilStarted() {
+            started.wait()
+        }
+    }
+
     @Test func failureAfterStagingLeavesRecoverableJournalAndNoOrphan() async throws {
         let library = try await TestLibrary()
         let source = try sourceFile(in: library.root, contents: "staged")
@@ -471,6 +539,142 @@ struct ManagedFileCoordinatorTests {
         #expect(report.abortedTransactionIDs.count == 1_000)
         #expect(await restarted.pendingTransactions().isEmpty)
         #expect(try managedBookFiles().isEmpty)
+    }
+
+    @Test func copyHashPublishAndCleanupUseDedicatedExecutorAndReportProgress() async throws {
+        let library = try await TestLibrary()
+        let source = try sourceFile(in: library.root, contents: "replacement")
+        let oldName = "old.epub"
+        try Data("old".utf8).write(to: BookFileStore.url(for: oldName))
+        let managedSource = try ManagedFileSource.book(sourceURL: source)
+        let bookID = UUID()
+        let threads = IOThreadRecorder()
+        let progress = ManagedProgressRecorder()
+        let coordinator = makeCoordinator { point in
+            switch point {
+            case .afterStaging, .duringCleanup:
+                threads.recordCurrentThread()
+            default:
+                break
+            }
+        }
+
+        let transaction = try await coordinator.stage(
+            intent: .replaceBookFile,
+            sources: [managedSource],
+            requirement: ManagedFileRequirement(
+                presentBookIDs: [bookID],
+                referencedBookFileNames: [managedSource.finalRelativeName],
+                unreferencedBookFileNames: [oldName]
+            ),
+            cleanups: [.book(oldName)],
+            progress: progress.record
+        )
+        try await coordinator.catalogDidCommit(transaction)
+        let snapshot = ManagedFileCatalogSnapshot(
+            presentBookIDs: [bookID],
+            referencedBookFileNames: [managedSource.finalRelativeName],
+            coverVersions: [:]
+        )
+        #expect(
+            try await coordinator.reconcile(
+                transaction,
+                against: snapshot,
+                progress: progress.record
+            ) == .completed
+        )
+
+        #expect(threads.snapshot.count == 2)
+        #expect(threads.snapshot.allSatisfy { !$0 })
+        let phases = Set(progress.snapshot.map(\.phase))
+        #expect(phases.contains(.copying))
+        #expect(phases.contains(.hashing))
+        #expect(phases.contains(.publishing))
+        #expect(phases.contains(.cleaning))
+        #expect(phases.contains(.finished))
+        let fractions = progress.snapshot.map(\.overallFraction)
+        #expect(zip(fractions, fractions.dropFirst()).allSatisfy { $0 <= $1 })
+    }
+
+    @Test func cancellationDuringCopyRemovesStagingAndJournal() async throws {
+        let library = try await TestLibrary()
+        let source = library.root.appending(path: "large-source.epub")
+        #expect(FileManager.default.createFile(atPath: source.path(percentEncoded: false), contents: nil))
+        let handle = try FileHandle(forWritingTo: source)
+        let megabyte = Data(repeating: 0x57, count: 1_048_576)
+        for _ in 0..<8 {
+            try handle.write(contentsOf: megabyte)
+        }
+        try handle.close()
+
+        let managedSource = try ManagedFileSource.book(sourceURL: source)
+        let coordinator = makeCoordinator()
+        let latch = CopyCancellationLatch()
+        let stageTask = Task {
+            try await coordinator.stage(
+                intent: .importBook,
+                sources: [managedSource],
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [UUID()],
+                    referencedBookFileNames: [managedSource.finalRelativeName]
+                ),
+                progress: latch.handle
+            )
+        }
+
+        await latch.waitUntilCopying()
+        stageTask.cancel()
+        latch.release()
+        await #expect(throws: CancellationError.self) {
+            _ = try await stageTask.value
+        }
+
+        #expect(await coordinator.pendingTransactions().isEmpty)
+        let staging = AppPaths.managedFilesDirectory.appending(
+            path: "Staging",
+            directoryHint: .isDirectory
+        )
+        let stagedEntries = try FileManager.default.contentsOfDirectory(
+            at: staging,
+            includingPropertiesForKeys: nil
+        )
+        #expect(stagedEntries.isEmpty)
+    }
+
+    @Test func oneThousandFileCleanupIsSerializedAndProgressIsThrottled() async throws {
+        let library = try await TestLibrary()
+        _ = library
+        var cleanups: [ManagedFileCleanup] = []
+        cleanups.reserveCapacity(1_000)
+        for index in 0..<1_000 {
+            let fileName = "bulk-\(index).epub"
+            try Data([UInt8(index % 251)]).write(to: BookFileStore.url(for: fileName))
+            cleanups.append(.book(fileName))
+        }
+        let coordinator = makeCoordinator()
+        let progress = ManagedProgressRecorder()
+        let transaction = try await coordinator.prepareCleanup(
+            intent: .deleteBook,
+            requirement: ManagedFileRequirement(
+                unreferencedBookFileNames: Set(cleanups.map(\.relativeName))
+            ),
+            cleanups: cleanups,
+            progress: progress.record
+        )
+        try await coordinator.catalogDidCommit(transaction)
+
+        #expect(
+            try await coordinator.reconcile(
+                transaction,
+                against: emptySnapshot,
+                progress: progress.record
+            ) == .completed
+        )
+
+        #expect(try managedBookFiles().isEmpty)
+        let cleanupUpdates = progress.snapshot.filter { $0.phase == .cleaning }
+        #expect(cleanupUpdates.count <= 101)
+        #expect(progress.snapshot.last?.phase == .finished)
     }
 
     private var emptySnapshot: ManagedFileCatalogSnapshot {
