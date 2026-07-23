@@ -269,7 +269,9 @@ nonisolated struct SmartShelfRule: Codable, Hashable, Identifiable, Sendable {
             return booleanMatches(book.drmProtected)
         case .onDevice:
             return booleanMatches(
-                deviceIsConnected ? deviceFileNames.contains(book.deviceMatchKey) : nil
+                deviceIsConnected
+                    ? !book.deviceMatchKeys.isDisjoint(with: deviceFileNames)
+                    : nil
             )
         case .missingMetadata:
             return booleanMatches(book.hasMissingMetadata)
@@ -367,7 +369,7 @@ nonisolated struct SmartShelfBookSnapshot: Sendable {
     let readingStatusRaw: String
     let hasHighlights: Bool
     let drmProtected: Bool
-    let deviceMatchKey: String
+    let deviceMatchKeys: Set<String>
     let hasMissingMetadata: Bool
 
     @MainActor init(_ book: Book) {
@@ -389,7 +391,7 @@ nonisolated struct SmartShelfBookSnapshot: Sendable {
         readingStatusRaw = book.readingStatus.rawValue
         hasHighlights = includeHighlights && !book.highlights.isEmpty
         drmProtected = book.drmProtected == true
-        deviceMatchKey = book.deviceMatchKey
+        deviceMatchKeys = book.deviceMatchKeys
         hasMissingMetadata = Self.isBlank(book.title)
             || Self.isBlank(book.author)
             || Self.isBlank(book.language)

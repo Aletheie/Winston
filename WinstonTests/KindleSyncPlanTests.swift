@@ -6,11 +6,14 @@ import Testing
 @Suite("Kindle sync plan", .serialized)
 struct KindleSyncPlanTests {
     private func candidate(
+        id: UUID = UUID(),
         title: String = "Dune",
         matchKey: String = "dune",
+        targetFileName: String? = nil,
         sourceFormat: String = "EPUB",
         targetFormat: String = "AZW3",
         fingerprint: String = "source-v2",
+        lineageFingerprint: String? = nil,
         size: UInt64 = 0,
         requiresConversion: Bool = true,
         staleConversion: Bool = false,
@@ -19,14 +22,15 @@ struct KindleSyncPlanTests {
         blockReason: KindleSyncReason? = nil
     ) -> KindleSyncCandidate {
         KindleSyncCandidate(
-            id: UUID(),
+            id: id,
             title: title,
             author: "Frank Herbert",
             matchKey: matchKey,
             sourceFormat: sourceFormat,
-            targetFileName: "\(title).\(targetFormat.lowercased())",
+            targetFileName: targetFileName ?? "\(title).\(targetFormat.lowercased())",
             targetFormat: targetFormat,
             sourceFingerprint: fingerprint,
+            sourceLineageFingerprint: lineageFingerprint,
             sendSizeBytes: size,
             requiresConversion: requiresConversion,
             hasStaleTargetConversion: staleConversion,
@@ -157,6 +161,37 @@ struct KindleSyncPlanTests {
         #expect(plan.items.first?.reason == .sourceChanged)
     }
 
+    @Test func generatedArtifactMatchesReceiptForItsSourceGeneration() {
+        let local = candidate(
+            fingerprint: "generated-artifact-hash",
+            lineageFingerprint: "primary-source-hash"
+        )
+        let target = DevicePathAllocator.allocate(
+            proposedFileName: local.targetFileName,
+            ownerID: local.id
+        )
+        let receipt = KindleSyncReceipt(
+            bookID: local.id,
+            sourceFingerprint: "primary-source-hash",
+            sentFileName: target,
+            coverVersion: 1,
+            syncedAt: .now
+        )
+        let device = DeviceBook(
+            path: "/documents/\(target)",
+            fileName: target,
+            sizeBytes: 900
+        )
+
+        let plan = KindleSyncPlanner.makePlan(
+            candidates: [local],
+            deviceBooks: [device],
+            profile: profile(receipts: [receipt])
+        )
+
+        #expect(plan.items.first?.action == .keep)
+    }
+
     @Test func changedCoverRepairsThumbnailWithoutReplacingBook() {
         let local = candidate(fingerprint: "same", coverVersion: 3)
         let receipt = KindleSyncReceipt(
@@ -223,19 +258,59 @@ struct KindleSyncPlanTests {
         #expect(removal?.selectedByDefault == false)
     }
 
-    @Test func collidingLibraryFilenamesAreBlockedInsteadOfOverwritingEachOther() {
-        let first = candidate(title: "Dune First Edition", matchKey: "dune")
-        let second = candidate(title: "Dune Translation", matchKey: "dune")
-        let device = DeviceBook(path: "/documents/Dune.azw3", fileName: "Dune.azw3", sizeBytes: 900)
+    @Test func collidingLibraryFilenamesReceiveStableDistinctPaths() {
+        let first = candidate(
+            title: "Dune First Edition",
+            matchKey: "book",
+            targetFileName: "book.azw3"
+        )
+        let second = candidate(
+            title: "Dune Translation",
+            matchKey: "book",
+            targetFileName: "book.azw3"
+        )
+        let firstTarget = DevicePathAllocator.allocate(
+            proposedFileName: first.targetFileName,
+            ownerID: first.id
+        )
+        let secondTarget = DevicePathAllocator.allocate(
+            proposedFileName: second.targetFileName,
+            ownerID: second.id
+        )
+        let deviceBooks = [
+            DeviceBook(
+                path: "/documents/\(firstTarget)",
+                fileName: firstTarget,
+                sizeBytes: 900
+            ),
+            DeviceBook(
+                path: "/documents/\(secondTarget)",
+                fileName: secondTarget,
+                sizeBytes: 900
+            ),
+        ]
+        let receipts = [first, second].map { candidate in
+            KindleSyncReceipt(
+                bookID: candidate.id,
+                sourceFingerprint: candidate.sourceFingerprint,
+                sentFileName: DevicePathAllocator.allocate(
+                    proposedFileName: candidate.targetFileName,
+                    ownerID: candidate.id
+                ),
+                coverVersion: candidate.coverVersion,
+                syncedAt: .now
+            )
+        }
 
         let plan = KindleSyncPlanner.makePlan(
             candidates: [first, second],
-            deviceBooks: [device],
-            profile: profile()
+            deviceBooks: deviceBooks,
+            profile: profile(receipts: receipts)
         )
 
-        #expect(plan.count(for: .blocked) == 2)
-        #expect(plan.items.filter { $0.action == .blocked }.allSatisfy { $0.reason == .fileNameCollision })
+        #expect(firstTarget != secondTarget)
+        #expect(plan.count(for: .keep) == 2)
+        #expect(plan.count(for: .blocked) == 0)
         #expect(plan.count(for: .add) == 0)
         #expect(plan.count(for: .remove) == 0)
     }
@@ -306,5 +381,50 @@ struct KindleSyncPlanTests {
         #expect(reloaded.profiles.count == 2)
         #expect(reloaded.receipts(for: firstProfile.id)[bookID] != nil)
         #expect(reloaded.receipts(for: secondProfile.id)[bookID] == nil)
+    }
+
+    @Test func legacyReceiptsDecodeWithUnknownArtifactMetadata() throws {
+        struct LegacyReceipt: Codable {
+            let bookID: UUID
+            let sourceFingerprint: String
+            let sentFileName: String
+            let coverVersion: Int?
+            let syncedAt: Date
+        }
+        struct LegacyProfile: Codable {
+            let id: UUID
+            let name: String
+            let deviceIdentifiers: [String]
+            let receipts: [LegacyReceipt]
+            let lastSeenAt: Date
+        }
+
+        let suiteName = "KindleSyncLegacyReceipt-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storageKey = "profiles"
+        let bookID = UUID()
+        let legacy = LegacyProfile(
+            id: UUID(),
+            name: "Legacy Kindle",
+            deviceIdentifiers: ["legacy-device"],
+            receipts: [LegacyReceipt(
+                bookID: bookID,
+                sourceFingerprint: "legacy-source",
+                sentFileName: "Legacy.mobi",
+                coverVersion: 1,
+                syncedAt: .now
+            )],
+            lastSeenAt: .now
+        )
+        defaults.set(try JSONEncoder().encode([legacy]), forKey: storageKey)
+
+        let store = KindleSyncProfileStore(defaults: defaults, storageKey: storageKey)
+        let receipt = try #require(store.receipts(for: legacy.id)[bookID])
+
+        #expect(receipt.assetID == nil)
+        #expect(receipt.sourceFormat == nil)
+        #expect(receipt.sourceSizeBytes == nil)
+        #expect(receipt.sourceFingerprint == "legacy-source")
     }
 }

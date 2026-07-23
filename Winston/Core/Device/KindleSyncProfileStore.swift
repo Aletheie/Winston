@@ -3,12 +3,35 @@ import Observation
 
 nonisolated struct KindleSyncReceipt: Codable, Equatable, Identifiable, Sendable {
     var bookID: UUID
+    var assetID: UUID?
+    var sourceFormat: String?
+    var sourceSizeBytes: UInt64?
     var sourceFingerprint: String
     var sentFileName: String
     var coverVersion: Int?
     var syncedAt: Date
 
     var id: UUID { bookID }
+
+    init(
+        bookID: UUID,
+        assetID: UUID? = nil,
+        sourceFormat: String? = nil,
+        sourceSizeBytes: UInt64? = nil,
+        sourceFingerprint: String,
+        sentFileName: String,
+        coverVersion: Int?,
+        syncedAt: Date
+    ) {
+        self.bookID = bookID
+        self.assetID = assetID
+        self.sourceFormat = sourceFormat
+        self.sourceSizeBytes = sourceSizeBytes
+        self.sourceFingerprint = sourceFingerprint
+        self.sentFileName = sentFileName
+        self.coverVersion = coverVersion
+        self.syncedAt = syncedAt
+    }
 }
 
 nonisolated struct KindleSyncProfile: Codable, Equatable, Identifiable, Sendable {
@@ -23,10 +46,37 @@ nonisolated struct KindleSyncTransferRecord: Equatable, Sendable {
     let deviceIdentifier: String
     let deviceName: String
     let bookID: UUID
+    let assetID: UUID?
+    let sourceFormat: String?
+    let sourceSizeBytes: UInt64?
     let sourceFingerprint: String
     let sentFileName: String
     let coverVersion: Int?
     let completedAt: Date
+
+    init(
+        deviceIdentifier: String,
+        deviceName: String,
+        bookID: UUID,
+        assetID: UUID? = nil,
+        sourceFormat: String? = nil,
+        sourceSizeBytes: UInt64? = nil,
+        sourceFingerprint: String,
+        sentFileName: String,
+        coverVersion: Int?,
+        completedAt: Date
+    ) {
+        self.deviceIdentifier = deviceIdentifier
+        self.deviceName = deviceName
+        self.bookID = bookID
+        self.assetID = assetID
+        self.sourceFormat = sourceFormat
+        self.sourceSizeBytes = sourceSizeBytes
+        self.sourceFingerprint = sourceFingerprint
+        self.sentFileName = sentFileName
+        self.coverVersion = coverVersion
+        self.completedAt = completedAt
+    }
 }
 
 @MainActor
@@ -115,6 +165,9 @@ final class KindleSyncProfileStore {
         guard let profileIndex = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         let receipt = KindleSyncReceipt(
             bookID: record.bookID,
+            assetID: record.assetID,
+            sourceFormat: record.sourceFormat,
+            sourceSizeBytes: record.sourceSizeBytes,
             sourceFingerprint: record.sourceFingerprint,
             sentFileName: record.sentFileName,
             coverVersion: record.coverVersion,

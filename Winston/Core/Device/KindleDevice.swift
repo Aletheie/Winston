@@ -52,6 +52,8 @@ nonisolated struct DeviceInfo: Sendable, Equatable {
 
 nonisolated struct DeviceBook: Identifiable, Sendable, Hashable {
     var mtpItemID: UInt32?
+    /// Mass-storage paths are mount-root-relative (for example `documents/book.mobi`).
+    /// Absolute device paths must never cross the mounted-volume boundary.
     var path: String?
     var fileName: String
     var sizeBytes: UInt64
@@ -65,7 +67,11 @@ nonisolated struct DeviceBook: Identifiable, Sendable, Hashable {
     }
 
     var matchKey: String {
-        (fileName as NSString).deletingPathExtension.lowercased()
+        DevicePathAllocator.rawMatchKey(for: fileName)
+    }
+
+    var legacyMatchKey: String {
+        DevicePathAllocator.legacyMatchKey(for: fileName)
     }
 
     var sizeDisplay: String {
@@ -92,7 +98,7 @@ nonisolated enum DeviceError: Error, LocalizedError, Equatable {
         case .deleteFailed(let code):     "Delete failed (error \(code))"
         case .fileMissing:                "The file no longer exists"
         case .invalidFileName:            "The destination file name is invalid"
-        case .unsafePath:                 "The device path is outside the documents folder"
+        case .unsafePath:                 "The device path violates the mounted-volume boundary"
         }
     }
 }
@@ -108,13 +114,13 @@ nonisolated protocol KindleDeviceConnection: Sendable {
     func isAlive() async -> Bool
     func disconnect() async
     func eject() async
-    func removeStaleVariants(baseName: String, keeping fileName: String) async
+    func removeStaleVariants(baseName: String, keeping fileName: String) async throws
     func removeAppleDoubleSidecars() async throws -> Int
 }
 
 nonisolated extension KindleDeviceConnection {
     func eject() async { await disconnect() }
-    func removeStaleVariants(baseName: String, keeping fileName: String) async {}
+    func removeStaleVariants(baseName: String, keeping fileName: String) async throws {}
 }
 
 nonisolated let deviceBookExtensions: Set<String> = ["epub", "mobi", "azw", "azw3", "pdf", "txt", "kfx"]

@@ -1,3 +1,6 @@
+import AppKit
+import CoreGraphics
+import CoreText
 import Testing
 import Foundation
 import SwiftData
@@ -32,6 +35,30 @@ struct TransferQueueTests {
         return book
     }
 
+    private func targetFileName(for book: Book, format: String) -> String {
+        DevicePathAllocator.allocate(
+            originalFileName: book.originalFileName,
+            targetFormat: format,
+            ownerID: book.uuid
+        )
+    }
+
+    private func makeTextPDF(text: String, at url: URL) throws {
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let context = CGContext(url as CFURL, mediaBox: &mediaBox, nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        context.beginPDFPage(nil)
+        let attributed = NSAttributedString(
+            string: text,
+            attributes: [.font: NSFont.systemFont(ofSize: 24)]
+        )
+        context.textPosition = CGPoint(x: 72, y: 700)
+        CTLineDraw(CTLineCreateWithAttributedString(attributed), context)
+        context.endPDFPage()
+        context.closePDF()
+    }
+
     @Test func deviceMonitorCachesMatchKeysAndPublishesACheapRevision() async {
         let fake = FakeKindleConnection()
         let monitor = makeMonitor(fake)
@@ -53,6 +80,35 @@ struct TransferQueueTests {
         monitor.removeBooksLocally([books[0].id])
         #expect(monitor.booksRevision == before + 2)
         #expect(monitor.deviceFileNames == ["second"])
+    }
+
+    @Test func allocatedMatchKeyRemovesOnlyTheIntendedCollidingBook() async {
+        let first = Book(fileName: "first.mobi", originalFileName: "book.mobi")
+        let second = Book(fileName: "second.mobi", originalFileName: "book.mobi")
+        let firstName = targetFileName(for: first, format: "mobi")
+        let secondName = targetFileName(for: second, format: "mobi")
+        let fake = FakeKindleConnection()
+        await fake.setBooks([
+            DeviceBook(
+                path: "/documents/\(firstName)",
+                fileName: firstName,
+                sizeBytes: 10
+            ),
+            DeviceBook(
+                path: "/documents/\(secondName)",
+                fileName: secondName,
+                sizeBytes: 20
+            ),
+        ])
+        let monitor = makeMonitor(fake)
+        await monitor.refreshBooks()
+        let keys = first.deviceMatchKeys.intersection(monitor.deviceFileNames)
+
+        let removed = await monitor.removeFromDevice(matching: keys)
+
+        #expect(removed == 1)
+        #expect(await fake.deletedFileNames == [firstName])
+        #expect(monitor.books.map(\.fileName) == [secondName])
     }
 
     @Test func copyFromDeviceRejectsUnsafeFileName() async {
@@ -81,10 +137,14 @@ struct TransferQueueTests {
         await queue.send(books: [book], via: makeMonitor(fake))
 
         let sent = await fake.sentFiles
-        #expect(sent.map(\.fileName) == ["Fox Book.mobi"])
+        let targetName = targetFileName(for: book, format: "mobi")
+        #expect(sent.map(\.fileName) == [targetName])
         #expect(sent.first?.byteCount ?? 0 > 0)
 
-        #expect(await fake.staleVariantCalls == [["Fox Book", "Fox Book.mobi"]])
+        #expect(await fake.staleVariantCalls == [[
+            (targetName as NSString).deletingPathExtension,
+            targetName,
+        ]])
 
         let thumbnails = await fake.pushedThumbnails
         #expect(thumbnails.count == 1)
@@ -95,6 +155,50 @@ struct TransferQueueTests {
         #expect(queue.failedCount == 0)
         #expect(queue.completedCount == 1)
         #expect(queue.overallProgress == 1)
+    }
+
+    @Test func bulkSendAllocatesDistinctPathsForEqualBasenames() async throws {
+        let lib = try await TestLibrary()
+        let first = try makeMOBIBook(in: lib, title: "First Collision")
+        let second = try makeMOBIBook(in: lib, title: "Second Collision")
+        first.originalFileName = "book.mobi"
+        second.originalFileName = "book.mobi"
+        let fake = FakeKindleConnection()
+
+        await TransferQueue(toasts: ToastCenter()).send(
+            books: [first, second],
+            via: makeMonitor(fake)
+        )
+
+        let sentNames = await fake.sentFiles.map(\.fileName)
+        #expect(sentNames == [
+            targetFileName(for: first, format: "mobi"),
+            targetFileName(for: second, format: "mobi"),
+        ])
+        #expect(Set(sentNames).count == 2)
+        let cleanupBases = await fake.staleVariantCalls.map { $0[0] }
+        #expect(Set(cleanupBases).count == 2)
+    }
+
+    @Test func separateDirectSendsKeepStableDistinctPathsForEqualBasenames() async throws {
+        let lib = try await TestLibrary()
+        let first = try makeMOBIBook(in: lib, title: "Direct First")
+        let second = try makeMOBIBook(in: lib, title: "Direct Second")
+        first.originalFileName = "book.mobi"
+        second.originalFileName = "book.mobi"
+        let fake = FakeKindleConnection()
+        let queue = TransferQueue(toasts: ToastCenter())
+        let monitor = makeMonitor(fake)
+
+        await queue.send(books: [first], via: monitor)
+        await queue.send(books: [second], via: monitor)
+
+        let sentNames = await fake.sentFiles.map(\.fileName)
+        #expect(sentNames == [
+            targetFileName(for: first, format: "mobi"),
+            targetFileName(for: second, format: "mobi"),
+        ])
+        #expect(Set(sentNames).count == 2)
     }
 
     @Test func successfulSendRecordsReceiptForTheConnectedKindleProfile() async throws {
@@ -115,8 +219,106 @@ struct TransferQueueTests {
 
         let profile = try #require(profiles.profile(for: FakeKindleConnection.fakeInfo))
         let receipt = try #require(profiles.receipts(for: profile.id)[book.uuid])
-        #expect(receipt.sentFileName == "Receipt Book.mobi")
+        #expect(receipt.sentFileName == targetFileName(for: book, format: "mobi"))
         #expect(receipt.coverVersion == book.coverVersion)
+    }
+
+    @Test func actualReceiptHashMatchesLaterSyncCandidateWithoutCatalogHash() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Unhashed Receipt")
+        var records: [KindleSyncTransferRecord] = []
+        let fake = FakeKindleConnection()
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { records.append($0) }
+        )
+
+        await queue.send(books: [book], via: makeMonitor(fake))
+
+        let record = try #require(records.first)
+        let candidate = KindleSendPreparation.candidate(for: book)
+        let deviceBook = DeviceBook(
+            path: "/documents/\(record.sentFileName)",
+            fileName: record.sentFileName,
+            sizeBytes: record.sourceSizeBytes ?? 0
+        )
+        let receipt = KindleSyncReceipt(
+            bookID: record.bookID,
+            assetID: record.assetID,
+            sourceFormat: record.sourceFormat,
+            sourceSizeBytes: record.sourceSizeBytes,
+            sourceFingerprint: record.sourceFingerprint,
+            sentFileName: record.sentFileName,
+            coverVersion: record.coverVersion,
+            syncedAt: record.completedAt
+        )
+        let plan = KindleSyncPlanner.makePlan(
+            candidates: [candidate],
+            deviceBooks: [deviceBook],
+            profile: KindleSyncProfile(
+                id: UUID(),
+                name: "My Kindle",
+                deviceIdentifiers: [FakeKindleConnection.fakeInfo.identifier],
+                receipts: [receipt],
+                lastSeenAt: .now
+            )
+        )
+
+        #expect(candidate.sourceFingerprint == record.sourceFingerprint)
+        #expect(plan.items.first?.action == .keep)
+    }
+
+    @Test func selectedSecondaryPDFUsesItsOwnBytesAndReceiptWhenPrimaryIsMissing() async throws {
+        let lib = try await TestLibrary()
+        let book = Book(
+            fileName: "missing-primary.epub",
+            originalFileName: "book.epub"
+        )
+        let primary = BookAsset(
+            uuid: book.uuid,
+            fileName: book.fileName,
+            contentHash: "missing-primary-hash",
+            validationStatus: .missing,
+            book: book
+        )
+        let pdfSource = lib.root.appending(path: "secondary.pdf")
+        try makeTextPDF(text: "Secondary PDF content.", at: pdfSource)
+        let secondaryName = "\(UUID().uuidString).pdf"
+        try lib.installBookFile(from: pdfSource, fileName: secondaryName)
+        let secondary = BookAsset(
+            fileName: secondaryName,
+            origin: .generated,
+            generatedFromContentHash: "unavailable-primary-generation",
+            validationStatus: .ok,
+            book: book
+        )
+        lib.context.insert(book)
+        lib.context.insert(primary)
+        lib.context.insert(secondary)
+        try lib.context.save()
+        let expectedHash = try ContentHasher.sha256(of: secondary.fileURL)
+        let expectedSize = UInt64(try Data(contentsOf: secondary.fileURL).count)
+        var receipts: [KindleSyncTransferRecord] = []
+        let fake = FakeKindleConnection()
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { receipts.append($0) }
+        )
+
+        await queue.send(asset: secondary, for: book, via: makeMonitor(fake))
+
+        #expect(await fake.sentFiles.count == 1)
+        #expect(queue.items.first?.stage == .done)
+        let receipt = try #require(receipts.first)
+        #expect(receipt.assetID == secondary.uuid)
+        #expect(receipt.sourceFormat == "PDF")
+        #expect(receipt.sourceSizeBytes == expectedSize)
+        #expect(receipt.sourceFingerprint == expectedHash)
+        #expect(receipt.sourceFingerprint != primary.contentHash)
+        let targetFormat = EbookConverter.needsConversion(format: "PDF")
+            ? EbookConverter.kindleTarget(forFormat: "PDF").ext
+            : "pdf"
+        #expect(receipt.sentFileName == targetFileName(for: book, format: targetFormat))
     }
 
     @Test(.enabled(if: !EbookConverter.prefersAZW3ForKindle))
@@ -133,7 +335,7 @@ struct TransferQueueTests {
         await queue.send(books: [book], via: makeMonitor(fake))
 
         let sent = await fake.sentFiles
-        #expect(sent.map(\.fileName) == ["Epub Book.mobi"])
+        #expect(sent.map(\.fileName) == [targetFileName(for: book, format: "mobi")])
         #expect(queue.items.allSatisfy { $0.stage == .done })
         #expect(!FileManager.default.fileExists(atPath: temporaryOutput.path(percentEncoded: false)))
     }
@@ -203,6 +405,65 @@ struct TransferQueueTests {
         #expect(await fake.pushedThumbnails.isEmpty)
     }
 
+    @Test func cleanupFailurePreventsDoneAndReceipt() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Cleanup Failure")
+        let fake = FakeKindleConnection()
+        await fake.setFailCleanup(true)
+        var receipts: [KindleSyncTransferRecord] = []
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { receipts.append($0) }
+        )
+
+        await queue.send(books: [book], via: makeMonitor(fake))
+
+        #expect(await fake.sentFiles.count == 1)
+        #expect(queue.items.first?.stage == .failed)
+        #expect(queue.completedCount == 0)
+        #expect(receipts.isEmpty)
+        #expect(await fake.pushedThumbnails.isEmpty)
+    }
+
+    @Test func thumbnailFailureFinishesWithReceiptWithoutCoverVersion() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Thumbnail Failure")
+        let fake = FakeKindleConnection()
+        await fake.setFailThumbnails(true)
+        var receipts: [KindleSyncTransferRecord] = []
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { receipts.append($0) }
+        )
+
+        await queue.send(books: [book], via: makeMonitor(fake))
+
+        #expect(queue.items.first?.stage == .done)
+        #expect(queue.completedCount == 1)
+        #expect(receipts.count == 1)
+        #expect(receipts.first?.coverVersion == nil)
+    }
+
+    @Test func receiptFailurePreventsDoneAfterDevicePostProcessing() async throws {
+        struct ReceiptFailure: Error {}
+
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Receipt Failure")
+        let fake = FakeKindleConnection()
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { _ in throw ReceiptFailure() }
+        )
+
+        await queue.send(books: [book], via: makeMonitor(fake))
+
+        #expect(await fake.sentFiles.count == 1)
+        #expect(await fake.staleVariantCalls.count == 1)
+        #expect(await fake.pushedThumbnails.count == 1)
+        #expect(queue.items.first?.stage == .failed)
+        #expect(queue.completedCount == 0)
+    }
+
     @Test func cancelKeepsQueueReservedUntilUninterruptibleSendReturns() async throws {
         let lib = try await TestLibrary()
         let first = try makeMOBIBook(in: lib, title: "First")
@@ -231,9 +492,10 @@ struct TransferQueueTests {
         }
 
         #expect(!queue.isTransferring)
-        #expect(await fake.sentFiles.map(\.fileName) == ["First.mobi"])
+        let firstTarget = targetFileName(for: first, format: "mobi")
+        #expect(await fake.sentFiles.map(\.fileName) == [firstTarget])
         #expect(queue.items.map(\.stage) == [.done, .cancelled])
-        #expect(receipts.map(\.sentFileName) == ["First.mobi"])
+        #expect(receipts.map(\.sentFileName) == [firstTarget])
         #expect(queue.failedCount == 0)
     }
 
@@ -288,8 +550,36 @@ struct TransferQueueTests {
         }
 
         #expect(!queue.isTransferring)
-        #expect(await fake.sentFiles.map(\.fileName) == ["Delete Mid Send.mobi"])
+        #expect(await fake.sentFiles.map(\.fileName) == [
+            targetFileName(for: book, format: "mobi"),
+        ])
         #expect(queue.items.first?.stage == .done)
+    }
+
+    @Test func replacingLaterAssetBeforeItsTurnFailsGenerationCheck() async throws {
+        let lib = try await TestLibrary()
+        let first = try makeMOBIBook(in: lib, title: "Generation First")
+        let second = try makeMOBIBook(in: lib, title: "Generation Second")
+        let fake = FakeKindleConnection()
+        await fake.setBlockSends(true)
+        let queue = TransferQueue(toasts: ToastCenter())
+        let monitor = makeMonitor(fake)
+
+        queue.beginSend(books: [first, second], via: monitor)
+        await fake.waitUntilSendStarts()
+        try Data("replacement generation".utf8).write(to: second.fileURL)
+        await fake.releaseBlockedSend()
+
+        let deadline = Date.now.addingTimeInterval(2)
+        while queue.isTransferring, Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(await fake.sentFiles.map(\.fileName) == [
+            targetFileName(for: first, format: "mobi"),
+        ])
+        #expect(queue.items.map(\.stage) == [.done, .failed])
+        #expect(queue.lastError == TransferArtifactError.sourceChanged.localizedDescription)
     }
 
     @Test func usesMOBISiblingWithoutConversionWhenPrimaryIsEPUB() async throws {
@@ -315,7 +605,9 @@ struct TransferQueueTests {
 
         await TransferQueue(toasts: ToastCenter()).send(books: [book], via: makeMonitor(fake))
 
-        #expect(await fake.sentFiles.map(\.fileName) == ["Sibling Pick.mobi"])
+        #expect(await fake.sentFiles.map(\.fileName) == [
+            targetFileName(for: book, format: "mobi"),
+        ])
         #expect(await fake.sentFiles.first?.byteCount == Data("mobi sibling".utf8).count)
     }
 
@@ -346,7 +638,9 @@ struct TransferQueueTests {
 
         await TransferQueue(toasts: ToastCenter()).send(books: [book], via: makeMonitor(fake))
 
-        #expect(await fake.sentFiles.map(\.fileName) == ["Preferred.azw3"])
+        #expect(await fake.sentFiles.map(\.fileName) == [
+            targetFileName(for: book, format: "azw3"),
+        ])
         #expect(await fake.sentFiles.first?.byteCount == Data("azw3 preferred".utf8).count)
     }
 
@@ -375,7 +669,9 @@ struct TransferQueueTests {
 
         await TransferQueue(toasts: ToastCenter()).send(books: [book], via: makeMonitor(fake))
 
-        #expect(await fake.sentFiles.map(\.fileName) == ["Fresh Source.mobi"])
+        #expect(await fake.sentFiles.map(\.fileName) == [
+            targetFileName(for: book, format: "mobi"),
+        ])
         #expect(await fake.sentFiles.first?.byteCount != staleBytes.count)
     }
 
@@ -399,7 +695,9 @@ struct TransferQueueTests {
 
         await queue.send(books: [book], via: makeMonitor(fake))
 
-        #expect(await fake.sentFiles.map(\.fileName) == ["Adopt.mobi"])
+        #expect(await fake.sentFiles.map(\.fileName) == [
+            targetFileName(for: book, format: "mobi"),
+        ])
         let adopted = book.assets.first(where: {
             $0.origin == .generated && $0.format == "MOBI" && $0.validationStatus == .ok
         })

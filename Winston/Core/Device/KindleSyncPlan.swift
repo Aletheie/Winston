@@ -32,12 +32,38 @@ nonisolated struct KindleSyncCandidate: Equatable, Identifiable, Sendable {
     let targetFileName: String
     let targetFormat: String
     let sourceFingerprint: String
+    let sourceLineageFingerprint: String?
     let sendSizeBytes: UInt64
     let requiresConversion: Bool
     let hasStaleTargetConversion: Bool
     let coverVersion: Int
     let hasCover: Bool
     let blockReason: KindleSyncReason?
+
+    func allocatingDevicePath() -> KindleSyncCandidate {
+        let allocated = DevicePathAllocator.allocate(
+            proposedFileName: targetFileName,
+            ownerID: id
+        )
+        guard allocated != targetFileName else { return self }
+        return KindleSyncCandidate(
+            id: id,
+            title: title,
+            author: author,
+            matchKey: matchKey,
+            sourceFormat: sourceFormat,
+            targetFileName: allocated,
+            targetFormat: targetFormat,
+            sourceFingerprint: sourceFingerprint,
+            sourceLineageFingerprint: sourceLineageFingerprint,
+            sendSizeBytes: sendSizeBytes,
+            requiresConversion: requiresConversion,
+            hasStaleTargetConversion: hasStaleTargetConversion,
+            coverVersion: coverVersion,
+            hasCover: hasCover,
+            blockReason: blockReason
+        )
+    }
 }
 
 nonisolated struct KindleSyncPlanItem: Equatable, Identifiable, Sendable {
@@ -95,27 +121,32 @@ nonisolated enum KindleSyncPlanner {
         deviceBooks: [DeviceBook],
         profile: KindleSyncProfile
     ) -> KindleSyncPlan {
+        let candidates = candidates.map { $0.allocatingDevicePath() }
         let receipts = Dictionary(
             profile.receipts.map { ($0.bookID, $0) },
             uniquingKeysWith: { lhs, rhs in lhs.syncedAt >= rhs.syncedAt ? lhs : rhs }
         )
         let deviceByKey = Dictionary(grouping: deviceBooks, by: \.matchKey)
-        let candidateGroups = Dictionary(grouping: candidates, by: \.matchKey)
-        let candidateKeys = Set(candidateGroups.keys)
-        let collidingKeys = Set(candidateGroups.compactMap { entry in
-            entry.value.count > 1 ? entry.key : nil
+        let candidateKeys = Set(candidates.flatMap {
+            [
+                $0.matchKey,
+                DevicePathAllocator.rawMatchKey(for: $0.targetFileName),
+            ]
         })
         var consumedDeviceIDs: Set<DeviceBook.ID> = []
         var items: [KindleSyncPlanItem] = []
 
         for candidate in candidates.sorted(by: candidatePrecedes) {
-            let matches = (deviceByKey[candidate.matchKey] ?? [])
-                .filter { !consumedDeviceIDs.contains($0.id) }
-            if collidingKeys.contains(candidate.matchKey) {
-                items.append(collisionItem(for: candidate, deviceBook: matches.first))
-                consumedDeviceIDs.formUnion(matches.map(\.id))
-                continue
-            }
+            let targetMatchKey = DevicePathAllocator.rawMatchKey(
+                for: candidate.targetFileName
+            )
+            var seenMatchIDs: Set<DeviceBook.ID> = []
+            let matches = ((deviceByKey[targetMatchKey] ?? [])
+                + (deviceByKey[candidate.matchKey] ?? []))
+                .filter { book in
+                    !consumedDeviceIDs.contains(book.id)
+                        && seenMatchIDs.insert(book.id).inserted
+                }
             guard !matches.isEmpty else {
                 items.append(missingItem(for: candidate))
                 continue
@@ -131,16 +162,12 @@ nonisolated enum KindleSyncPlanner {
             let receipt = receipts[candidate.id]
             let decision = decision(for: candidate, deviceBook: preferred, receipt: receipt)
             items.append(item(for: candidate, deviceBook: preferred, decision: decision))
-
-            if decision.action == .update {
-                consumedDeviceIDs.formUnion(matches.map(\.id))
-            } else {
-                consumedDeviceIDs.insert(preferred.id)
-            }
+            consumedDeviceIDs.insert(preferred.id)
         }
 
         for deviceBook in deviceBooks where !consumedDeviceIDs.contains(deviceBook.id) {
             let hasLibraryPeer = candidateKeys.contains(deviceBook.matchKey)
+                || candidateKeys.contains(deviceBook.legacyMatchKey)
             items.append(KindleSyncPlanItem(
                 id: "remove|\(deviceBook.id)",
                 action: .remove,
@@ -191,25 +218,6 @@ nonisolated enum KindleSyncPlanner {
         )
     }
 
-    private static func collisionItem(
-        for candidate: KindleSyncCandidate,
-        deviceBook: DeviceBook?
-    ) -> KindleSyncPlanItem {
-        KindleSyncPlanItem(
-            id: "blocked-collision|\(candidate.id.uuidString)",
-            action: .blocked,
-            reason: .fileNameCollision,
-            bookID: candidate.id,
-            deviceBookID: deviceBook?.id,
-            deviceFileName: deviceBook?.fileName,
-            title: candidate.title,
-            author: candidate.author,
-            sourceFormat: candidate.sourceFormat,
-            targetFormat: candidate.targetFormat,
-            selectedByDefault: false
-        )
-    }
-
     private static func decision(
         for candidate: KindleSyncCandidate,
         deviceBook: DeviceBook,
@@ -225,7 +233,9 @@ nonisolated enum KindleSyncPlanner {
             return (.update, .formatChanged)
         }
         if let receipt {
-            if receipt.sourceFingerprint != candidate.sourceFingerprint {
+            let receiptMatchesSource = receipt.sourceFingerprint == candidate.sourceFingerprint
+                || receipt.sourceFingerprint == candidate.sourceLineageFingerprint
+            if !receiptMatchesSource {
                 return (.update, .sourceChanged)
             }
             if receipt.sentFileName.caseInsensitiveCompare(deviceBook.fileName) != .orderedSame {

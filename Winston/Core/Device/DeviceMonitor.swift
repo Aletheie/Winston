@@ -95,7 +95,12 @@ final class DeviceMonitor {
             MassStorageDeviceConnection.detectKindleVolume()
         }.value
         if let volume {
-            await connect(MassStorageDeviceConnection(volumeURL: volume))
+            do {
+                await connect(try MassStorageDeviceConnection(volumeURL: volume))
+            } catch {
+                state = .disconnected
+                lastError = error.localizedDescription
+            }
             return
         }
 

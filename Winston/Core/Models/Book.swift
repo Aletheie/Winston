@@ -150,6 +150,35 @@ final class Book {
         return value
     }
 
+    nonisolated(unsafe) private static let allocatedDeviceMatchKeys: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 16_384
+        return cache
+    }()
+
+    var allocatedDeviceMatchKey: String {
+        if !hasDigitalFile { return deviceMatchKey }
+        let key = "\(uuid.uuidString)|\(originalFileName)" as NSString
+        if let cached = Self.allocatedDeviceMatchKeys.object(forKey: key) {
+            return cached as String
+        }
+        let value = DevicePathAllocator.allocatedMatchKey(
+            originalFileName: originalFileName,
+            ownerID: uuid
+        )
+        Self.allocatedDeviceMatchKeys.setObject(value as NSString, forKey: key)
+        return value
+    }
+
+    var deviceMatchKeys: Set<String> {
+        [allocatedDeviceMatchKey, deviceMatchKey]
+    }
+
+    func isOnDevice(fileNames: Set<String>) -> Bool {
+        fileNames.contains(allocatedDeviceMatchKey)
+            || fileNames.contains(deviceMatchKey)
+    }
+
     nonisolated(unsafe) private static let fileSizes: NSCache<NSNumber, NSString> = {
         let cache = NSCache<NSNumber, NSString>()
         cache.countLimit = 8_192

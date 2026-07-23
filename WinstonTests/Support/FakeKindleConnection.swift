@@ -15,6 +15,8 @@ actor FakeKindleConnection: KindleDeviceConnection {
 
     private var alive = true
     private var failSends = false
+    private var failCleanup = false
+    private var failThumbnails = false
     private var blockSends = false
     private var blockSendsCooperatively = false
     private var sendStarted = false
@@ -24,6 +26,8 @@ actor FakeKindleConnection: KindleDeviceConnection {
 
     func setAlive(_ value: Bool) { alive = value }
     func setFailSends(_ value: Bool) { failSends = value }
+    func setFailCleanup(_ value: Bool) { failCleanup = value }
+    func setFailThumbnails(_ value: Bool) { failThumbnails = value }
     func setBlockSends(_ value: Bool) { blockSends = value }
     func setBlockSendsCooperatively(_ value: Bool) { blockSendsCooperatively = value }
     func setBooks(_ value: [DeviceBook]) { books = value }
@@ -77,6 +81,7 @@ actor FakeKindleConnection: KindleDeviceConnection {
     }
 
     func pushCoverThumbnail(_ fileURL: URL, named name: String) async throws {
+        guard !failThumbnails else { throw DeviceError.transferFailed(code: -3) }
         pushedThumbnails.append(name)
     }
 
@@ -88,7 +93,8 @@ actor FakeKindleConnection: KindleDeviceConnection {
 
     func eject() async { ejected = true }
 
-    func removeStaleVariants(baseName: String, keeping fileName: String) async {
+    func removeStaleVariants(baseName: String, keeping fileName: String) async throws {
+        guard !failCleanup else { throw DeviceError.transferFailed(code: -4) }
         staleVariantCalls.append([baseName, fileName])
     }
 

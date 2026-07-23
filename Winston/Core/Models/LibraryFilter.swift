@@ -20,12 +20,12 @@ nonisolated enum KindlePresenceFilter: String, CaseIterable, Hashable, Identifia
     var id: Self { self }
 
     func includes(
-        deviceMatchKey: String,
+        deviceMatchKeys: Set<String>,
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) -> Bool {
         guard deviceIsConnected else { return true }
-        let isOnKindle = deviceFileNames.contains(deviceMatchKey)
+        let isOnKindle = !deviceMatchKeys.isDisjoint(with: deviceFileNames)
         return switch self {
         case .all: true
         case .onKindle: isOnKindle

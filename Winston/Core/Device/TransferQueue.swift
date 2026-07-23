@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import OSLog
+import SwiftData
 
 private nonisolated final class TransferProgressGate: @unchecked Sendable {
     private let lock = NSLock()
@@ -26,15 +27,15 @@ private nonisolated final class TransferProgressGate: @unchecked Sendable {
 @Observable
 final class TransferQueue {
     private struct SendRequest: Sendable {
-        let uuid: UUID
-        let displayName: String
-        let sourceURL: URL
-        let targetFileName: String
-        let format: String
-        let sourceFingerprint: String
-        let coverVersion: Int
+        let descriptor: KindleSendDescriptor
+        let artifact: TransferArtifact?
         let drmProtected: Bool
-        let fileUnavailable: Bool
+        let generationIsCurrent: @MainActor @Sendable () -> Bool
+
+        var uuid: UUID { descriptor.bookUUID }
+        var displayName: String { descriptor.displayName }
+        var targetFileName: String { descriptor.targetFileName }
+        var fileUnavailable: Bool { descriptor.fileUnavailable || artifact == nil }
     }
 
     enum Direction: Sendable, Equatable {
@@ -44,6 +45,7 @@ final class TransferQueue {
 
     enum Stage: Sendable, Equatable {
         case waiting
+        case preparing
         case converting
         case transferring
         case cancelling
@@ -67,7 +69,7 @@ final class TransferQueue {
 
     private let toasts: ToastCenter
     private let onConversionArtifact: (@MainActor @Sendable (UUID, URL) async -> Void)?
-    private let onTransferCompleted: (@MainActor @Sendable (KindleSyncTransferRecord) -> Void)?
+    private let onTransferCompleted: (@MainActor @Sendable (KindleSyncTransferRecord) async throws -> Void)?
     private var sendTask: Task<Void, Never>?
     private var clearTask: Task<Void, Never>?
     @ObservationIgnored private var itemIndexByID: [UUID: Int] = [:]
@@ -79,7 +81,7 @@ final class TransferQueue {
     init(
         toasts: ToastCenter,
         onConversionArtifact: (@MainActor @Sendable (UUID, URL) async -> Void)? = nil,
-        onTransferCompleted: (@MainActor @Sendable (KindleSyncTransferRecord) -> Void)? = nil
+        onTransferCompleted: (@MainActor @Sendable (KindleSyncTransferRecord) async throws -> Void)? = nil
     ) {
         self.toasts = toasts
         self.onConversionArtifact = onConversionArtifact
@@ -88,7 +90,7 @@ final class TransferQueue {
 
     func beginSend(books: [Book], via monitor: DeviceMonitor) {
         guard !isTransferring else { return }
-        let requests = books.filter(\.hasDigitalFile).map(Self.makeRequest)
+        let requests = Self.makeRequests(for: books)
         guard !requests.isEmpty else { return }
         clearTask?.cancel()
         clearTask = nil
@@ -143,7 +145,7 @@ final class TransferQueue {
 
     func send(books: [Book], via monitor: DeviceMonitor, announcesResult: Bool) async {
         guard !isTransferring else { return }
-        let requests = books.filter(\.hasDigitalFile).map(Self.makeRequest)
+        let requests = Self.makeRequests(for: books)
         guard !requests.isEmpty else { return }
         clearTask?.cancel()
         clearTask = nil
@@ -166,7 +168,11 @@ final class TransferQueue {
         announcesResult: Bool = true
     ) async {
         var pollingSuspended = false
+        let stagingDirectory = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonTransferArtifacts", directoryHint: .isDirectory)
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
         defer {
+            try? FileManager.default.removeItem(at: stagingDirectory)
             if pollingSuspended { monitor.resumePolling() }
             isTransferring = false
             sendTask = nil
@@ -184,9 +190,55 @@ final class TransferQueue {
         pollingSuspended = true
         replaceItems(requests.map { Item(displayName: $0.displayName, direction: .toDevice) })
 
+        let targetGroups = Dictionary(grouping: requests.indices) {
+            requests[$0].targetFileName.lowercased()
+        }
+        let conflictingIndexes = Set(targetGroups.values.flatMap { indexes -> [Int] in
+            let owners = Set(indexes.map { requests[$0].uuid })
+            return owners.count > 1 ? indexes : []
+        })
+        var preparedArtifacts: [Int: MaterializedTransferArtifact] = [:]
+        preparedArtifacts.reserveCapacity(requests.count)
+
         for (index, request) in requests.enumerated() {
             if Task.isCancelled { break }
             let itemID = items[index].id
+            if conflictingIndexes.contains(index) {
+                lastError = "Destination file name collision"
+                markFailed(itemID)
+                continue
+            }
+            guard !request.fileUnavailable, !request.drmProtected,
+                  let artifact = request.artifact else { continue }
+            guard request.generationIsCurrent(), artifact.sourceGenerationIsCurrent() else {
+                lastError = TransferArtifactError.sourceChanged.localizedDescription
+                markFailed(itemID)
+                continue
+            }
+            setStage(.preparing, for: itemID)
+            do {
+                let prepared = try await artifact.materialize(in: stagingDirectory)
+                guard request.generationIsCurrent(), artifact.sourceGenerationIsCurrent() else {
+                    lastError = TransferArtifactError.sourceChanged.localizedDescription
+                    markFailed(itemID)
+                    continue
+                }
+                preparedArtifacts[index] = prepared
+                setStage(.waiting, for: itemID)
+            } catch {
+                if error is CancellationError {
+                    markCancelled(itemID)
+                    break
+                }
+                lastError = error.localizedDescription
+                markFailed(itemID)
+            }
+        }
+
+        for (index, request) in requests.enumerated() {
+            if Task.isCancelled { break }
+            let itemID = items[index].id
+            guard !Self.isTerminal(items[index].stage) else { continue }
 
             guard await connection.isAlive() else {
                 lastError = "Device disconnected"
@@ -194,8 +246,10 @@ final class TransferQueue {
                 await monitor.disconnect()
                 break
             }
+            let preparedArtifact = preparedArtifacts[index]
             await transfer(
                 request,
+                preparedArtifact: preparedArtifact,
                 itemID: itemID,
                 connection: connection,
                 deviceInfo: deviceInfo
@@ -223,6 +277,7 @@ final class TransferQueue {
 
     private func transfer(
         _ request: SendRequest,
+        preparedArtifact: MaterializedTransferArtifact?,
         itemID: UUID,
         connection: any KindleDeviceConnection,
         deviceInfo: DeviceInfo
@@ -238,19 +293,28 @@ final class TransferQueue {
             markFailed(itemID)
             return
         }
+        guard let preparedArtifact,
+              request.generationIsCurrent(),
+              preparedArtifact.artifact.sourceGenerationIsCurrent() else {
+            lastError = TransferArtifactError.sourceChanged.localizedDescription
+            markFailed(itemID)
+            return
+        }
 
-        var sourceURL = request.sourceURL
+        var sourceURL = preparedArtifact.sourceURL
         var temporaryConversion: URL?
         defer {
             if let temporaryConversion { try? FileManager.default.removeItem(at: temporaryConversion) }
         }
 
-        if EbookConverter.needsConversion(format: request.format) {
+        if EbookConverter.needsConversion(format: preparedArtifact.artifact.sourceFormat) {
             setStage(.converting, for: itemID)
             do {
                 sourceURL = try await EbookConverter.convertForKindle(sourceURL)
                 temporaryConversion = sourceURL
-                await onConversionArtifact?(request.uuid, sourceURL)
+                if preparedArtifact.artifact.sourceIsPrimary {
+                    await onConversionArtifact?(request.uuid, sourceURL)
+                }
             } catch {
                 if error is CancellationError {
                     markCancelled(itemID)
@@ -263,6 +327,12 @@ final class TransferQueue {
             }
         }
 
+        guard request.generationIsCurrent(),
+              preparedArtifact.artifact.sourceGenerationIsCurrent() else {
+            lastError = TransferArtifactError.sourceChanged.localizedDescription
+            markFailed(itemID)
+            return
+        }
         guard !Task.isCancelled else {
             markCancelled(itemID)
             return
@@ -291,22 +361,25 @@ final class TransferQueue {
                 }
             )
             Log.device.notice("Transferred \(fileName, privacy: .public)")
-            markDone(itemID)
-            await connection.removeStaleVariants(baseName: base, keeping: fileName)
+            try await connection.removeStaleVariants(baseName: base, keeping: fileName)
             let coverPushed = await pushThumbnail(
                 for: request.uuid,
                 sentFile: sourceURL,
                 connection: connection
             )
-            onTransferCompleted?(KindleSyncTransferRecord(
+            try await onTransferCompleted?(KindleSyncTransferRecord(
                 deviceIdentifier: deviceInfo.identifier,
                 deviceName: deviceInfo.name,
                 bookID: request.uuid,
-                sourceFingerprint: request.sourceFingerprint,
+                assetID: preparedArtifact.artifact.assetGeneration.assetID,
+                sourceFormat: preparedArtifact.artifact.sourceFormat,
+                sourceSizeBytes: preparedArtifact.sourceSizeBytes,
+                sourceFingerprint: preparedArtifact.sourceFingerprint,
                 sentFileName: fileName,
-                coverVersion: coverPushed ? request.coverVersion : nil,
+                coverVersion: coverPushed ? preparedArtifact.artifact.coverVersion : nil,
                 completedAt: .now
             ))
+            markDone(itemID)
         } catch {
             if error is CancellationError {
                 Log.device.info("Transfer of \(fileName, privacy: .public) cancelled")
@@ -319,51 +392,57 @@ final class TransferQueue {
         }
     }
 
+    private static func makeRequests(for books: [Book]) -> [SendRequest] {
+        var seenBookIDs: Set<UUID> = []
+        return books.compactMap { book in
+            guard book.hasDigitalFile, seenBookIDs.insert(book.uuid).inserted else { return nil }
+            return makeRequest(for: book)
+        }
+    }
+
     private static func makeRequest(for book: Book) -> SendRequest {
-        let descriptor = KindleSendPreparation.descriptor(for: book)
-        return SendRequest(
-            uuid: book.uuid,
-            displayName: book.displayTitle,
-            sourceURL: descriptor.sourceURL,
-            targetFileName: descriptor.targetFileName,
-            format: descriptor.sourceFormat,
-            sourceFingerprint: descriptor.sourceFingerprint,
-            coverVersion: descriptor.coverVersion,
-            drmProtected: book.drmProtected == true,
-            fileUnavailable: descriptor.fileUnavailable
+        makeRequest(
+            descriptor: KindleSendPreparation.descriptor(for: book),
+            book: book
         )
     }
 
     private static func makeRequest(for asset: BookAsset, book: Book) -> SendRequest {
-        if asset.validationStatus == .missing || asset.validationStatus == .corrupt {
-            return makeRequest(for: book)
-        }
-        if asset.fileName != book.fileName, asset.origin == .generated {
-            let primaryHash = book.assets.first(where: { $0.fileName == book.fileName })?.contentHash
-            guard let primaryHash, asset.generatedFromContentHash == primaryHash else {
-                return makeRequest(for: book)
-            }
-        }
-        let descriptor = KindleSendPreparation.descriptor(for: book)
-        let requiresConversion = EbookConverter.needsConversion(format: asset.format)
-        let targetFormat = requiresConversion
-            ? EbookConverter.kindleTarget(forFormat: asset.format).ext
-            : asset.format.lowercased()
-        let baseName = (descriptor.targetFileName as NSString).deletingPathExtension
-        let targetName = "\(baseName).\(targetFormat)"
-        let sourceURL = BookFileStore.validatedURL(for: asset.fileName) ?? asset.fileURL
+        makeRequest(
+            descriptor: KindleSendPreparation.descriptor(for: asset, in: book),
+            book: book
+        )
+    }
+
+    private static func makeRequest(
+        descriptor: KindleSendDescriptor,
+        book: Book
+    ) -> SendRequest {
+        let generation = descriptor.assetGeneration
+        let bookWasAttached = book.modelContext != nil
+        let expectedOriginalFileName = book.originalFileName
+        let expectedCoverVersion = descriptor.coverVersion
+        let expectedDRMProtected = descriptor.drmProtected
         return SendRequest(
-            uuid: book.uuid,
-            displayName: book.displayTitle,
-            sourceURL: sourceURL,
-            targetFileName: ManagedLeafName(rawValue: targetName)?.rawValue
-                ?? descriptor.targetFileName,
-            format: asset.format,
-            sourceFingerprint: descriptor.sourceFingerprint,
-            coverVersion: descriptor.coverVersion,
-            drmProtected: book.drmProtected == true,
-            fileUnavailable: descriptor.fileUnavailable
-                || BookFileStore.validatedURL(for: asset.fileName) == nil
+            descriptor: descriptor,
+            artifact: TransferArtifact(descriptor: descriptor),
+            drmProtected: descriptor.drmProtected,
+            generationIsCurrent: { [book] in
+                if bookWasAttached, book.modelContext == nil { return false }
+                guard book.uuid == descriptor.bookUUID,
+                      book.originalFileName == expectedOriginalFileName,
+                      book.coverVersion == expectedCoverVersion,
+                      (book.drmProtected == true) == expectedDRMProtected else { return false }
+                if generation.isCatalogued {
+                    guard let asset = book.assets.first(where: { $0.uuid == generation.assetID }) else {
+                        return false
+                    }
+                    return asset.fileName == generation.fileName
+                        && asset.dateAdded == generation.dateAdded
+                }
+                return book.fileName == generation.fileName
+                    && book.dateAdded == generation.dateAdded
+            }
         )
     }
 
@@ -451,9 +530,12 @@ final class TransferQueue {
         isTransferring = true
         let item = Item(displayName: book.displayTitle, direction: .toDevice)
         replaceItems([item])
-        setStage(.transferring, for: item.id)
         monitor.suspendPolling()
+        let stagingDirectory = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonTransferArtifacts", directoryHint: .isDirectory)
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
         defer {
+            try? FileManager.default.removeItem(at: stagingDirectory)
             monitor.resumePolling()
             isTransferring = false
             scheduleClear()
@@ -465,9 +547,35 @@ final class TransferQueue {
             await monitor.disconnect()
             return false
         }
+        let request = Self.makeRequest(descriptor: descriptor, book: book)
+        guard !request.fileUnavailable, !request.drmProtected,
+              let artifact = request.artifact,
+              request.generationIsCurrent(),
+              artifact.sourceGenerationIsCurrent() else {
+            lastError = TransferArtifactError.sourceChanged.localizedDescription
+            markFailed(item.id)
+            return false
+        }
+        let preparedArtifact: MaterializedTransferArtifact
+        setStage(.preparing, for: item.id)
+        do {
+            preparedArtifact = try await artifact.materialize(in: stagingDirectory)
+            guard request.generationIsCurrent(), artifact.sourceGenerationIsCurrent() else {
+                throw TransferArtifactError.sourceChanged
+            }
+        } catch {
+            lastError = error.localizedDescription
+            if error is CancellationError {
+                markCancelled(item.id)
+            } else {
+                markFailed(item.id)
+            }
+            return false
+        }
+        setStage(.transferring, for: item.id)
         let pushed = await pushThumbnail(
             for: book.uuid,
-            sentFile: descriptor.sourceURL,
+            sentFile: preparedArtifact.sourceURL,
             connection: connection
         )
         guard pushed else {
@@ -478,16 +586,25 @@ final class TransferQueue {
             }
             return false
         }
+        do {
+            try await onTransferCompleted?(KindleSyncTransferRecord(
+                deviceIdentifier: deviceInfo.identifier,
+                deviceName: deviceInfo.name,
+                bookID: book.uuid,
+                assetID: preparedArtifact.artifact.assetGeneration.assetID,
+                sourceFormat: preparedArtifact.artifact.sourceFormat,
+                sourceSizeBytes: preparedArtifact.sourceSizeBytes,
+                sourceFingerprint: preparedArtifact.sourceFingerprint,
+                sentFileName: deviceBook.fileName,
+                coverVersion: preparedArtifact.artifact.coverVersion,
+                completedAt: .now
+            ))
+        } catch {
+            lastError = error.localizedDescription
+            markFailed(item.id)
+            return false
+        }
         markDone(item.id)
-        onTransferCompleted?(KindleSyncTransferRecord(
-            deviceIdentifier: deviceInfo.identifier,
-            deviceName: deviceInfo.name,
-            bookID: book.uuid,
-            sourceFingerprint: descriptor.sourceFingerprint,
-            sentFileName: deviceBook.fileName,
-            coverVersion: descriptor.coverVersion,
-            completedAt: .now
-        ))
         if announcesResult {
             toasts.success(String(localized: "Repaired the Kindle cover for “\(book.displayTitle)”."))
         }

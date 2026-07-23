@@ -41,6 +41,21 @@ struct SeriesSendTests {
         ))
     }
 
+    @Test func allocatedDeviceKeyDoesNotHideAnotherBookWithTheSameBasename() {
+        let first = book("first", index: "1")
+        let second = book("second", index: "2")
+        first.originalFileName = "book.epub"
+        second.originalFileName = "book.epub"
+
+        let pending = SendSeriesButton.pendingSend(
+            in: [first, second],
+            deviceFileNames: [first.allocatedDeviceMatchKey]
+        )
+
+        #expect(pending.map(\.uuid) == [second.uuid])
+        #expect(first.allocatedDeviceMatchKey != second.allocatedDeviceMatchKey)
+    }
+
     @Test func physicalOnlyCopiesAreNotSentOrCountedAsMissingFromKindle() {
         let wizard = book("wizard", index: "1")
         let physical = Book(fileName: "", originalFileName: "Tombs")

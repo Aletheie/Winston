@@ -277,7 +277,7 @@ struct SidecarCleanupTests {
             createFile(at: url)
         }
 
-        let connection = MassStorageDeviceConnection(volumeURL: volume)
+        let connection = try MassStorageDeviceConnection(volumeURL: volume)
         let removed = try await connection.removeAppleDoubleSidecars()
 
         #expect(removed == 3)
@@ -287,12 +287,46 @@ struct SidecarCleanupTests {
             #expect(!exists(gone))
         }
     }
+
+    @Test
+    func doesNotTraverseSymlinkedSubdirectories() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonSidecarBoundary-\(UUID().uuidString)")
+        let volume = root.appending(path: "Kindle")
+        let documents = volume.appending(path: "documents")
+        let outside = root.appending(path: "outside")
+        try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outsideSidecar = outside.appending(path: "._outside.mobi")
+        createFile(at: outsideSidecar)
+        try FileManager.default.createSymbolicLink(
+            at: documents.appending(path: "linked"),
+            withDestinationURL: outside
+        )
+        let connection = try MassStorageDeviceConnection(volumeURL: volume)
+
+        let removed = try await connection.removeAppleDoubleSidecars()
+
+        #expect(removed == 0)
+        #expect(exists(outsideSidecar))
+    }
 }
 
 // MARK: - Mass storage transfer safety
 
 struct MassStorageTransferTests {
     private struct InjectedCopyFailure: Error { }
+
+    private func boundaryFixture() throws -> (root: URL, volume: URL, outside: URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonMountedBoundary-\(UUID().uuidString)")
+        let volume = root.appending(path: "Kindle", directoryHint: .isDirectory)
+        let outside = root.appending(path: "Outside", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: volume, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        return (root, volume, outside)
+    }
 
     private func fixture() throws -> (volume: URL, source: URL, destination: URL) {
         let root = FileManager.default.temporaryDirectory
@@ -310,7 +344,7 @@ struct MassStorageTransferTests {
         defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
         try Data("new complete bytes".utf8).write(to: urls.source)
         try Data("old bytes".utf8).write(to: urls.destination)
-        let connection = MassStorageDeviceConnection(volumeURL: urls.volume)
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
 
         try await connection.send(fileURL: urls.source, fileName: "book.mobi") { _ in }
 
@@ -322,7 +356,7 @@ struct MassStorageTransferTests {
         defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
         try Data(repeating: 0x42, count: 2 * 1_024 * 1_024).write(to: urls.source)
         try Data("old bytes".utf8).write(to: urls.destination)
-        let connection = MassStorageDeviceConnection(
+        let connection = try MassStorageDeviceConnection(
             volumeURL: urls.volume,
             copyChunkHook: { _ in throw InjectedCopyFailure() }
         )
@@ -344,7 +378,7 @@ struct MassStorageTransferTests {
         defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
         try Data(repeating: 0x42, count: 2 * 1_024 * 1_024).write(to: urls.source)
         try Data("old bytes".utf8).write(to: urls.destination)
-        let connection = MassStorageDeviceConnection(volumeURL: urls.volume)
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
         let transfer = Task {
             try await connection.send(fileURL: urls.source, fileName: "book.mobi") { _ in }
         }
@@ -358,7 +392,7 @@ struct MassStorageTransferTests {
         let urls = try fixture()
         defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
         try Data("bytes".utf8).write(to: urls.source)
-        let connection = MassStorageDeviceConnection(volumeURL: urls.volume)
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
 
         await #expect(throws: DeviceError.invalidFileName) {
             try await connection.send(fileURL: urls.source, fileName: "../outside.mobi") { _ in }
@@ -366,6 +400,311 @@ struct MassStorageTransferTests {
         #expect(!FileManager.default.fileExists(
             atPath: urls.volume.appending(path: "outside.mobi").path(percentEncoded: false)
         ))
+    }
+
+    @Test func listCopyAndDeleteStayOnRelativeBoundaryPaths() async throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        let nested = urls.volume.appending(path: "documents/Author")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let source = nested.appending(path: "book.mobi")
+        try Data("device book".utf8).write(to: source)
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
+
+        let listed = try await connection.listBooks()
+        let book = try #require(listed.first)
+        #expect(book.path == "documents/Author/book.mobi")
+
+        let copied = urls.root.appending(path: "copied.mobi")
+        try await connection.copyBook(book, to: copied) { _ in }
+        #expect(try Data(contentsOf: copied) == Data("device book".utf8))
+
+        try await connection.delete(book)
+        #expect(!FileManager.default.fileExists(atPath: source.path(percentEncoded: false)))
+    }
+
+    @Test func copyRejectsAbsoluteAndParentTraversalPaths() async throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        try FileManager.default.createDirectory(
+            at: urls.volume.appending(path: "documents"),
+            withIntermediateDirectories: false
+        )
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
+        let destination = urls.root.appending(path: "copy.mobi")
+        for path in [
+            urls.outside.appending(path: "outside.mobi").path(percentEncoded: false),
+            "documents/../Outside/outside.mobi",
+        ] {
+            let book = DeviceBook(
+                path: path,
+                fileName: "outside.mobi",
+                sizeBytes: 1
+            )
+            await #expect(throws: DeviceError.unsafePath) {
+                try await connection.copyBook(book, to: destination) { _ in }
+            }
+        }
+        #expect(!FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)))
+    }
+
+    @Test func coverWriteCreatesValidatedSystemDirectories() async throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        try FileManager.default.createDirectory(
+            at: urls.volume.appending(path: "documents"),
+            withIntermediateDirectories: false
+        )
+        let thumbnail = urls.root.appending(path: "thumbnail.jpg")
+        try Data("jpeg bytes".utf8).write(to: thumbnail)
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
+
+        try await connection.pushCoverThumbnail(thumbnail, named: "cover.jpg")
+
+        let stored = urls.volume.appending(path: "system/thumbnails/cover.jpg")
+        #expect(try Data(contentsOf: stored) == Data("jpeg bytes".utf8))
+    }
+
+    @Test func connectionRejectsSymlinkedDocumentsDirectory() throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        try FileManager.default.createSymbolicLink(
+            at: urls.volume.appending(path: "documents"),
+            withDestinationURL: urls.outside
+        )
+
+        #expect(throws: DeviceError.unsafePath) {
+            _ = try MassStorageDeviceConnection(volumeURL: urls.volume)
+        }
+    }
+
+    @Test func connectionRejectsSymlinkedMountRoot() throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        let alias = urls.root.appending(path: "Kindle-alias")
+        try FileManager.default.createSymbolicLink(
+            at: alias,
+            withDestinationURL: urls.volume
+        )
+
+        #expect(throws: DeviceError.unsafePath) {
+            _ = try MassStorageDeviceConnection(volumeURL: alias)
+        }
+    }
+
+    @Test func connectionRejectsSymlinkedSystemDirectory() throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        try FileManager.default.createDirectory(
+            at: urls.volume.appending(path: "documents"),
+            withIntermediateDirectories: false
+        )
+        try FileManager.default.createSymbolicLink(
+            at: urls.volume.appending(path: "system"),
+            withDestinationURL: urls.outside
+        )
+
+        #expect(throws: DeviceError.unsafePath) {
+            _ = try MassStorageDeviceConnection(volumeURL: urls.volume)
+        }
+    }
+
+    @Test func connectionRejectsSymlinkedThumbnailsDirectory() throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        try FileManager.default.createDirectory(
+            at: urls.volume.appending(path: "documents"),
+            withIntermediateDirectories: false
+        )
+        let system = urls.volume.appending(path: "system")
+        try FileManager.default.createDirectory(at: system, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(
+            at: system.appending(path: "thumbnails"),
+            withDestinationURL: urls.outside
+        )
+
+        #expect(throws: DeviceError.unsafePath) {
+            _ = try MassStorageDeviceConnection(volumeURL: urls.volume)
+        }
+    }
+
+    @Test func sendRejectsSymlinkedDestinationLeaf() async throws {
+        let urls = try fixture()
+        defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
+        let outside = urls.volume.deletingLastPathComponent().appending(path: "outside.mobi")
+        try Data("outside sentinel".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: urls.destination,
+            withDestinationURL: outside
+        )
+        try Data("replacement".utf8).write(to: urls.source)
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
+
+        await #expect(throws: DeviceError.unsafePath) {
+            try await connection.send(
+                fileURL: urls.source,
+                fileName: "book.mobi"
+            ) { _ in }
+        }
+
+        #expect(try Data(contentsOf: outside) == Data("outside sentinel".utf8))
+    }
+
+    @Test func clippingsReadRejectsSymlinkedLeaf() async throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        let documents = urls.volume.appending(path: "documents")
+        try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: false)
+        let outside = urls.outside.appending(path: "clippings.txt")
+        try Data("outside clipping".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: documents.appending(path: "My Clippings.txt"),
+            withDestinationURL: outside
+        )
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
+
+        await #expect(throws: DeviceError.unsafePath) {
+            try await connection.readClippingsText()
+        }
+    }
+
+    @Test func deleteRejectsSymlinkedLeafWithoutDeletingTarget() async throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        let documents = urls.volume.appending(path: "documents")
+        try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: false)
+        let outside = urls.outside.appending(path: "outside.mobi")
+        try Data("outside book".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: documents.appending(path: "book.mobi"),
+            withDestinationURL: outside
+        )
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
+        let book = DeviceBook(
+            path: "documents/book.mobi",
+            fileName: "book.mobi",
+            sizeBytes: 12
+        )
+
+        await #expect(throws: DeviceError.unsafePath) {
+            try await connection.delete(book)
+        }
+
+        #expect(FileManager.default.fileExists(atPath: outside.path(percentEncoded: false)))
+    }
+
+    @Test func symlinkSwapDuringWriteCannotEscapePinnedDocumentsDirectory() async throws {
+        let urls = try fixture()
+        let root = urls.volume.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let documents = urls.destination.deletingLastPathComponent()
+        let pinnedDocuments = urls.volume.appending(path: "documents-pinned")
+        let outside = root.appending(path: "outside", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+        let outsideBook = outside.appending(path: "book.mobi")
+        try Data("outside sentinel".utf8).write(to: outsideBook)
+        try Data("old device bytes".utf8).write(to: urls.destination)
+        try Data(repeating: 0x42, count: 2 * 1_048_576).write(to: urls.source)
+        let connection = try MassStorageDeviceConnection(
+            volumeURL: urls.volume,
+            copyChunkHook: { written in
+                guard written == 1_048_576 else { return }
+                try FileManager.default.moveItem(at: documents, to: pinnedDocuments)
+                try FileManager.default.createSymbolicLink(
+                    at: documents,
+                    withDestinationURL: outside
+                )
+            }
+        )
+
+        await #expect(throws: DeviceError.unsafePath) {
+            try await connection.send(
+                fileURL: urls.source,
+                fileName: "book.mobi"
+            ) { _ in }
+        }
+
+        #expect(try Data(contentsOf: outsideBook) == Data("outside sentinel".utf8))
+        #expect(
+            try Data(contentsOf: pinnedDocuments.appending(path: "book.mobi"))
+                == Data("old device bytes".utf8)
+        )
+        let pinnedEntries = try FileManager.default.contentsOfDirectory(
+            at: pinnedDocuments,
+            includingPropertiesForKeys: nil
+        )
+        #expect(!pinnedEntries.contains { $0.lastPathComponent.hasPrefix(".winston-transfer-") })
+    }
+
+    @Test func disappearingMountDuringWritePreservesDestination() async throws {
+        let urls = try fixture()
+        let root = urls.volume.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let disconnectedVolume = root.appending(path: "Kindle-disconnected")
+        try Data("old device bytes".utf8).write(to: urls.destination)
+        try Data(repeating: 0x43, count: 2 * 1_048_576).write(to: urls.source)
+        let connection = try MassStorageDeviceConnection(
+            volumeURL: urls.volume,
+            copyChunkHook: { written in
+                guard written == 1_048_576 else { return }
+                try FileManager.default.moveItem(
+                    at: urls.volume,
+                    to: disconnectedVolume
+                )
+            }
+        )
+
+        await #expect(throws: DeviceError.notConnected) {
+            try await connection.send(
+                fileURL: urls.source,
+                fileName: "book.mobi"
+            ) { _ in }
+        }
+
+        let preserved = disconnectedVolume.appending(path: "documents/book.mobi")
+        #expect(try Data(contentsOf: preserved) == Data("old device bytes".utf8))
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: preserved.deletingLastPathComponent(),
+            includingPropertiesForKeys: nil
+        )
+        #expect(!entries.contains { $0.lastPathComponent.hasPrefix(".winston-transfer-") })
+    }
+
+    @Test func explicitDisconnectDuringWritePreservesDestination() async throws {
+        let urls = try fixture()
+        defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
+        try Data("old device bytes".utf8).write(to: urls.destination)
+        try Data(repeating: 0x44, count: 2 * 1_048_576).write(to: urls.source)
+        let (chunkEvents, chunkContinuation) = AsyncStream<Void>.makeStream()
+        let resumeCopy = DispatchSemaphore(value: 0)
+        let connection = try MassStorageDeviceConnection(
+            volumeURL: urls.volume,
+            copyChunkHook: { written in
+                guard written == 1_048_576 else { return }
+                chunkContinuation.yield()
+                _ = resumeCopy.wait(timeout: .now() + 5)
+            }
+        )
+        let transfer = Task {
+            try await connection.send(
+                fileURL: urls.source,
+                fileName: "book.mobi"
+            ) { _ in }
+        }
+
+        for await _ in chunkEvents { break }
+        await connection.disconnect()
+        resumeCopy.signal()
+
+        await #expect(throws: DeviceError.notConnected) {
+            try await transfer.value
+        }
+        #expect(try Data(contentsOf: urls.destination) == Data("old device bytes".utf8))
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: urls.destination.deletingLastPathComponent(),
+            includingPropertiesForKeys: nil
+        )
+        #expect(!entries.contains { $0.lastPathComponent.hasPrefix(".winston-transfer-") })
     }
 }
 
