@@ -89,6 +89,93 @@ struct LibraryMutationTests {
         #expect(LibraryMutationLog.shared.catalogRevision == catalogBefore)
     }
 
+    @Test func catalogJournalPreservesAffectedBookIDs() {
+        let log = LibraryMutationLog()
+        let before = log.catalogRevision
+        let first = UUID()
+        let second = UUID()
+
+        log.bump(affectedBookIDs: [first])
+        log.bump(affectedBookIDs: [second])
+
+        let delta = log.catalogDelta(since: before)
+        #expect(delta.toRevision == before + 2)
+        #expect(delta.affectedBookIDs == [first, second])
+        #expect(!delta.requiresFullRebuild)
+        #expect(!delta.changesBookMembership)
+    }
+
+    @Test func fullTextJournalIgnoresUnrelatedCatalogChangesAndPreservesAssetIDs() {
+        let log = LibraryMutationLog()
+        let before = log.fullTextRevision
+        let assetBookID = UUID()
+
+        log.bump(affectedBookIDs: [UUID()])
+        #expect(log.fullTextRevision == before)
+
+        log.bump(
+            affectedBookIDs: [assetBookID],
+            fullTextAffectedBookIDs: [assetBookID]
+        )
+        let delta = log.fullTextDelta(since: before)
+        #expect(delta.toRevision == before + 1)
+        #expect(delta.affectedBookIDs == [assetBookID])
+        #expect(!delta.requiresFullRebuild)
+    }
+
+    @Test func mutationCommandsOnlyInvalidateFullTextWhenIndexedContentCanChange() {
+        #expect(!CatalogMutationCommand.setReadingStatus(
+            bookIDs: [UUID()],
+            status: .finished
+        ).changesFullTextIndex)
+        #expect(!CatalogMutationCommand.updateMetadata(
+            bookID: UUID(),
+            fields: ["rating", "notes"]
+        ).changesFullTextIndex)
+        #expect(CatalogMutationCommand.updateMetadata(
+            bookID: UUID(),
+            fields: ["title"]
+        ).changesFullTextIndex)
+        #expect(!CatalogMutationCommand.updateWork(
+            workID: UUID(),
+            fields: ["preferredEditionUUID"]
+        ).changesFullTextIndex)
+        #expect(CatalogMutationCommand.updateWork(
+            workID: UUID(),
+            fields: ["author"]
+        ).changesFullTextIndex)
+        #expect(CatalogMutationCommand.replaceFile(
+            bookID: UUID(),
+            assetID: UUID()
+        ).changesFullTextIndex)
+    }
+
+    @Test func workIdentityChangeInvalidatesEveryEditionForFullTextMetadata() async throws {
+        let lib = try await TestLibrary()
+        let work = Work(title: "Original")
+        let first = Book(fileName: "first.epub", originalFileName: "First.epub")
+        let second = Book(fileName: "second.epub", originalFileName: "Second.epub")
+        lib.context.insert(work)
+        lib.context.insert(first)
+        lib.context.insert(second)
+        first.work = work
+        second.work = work
+        try lib.context.save()
+        let mutations = CatalogMutationService(modelContext: lib.context)
+        let before = LibraryMutationLog.shared.fullTextRevision
+
+        try mutations.commit(
+            .updateWork(workID: work.uuid, fields: ["title"]),
+            affectedWorkIDs: [work.uuid]
+        ) {
+            work.title = "Updated"
+        }
+
+        let delta = LibraryMutationLog.shared.fullTextDelta(since: before)
+        #expect(delta.affectedBookIDs == [first.uuid, second.uuid])
+        #expect(!delta.requiresFullRebuild)
+    }
+
     @Test func facadeWritesBumpTheRevision() async throws {
         let lib = try await TestLibrary()
         let viewModel = LibraryViewModel(modelContext: lib.context, settings: AppSettings(), toasts: ToastCenter())
