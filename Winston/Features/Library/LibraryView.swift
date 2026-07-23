@@ -669,7 +669,7 @@ struct LibraryView: View {
     }
 
     private func deleteFromDevice(_ booksToRemove: [Book]) {
-        let keys = Set(booksToRemove.map(\.deviceMatchKey))
+        let keys = Set(booksToRemove.flatMap(\.deviceMatchKeys))
             .intersection(deviceMonitor.deviceFileNames)
         guard !keys.isEmpty else { return }
         Task {

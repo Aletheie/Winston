@@ -46,7 +46,7 @@ struct SendSeriesButton: View {
         books
             .filter {
                 $0.hasDigitalFile && $0.drmProtected != true
-                    && !deviceFileNames.contains($0.deviceMatchKey)
+                    && !$0.isOnDevice(fileNames: deviceFileNames)
             }
             .sorted {
                 let lhs = $0.seriesIndex.flatMap(Double.init) ?? .greatestFiniteMagnitude
@@ -59,7 +59,7 @@ struct SendSeriesButton: View {
     static func entireSeriesIsOnDevice(_ books: [Book], deviceFileNames: Set<String>) -> Bool {
         let digitalBooks = books.filter(\.hasDigitalFile)
         return !digitalBooks.isEmpty
-            && digitalBooks.allSatisfy { deviceFileNames.contains($0.deviceMatchKey) }
+            && digitalBooks.allSatisfy { $0.isOnDevice(fileNames: deviceFileNames) }
     }
 
     private var helpText: String {

@@ -180,7 +180,7 @@ enum LibraryQuery {
             guard belongs,
                   book.search.matches(visibleQuery),
                   kindlePresenceFilter.includes(
-                    deviceMatchKey: book.smartShelf.deviceMatchKey,
+                    deviceMatchKeys: book.smartShelf.deviceMatchKeys,
                     deviceFileNames: deviceFileNames,
                     deviceIsConnected: deviceIsConnected
                   ) else { continue }

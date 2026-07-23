@@ -42,7 +42,7 @@ struct BookTableView: View {
                     if convertingUUIDs.contains(book.uuid) {
                         ProgressView().controlSize(.small)
                     }
-                    if deviceFileNames.contains(book.deviceMatchKey) {
+                    if book.isOnDevice(fileNames: deviceFileNames) {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 9))
                             .foregroundStyle(theme.success)
@@ -131,7 +131,7 @@ struct BookTableView: View {
     private func menu(for ids: Set<Book.ID>) -> some View {
         let chosen = books.filter { ids.contains($0.id) }
         let convertible = chosen.filter { $0.hasDigitalFile && EbookConverter.needsConversion(format: $0.format) }.count
-        let onDevice = chosen.filter { deviceFileNames.contains($0.deviceMatchKey) }.count
+        let onDevice = chosen.filter { $0.isOnDevice(fileNames: deviceFileNames) }.count
         if chosen.count == 1, let book = chosen.first {
             BookContextMenu(
                 book: book,
@@ -139,7 +139,7 @@ struct BookTableView: View {
                 isInSelection: selection.isSelected(book),
                 convertibleInSelection: convertible,
                 collections: collections,
-                isOnDevice: deviceFileNames.contains(book.deviceMatchKey),
+                isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
                 onDeviceInSelection: onDevice,
                 actions: actions
             )

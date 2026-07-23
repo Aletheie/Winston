@@ -66,10 +66,14 @@ struct DeviceView: View {
             return
         }
         let authorMap = Dictionary(
-            books.compactMap { book in book.displayAuthor.map { (book.deviceMatchKey, $0) } },
+            books.flatMap { book in
+                book.displayAuthor.map { author in
+                    book.deviceMatchKeys.map { ($0, author) }
+                } ?? []
+            },
             uniquingKeysWith: { first, _ in first }
         )
-        let libraryKeys = Set(books.lazy.map(\.deviceMatchKey))
+        let libraryKeys = Set(books.flatMap(\.deviceMatchKeys))
         let rows = DeviceTableQuery.rows(books: monitor.books, authorByMatchKey: authorMap)
         authorByDeviceKey = authorMap
         deviceOnlyBooks = monitor.books.filter { !libraryKeys.contains($0.matchKey) }

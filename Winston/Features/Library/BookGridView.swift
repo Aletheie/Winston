@@ -58,7 +58,7 @@ struct BookGridView: View {
     }
 
     private var onDeviceInSelection: Int {
-        books.filter { selection.isSelected($0) && deviceFileNames.contains($0.deviceMatchKey) }.count
+        books.filter { selection.isSelected($0) && $0.isOnDevice(fileNames: deviceFileNames) }.count
     }
 
     var body: some View {
@@ -81,7 +81,7 @@ struct BookGridView: View {
                     BookCardView(
                         book: book,
                         isSelected: selection.isSelected(book),
-                        isOnDevice: deviceFileNames.contains(book.deviceMatchKey),
+                        isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
                         isConverting: convertingUUIDs.contains(book.uuid),
                         isMissing: missingUUIDs.contains(book.uuid),
                         editionCount: editions.editionCounts[book.uuid] ?? 1,
@@ -125,7 +125,7 @@ struct BookGridView: View {
                             isInSelection: selection.isSelected(book),
                             convertibleInSelection: convertibleInSelection,
                             collections: collections,
-                            isOnDevice: deviceFileNames.contains(book.deviceMatchKey),
+                            isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
                             onDeviceInSelection: onDeviceInSelection,
                             actions: actions
                         )
