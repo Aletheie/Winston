@@ -71,9 +71,9 @@ Winston models **works, editions and files** separately. Two translations of Dun
 
 ### Plugins
 
-- Plain JavaScript plugins run in JavaScriptCore and live in `~/Library/Application Support/Winston/Plugins/`.
-- Each manifest declares permissions, which the user approves in Settings. Plugins have no direct filesystem or network access.
-- Plugins start disabled. A load timeout or five uncaught errors quarantines one; its logs remain available in Settings.
+- Plain JavaScript plugins run in per-session, killable JavaScriptCore worker processes and live in `~/Library/Application Support/Winston/Plugins/`.
+- Each manifest declares permissions, which the user approves in Settings. Consent is tied to the complete bundle digest; plugins have no direct filesystem or network access.
+- Plugins start disabled. A timeout, resource-limit violation, or five uncaught errors quarantines one; its logs remain available in Settings.
 - [Example plugins](docs/example-plugin) · [API reference](docs/PluginAPI.md) · [Writing guide](docs/WritingPlugins.md)
 
 ### macOS integration
@@ -190,7 +190,7 @@ Verified on a Paperwhite 11th generation.
 
 - Swift 6 with MainActor isolation by default
 - SwiftUI and SwiftData
-- JavaScriptCore for plugins
+- JavaScriptCore in isolated plugin worker processes
 - Quick Look app extension for MOBI and AZW3 previews
 - `libmtp` and `libusb` for MTP devices
 - [Tuist](https://tuist.dev) for project generation
