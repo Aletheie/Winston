@@ -16,7 +16,6 @@ struct ContentView: View {
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
     @Environment(DeviceMonitor.self) private var deviceMonitor
-    @Environment(ToastCenter.self) private var toasts
     @Query(sort: \Book.dateAdded, order: .reverse) private var books: [Book]
     @Query(sort: \BookCollection.name) private var collections: [BookCollection]
 
@@ -28,6 +27,7 @@ struct ContentView: View {
     @State private var watchStability = WatchFolderStabilityTracker()
     @State private var watchScanTask: Task<Void, Never>?
     @State private var activeLibrarySheet: LibrarySheet?
+    @State private var libraryReadModel = LibraryReadModel()
 
     private var destination: MainDestination {
         switch sidebarSelection {
@@ -48,6 +48,7 @@ struct ContentView: View {
             SidebarView(
                 books: books,
                 collections: collections,
+                readModel: libraryReadModel,
                 viewModel: viewModel,
                 selection: $sidebarSelection,
                 onReviewEditions: openEditionReview
@@ -65,6 +66,7 @@ struct ContentView: View {
                     LibraryView(
                         books: books,
                         collections: collections,
+                        readModel: libraryReadModel,
                         viewModel: viewModel,
                         filter: filter,
                         onShowAll: { sidebarSelection = .all },
@@ -89,10 +91,26 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            LibraryStatusToasts(viewModel: viewModel, onReviewEditions: openEditionReview)
+            LibraryStatusToasts(
+                viewModel: viewModel,
+                maintenance: viewModel.maintenance,
+                onReviewEditions: openEditionReview
+            )
+        }
+        .background {
+            LibraryReadModelSyncView(
+                readModel: libraryReadModel,
+                books: books,
+                collections: collections
+            )
         }
         .tint(theme.accent)
         .task {
+            StartupPerformance.markInteractive()
+            Log.persistenceSignposter.emitEvent(
+                "LibraryInteractive",
+                id: Log.persistenceSignposter.makeSignpostID()
+            )
             restoreSceneState()
             normalizeRestoredDestination()
             deviceMonitor.start()
@@ -100,29 +118,18 @@ struct ContentView: View {
             await viewModel.notices.checkForNewReleasesIfDue()
         }
         .task(priority: .background) {
-            let signposter = Log.persistenceSignposter
-            let interval = signposter.beginInterval(
-                "StartupMaintenance",
-                id: signposter.makeSignpostID()
-            )
-            defer { signposter.endInterval("StartupMaintenance", interval) }
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
-            await checkIntegrityAndBackup()
-            guard !Task.isCancelled else { return }
-            await viewModel.backfillMissingSizes()
-            guard !Task.isCancelled else { return }
-            await viewModel.detectMissingDRM()
-            guard !Task.isCancelled else { return }
-            await viewModel.backfillMissingAssetHashes()
-            guard !Task.isCancelled else { return }
-            await viewModel.editions.scanLibrary()
-            guard !Task.isCancelled else { return }
-            await viewModel.rescanMissingMetadata()
+            viewModel.maintenance.start()
         }
         .task(id: metadataBackfillConfiguration, priority: .background) {
             guard settings.onlineMetadataEnabled else { return }
             try? await Task.sleep(for: .seconds(8))
+            while viewModel.maintenance.isActive {
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    return
+                }
+            }
             guard !Task.isCancelled else { return }
             viewModel.backfillOnlineMetadata()
             await viewModel.notices.checkForNewReleasesIfDue()
@@ -237,33 +244,49 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Integrity & backup
+}
 
-    private func checkIntegrityAndBackup() async {
-        let missing = await viewModel.scanForMissingFiles()
-        if missing > 0 {
-            toasts.error(String(localized: "Some book files are missing (\(missing))."))
-        }
-        runAutoBackupIfDue()
+private struct LibraryReadModelSyncView: View {
+    let readModel: LibraryReadModel
+    let books: [Book]
+    let collections: [BookCollection]
+
+    @Environment(DeviceMonitor.self) private var deviceMonitor
+
+    private struct Revision: Hashable {
+        let catalogRevision: Int
+        let bookCount: Int
+        let collectionCount: Int
+        let deviceFileNames: Set<String>
+        let deviceIsConnected: Bool
     }
 
-    private func runAutoBackupIfDue() {
-        guard settings.autoBackupEnabled, let path = settings.backupFolderPath else { return }
-        let due = settings.lastBackupAt.map { Date.now.timeIntervalSince($0) > 24 * 3600 } ?? true
-        guard due else { return }
-        let folder = URL(fileURLWithPath: path)
-        Task {
-            do {
-                _ = try await ManagedFileCoordinator.shared.createBackup(
-                    storeURL: PersistenceController.storeURL,
-                    to: folder
+    private var revision: Revision {
+        Revision(
+            catalogRevision: LibraryMutationLog.shared.catalogRevision,
+            bookCount: books.count,
+            collectionCount: collections.count,
+            deviceFileNames: deviceMonitor.deviceFileNames,
+            deviceIsConnected: deviceMonitor.isConnected
+        )
+    }
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .task(id: revision) {
+                let delta = LibraryMutationLog.shared.catalogDelta(
+                    since: readModel.catalogRevision
                 )
-                settings.lastBackupAt = .now
-                toasts.info(String(localized: "Library backed up."))
-            } catch {
-                toasts.error(String(localized: "Backup failed."))
+                await readModel.synchronize(
+                    books: books,
+                    collections: collections,
+                    delta: delta,
+                    deviceFileNames: revision.deviceFileNames,
+                    deviceIsConnected: revision.deviceIsConnected
+                )
             }
-        }
     }
 }
 

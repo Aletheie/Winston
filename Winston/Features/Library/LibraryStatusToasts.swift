@@ -2,6 +2,7 @@ import SwiftUI
 
 struct LibraryStatusToasts: View {
     let viewModel: LibraryViewModel
+    let maintenance: MaintenanceScheduler
     let onReviewEditions: () -> Void
 
     @Environment(\.theme) private var theme
@@ -68,6 +69,39 @@ struct LibraryStatusToasts: View {
     private var activeToasts: [Toast] {
         var toasts: [Toast] = []
 
+        switch maintenance.phase {
+        case .running(let progress):
+            toasts.append(Toast(
+                id: "maintenance",
+                style: .progress,
+                message: maintenanceMessage(for: progress.job),
+                progress: progress.fraction
+            ))
+        case .paused(let progress, let reason):
+            let message = switch reason {
+            case .requested:
+                String(localized: "Library maintenance paused.")
+            case .lowPower:
+                String(localized: "Library maintenance paused in Low Power Mode.")
+            }
+            toasts.append(Toast(
+                id: "maintenance",
+                style: .info,
+                message: message,
+                progress: progress.fraction
+            ))
+        case .failed(let job, _):
+            toasts.append(Toast(
+                id: "maintenance",
+                style: .error,
+                message: String(
+                    localized: "Library maintenance paused during \(maintenanceJobName(job))."
+                )
+            ))
+        case .idle, .completed:
+            break
+        }
+
         if !viewModel.isImportingCalibre, let summary = viewModel.calibreImportSummary {
             let style: Toast.Style = switch viewModel.calibreImportSummaryStyle {
             case .success: .success
@@ -112,6 +146,29 @@ struct LibraryStatusToasts: View {
         }
 
         return toasts
+    }
+
+    private func maintenanceMessage(for job: MaintenanceJob) -> String {
+        String(localized: "Library maintenance: \(maintenanceJobName(job))…")
+    }
+
+    private func maintenanceJobName(_ job: MaintenanceJob) -> String {
+        switch job {
+        case .legacyLibrary:
+            String(localized: "migrating the legacy catalog")
+        case .catalogStructure:
+            String(localized: "updating catalog records")
+        case .catalogCleanup:
+            String(localized: "cleaning catalog records")
+        case .assetInspection:
+            String(localized: "inspecting book files")
+        case .metadataExtraction:
+            String(localized: "extracting metadata")
+        case .editionDiscovery:
+            String(localized: "finding related editions")
+        case .automaticBackup:
+            String(localized: "creating a backup")
+        }
     }
 
     private func handleAction(_ toast: Toast) {

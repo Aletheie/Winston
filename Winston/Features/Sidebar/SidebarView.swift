@@ -1,6 +1,5 @@
 import SwiftUI
 import SwiftData
-import OSLog
 
 enum SidebarItem: Hashable, RawRepresentable {
     case all
@@ -78,6 +77,7 @@ enum SidebarItem: Hashable, RawRepresentable {
 struct SidebarView: View {
     var books: [Book]
     var collections: [BookCollection]
+    var readModel: LibraryReadModel
     var viewModel: LibraryViewModel
     @Binding var selection: SidebarItem?
     let onReviewEditions: () -> Void
@@ -116,13 +116,13 @@ struct SidebarView: View {
         }
     }
 
-    @State private var facets = Facets()
+    private var facets: LibraryFacetSnapshot { readModel.facets }
 
     var body: some View {
         List(selection: $selection) {
             Section {
                 SidebarRow(title: theme.styledText(terminal: "ALL BOOKS", native: "All Books"),
-                           systemImage: "books.vertical", count: books.count)
+                           systemImage: "books.vertical", count: readModel.bookCount)
                     .tag(SidebarItem.all)
                 if settings.showDiscoverInSidebar {
                     Label {
@@ -188,7 +188,7 @@ struct SidebarView: View {
                 onDelete: { deleteCollectionTarget = $0 },
                 onDropBooks: { bookIDs, collection in
                     guard !collection.isSystem, !collection.isSmart else { return }
-                    let draggedBooks = books.filter { bookIDs.contains($0.uuid) }
+                    let draggedBooks = readModel.books(for: Array(bookIDs))
                     guard !draggedBooks.isEmpty else { return }
                     viewModel.add(draggedBooks, to: collection)
                 }
@@ -253,14 +253,6 @@ struct SidebarView: View {
             default:
                 break
             }
-        }
-        .task(id: FacetRevision(
-            revision: LibraryMutationLog.shared.catalogRevision,
-            bookCount: books.count,
-            deviceFileNames: deviceMonitor.deviceFileNames,
-            deviceIsConnected: deviceMonitor.isConnected
-        )) {
-            await refreshFacets()
         }
         .tint(theme.accent)
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -377,7 +369,7 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) { deleteTagTarget = nil }
         } message: {
             if let target = deleteTagTarget {
-                let count = books.lazy.filter { $0.tags.contains(target) }.count
+                let count = facets.tags[target, default: 0]
                 Text(
                     "The tag is removed from \(count) books.",
                     comment: "Deletion confirmation: number of books from which the tag is removed."
@@ -413,148 +405,12 @@ struct SidebarView: View {
 
     // MARK: - Author tip
 
-    private var authorTip: (original: String, suggestion: String)? {
+    private var authorTip: LibraryFacetTip? {
         facets.authorTips.first { !dismissedAuthorTips.contains($0.original) }
     }
 
-    private var seriesTip: (original: String, suggestion: String)? {
+    private var seriesTip: LibraryFacetTip? {
         facets.seriesTips.first { !dismissedSeriesTips.contains($0.original) }
-    }
-
-    // MARK: - Facets
-
-    private struct FacetRevision: Hashable {
-        let revision: Int
-        let bookCount: Int
-        let deviceFileNames: Set<String>
-        let deviceIsConnected: Bool
-    }
-
-    private nonisolated struct FacetBook: Sendable {
-        let format: String
-        let author: String?
-        let series: String?
-        let tags: [String]
-        let isRated: Bool
-        let readingStatus: ReadingStatus
-        let dateAdded: Date
-
-        @MainActor init(_ book: Book) {
-            format = book.format
-            author = book.displayAuthor
-            series = book.series
-            tags = book.tags
-            isRated = (book.rating ?? 0) > 0
-            readingStatus = book.readingStatus
-            dateAdded = book.dateAdded
-        }
-    }
-
-    private nonisolated struct Facets: Sendable {
-        var formats: [String: Int] = [:]
-        var authors: [String: Int] = [:]
-        var series: [String: Int] = [:]
-        var tags: [String: Int] = [:]
-        var formatKeys: [String] = []
-        var authorKeys: [String] = []
-        var seriesKeys: [String] = []
-        var tagKeys: [String] = []
-        var rated = 0
-        var statusCounts: [ReadingStatus: Int] = [:]
-        var recent = 0
-        var smartCounts: [UUID: Int] = [:]
-        var authorTips: [(original: String, suggestion: String)] = []
-        var seriesTips: [(original: String, suggestion: String)] = []
-    }
-
-    private func refreshFacets() async {
-        var searches: [(UUID, String)] = []
-        var shelves: [(UUID, SmartShelfDefinition)] = []
-        for collection in collections where collection.isSmart && !collection.isWishlist {
-            if let definition = collection.smartShelfDefinition {
-                shelves.append((collection.id, definition))
-            } else if let search = collection.savedSearch {
-                searches.append((collection.id, search))
-            }
-        }
-        var facetBooks: [FacetBook] = []
-        var searchBooks: [LibraryQuery.SearchSnapshot] = []
-        var shelfBooks: [SmartShelfBookSnapshot] = []
-        let includesSearch = !searches.isEmpty
-        let includesShelves = !shelves.isEmpty
-        let includesHighlights = shelves.contains { $0.1.requiresHighlights }
-        facetBooks.reserveCapacity(books.count)
-        if includesSearch { searchBooks.reserveCapacity(books.count) }
-        if includesShelves { shelfBooks.reserveCapacity(books.count) }
-        for (index, book) in books.enumerated() {
-            facetBooks.append(FacetBook(book))
-            if includesSearch { searchBooks.append(LibraryQuery.SearchSnapshot(book)) }
-            if includesShelves {
-                shelfBooks.append(SmartShelfBookSnapshot(book, includeHighlights: includesHighlights))
-            }
-            if (index + 1).isMultiple(of: 512) {
-                await Task.yield()
-                guard !Task.isCancelled else { return }
-            }
-        }
-        let signposter = Log.librarySignposter
-        let interval = signposter.beginInterval("SidebarFacets")
-        let updated = await Self.makeFacets(
-            books: facetBooks,
-            searchBooks: searchBooks,
-            searches: searches,
-            shelfBooks: shelfBooks,
-            shelves: shelves,
-            deviceFileNames: deviceMonitor.deviceFileNames,
-            deviceIsConnected: deviceMonitor.isConnected
-        )
-        signposter.endInterval("SidebarFacets", interval)
-        guard !Task.isCancelled else { return }
-        facets = updated
-    }
-
-    // @Model values are snapshotted on the main actor before this work starts.
-    @concurrent
-    private static func makeFacets(
-        books: [FacetBook],
-        searchBooks: [LibraryQuery.SearchSnapshot],
-        searches: [(UUID, String)],
-        shelfBooks: [SmartShelfBookSnapshot],
-        shelves: [(UUID, SmartShelfDefinition)],
-        deviceFileNames: Set<String>,
-        deviceIsConnected: Bool
-    ) async -> Facets {
-        var facets = Facets()
-        let recentCutoff = Date.now.addingTimeInterval(-14 * 24 * 3600)
-        for book in books {
-            guard !Task.isCancelled else { return facets }
-            facets.formats[book.format, default: 0] += 1
-            if let author = book.author { facets.authors[author, default: 0] += 1 }
-            if let series = book.series, !series.isEmpty { facets.series[series, default: 0] += 1 }
-            for tag in book.tags { facets.tags[tag, default: 0] += 1 }
-            if book.isRated { facets.rated += 1 }
-            facets.statusCounts[book.readingStatus, default: 0] += 1
-            if book.dateAdded > recentCutoff { facets.recent += 1 }
-        }
-        facets.formatKeys = facets.formats.keys.sorted()
-        facets.authorKeys = facets.authors.keys.sorted()
-        facets.seriesKeys = facets.series.compactMap { series, count in
-            count > 1 ? series : nil
-        }.sorted()
-        facets.tagKeys = facets.tags.keys.sorted()
-        facets.authorTips = facets.authorKeys.compactMap { author in
-            MetadataFixFinder.reversedAuthorSuggestion(author).map { (author, $0) }
-        }
-        facets.seriesTips = SeriesSuggestions.unificationTips(counts: facets.series)
-        facets.smartCounts = LibraryQuery.smartCounts(for: searchBooks, searches: searches)
-        let structuredCounts = LibraryQuery.smartShelfCounts(
-            for: shelfBooks,
-            shelves: shelves,
-            deviceFileNames: deviceFileNames,
-            deviceIsConnected: deviceIsConnected
-        )
-        facets.smartCounts.merge(structuredCounts) { _, structured in structured }
-        return facets
     }
 }
 
@@ -565,6 +421,7 @@ struct SidebarView: View {
     SidebarView(
         books: [],
         collections: [],
+        readModel: LibraryReadModel(),
         viewModel: LibraryViewModel(modelContext: container.mainContext, settings: AppSettings(), toasts: ToastCenter()),
         selection: .constant(.all),
         onReviewEditions: {}

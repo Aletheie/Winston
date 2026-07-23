@@ -43,6 +43,7 @@ enum LibrarySheet: Identifiable {
 struct LibraryView: View {
     var books: [Book]
     var collections: [BookCollection]
+    var readModel: LibraryReadModel
     var viewModel: LibraryViewModel
     let filter: LibraryFilter
     let onShowAll: () -> Void
@@ -69,9 +70,10 @@ struct LibraryView: View {
     @State private var debouncedSearch = ""
     @State private var kindlePresenceFilter: KindlePresenceFilter = .all
     @State private var displayed: [Book] = []
+    @State private var displayedIDs: [UUID] = []
+    @State private var displayedReadModelGeneration = 0
+    @State private var displayedQuery: LibraryDisplayQuery?
     @State private var animateNextDisplayChange = false
-    @State private var displaySnapshots: [LibraryDisplaySnapshot] = []
-    @State private var displaySnapshotRevision: DisplaySnapshotRevision?
     @State private var sortOrder: [KeyPathComparator<Book>] = [BookSort.dateAdded.comparator(ascending: false)]
     @State private var showDeleteConfirm = false
     @State private var pendingDeletion: [Book] = []
@@ -87,14 +89,10 @@ struct LibraryView: View {
     // MARK: - Derived state
 
     private var primarySelectedBook: Book? {
-        selection.primaryBook(in: books)
-    }
-
-    private struct DisplaySnapshotRevision: Hashable {
-        let mutationRevision: Int
-        let bookCount: Int
-        let includeCollections: Bool
-        let includeHighlights: Bool
+        let id = selection.lastClickedBookID.flatMap {
+            selection.selectedBookIDs.contains($0) ? $0 : nil
+        } ?? selection.selectedBookIDs.first
+        return readModel.book(id: id)
     }
 
     private enum ContentState: Hashable {
@@ -114,14 +112,9 @@ struct LibraryView: View {
     }
 
     private struct DisplayRevision: Hashable {
-        let snapshot: DisplaySnapshotRevision
-        let filter: LibraryFilter
-        let searchText: String
-        let sort: LibraryDisplaySort
-        let smartShelf: SmartShelfDisplayConfiguration?
-        let deviceFileNames: Set<String>
-        let deviceIsConnected: Bool
-        let kindlePresenceFilter: KindlePresenceFilter
+        let readModelGeneration: Int
+        let query: LibraryDisplayQuery
+        let hasInvalidSmartShelf: Bool
     }
 
     private var smartShelfDisplayConfiguration: SmartShelfDisplayConfiguration? {
@@ -137,26 +130,21 @@ struct LibraryView: View {
 
     private var displayRevision: DisplayRevision {
         let smartShelf = smartShelfDisplayConfiguration
-        let includeCollections: Bool
-        if case .collection = filter, smartShelf == nil {
-            includeCollections = true
-        } else {
-            includeCollections = false
-        }
         return DisplayRevision(
-            snapshot: DisplaySnapshotRevision(
-                mutationRevision: LibraryMutationLog.shared.catalogRevision,
-                bookCount: books.count,
-                includeCollections: includeCollections,
-                includeHighlights: smartShelf?.definition?.requiresHighlights == true
+            readModelGeneration: readModel.generation,
+            query: LibraryDisplayQuery(
+                filter: filter,
+                searchText: debouncedSearch,
+                sort: LibraryQuery.displaySort(for: sortOrder),
+                savedSearch: smartShelf?.savedSearch,
+                smartShelf: smartShelf?.definition,
+                deviceFileNames: deviceMonitor.deviceFileNames,
+                deviceIsConnected: deviceMonitor.isConnected,
+                kindlePresenceFilter: kindlePresenceFilter
             ),
-            filter: filter,
-            searchText: debouncedSearch,
-            sort: LibraryQuery.displaySort(for: sortOrder),
-            smartShelf: smartShelf,
-            deviceFileNames: deviceMonitor.deviceFileNames,
-            deviceIsConnected: deviceMonitor.isConnected,
-            kindlePresenceFilter: kindlePresenceFilter
+            hasInvalidSmartShelf: smartShelf != nil
+                && smartShelf?.savedSearch == nil
+                && smartShelf?.definition == nil
         )
     }
 
@@ -203,7 +191,7 @@ struct LibraryView: View {
     }
 
     private var selectedBooks: [Book] {
-        books.filter { selection.selectedBookIDs.contains($0.id) }
+        readModel.selectedBooks(for: selection.selectedBookIDs)
     }
 
     private func targetBooks(for book: Book) -> [Book] {
@@ -445,7 +433,7 @@ struct LibraryView: View {
     }
 
     private var emptyStateKind: LibraryEmptyState.Kind {
-        if books.isEmpty {
+        if readModel.bookCount == 0 {
             .emptyLibrary(onImport: { isImporting = true },
                           onImportCalibre: { Task { await LibraryExternalActions.importFromCalibre(via: viewModel) } })
         } else if !searchText.isEmpty {
@@ -548,12 +536,12 @@ struct LibraryView: View {
     }
 
     private func openBook(_ bookID: UUID) {
-        guard let book = books.first(where: { $0.uuid == bookID }) else { return }
+        guard let book = readModel.book(uuid: bookID) else { return }
         LibraryExternalActions.openInReader(book)
     }
 
     private func showBookInLibrary(_ bookID: UUID) {
-        guard let book = books.first(where: { $0.uuid == bookID }) else { return }
+        guard let book = readModel.book(uuid: bookID) else { return }
         showInLibrary(book)
     }
 
@@ -563,7 +551,7 @@ struct LibraryView: View {
     }
 
     private func transmitSelected() {
-        let toSend = books.filter { selection.selectedBookIDs.contains($0.id) && $0.hasDigitalFile }
+        let toSend = selectedBooks.filter(\.hasDigitalFile)
         guard !toSend.isEmpty else { return }
         if settings.inspectBeforeKindleTransfer {
             presentBookDoctor(for: toSend, purpose: .sendToKindle)
@@ -605,59 +593,42 @@ struct LibraryView: View {
     }
 
     private func refreshDisplayed(for revision: DisplayRevision) async {
-        let snapshots: [LibraryDisplaySnapshot]
-        if displaySnapshotRevision == revision.snapshot {
-            snapshots = displaySnapshots
-        } else {
-            let signposter = Log.librarySignposter
-            let interval = signposter.beginInterval("LibrarySnapshot")
-            defer { signposter.endInterval("LibrarySnapshot", interval) }
-            var updated: [LibraryDisplaySnapshot] = []
-            updated.reserveCapacity(books.count)
-            for (index, book) in books.enumerated() {
-                updated.append(
-                    LibraryDisplaySnapshot(
-                        book,
-                        sourceOrdinal: index,
-                        includeCollections: revision.snapshot.includeCollections,
-                        includeHighlights: revision.snapshot.includeHighlights
-                    )
-                )
-                if (index + 1).isMultiple(of: 512) {
-                    await Task.yield()
-                    guard !Task.isCancelled else { return }
-                }
-            }
-            displaySnapshots = updated
-            displaySnapshotRevision = revision.snapshot
-            snapshots = updated
-        }
-
-        if let smartShelf = revision.smartShelf,
-           smartShelf.savedSearch == nil,
-           smartShelf.definition == nil {
+        if revision.hasInvalidSmartShelf {
+            displayedIDs = []
             displayed = []
+            displayedReadModelGeneration = revision.readModelGeneration
+            displayedQuery = revision.query
             return
         }
 
         let signposter = Log.librarySignposter
-        let queryInterval = signposter.beginInterval("LibraryFilterAndSort")
-        let ids = await LibraryQuery.displayIDsConcurrently(
-            for: snapshots,
-            filter: revision.filter,
-            searchText: revision.searchText,
-            sort: revision.sort,
-            savedSearch: revision.smartShelf?.savedSearch,
-            smartShelf: revision.smartShelf?.definition,
-            deviceFileNames: revision.deviceFileNames,
-            deviceIsConnected: revision.deviceIsConnected,
-            kindlePresenceFilter: revision.kindlePresenceFilter
-        )
-        signposter.endInterval("LibraryFilterAndSort", queryInterval)
+        let delta = readModel.displayDelta(since: displayedReadModelGeneration)
+        let ids: [UUID]
+        let requiresBookResolution: Bool
+        if displayedQuery == revision.query,
+           let incremental = readModel.incrementallyUpdatingDisplayIDs(
+               displayedIDs,
+               with: delta,
+               query: revision.query
+           ) {
+            let interval = signposter.beginInterval("LibraryFilterAndSortIncremental")
+            ids = incremental.ids
+            requiresBookResolution = incremental.changed
+            signposter.endInterval("LibraryFilterAndSortIncremental", interval)
+        } else {
+            let interval = signposter.beginInterval("LibraryFilterAndSort")
+            ids = await readModel.displayIDs(query: revision.query)
+            requiresBookResolution = true
+            signposter.endInterval("LibraryFilterAndSort", interval)
+        }
         guard !Task.isCancelled, displayRevision == revision else { return }
 
-        let booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
-        let updated = ids.compactMap { booksByID[$0] }
+        displayedIDs = ids
+        displayedReadModelGeneration = revision.readModelGeneration
+        displayedQuery = revision.query
+        guard requiresBookResolution else { return }
+
+        let updated = readModel.books(for: ids)
         if animateNextDisplayChange {
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
                 displayed = updated
@@ -687,6 +658,7 @@ struct LibraryView: View {
         LibraryView(
             books: [],
             collections: [],
+            readModel: LibraryReadModel(),
             viewModel: LibraryViewModel(modelContext: container.mainContext, settings: AppSettings(), toasts: ToastCenter()),
             filter: .all,
             onShowAll: {},

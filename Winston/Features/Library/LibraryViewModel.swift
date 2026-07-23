@@ -33,6 +33,7 @@ final class LibraryViewModel {
     let editions: CatalogReconciliationService
     let wishlist: WishlistService
     let notices: NoticeService
+    let maintenance: MaintenanceScheduler
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
          online: any OnlineMetadataFetching = OnlineMetadataService(),
@@ -67,10 +68,11 @@ final class LibraryViewModel {
             modelContext: modelContext,
             mutations: mutations,
             managedFiles: managedFiles,
-            toasts: toasts
+            toasts: toasts,
+            loadEditionCountsImmediately: false
         )
         self.editions = editions
-        self.importer = ImportService(
+        let importer = ImportService(
             modelContext: modelContext,
             settings: settings,
             metadata: metadata,
@@ -80,6 +82,7 @@ final class LibraryViewModel {
             mutations: mutations,
             managedFiles: managedFiles
         )
+        self.importer = importer
         self.calibreImporter = CalibreImportService(
             modelContext: modelContext,
             settings: settings,
@@ -106,6 +109,15 @@ final class LibraryViewModel {
         self.health = LibraryHealthService(
             modelContext: modelContext,
             analysisCoordinator: mutations.analysisCoordinator
+        )
+        self.maintenance = MaintenanceScheduler(
+            context: modelContext,
+            mutations: mutations,
+            managedFiles: managedFiles,
+            importer: importer,
+            editions: editions,
+            settings: settings,
+            toasts: toasts
         )
     }
 
@@ -171,7 +183,10 @@ final class LibraryViewModel {
         book.work = work
 
         do {
-            try modelContext.saveAndPublish()
+            try modelContext.saveAndPublish(
+                affectedBookIDs: [book.uuid],
+                changesBookMembership: true
+            )
             editions.refreshEditionCounts()
             toasts.success(String(localized: "Added physical book “\(title)”"))
             return book
@@ -620,7 +635,10 @@ final class LibraryViewModel {
         book.fileSizeBytes = asset.sizeBytes
         book.drmProtected = analysis.0
         book.coverVersion += 1
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(
+            affectedBookIDs: [book.uuid],
+            fullTextAffectedBookIDs: [book.uuid]
+        )
     }
 
     @discardableResult
@@ -695,7 +713,14 @@ final class LibraryViewModel {
               asset.fileName == fileName,
               asset.dateAdded == dateAdded else { return }
         asset.validationStatus = status
-        modelContext.saveQuietly()
+        if let bookID = asset.book?.uuid {
+            modelContext.saveQuietly(
+                affectedBookIDs: [bookID],
+                fullTextAffectedBookIDs: [bookID]
+            )
+        } else {
+            modelContext.saveQuietly()
+        }
     }
 
     // MARK: - Reading status
@@ -876,9 +901,11 @@ final class LibraryViewModel {
     func deleteCollection(_ collection: BookCollection) -> Bool {
         guard !collection.isSystem else { return false }
         let collectionID = collection.id
+        let bookIDs = Set(collection.books.map(\.uuid))
         do {
             try mutations.commit(
                 .deleteCollection(collectionID: collectionID),
+                affectedBookIDs: bookIDs,
                 affectedCollectionIDs: [collectionID]
             ) {
                 modelContext.delete(try mutations.collection(id: collectionID))
