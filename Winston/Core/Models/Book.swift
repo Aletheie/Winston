@@ -91,6 +91,18 @@ final class Book {
         primaryFileURL != nil
     }
 
+    /// Persisted catalog availability used by read models and other hot paths.
+    /// Filesystem validation belongs to explicit health/transfer operations.
+    var hasCatalogDigitalFile: Bool {
+        guard !fileName.isEmpty else { return false }
+        guard let primaryAsset = assets.first(where: { $0.fileName == fileName })
+            ?? assets.first(where: { $0.uuid == uuid }) else {
+            // Legacy rows may predate BookAsset backfill.
+            return true
+        }
+        return primaryAsset.validationStatus != .missing
+    }
+
     var hasPhysicalCopy: Bool {
         get { hasPhysicalCopyRaw ?? false }
         set { hasPhysicalCopyRaw = newValue }
@@ -103,6 +115,18 @@ final class Book {
     }()
 
     var format: String {
+        Self.catalogFormat(
+            fileName: fileName,
+            hasDigitalFile: hasCatalogDigitalFile,
+            hasPhysicalCopy: hasPhysicalCopy
+        )
+    }
+
+    nonisolated static func catalogFormat(
+        fileName: String,
+        hasDigitalFile: Bool,
+        hasPhysicalCopy: Bool
+    ) -> String {
         if !hasDigitalFile { return hasPhysicalCopy ? "PRINT" : "" }
         let key = fileName as NSString
         if let cached = Self.formats.object(forKey: key) { return cached as String }
@@ -142,7 +166,19 @@ final class Book {
     }()
 
     var deviceMatchKey: String {
-        if !hasDigitalFile { return "physical:\(uuid.uuidString.lowercased())" }
+        Self.catalogDeviceMatchKey(
+            originalFileName: originalFileName,
+            ownerID: uuid,
+            hasDigitalFile: hasCatalogDigitalFile
+        )
+    }
+
+    nonisolated static func catalogDeviceMatchKey(
+        originalFileName: String,
+        ownerID: UUID,
+        hasDigitalFile: Bool
+    ) -> String {
+        if !hasDigitalFile { return "physical:\(ownerID.uuidString.lowercased())" }
         let key = originalFileName as NSString
         if let cached = Self.deviceMatchKeys.object(forKey: key) { return cached as String }
         let value = key.deletingPathExtension.lowercased()
@@ -157,21 +193,51 @@ final class Book {
     }()
 
     var allocatedDeviceMatchKey: String {
-        if !hasDigitalFile { return deviceMatchKey }
-        let key = "\(uuid.uuidString)|\(originalFileName)" as NSString
+        Self.catalogAllocatedDeviceMatchKey(
+            originalFileName: originalFileName,
+            ownerID: uuid,
+            hasDigitalFile: hasCatalogDigitalFile
+        )
+    }
+
+    nonisolated static func catalogAllocatedDeviceMatchKey(
+        originalFileName: String,
+        ownerID: UUID,
+        hasDigitalFile: Bool
+    ) -> String {
+        if !hasDigitalFile {
+            return catalogDeviceMatchKey(
+                originalFileName: originalFileName,
+                ownerID: ownerID,
+                hasDigitalFile: false
+            )
+        }
+        let key = "\(ownerID.uuidString)|\(originalFileName)" as NSString
         if let cached = Self.allocatedDeviceMatchKeys.object(forKey: key) {
             return cached as String
         }
         let value = DevicePathAllocator.allocatedMatchKey(
             originalFileName: originalFileName,
-            ownerID: uuid
+            ownerID: ownerID
         )
         Self.allocatedDeviceMatchKeys.setObject(value as NSString, forKey: key)
         return value
     }
 
     var deviceMatchKeys: Set<String> {
-        [allocatedDeviceMatchKey, deviceMatchKey]
+        let hasDigitalFile = hasCatalogDigitalFile
+        return [
+            Self.catalogAllocatedDeviceMatchKey(
+                originalFileName: originalFileName,
+                ownerID: uuid,
+                hasDigitalFile: hasDigitalFile
+            ),
+            Self.catalogDeviceMatchKey(
+                originalFileName: originalFileName,
+                ownerID: uuid,
+                hasDigitalFile: hasDigitalFile
+            ),
+        ]
     }
 
     func isOnDevice(fileNames: Set<String>) -> Bool {

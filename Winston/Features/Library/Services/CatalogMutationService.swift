@@ -34,6 +34,45 @@ enum CatalogMutationCommand {
     case updateCover(bookID: UUID, version: Int)
     case applyAnalysis(bookID: UUID, kind: CatalogAnalysisJobKind)
     case applyAnalysisBatch(bookIDs: [UUID], kind: CatalogAnalysisJobKind)
+
+    var changesBookMembership: Bool {
+        switch self {
+        case .importBooks, .calibreImport, .removeBooks, .legacyMigration,
+             .reconcileEditions:
+            true
+        default:
+            false
+        }
+    }
+
+    var changesFullTextIndex: Bool {
+        switch self {
+        case .importBooks, .calibreImport, .addFile, .replaceFile, .removeFile,
+             .removeBooks, .conversionOutput, .legacyMigration, .reconcileEditions,
+             .assignEdition:
+            true
+
+        case .updateMetadata(_, let fields),
+             .updateMetadataBatch(_, _, let fields),
+             .pluginUpdate(_, let fields),
+             .updateWork(_, let fields):
+            !fields.isDisjoint(with: ["title", "author"])
+
+        case .applyAnalysis(_, let kind),
+             .applyAnalysisBatch(_, let kind):
+            switch kind {
+            case .metadataExtraction, .onlineEnrichment, .assetHash, .assetInspection:
+                true
+            case .pageCount, .fileSize, .drmInspection:
+                false
+            }
+
+        case .setReadingStatus, .setReadingProgress,
+             .createCollection, .updateCollection, .deleteCollection,
+             .updateCover:
+            false
+        }
+    }
 }
 
 struct CatalogChangeSet {
@@ -298,6 +337,7 @@ final class CatalogMutationService {
         affectedWorkIDs: Set<UUID> = [],
         affectedCollectionIDs: Set<UUID> = [],
         catalogChanged: Bool = true,
+        progress: ManagedFileProgressHandler? = nil,
         revertingOnFailure rollbackMutation: () -> Void = {},
         applying mutation: () throws -> Void
     ) async throws -> CatalogFileCommitResult {
@@ -339,7 +379,10 @@ final class CatalogMutationService {
             affectedWorkIDs: affectedWorkIDs,
             affectedCollectionIDs: affectedCollectionIDs
         ), catalogChanged: catalogChanged)
-        let pending = await finalizeCommittedTransactions([transaction])
+        let pending = await finalizeCommittedTransactions(
+            [transaction],
+            progress: progress
+        )
         return CatalogFileCommitResult(changeSet: changeSet, pendingTransactionIDs: pending)
     }
 
@@ -414,7 +457,8 @@ final class CatalogMutationService {
     }
 
     private func finalizeCommittedTransactions(
-        _ transactions: [ManagedFileTransaction]
+        _ transactions: [ManagedFileTransaction],
+        progress: ManagedFileProgressHandler? = nil
     ) async -> [UUID] {
         let snapshot: ManagedFileCatalogSnapshot
         do {
@@ -430,7 +474,11 @@ final class CatalogMutationService {
         for transaction in transactions {
             do {
                 try await managedFiles.catalogDidCommit(transaction)
-                let outcome = try await managedFiles.reconcile(transaction, against: snapshot)
+                let outcome = try await managedFiles.reconcile(
+                    transaction,
+                    against: snapshot,
+                    progress: progress
+                )
                 if outcome != .completed { pending.append(transaction.id) }
             } catch {
                 pending.append(transaction.id)
@@ -458,8 +506,59 @@ final class CatalogMutationService {
         catalogChanged: Bool
     ) -> CatalogChangeSet {
         invalidateAnalysis(for: changeSet)
-        LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
+        let fullTextAffectedBookIDs = fullTextAffectedBookIDs(for: changeSet)
+        LibraryMutationLog.shared.bump(
+            catalogChanged: catalogChanged,
+            affectedBookIDs: changeSet.affectedBookIDs,
+            affectedCollectionIDs: changeSet.affectedCollectionIDs,
+            changesBookMembership: changeSet.command.changesBookMembership,
+            fullTextAffectedBookIDs: fullTextAffectedBookIDs
+        )
         return changeSet
+    }
+
+    private func fullTextAffectedBookIDs(
+        for changeSet: CatalogChangeSet
+    ) -> Set<UUID>? {
+        guard changeSet.command.changesFullTextIndex else { return [] }
+        var bookIDs = changeSet.affectedBookIDs
+
+        switch changeSet.command {
+        case .updateMetadata(let bookID, _),
+             .pluginUpdate(let bookID, _),
+             .addFile(let bookID, _),
+             .replaceFile(let bookID, _),
+             .removeFile(let bookID, _),
+             .conversionOutput(let bookID, _),
+             .applyAnalysis(let bookID, _):
+            bookIDs.insert(bookID)
+
+        case .updateMetadataBatch(let commandBookIDs, _, _),
+             .assignEdition(let commandBookIDs, _),
+             .importBooks(let commandBookIDs),
+             .calibreImport(let commandBookIDs),
+             .removeBooks(let commandBookIDs),
+             .legacyMigration(let commandBookIDs),
+             .applyAnalysisBatch(let commandBookIDs, _):
+            bookIDs.formUnion(commandBookIDs)
+
+        case .reconcileEditions(let survivorID, let removedID, _):
+            bookIDs.formUnion([survivorID, removedID])
+
+        case .updateWork(let commandWorkID, _):
+            for workID in changeSet.affectedWorkIDs.union([commandWorkID]) {
+                guard let affectedWork = try? work(id: workID) else {
+                    return nil
+                }
+                bookIDs.formUnion(affectedWork.editions.map(\.uuid))
+            }
+
+        case .setReadingStatus, .setReadingProgress,
+             .createCollection, .updateCollection, .deleteCollection,
+             .updateCover:
+            break
+        }
+        return bookIDs
     }
 
     private func invalidateAnalysis(for changeSet: CatalogChangeSet) {

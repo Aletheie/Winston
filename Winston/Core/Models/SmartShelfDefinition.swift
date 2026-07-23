@@ -354,7 +354,7 @@ nonisolated struct SmartShelfRule: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
-nonisolated struct SmartShelfBookSnapshot: Sendable {
+nonisolated struct SmartShelfBookSnapshot: Equatable, Sendable {
     let id: UUID
     let title: String?
     let author: String?
@@ -372,11 +372,52 @@ nonisolated struct SmartShelfBookSnapshot: Sendable {
     let deviceMatchKeys: Set<String>
     let hasMissingMetadata: Bool
 
+    init(
+        id: UUID,
+        title: String? = nil,
+        author: String? = nil,
+        publisher: String? = nil,
+        language: String? = nil,
+        translator: String? = nil,
+        tags: [String] = [],
+        series: String? = nil,
+        pageCount: Int? = nil,
+        format: String,
+        rating: Int? = nil,
+        readingStatusRaw: String = ReadingStatus.unread.rawValue,
+        hasHighlights: Bool = false,
+        drmProtected: Bool = false,
+        deviceMatchKeys: Set<String> = [],
+        hasMissingMetadata: Bool = false
+    ) {
+        self.id = id
+        self.title = title
+        self.author = author
+        self.publisher = publisher
+        self.language = language
+        self.translator = translator
+        self.tags = tags
+        self.series = series
+        self.pageCount = pageCount
+        self.format = format
+        self.rating = rating
+        self.readingStatusRaw = readingStatusRaw
+        self.hasHighlights = hasHighlights
+        self.drmProtected = drmProtected
+        self.deviceMatchKeys = deviceMatchKeys
+        self.hasMissingMetadata = hasMissingMetadata
+    }
+
     @MainActor init(_ book: Book) {
         self.init(book, includeHighlights: true)
     }
 
-    @MainActor init(_ book: Book, includeHighlights: Bool) {
+    @MainActor init(
+        _ book: Book,
+        includeHighlights: Bool,
+        format: String? = nil,
+        deviceMatchKeys: Set<String>? = nil
+    ) {
         id = book.uuid
         title = book.title
         author = book.displayAuthor
@@ -386,12 +427,12 @@ nonisolated struct SmartShelfBookSnapshot: Sendable {
         tags = book.tags
         series = book.series
         pageCount = book.pageCount
-        format = book.format
+        self.format = format ?? book.format
         rating = book.rating
         readingStatusRaw = book.readingStatus.rawValue
         hasHighlights = includeHighlights && !book.highlights.isEmpty
         drmProtected = book.drmProtected == true
-        deviceMatchKeys = book.deviceMatchKeys
+        self.deviceMatchKeys = deviceMatchKeys ?? book.deviceMatchKeys
         hasMissingMetadata = Self.isBlank(book.title)
             || Self.isBlank(book.author)
             || Self.isBlank(book.language)

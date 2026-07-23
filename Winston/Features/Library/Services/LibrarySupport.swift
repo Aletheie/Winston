@@ -8,15 +8,40 @@ extension ModelContext {
         (try? fetch(FetchDescriptor<Book>())) ?? []
     }
 
-    func saveAndPublish(catalogChanged: Bool = true) throws {
+    func saveAndPublish(
+        catalogChanged: Bool = true,
+        affectedBookIDs: Set<UUID>? = nil,
+        affectedCollectionIDs: Set<UUID> = [],
+        changesBookMembership: Bool = false,
+        fullTextAffectedBookIDs: Set<UUID>? = []
+    ) throws {
         try save()
-        LibraryMutationLog.shared.bump(catalogChanged: catalogChanged)
+        LibraryMutationLog.shared.bump(
+            catalogChanged: catalogChanged,
+            affectedBookIDs: affectedBookIDs,
+            affectedCollectionIDs: affectedCollectionIDs,
+            changesBookMembership: changesBookMembership,
+            fullTextAffectedBookIDs: fullTextAffectedBookIDs
+        )
     }
 
     @discardableResult
-    func saveQuietly(rollbackOnFailure _: Bool = true, catalogChanged: Bool = true) -> Bool {
+    func saveQuietly(
+        rollbackOnFailure _: Bool = true,
+        catalogChanged: Bool = true,
+        affectedBookIDs: Set<UUID>? = nil,
+        affectedCollectionIDs: Set<UUID> = [],
+        changesBookMembership: Bool = false,
+        fullTextAffectedBookIDs: Set<UUID>? = []
+    ) -> Bool {
         do {
-            try saveAndPublish(catalogChanged: catalogChanged)
+            try saveAndPublish(
+                catalogChanged: catalogChanged,
+                affectedBookIDs: affectedBookIDs,
+                affectedCollectionIDs: affectedCollectionIDs,
+                changesBookMembership: changesBookMembership,
+                fullTextAffectedBookIDs: fullTextAffectedBookIDs
+            )
             return true
         } catch {
             rollback()
