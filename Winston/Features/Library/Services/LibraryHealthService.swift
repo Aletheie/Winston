@@ -109,22 +109,27 @@ final class LibraryHealthService {
             return (missingBooks, assetStatus)
         }.value
         missingFileUUIDs = result.0
-        var changed = false
+        var changedBookIDs: Set<UUID> = []
         for (index, asset) in assets.enumerated() {
             // The yields below let deletions interleave; a removed asset must not be written to.
             guard asset.modelContext != nil, let status = result.1[asset.uuid] else { continue }
             if status == .missing {
                 if asset.validationStatus != .missing {
                     asset.validationStatus = .missing
-                    changed = true
+                    if let bookID = asset.book?.uuid { changedBookIDs.insert(bookID) }
                 }
             } else if asset.validationStatus == nil || asset.validationStatus == .missing {
                 asset.validationStatus = .ok
-                changed = true
+                if let bookID = asset.book?.uuid { changedBookIDs.insert(bookID) }
             }
             if index > 0, index.isMultiple(of: 256) { await Task.yield() }
         }
-        if changed { modelContext.saveQuietly() }
+        if !changedBookIDs.isEmpty {
+            modelContext.saveQuietly(
+                affectedBookIDs: changedBookIDs,
+                fullTextAffectedBookIDs: changedBookIDs
+            )
+        }
         return result.0.count
     }
 
@@ -181,7 +186,11 @@ final class LibraryHealthService {
             modelContext.insert(asset)
             updatedAsset = asset
         }
-        guard modelContext.saveQuietly(rollbackOnFailure: true) else {
+        guard modelContext.saveQuietly(
+            rollbackOnFailure: true,
+            affectedBookIDs: [book.uuid],
+            fullTextAffectedBookIDs: [book.uuid]
+        ) else {
             Task.detached(priority: .utility) {
                 BookFileStore.delete(fileName: fileName)
             }
@@ -208,7 +217,10 @@ final class LibraryHealthService {
               updatedAsset.dateAdded == replacementDate else { return }
         updatedAsset.contentHash = analysis.0
         if book.fileName == fileName { book.drmProtected = analysis.1 }
-        modelContext.saveQuietly()
+        modelContext.saveQuietly(
+            affectedBookIDs: [book.uuid],
+            fullTextAffectedBookIDs: [book.uuid]
+        )
     }
 
 }

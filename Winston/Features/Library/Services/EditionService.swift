@@ -170,7 +170,8 @@ final class CatalogReconciliationService {
         covers: CoverRepository = .shared,
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared,
-        toasts: ToastCenter? = nil
+        toasts: ToastCenter? = nil,
+        loadEditionCountsImmediately: Bool = true
     ) {
         self.modelContext = modelContext
         self.defaults = defaults
@@ -182,7 +183,9 @@ final class CatalogReconciliationService {
         self.managedFiles = managedFiles
         self.toasts = toasts
         self.dismissedPairKeys = Set(defaults.stringArray(forKey: dismissedDefaultsKey) ?? [])
-        refreshEditionCounts()
+        if loadEditionCountsImmediately {
+            refreshEditionCounts()
+        }
     }
 
     var pendingCount: Int { pendingProposals.count }
@@ -197,6 +200,33 @@ final class CatalogReconciliationService {
             guard editions.count > 1 else { continue }
             for edition in editions { counts[edition.uuid] = editions.count }
         }
+        editionCounts = counts
+    }
+
+    func refreshEditionCountsInChunks(chunkSize: Int = 256) async {
+        var counts: [UUID: Int] = [:]
+        var offset = 0
+        while true {
+            guard !Task.isCancelled else { return }
+            var descriptor = FetchDescriptor<Work>(
+                sortBy: [SortDescriptor(\Work.uuid)]
+            )
+            descriptor.relationshipKeyPathsForPrefetching = [\Work.editions]
+            descriptor.fetchOffset = offset
+            descriptor.fetchLimit = max(1, chunkSize)
+            guard let works = try? modelContext.fetch(descriptor) else { return }
+            for work in works {
+                let editions = work.editions
+                guard editions.count > 1 else { continue }
+                for edition in editions {
+                    counts[edition.uuid] = editions.count
+                }
+            }
+            offset += works.count
+            guard works.count == max(1, chunkSize) else { break }
+            await Task.yield()
+        }
+        guard !Task.isCancelled else { return }
         editionCounts = counts
     }
 
@@ -244,16 +274,25 @@ final class CatalogReconciliationService {
         }
     }
 
-    func scanLibrary() async {
-        var descriptor = FetchDescriptor<Book>()
-        descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
-        let books = (try? modelContext.fetch(descriptor)) ?? []
+    func scanLibrary(chunkSize: Int = 256) async {
         var candidates: [EditionCandidate] = []
-        candidates.reserveCapacity(books.count)
-        for (index, book) in books.enumerated() {
+        var offset = 0
+        while true {
             guard !Task.isCancelled else { return }
-            candidates.append(Self.candidate(book))
-            if index > 0, index.isMultiple(of: 128) { await Task.yield() }
+            var descriptor = FetchDescriptor<Book>(
+                sortBy: [
+                    SortDescriptor(\Book.dateAdded),
+                    SortDescriptor(\Book.uuid),
+                ]
+            )
+            descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
+            descriptor.fetchOffset = offset
+            descriptor.fetchLimit = max(1, chunkSize)
+            guard let books = try? modelContext.fetch(descriptor) else { return }
+            candidates.append(contentsOf: books.map(Self.candidate))
+            offset += books.count
+            guard books.count == max(1, chunkSize) else { break }
+            await Task.yield()
         }
         let proposals = await EditionMatcher.scan(candidates)
         guard !Task.isCancelled else { return }

@@ -58,6 +58,7 @@ final class HighlightsService {
                 uniquingKeysWith: { first, _ in first }
             )
             var added = 0
+            var affectedBookIDs: Set<UUID> = []
             for match in matches {
                 guard let book = currentBooks[match.bookUUID], book.modelContext != nil else { continue }
                 let highlight = Highlight(text: match.text, isNote: match.isNote,
@@ -65,8 +66,11 @@ final class HighlightsService {
                 highlight.book = book
                 modelContext.insert(highlight)
                 added += 1
+                affectedBookIDs.insert(book.uuid)
             }
-            modelContext.saveQuietly()
+            if !affectedBookIDs.isEmpty {
+                modelContext.saveQuietly(affectedBookIDs: affectedBookIDs)
+            }
             highlightImportSummary = added > 0
                 ? String(localized: "Imported \(added) highlight(s).")
                 : String(localized: "No new highlights found.")

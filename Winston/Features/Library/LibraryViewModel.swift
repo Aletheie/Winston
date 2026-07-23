@@ -140,6 +140,16 @@ final class LibraryViewModel {
     var highlightImportSummary: String? { highlights.highlightImportSummary }
     var isExporting: Bool { exporter.isExporting }
     var metadataFetchSummary: String? { metadata.metadataFetchSummary }
+    private var managedFileProgressByID: [UUID: ManagedFileProgress] = [:]
+    private var managedFileOperationOrder: [UUID] = []
+
+    var managedFileProgress: ManagedFileProgress? {
+        managedFileOperationOrder.lazy.compactMap { self.managedFileProgressByID[$0] }.first
+    }
+
+    var managedFileOperationCount: Int {
+        managedFileProgressByID.count
+    }
 
     func isConverting(_ book: Book) -> Bool { conversion.isConverting(book) }
 
@@ -216,6 +226,9 @@ final class LibraryViewModel {
             return removalSnapshot(for: book)
         }
         guard !removals.isEmpty else { return }
+        let operationID = UUID()
+        let progress = beginManagedFileOperation(id: operationID, intent: .deleteBook)
+        defer { endManagedFileOperation(id: operationID) }
 
         let fileNames = Set(removals.flatMap(\.fileNames))
         let bookIDs = Set(removals.map(\.uuid))
@@ -230,7 +243,9 @@ final class LibraryViewModel {
                     absentBookIDs: bookIDs,
                     unreferencedBookFileNames: fileNames
                 ),
-                cleanups: cleanup
+                cleanups: cleanup,
+                operationID: operationID,
+                progress: progress
             )
         } catch {
             toasts.error(String(localized: "Couldn’t remove the selected books."))
@@ -250,6 +265,7 @@ final class LibraryViewModel {
                 .removeBooks(bookIDs: Array(bookIDs)),
                 transaction: transaction,
                 affectedBookIDs: bookIDs,
+                progress: progress,
                 revertingOnFailure: {
                     for (book, work, preferredEditionUUID) in removalPreimages {
                         if let work, work.modelContext == nil { modelContext.insert(work) }
@@ -291,7 +307,7 @@ final class LibraryViewModel {
     private func removalSnapshot(for book: Book) -> RemovedBook? {
         guard book.modelContext != nil else { return nil }
         let assetNames = (book.assets.isEmpty ? [book.fileName] : book.assets.map(\.fileName))
-            .filter { BookFileStore.validatedURL(for: $0) != nil }
+            .filter { ManagedLeafName(rawValue: $0) != nil }
         return RemovedBook(uuid: book.uuid, fileNames: Set(assetNames))
     }
 
@@ -418,12 +434,20 @@ final class LibraryViewModel {
         for bookUUID: UUID,
         from url: URL
     ) async -> ConversionArtifactAdoptionResult {
-        await conversion.adoptArtifact(for: bookUUID, from: url)
+        let operationID = UUID()
+        let progress = beginManagedFileOperation(id: operationID, intent: .conversionOutput)
+        defer { endManagedFileOperation(id: operationID) }
+        return await conversion.adoptArtifact(
+            for: bookUUID,
+            from: url,
+            operationID: operationID,
+            progress: progress
+        )
     }
 
     @discardableResult
     func addFile(to book: Book, from url: URL, origin: AssetOrigin = .imported) async -> BookAsset? {
-        let shouldBecomePrimary = !book.hasDigitalFile
+        let shouldBecomePrimary = !book.hasCatalogDigitalFile
         let bookID = book.uuid
         let originalPrimaryName = book.fileName
         let originalFileSize = book.fileSizeBytes
@@ -433,6 +457,9 @@ final class LibraryViewModel {
         guard let source = try? ManagedFileSource.book(sourceURL: url, fileID: assetID) else { return nil }
         let fileName = source.finalRelativeName
         let expectedCoverVersion = shouldBecomePrimary ? originalCoverVersion + 1 : originalCoverVersion
+        let operationID = UUID()
+        let progress = beginManagedFileOperation(id: operationID, intent: .importBook)
+        defer { endManagedFileOperation(id: operationID) }
         let transaction: ManagedFileTransaction
         do {
             transaction = try await managedFiles.stage(
@@ -442,7 +469,9 @@ final class LibraryViewModel {
                     presentBookIDs: [bookID],
                     referencedBookFileNames: [fileName],
                     coverVersions: shouldBecomePrimary ? [bookID: expectedCoverVersion] : [:]
-                )
+                ),
+                operationID: operationID,
+                progress: progress
             )
         } catch {
             return nil
@@ -466,6 +495,7 @@ final class LibraryViewModel {
                 .addFile(bookID: bookID, assetID: assetID),
                 transaction: transaction,
                 affectedBookIDs: [bookID],
+                progress: progress,
                 revertingOnFailure: {
                     liveBook.fileName = originalPrimaryName
                     liveBook.fileSizeBytes = originalFileSize
@@ -528,6 +558,9 @@ final class LibraryViewModel {
         guard let source = try? ManagedFileSource.book(sourceURL: url) else { return }
         let fileName = source.finalRelativeName
         let expectedCoverVersion = wasPrimary ? originalCoverVersion + 1 : originalCoverVersion
+        let operationID = UUID()
+        let progress = beginManagedFileOperation(id: operationID, intent: .replaceBookFile)
+        defer { endManagedFileOperation(id: operationID) }
         let transaction: ManagedFileTransaction
         do {
             transaction = try await managedFiles.stage(
@@ -539,7 +572,9 @@ final class LibraryViewModel {
                     unreferencedBookFileNames: [oldName],
                     coverVersions: wasPrimary ? [bookID: expectedCoverVersion] : [:]
                 ),
-                cleanups: [.book(oldName)]
+                cleanups: [.book(oldName)],
+                operationID: operationID,
+                progress: progress
             )
         } catch {
             return
@@ -567,6 +602,7 @@ final class LibraryViewModel {
                 .replaceFile(bookID: bookID, assetID: assetID),
                 transaction: transaction,
                 affectedBookIDs: [bookID],
+                progress: progress,
                 revertingOnFailure: {
                     liveAsset.fileName = oldName
                     liveAsset.sizeBytes = oldSize
@@ -648,6 +684,9 @@ final class LibraryViewModel {
         let assetID = asset.uuid
         let fileName = asset.fileName
         let dateAdded = asset.dateAdded
+        let operationID = UUID()
+        let progress = beginManagedFileOperation(id: operationID, intent: .deleteBookFile)
+        defer { endManagedFileOperation(id: operationID) }
         let transaction: ManagedFileTransaction
         do {
             transaction = try await managedFiles.prepareCleanup(
@@ -656,7 +695,9 @@ final class LibraryViewModel {
                     presentBookIDs: [bookID],
                     unreferencedBookFileNames: [fileName]
                 ),
-                cleanups: [.book(fileName)]
+                cleanups: [.book(fileName)],
+                operationID: operationID,
+                progress: progress
             )
         } catch {
             return false
@@ -675,6 +716,7 @@ final class LibraryViewModel {
                 .removeFile(bookID: bookID, assetID: assetID),
                 transaction: transaction,
                 affectedBookIDs: [bookID],
+                progress: progress,
                 revertingOnFailure: {
                     if liveAsset.modelContext == nil { modelContext.insert(liveAsset) }
                     liveAsset.book = liveBook
@@ -960,5 +1002,24 @@ final class LibraryViewModel {
             toasts.error(String(localized: "Couldn’t save library changes."))
         }
         return succeeded
+    }
+
+    private func beginManagedFileOperation(
+        id: UUID,
+        intent: ManagedFileIntent
+    ) -> ManagedFileProgressHandler {
+        managedFileProgressByID[id] = .initial(transactionID: id, intent: intent)
+        managedFileOperationOrder.append(id)
+        return { [weak self] update in
+            Task { @MainActor [weak self] in
+                guard let self, self.managedFileProgressByID[id] != nil else { return }
+                self.managedFileProgressByID[id] = update
+            }
+        }
+    }
+
+    private func endManagedFileOperation(id: UUID) {
+        managedFileProgressByID.removeValue(forKey: id)
+        managedFileOperationOrder.removeAll { $0 == id }
     }
 }

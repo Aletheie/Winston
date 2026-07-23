@@ -9,6 +9,7 @@ nonisolated enum CatalogAnalysisJobKind: Hashable, Sendable {
     case fileSize
     case drmInspection
     case assetHash(assetID: UUID)
+    case assetInspection(assetID: UUID)
 
     var label: String {
         switch self {
@@ -18,6 +19,7 @@ nonisolated enum CatalogAnalysisJobKind: Hashable, Sendable {
         case .fileSize: "file-size"
         case .drmInspection: "drm-inspection"
         case .assetHash: "asset-hash"
+        case .assetInspection: "asset-inspection"
         }
     }
 }

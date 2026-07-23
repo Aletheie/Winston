@@ -251,8 +251,13 @@ final class ConversionService {
     }
 
     @discardableResult
-    func adoptArtifact(for bookUUID: UUID, from url: URL) async -> ConversionArtifactAdoptionResult {
-        guard let book = lookupBook(uuid: bookUUID), book.hasDigitalFile,
+    func adoptArtifact(
+        for bookUUID: UUID,
+        from url: URL,
+        operationID: UUID? = nil,
+        progress: ManagedFileProgressHandler? = nil
+    ) async -> ConversionArtifactAdoptionResult {
+        guard let book = lookupBook(uuid: bookUUID), book.hasCatalogDigitalFile,
               let format = EbookConverter.OutputFormat(rawValue: url.pathExtension.lowercased()),
               let request = makeRequest(for: book, to: format) else {
             return .failed
@@ -273,7 +278,9 @@ final class ConversionService {
             for: request,
             sourceHash: sourceHash,
             targetIdentity: targetIdentity,
-            extractedCover: nil
+            extractedCover: nil,
+            operationID: operationID,
+            progress: progress
         )
         switch result {
         case .installed:
@@ -302,9 +309,10 @@ final class ConversionService {
            replacementAssetUUID == sourceAsset?.uuid {
             return nil
         }
+        guard let sourceURL = BookFileStore.catalogURL(for: book.fileName) else { return nil }
         return Request(
             uuid: book.uuid,
-            sourceURL: book.fileURL,
+            sourceURL: sourceURL,
             sourceFileName: book.fileName,
             sourceAsset: sourceAsset,
             coverVersion: book.coverVersion,
@@ -352,7 +360,6 @@ final class ConversionService {
             toasts.error(String(localized: "Couldn\u{2019}t convert \u{201C}\(request.title)\u{201D}."))
             return
         }
-        defer { try? FileManager.default.removeItem(at: converted) }
 
         let result = await installArtifact(
             at: converted,
@@ -361,6 +368,7 @@ final class ConversionService {
             targetIdentity: targetIdentity,
             extractedCover: extractedCover
         )
+        await managedFiles.removeTemporaryItem(at: converted)
         switch result {
         case .installed:
             if let image = extractedCover?.0 {
@@ -381,7 +389,9 @@ final class ConversionService {
         for request: Request,
         sourceHash: String,
         targetIdentity: TargetFileIdentity,
-        extractedCover: (NSImage, Data)?
+        extractedCover: (NSImage, Data)?,
+        operationID: UUID? = nil,
+        progress: ManagedFileProgressHandler? = nil
     ) async -> InstallResult {
         await checkpoint(.artifactReady)
         if let conflict = snapshotConflict(for: request) {
@@ -419,9 +429,16 @@ final class ConversionService {
         let oldFileName = replacement?.fileName
         let retiredNames = Set(oldFileName.map { [$0] } ?? [])
 
+        let coverIsMissing = if extractedCover != nil {
+            await Task.detached(priority: .utility) {
+                !CoverStore.exists(for: request.uuid)
+            }.value
+        } else {
+            false
+        }
         let shouldInstallCover = extractedCover != nil
             && lookupBook(uuid: request.uuid)?.coverVersion == request.coverVersion
-            && !CoverStore.exists(for: request.uuid)
+            && coverIsMissing
         let expectedCoverVersion = request.coverVersion + (shouldInstallCover ? 1 : 0)
         var sources = [bookSource]
         if shouldInstallCover, let coverData = extractedCover?.1 {
@@ -445,7 +462,9 @@ final class ConversionService {
                     unreferencedBookFileNames: retiredNames,
                     coverVersions: shouldInstallCover ? [request.uuid: expectedCoverVersion] : [:]
                 ),
-                cleanups: cleanups
+                cleanups: cleanups,
+                operationID: operationID,
+                progress: progress
             )
         } catch {
             return .failed
@@ -476,6 +495,7 @@ final class ConversionService {
                 .conversionOutput(bookID: request.uuid, assetID: installedAssetUUID),
                 transaction: transaction,
                 affectedBookIDs: [request.uuid],
+                progress: progress,
                 revertingOnFailure: {
                     guard mutationWasApplied else { return }
                     if let insertedAsset {
@@ -587,8 +607,9 @@ final class ConversionService {
         guard let target = request.target.replacementAsset else {
             return TargetFileIdentity.none
         }
-        guard let url = BookFileStore.validatedURL(for: target.fileName) else { return nil }
+        let fileName = target.fileName
         return await Task.detached(priority: .utility) { () -> TargetFileIdentity? in
+            guard let url = BookFileStore.validatedURL(for: fileName) else { return nil }
             let path = url.path(percentEncoded: false)
             guard FileManager.default.fileExists(atPath: path) else { return .missing }
             guard let digest = try? ContentHasher.sha256Cancellable(of: url) else { return nil }
@@ -604,9 +625,11 @@ final class ConversionService {
         case .none, .missing:
             return true
         case .sha256(let expected):
-            guard let target = request.target.replacementAsset,
-                  let url = BookFileStore.validatedURL(for: target.fileName) else { return false }
-            return await hash(of: url) == expected
+            guard let target = request.target.replacementAsset else { return false }
+            return await Task.detached(priority: .utility) {
+                guard let url = BookFileStore.validatedURL(for: target.fileName) else { return false }
+                return (try? ContentHasher.sha256Cancellable(of: url)) == expected
+            }.value
         }
     }
 

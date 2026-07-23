@@ -755,7 +755,9 @@ final class ReadingHistoryImporter {
 
         do {
             try save()
-            if !touched.isEmpty { LibraryMutationLog.shared.bump() }
+            if !touched.isEmpty {
+                LibraryMutationLog.shared.bump(affectedBookIDs: touched)
+            }
         } catch {
             let insertedIDs = Set(insertedSessions.map(\.uuid))
             for state in rollbackStates {

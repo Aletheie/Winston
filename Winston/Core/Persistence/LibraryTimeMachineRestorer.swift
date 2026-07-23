@@ -145,7 +145,9 @@ struct LibraryTimeMachineRestorer {
 
         let restoredCoverData = try await coverData(for: snapshot, scope: scope)
         do {
-            if modelContext.hasChanges { try modelContext.saveAndPublish() }
+            if modelContext.hasChanges {
+                try modelContext.saveAndPublish(fullTextAffectedBookIDs: nil)
+            }
         } catch {
             modelContext.rollback()
             throw LibraryTimeMachineRestoreError.saveFailed(error.localizedDescription)
@@ -222,7 +224,11 @@ struct LibraryTimeMachineRestorer {
             }
 
             do {
-                try modelContext.saveAndPublish()
+                try modelContext.saveAndPublish(
+                    affectedBookIDs: [snapshot.id],
+                    changesBookMembership: createdBook,
+                    fullTextAffectedBookIDs: scope == .cover ? [] : [snapshot.id]
+                )
             } catch {
                 throw LibraryTimeMachineRestoreError.saveFailed(error.localizedDescription)
             }

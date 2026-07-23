@@ -75,10 +75,16 @@ enum BookFileStore {
         return ext.isEmpty ? uuid.uuidString : "\(uuid.uuidString).\(ext)"
     }
 
-    nonisolated static func validatedURL(for fileName: String) -> URL? {
+    /// Constructs a managed URL from catalog data without touching the
+    /// filesystem. Callers that perform I/O must still use `validatedURL`.
+    nonisolated static func catalogURL(for fileName: String) -> URL? {
         guard let leaf = ManagedLeafName(rawValue: fileName),
               let candidate = leaf.appending(to: AppPaths.booksDirectory) else { return nil }
+        return candidate
+    }
 
+    nonisolated static func validatedURL(for fileName: String) -> URL? {
+        guard let candidate = catalogURL(for: fileName) else { return nil }
         let root = AppPaths.booksDirectory.standardizedFileURL.resolvingSymlinksInPath()
         let resolved = candidate.resolvingSymlinksInPath()
         guard resolved.deletingLastPathComponent() == root else { return nil }

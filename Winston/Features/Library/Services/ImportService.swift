@@ -365,7 +365,20 @@ final class ImportService {
     func rescanMissingMetadata() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.title == nil })
         guard let fetched = try? modelContext.fetch(descriptor) else { return }
-        let books = fetched.filter { $0.hasDigitalFile && !pendingMetadataUUIDs.contains($0.uuid) }
+        let bookIDs = fetched
+            .filter(\.hasCatalogDigitalFile)
+            .map(\.uuid)
+        await rescanMissingMetadata(bookIDs: bookIDs)
+    }
+
+    func rescanMissingMetadata(bookIDs: [UUID]) async {
+        let books = bookIDs.compactMap { id in
+            try? mutations.book(id: id)
+        }.filter {
+            $0.title == nil
+                && $0.hasCatalogDigitalFile
+                && !pendingMetadataUUIDs.contains($0.uuid)
+        }
         guard !books.isEmpty else { return }
 
         let batchID: UUID?

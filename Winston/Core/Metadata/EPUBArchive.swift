@@ -34,6 +34,12 @@ nonisolated final class EPUBArchive {
         Self.openCounts.withLock { $0[url.path, default: 0] += 1 }
     }
 
+    init(data: Data, sourceURL: URL) throws {
+        self.archive = try Archive(data: data, accessMode: .read)
+        self.url = sourceURL
+        Self.openCounts.withLock { $0[sourceURL.path, default: 0] += 1 }
+    }
+
     func entry(_ path: String) -> Data? {
         if let data = rawEntry(path) { return data }
         if let decoded = path.removingPercentEncoding, decoded != path {
