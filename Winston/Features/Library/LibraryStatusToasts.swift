@@ -69,6 +69,18 @@ struct LibraryStatusToasts: View {
     private var activeToasts: [Toast] {
         var toasts: [Toast] = []
 
+        if let progress = viewModel.managedFileProgress {
+            toasts.append(Toast(
+                id: "managed-files",
+                style: .progress,
+                message: managedFileMessage(
+                    for: progress,
+                    operationCount: viewModel.managedFileOperationCount
+                ),
+                progress: progress.overallFraction
+            ))
+        }
+
         switch maintenance.phase {
         case .running(let progress):
             toasts.append(Toast(
@@ -146,6 +158,35 @@ struct LibraryStatusToasts: View {
         }
 
         return toasts
+    }
+
+    private func managedFileMessage(
+        for progress: ManagedFileProgress,
+        operationCount: Int
+    ) -> String {
+        if operationCount > 1 {
+            return String(localized: "Updating book files…")
+        }
+        switch progress.intent {
+        case .importBook:
+            return String(localized: "Adding book file…")
+        case .replaceBookFile:
+            return String(localized: "Replacing book file…")
+        case .conversionOutput:
+            return String(localized: "Installing converted file…")
+        case .deleteBook:
+            return String(localized: "Removing book files…")
+        case .deleteBookFile:
+            return String(localized: "Removing book file…")
+        case .calibreImport:
+            return String(localized: "Installing Calibre files…")
+        case .legacyMigration:
+            return String(localized: "Migrating book files…")
+        case .coverUpdate:
+            return String(localized: "Updating cover file…")
+        case .restore:
+            return String(localized: "Restoring book files…")
+        }
     }
 
     private func maintenanceMessage(for job: MaintenanceJob) -> String {
