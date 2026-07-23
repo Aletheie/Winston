@@ -20,9 +20,20 @@ nonisolated struct LibraryDisplaySort: Hashable, Sendable {
     static let sourceOrder = LibraryDisplaySort(field: .source, ascending: true)
 }
 
+nonisolated struct LibraryDisplayQuery: Hashable, Sendable {
+    let filter: LibraryFilter
+    let searchText: String
+    let sort: LibraryDisplaySort
+    let savedSearch: String?
+    let smartShelf: SmartShelfDefinition?
+    let deviceFileNames: Set<String>
+    let deviceIsConnected: Bool
+    let kindlePresenceFilter: KindlePresenceFilter
+}
+
 /// Immutable data used by interactive library filtering. SwiftData models remain on the
 /// main actor while the O(n) filtering and O(n log n) sorting work can run concurrently.
-nonisolated struct LibraryDisplaySnapshot: Sendable {
+nonisolated struct LibraryDisplaySnapshot: Equatable, Sendable {
     let id: UUID
     let sourceOrdinal: Int
     let displayTitle: String
@@ -38,12 +49,62 @@ nonisolated struct LibraryDisplaySnapshot: Sendable {
     let search: LibraryQuery.SearchSnapshot
     let smartShelf: SmartShelfBookSnapshot
 
+    init(
+        id: UUID,
+        sourceOrdinal: Int,
+        displayTitle: String,
+        displayAuthor: String,
+        dateAdded: Date,
+        rating: Int,
+        readingStatus: ReadingStatus,
+        format: String,
+        tags: [String],
+        series: String?,
+        seriesIndex: Double,
+        collectionIDs: [UUID],
+        search: LibraryQuery.SearchSnapshot,
+        smartShelf: SmartShelfBookSnapshot
+    ) {
+        self.id = id
+        self.sourceOrdinal = sourceOrdinal
+        self.displayTitle = displayTitle
+        self.displayAuthor = displayAuthor
+        self.dateAdded = dateAdded
+        self.rating = rating
+        self.readingStatus = readingStatus
+        self.format = format
+        self.tags = tags
+        self.series = series
+        self.seriesIndex = seriesIndex
+        self.collectionIDs = collectionIDs
+        self.search = search
+        self.smartShelf = smartShelf
+    }
+
     @MainActor init(
         _ book: Book,
         sourceOrdinal: Int,
         includeCollections: Bool,
         includeHighlights: Bool
     ) {
+        let hasDigitalFile = book.hasCatalogDigitalFile
+        let catalogFormat = Book.catalogFormat(
+            fileName: book.fileName,
+            hasDigitalFile: hasDigitalFile,
+            hasPhysicalCopy: book.hasPhysicalCopy
+        )
+        let deviceMatchKeys: Set<String> = [
+            Book.catalogDeviceMatchKey(
+                originalFileName: book.originalFileName,
+                ownerID: book.uuid,
+                hasDigitalFile: hasDigitalFile
+            ),
+            Book.catalogAllocatedDeviceMatchKey(
+                originalFileName: book.originalFileName,
+                ownerID: book.uuid,
+                hasDigitalFile: hasDigitalFile
+            ),
+        ]
         id = book.uuid
         self.sourceOrdinal = sourceOrdinal
         displayTitle = book.displayTitle
@@ -51,13 +112,20 @@ nonisolated struct LibraryDisplaySnapshot: Sendable {
         dateAdded = book.dateAdded
         rating = book.sortRating
         readingStatus = book.readingStatus
-        format = book.format
+        format = catalogFormat
         tags = book.tags
         series = book.series
         seriesIndex = book.seriesIndex.flatMap(Double.init) ?? .greatestFiniteMagnitude
-        collectionIDs = includeCollections ? book.collections.map(\.id) : []
-        search = LibraryQuery.SearchSnapshot(book)
-        smartShelf = SmartShelfBookSnapshot(book, includeHighlights: includeHighlights)
+        collectionIDs = includeCollections
+            ? book.collections.map(\.id).sorted { $0.uuidString < $1.uuidString }
+            : []
+        search = LibraryQuery.SearchSnapshot(book, format: catalogFormat)
+        smartShelf = SmartShelfBookSnapshot(
+            book,
+            includeHighlights: includeHighlights,
+            format: catalogFormat,
+            deviceMatchKeys: deviceMatchKeys
+        )
     }
 }
 
@@ -201,6 +269,23 @@ enum LibraryQuery {
         return matching.map(\.id)
     }
 
+    nonisolated static func displayIDs(
+        for books: [LibraryDisplaySnapshot],
+        query: LibraryDisplayQuery
+    ) -> [UUID] {
+        displayIDs(
+            for: books,
+            filter: query.filter,
+            searchText: query.searchText,
+            sort: query.sort,
+            savedSearch: query.savedSearch,
+            smartShelf: query.smartShelf,
+            deviceFileNames: query.deviceFileNames,
+            deviceIsConnected: query.deviceIsConnected,
+            kindlePresenceFilter: query.kindlePresenceFilter
+        )
+    }
+
     @concurrent
     static func displayIDsConcurrently(
         for books: [LibraryDisplaySnapshot],
@@ -224,6 +309,82 @@ enum LibraryQuery {
             deviceIsConnected: deviceIsConnected,
             kindlePresenceFilter: kindlePresenceFilter
         )
+    }
+
+    nonisolated static func displayMatches(
+        _ book: LibraryDisplaySnapshot,
+        query: LibraryDisplayQuery,
+        now: Date = .now
+    ) -> Bool {
+        let belongs: Bool
+        if let smartShelf = query.smartShelf {
+            belongs = smartShelf.matches(
+                book.smartShelf,
+                deviceFileNames: query.deviceFileNames,
+                deviceIsConnected: query.deviceIsConnected
+            )
+        } else if let savedSearch = query.savedSearch {
+            belongs = book.search.matches(
+                NormalizedQuery(SearchQuery.parse(savedSearch))
+            )
+        } else {
+            belongs = matches(
+                book,
+                filter: query.filter,
+                recentCutoff: now.addingTimeInterval(-14 * 24 * 3600)
+            )
+        }
+        return belongs
+            && book.search.matches(NormalizedQuery(SearchQuery.parse(query.searchText)))
+            && query.kindlePresenceFilter.includes(
+                deviceMatchKeys: book.smartShelf.deviceMatchKeys,
+                deviceFileNames: query.deviceFileNames,
+                deviceIsConnected: query.deviceIsConnected
+            )
+    }
+
+    nonisolated static func displayOrderingChanged(
+        from old: LibraryDisplaySnapshot,
+        to new: LibraryDisplaySnapshot,
+        query: LibraryDisplayQuery
+    ) -> Bool {
+        if case .series = query.filter {
+            return old.seriesIndex != new.seriesIndex
+                || old.sourceOrdinal != new.sourceOrdinal
+        }
+        switch query.sort.field {
+        case .source:
+            return old.sourceOrdinal != new.sourceOrdinal
+        case .title:
+            return old.displayTitle != new.displayTitle
+                || old.sourceOrdinal != new.sourceOrdinal
+        case .author:
+            return old.displayAuthor != new.displayAuthor
+                || old.sourceOrdinal != new.sourceOrdinal
+        case .dateAdded:
+            return old.dateAdded != new.dateAdded
+                || old.sourceOrdinal != new.sourceOrdinal
+        case .rating:
+            return old.rating != new.rating
+                || old.sourceOrdinal != new.sourceOrdinal
+        }
+    }
+
+    nonisolated static func displayOrdered(
+        _ lhs: LibraryDisplaySnapshot,
+        before rhs: LibraryDisplaySnapshot,
+        query: LibraryDisplayQuery
+    ) -> Bool {
+        if case .series = query.filter {
+            if lhs.seriesIndex == rhs.seriesIndex {
+                return lhs.sourceOrdinal < rhs.sourceOrdinal
+            }
+            return lhs.seriesIndex < rhs.seriesIndex
+        }
+        if query.sort.field == .source {
+            return lhs.sourceOrdinal < rhs.sourceOrdinal
+        }
+        return ordered(lhs, before: rhs, by: query.sort)
     }
 
     private nonisolated static func matches(
@@ -325,7 +486,7 @@ enum LibraryQuery {
             let count = books.count(where: { matches($0, query) })
             return count == 0 ? [:] : [id: count]
         }
-        return smartCounts(for: books.map(SearchSnapshot.init), queries: queries)
+        return smartCounts(for: books.map { SearchSnapshot($0) }, queries: queries)
     }
 
     static func smartShelfCounts(
@@ -388,7 +549,7 @@ enum LibraryQuery {
         return counts
     }
 
-    fileprivate nonisolated struct NormalizedQuery: Sendable {
+    nonisolated struct NormalizedQuery: Equatable, Sendable {
         let freeText: String
         let authors: [String]
         let tags: [String]
@@ -412,7 +573,7 @@ enum LibraryQuery {
         }
     }
 
-    nonisolated struct SearchSnapshot: Sendable {
+    nonisolated struct SearchSnapshot: Equatable, Sendable {
         let title: String
         let author: String
         let tags: [String]
@@ -424,7 +585,35 @@ enum LibraryQuery {
         let shelf: String
         let year: Int?
 
+        init(
+            title: String,
+            author: String,
+            tags: [String] = [],
+            series: String = "",
+            notes: String = "",
+            translator: String = "",
+            language: String = "",
+            format: String,
+            shelf: String = "",
+            year: Int? = nil
+        ) {
+            self.title = title
+            self.author = author
+            self.tags = tags
+            self.series = series
+            self.notes = notes
+            self.translator = translator
+            self.language = language
+            self.format = format
+            self.shelf = shelf
+            self.year = year
+        }
+
         @MainActor init(_ book: Book) {
+            self.init(book, format: book.format)
+        }
+
+        @MainActor init(_ book: Book, format: String) {
             title = book.displayTitle.lowercased()
             author = book.displayAuthor?.lowercased() ?? ""
             tags = book.tags.map { $0.lowercased() }
@@ -432,12 +621,12 @@ enum LibraryQuery {
             notes = book.notes?.lowercased() ?? ""
             translator = book.translator?.lowercased() ?? ""
             language = book.language?.lowercased() ?? ""
-            format = book.format.lowercased()
+            self.format = format.lowercased()
             shelf = book.shelfLocation?.lowercased() ?? ""
             year = book.year.flatMap { Int($0.prefix(4)) }
         }
 
-        fileprivate func matches(_ query: NormalizedQuery) -> Bool {
+        func matches(_ query: NormalizedQuery) -> Bool {
             if !query.freeText.isEmpty {
                 let q = query.freeText
                 let hit = title.contains(q) || author.contains(q) || tags.contains { $0.contains(q) }

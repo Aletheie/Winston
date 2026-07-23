@@ -22,36 +22,96 @@ final class FullTextSearchViewModel {
     private(set) var isSearching = false
 
     @ObservationIgnored private let service: FullTextIndexService
+    @ObservationIgnored private var preparationTask: Task<FullTextIndexSummary, Error>?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
+    @ObservationIgnored private var preparationGeneration = 0
+    @ObservationIgnored private var searchGeneration = 0
+    @ObservationIgnored private var lastPreparedRevision: Int?
+    @ObservationIgnored private var lastManualRefreshGeneration = 0
 
     init(service: FullTextIndexService = .shared) {
         self.service = service
     }
 
-    func prepare(books: [Book]) async {
+    func prepare(
+        books: [Book],
+        fullTextRevision: Int,
+        manualRefreshGeneration: Int
+    ) async {
+        preparationGeneration &+= 1
+        let generation = preparationGeneration
+        preparationTask?.cancel()
         searchTask?.cancel()
+        searchGeneration &+= 1
         isSearching = false
-        let snapshots = Self.snapshots(from: books)
-        phase = .indexing(searchableBooks: snapshots.count { $0.source != nil })
+
+        let forceReindex = manualRefreshGeneration != lastManualRefreshGeneration
+        let delta = lastPreparedRevision.map {
+            LibraryMutationLog.shared.fullTextDelta(since: $0)
+        }
+        let requiresFullSynchronization = forceReindex
+            || delta == nil
+            || delta?.requiresFullRebuild == true
+        let currentBookIDs = Set(books.map(\.uuid))
+        let changedBookIDs = delta?.affectedBookIDs ?? []
+        let snapshots = Self.snapshots(
+            from: requiresFullSynchronization
+                ? books
+                : books.filter { changedBookIDs.contains($0.uuid) }
+        )
+        let removedBookIDs = requiresFullSynchronization
+            ? Set<UUID>()
+            : changedBookIDs.subtracting(currentBookIDs)
+        let searchableBooks = if case .ready(let summary) = phase {
+            summary.searchableBooks
+        } else {
+            snapshots.count { $0.source != nil }
+        }
+        phase = .indexing(searchableBooks: searchableBooks)
+
+        let task = Task { [service] in
+            if requiresFullSynchronization {
+                try await service.synchronize(snapshots, forceReindex: forceReindex)
+            } else {
+                try await service.applyChanges(snapshots, removing: removedBookIDs)
+            }
+        }
+        preparationTask = task
 
         do {
-            let summary = try await service.synchronize(snapshots)
-            guard !Task.isCancelled else { return }
+            let summary = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            guard !Task.isCancelled, generation == preparationGeneration else { return }
+            preparationTask = nil
+            lastPreparedRevision = fullTextRevision
+            lastManualRefreshGeneration = manualRefreshGeneration
             phase = .ready(summary)
             scheduleSearch(immediately: true)
         } catch is CancellationError {
             return
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, generation == preparationGeneration else { return }
+            preparationTask = nil
             phase = .failed(String(localized: "The local search index couldn’t be prepared."))
         }
     }
 
     func cancel() {
+        preparationGeneration &+= 1
+        searchGeneration &+= 1
+        preparationTask?.cancel()
         searchTask?.cancel()
+        preparationTask = nil
+        searchTask = nil
+        isSearching = false
     }
 
     private func scheduleSearch(immediately: Bool = false) {
+        searchGeneration &+= 1
+        let generation = searchGeneration
         searchTask?.cancel()
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count >= 2 else {
@@ -76,8 +136,21 @@ final class FullTextSearchViewModel {
                 }
             }
             guard !Task.isCancelled else { return }
-            let found = await service.search(trimmed)
+            let found: [FullTextBookResult]
+            do {
+                found = try await service.search(trimmed)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, let self,
+                      generation == self.searchGeneration else { return }
+                self.results = []
+                self.isSearching = false
+                self.phase = .failed(String(localized: "The local search index couldn’t be searched."))
+                return
+            }
             guard !Task.isCancelled, let self,
+                  generation == self.searchGeneration,
                   self.query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
             self.results = found
             self.isSearching = false
@@ -94,15 +167,33 @@ final class FullTextSearchViewModel {
         books.map { book in
             var candidates = book.assets.map { asset in
                 SourceCandidate(
-                    source: .init(fileURL: asset.fileURL, contentHash: asset.contentHash),
+                    source: .init(
+                        fileURL: asset.fileURL,
+                        generation: .init(
+                            assetID: asset.uuid,
+                            fileName: asset.fileName,
+                            contentHash: asset.contentHash,
+                            sizeBytes: asset.sizeBytes,
+                            dateAdded: asset.dateAdded
+                        )
+                    ),
                     isPrimary: asset.fileName == book.fileName,
                     originRank: rank(asset.origin)
                 )
             }
-            if let primaryURL = book.primaryFileURL,
+            if ManagedLeafName(rawValue: book.fileName) != nil,
                !candidates.contains(where: { $0.source.fileURL.lastPathComponent == book.fileName }) {
                 candidates.append(SourceCandidate(
-                    source: .init(fileURL: primaryURL, contentHash: nil),
+                    source: .init(
+                        fileURL: BookFileStore.url(for: book.fileName),
+                        generation: .init(
+                            assetID: book.uuid,
+                            fileName: book.fileName,
+                            contentHash: nil,
+                            sizeBytes: book.fileSizeBytes,
+                            dateAdded: book.dateAdded
+                        )
+                    ),
                     isPrimary: true,
                     originRank: 0
                 ))
@@ -150,6 +241,11 @@ final class FullTextSearchViewModel {
 }
 
 struct FullTextSearchSheet: View {
+    private struct PreparationID: Equatable {
+        let fullTextRevision: Int
+        let manualRefreshGeneration: Int
+    }
+
     let books: [Book]
     let onOpen: (UUID) -> Void
     let onShowInLibrary: (UUID) -> Void
@@ -157,6 +253,7 @@ struct FullTextSearchSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @State private var model = FullTextSearchViewModel()
+    @State private var manualRefreshGeneration = 0
 
     var body: some View {
         @Bindable var model = model
@@ -186,14 +283,21 @@ struct FullTextSearchSheet: View {
         .frame(minWidth: 700, idealWidth: 820, maxWidth: 1060,
                minHeight: 560, idealHeight: 700, maxHeight: 940)
         .background(theme.background)
-        .task(id: LibraryMutationLog.shared.catalogRevision) {
-            await model.prepare(books: books)
+        .task(id: PreparationID(
+            fullTextRevision: LibraryMutationLog.shared.fullTextRevision,
+            manualRefreshGeneration: manualRefreshGeneration
+        )) {
+            await model.prepare(
+                books: books,
+                fullTextRevision: LibraryMutationLog.shared.fullTextRevision,
+                manualRefreshGeneration: manualRefreshGeneration
+            )
         }
         .onDisappear { model.cancel() }
     }
 
     private func refreshIndex() {
-        Task { await model.prepare(books: books) }
+        manualRefreshGeneration &+= 1
     }
 }
 
