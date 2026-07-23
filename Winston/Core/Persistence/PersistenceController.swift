@@ -24,11 +24,29 @@ enum PersistenceController {
 
     static let shared: ModelContainer = {
         RenameMigration.runIfNeeded()
-        try? AppPaths.ensureRequiredDirectories()
-        restoreAppliedAtLaunch = LibraryBackup.applyPendingRestoreIfNeeded(
+        // Recovery must observe the exact filesystem left by the previous process. Recreating
+        // missing covers/Books/ManagedFiles directories before journal replay would look like an
+        // external mutation after a crash between two restore renames.
+        try? AppPaths.ensureDirectory(AppPaths.appSupportDirectory)
+        let restoreOutcome = LibraryBackup.restorePendingSnapshotIfNeeded(
             storeURL: storeURL,
             coversDirectory: AppPaths.coversDirectory
         )
+        restoreAppliedAtLaunch = restoreOutcome == .committed
+        if case .blocked(let message) = restoreOutcome {
+            let failure = StoreOpenFailure(
+                kind: .retryable,
+                domain: "Winston.LibraryRestore",
+                code: 1,
+                message: message
+            )
+            Log.persistence.fault(
+                "The live store was not opened because restore recovery is unresolved: \(message, privacy: .public)"
+            )
+            lastRecovery = .retryableFailure(failure)
+            return inMemory()
+        }
+        try? AppPaths.ensureRequiredDirectories()
         let (container, recovery) = makeContainer(storeURL: storeURL)
         lastRecovery = recovery
         return container
