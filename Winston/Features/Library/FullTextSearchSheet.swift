@@ -165,24 +165,29 @@ final class FullTextSearchViewModel {
 
     private static func snapshots(from books: [Book]) -> [FullTextBookSnapshot] {
         books.map { book in
-            var candidates = book.assets.map { asset in
-                SourceCandidate(
-                    source: .init(
-                        fileURL: asset.fileURL,
-                        generation: .init(
-                            assetID: asset.uuid,
-                            fileName: asset.fileName,
-                            contentHash: asset.contentHash,
-                            sizeBytes: asset.sizeBytes,
-                            dateAdded: asset.dateAdded
-                        )
-                    ),
-                    isPrimary: asset.fileName == book.fileName,
-                    originRank: rank(asset.origin)
-                )
-            }
-            if ManagedLeafName(rawValue: book.fileName) != nil,
-               !candidates.contains(where: { $0.source.fileURL.lastPathComponent == book.fileName }) {
+            var candidates = book.assets
+                .filter {
+                    $0.validationStatus != .missing
+                        && $0.validationStatus != .corrupt
+                }
+                .map { asset in
+                    SourceCandidate(
+                        source: .init(
+                            fileURL: asset.fileURL,
+                            generation: .init(
+                                assetID: asset.uuid,
+                                fileName: asset.fileName,
+                                contentHash: asset.contentHash,
+                                sizeBytes: asset.sizeBytes,
+                                dateAdded: asset.dateAdded
+                            )
+                        ),
+                        isPrimary: asset.fileName == book.fileName,
+                        originRank: rank(asset.origin)
+                    )
+                }
+            if book.assets.isEmpty,
+               ManagedLeafName(rawValue: book.fileName) != nil {
                 candidates.append(SourceCandidate(
                     source: .init(
                         fileURL: BookFileStore.url(for: book.fileName),

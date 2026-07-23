@@ -121,6 +121,18 @@ private nonisolated struct FullTextSQLiteError: Error, LocalizedError, Sendable 
     }
 }
 
+private nonisolated final class FullTextSQLiteConnection: @unchecked Sendable {
+    let handle: OpaquePointer
+
+    init(_ handle: OpaquePointer) {
+        self.handle = handle
+    }
+
+    deinit {
+        sqlite3_close_v2(handle)
+    }
+}
+
 private nonisolated enum FullTextIndexError: Error, LocalizedError, Sendable {
     case sourceUnavailable
     case sourceChanged
@@ -201,17 +213,11 @@ actor FullTextSearchIndex {
 
     private let indexDirectory: URL
     private let databaseURL: URL
-    private var database: OpaquePointer?
+    private var connection: FullTextSQLiteConnection?
 
     init(indexDirectory: URL = AppPaths.fullTextIndexDirectory) {
         self.indexDirectory = indexDirectory
         databaseURL = indexDirectory.appending(path: "fulltext.sqlite3")
-    }
-
-    deinit {
-        if let database {
-            sqlite3_close_v2(database)
-        }
     }
 
     func synchronize(
@@ -369,7 +375,7 @@ actor FullTextSearchIndex {
         source: FullTextBookSnapshot.Source,
         database: OpaquePointer
     ) throws -> SynchronizationOutcome {
-        guard let initialFileGeneration = CatalogFileGeneration.capture(at: source.fileURL) else {
+        guard let initialFileGeneration = sourceFileGeneration(at: source.fileURL) else {
             throw FullTextIndexError.sourceUnavailable
         }
         let path = sourcePath(for: source.fileURL)
@@ -395,7 +401,7 @@ actor FullTextSearchIndex {
 
         let contentHash = try resolvedHash(for: source)
         try Task.checkCancellation()
-        guard CatalogFileGeneration.capture(at: source.fileURL) == initialFileGeneration else {
+        guard sourceFileGeneration(at: source.fileURL) == initialFileGeneration else {
             throw FullTextIndexError.sourceChanged
         }
 
@@ -418,7 +424,7 @@ actor FullTextSearchIndex {
             format: source.format
         )
         try Task.checkCancellation()
-        guard CatalogFileGeneration.capture(at: source.fileURL) == initialFileGeneration else {
+        guard sourceFileGeneration(at: source.fileURL) == initialFileGeneration else {
             throw FullTextIndexError.sourceChanged
         }
         try replaceDocument(
@@ -814,8 +820,26 @@ actor FullTextSearchIndex {
         url.standardizedFileURL.resolvingSymlinksInPath().path(percentEncoded: false)
     }
 
+    private func sourceFileGeneration(at url: URL) -> CatalogFileGeneration? {
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: url.path(percentEncoded: false)
+        ) else { return nil }
+        let system = (attributes[.systemNumber] as? NSNumber)?.uint64Value
+        let file = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
+        let identity: String? = if let system, let file {
+            "\(system):\(file)"
+        } else {
+            nil
+        }
+        return CatalogFileGeneration(
+            resourceIdentifier: identity,
+            modificationDate: attributes[.modificationDate] as? Date,
+            fileSize: (attributes[.size] as? NSNumber)?.int64Value ?? -1
+        )
+    }
+
     private func openDatabase() throws -> OpaquePointer {
-        if let database { return database }
+        if let connection { return connection.handle }
         try AppPaths.ensureDirectory(indexDirectory)
         var opened: OpaquePointer?
         let code = sqlite3_open_v2(
@@ -831,7 +855,7 @@ actor FullTextSearchIndex {
             throw FullTextSQLiteError(code: code, operation: "Open full-text database", message: message)
         }
 
-        database = opened
+        connection = FullTextSQLiteConnection(opened)
         sqlite3_extended_result_codes(opened, 1)
         sqlite3_busy_timeout(opened, 5_000)
         do {
@@ -849,8 +873,7 @@ actor FullTextSearchIndex {
             }
             return opened
         } catch {
-            sqlite3_close_v2(opened)
-            database = nil
+            connection = nil
             throw error
         }
     }
@@ -899,10 +922,7 @@ actor FullTextSearchIndex {
     }
 
     private func resetDatabase() throws {
-        if let database {
-            sqlite3_close_v2(database)
-            self.database = nil
-        }
+        connection = nil
         let fileManager = FileManager.default
         for url in [
             databaseURL,
