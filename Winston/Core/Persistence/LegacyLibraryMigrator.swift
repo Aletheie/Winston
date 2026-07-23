@@ -3,6 +3,18 @@ import SwiftData
 import OSLog
 
 enum LegacyLibraryMigrator {
+    enum MigrationResult: Equatable {
+        case completed
+        case cancelled
+        case failed
+    }
+
+    private static let progressKey = "maintenance.legacy-library.v2.offset"
+
+    static func resetCheckpoint(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: progressKey)
+    }
+
     private nonisolated struct LegacyMetadata: Decodable, Sendable {
         var title: String?
         var author: String?
@@ -31,9 +43,26 @@ enum LegacyLibraryMigrator {
         mutations: CatalogMutationService,
         managedFiles: ManagedFileCoordinator
     ) async -> Bool {
+        await migrateIncrementally(
+            context: context,
+            mutations: mutations,
+            managedFiles: managedFiles
+        ) == .completed
+    }
+
+    @MainActor
+    static func migrateIncrementally(
+        context: ModelContext,
+        mutations: CatalogMutationService,
+        managedFiles: ManagedFileCoordinator,
+        defaults: UserDefaults = .standard,
+        batchSize: Int = 16,
+        onProgress: (Int, Int) -> Void = { _, _ in }
+    ) async -> MigrationResult {
         let legacyFile = AppPaths.appSupportDirectory.appending(path: "library.json")
         guard FileManager.default.fileExists(atPath: legacyFile.path(percentEncoded: false)) else {
-            return true
+            defaults.removeObject(forKey: progressKey)
+            return .completed
         }
 
         let legacyBooks: [LegacyBook]
@@ -46,93 +75,43 @@ enum LegacyLibraryMigrator {
             }.value
         } catch {
             Log.persistence.error("Legacy migration could not read the old catalog: \(error.localizedDescription, privacy: .public)")
-            return false
+            return .failed
         }
 
-        for legacy in legacyBooks {
+        let startIndex = min(
+            max(defaults.integer(forKey: progressKey), 0),
+            legacyBooks.count
+        )
+        onProgress(startIndex, legacyBooks.count)
+
+        for index in startIndex ..< legacyBooks.count {
+            guard !Task.isCancelled else { return .cancelled }
+            let legacy = legacyBooks[index]
             let legacyID = legacy.id
             var descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == legacyID })
             descriptor.fetchLimit = 1
-            if (try? context.fetch(descriptor).first) != nil { continue }
-
-            let sourceURL = resolveURL(for: legacy)
-            let accessing = sourceURL.startAccessingSecurityScopedResource()
-            defer { if accessing { sourceURL.stopAccessingSecurityScopedResource() } }
-            guard FileManager.default.fileExists(atPath: sourceURL.path(percentEncoded: false)) else {
-                Log.persistence.error("Legacy migration source is unavailable: \(sourceURL.lastPathComponent, privacy: .private)")
-                return false
-            }
-
-            let source: ManagedFileSource
-            do {
-                source = try .book(sourceURL: sourceURL, fileID: legacy.id)
-            } catch {
-                return false
-            }
-            let fileName = source.finalRelativeName
-            let transaction: ManagedFileTransaction
-            do {
-                transaction = try await managedFiles.stage(
-                    intent: .legacyMigration,
-                    sources: [source],
-                    requirement: ManagedFileRequirement(
-                        presentBookIDs: [legacy.id],
-                        referencedBookFileNames: [fileName]
-                    )
+            if (try? context.fetch(descriptor).first) == nil {
+                let sourceURL = resolveURL(for: legacy)
+                let accessing = sourceURL.startAccessingSecurityScopedResource()
+                let result = await migrate(
+                    legacy,
+                    sourceURL: sourceURL,
+                    context: context,
+                    mutations: mutations,
+                    managedFiles: managedFiles
                 )
-            } catch {
-                Log.persistence.error("Legacy file staging failed: \(error.localizedDescription, privacy: .public)")
-                return false
+                if accessing { sourceURL.stopAccessingSecurityScopedResource() }
+                guard result else { return .failed }
             }
 
-            guard let staged = transaction.files.first else {
-                await managedFiles.abort(transaction)
-                return false
-            }
-            let book = Book(
-                uuid: legacy.id,
-                fileName: fileName,
-                originalFileName: legacy.fileURL.lastPathComponent,
-                dateAdded: legacy.dateAdded
-            )
-            book.fileSizeBytes = staged.byteCount
-            book.title = legacy.metadata.title
-            book.author = legacy.metadata.author
-            book.publisher = legacy.metadata.publisher
-            book.year = legacy.metadata.year
-            book.language = legacy.metadata.language
-            book.isbn = legacy.metadata.isbn
-            book.series = legacy.metadata.series
-            book.seriesIndex = legacy.metadata.seriesIndex
-            book.tags = legacy.metadata.tags ?? []
-            book.bookDescription = legacy.metadata.description
-            book.rating = legacy.rating
-            let asset = BookAsset(
-                uuid: legacy.id,
-                fileName: fileName,
-                origin: .original,
-                contentHash: staged.sha256,
-                sizeBytes: staged.byteCount,
-                dateAdded: legacy.dateAdded,
-                validationStatus: .ok,
-                book: book
-            )
-            context.insert(book)
-            context.insert(asset)
-
-            do {
-                let result = try await mutations.commitStagedFiles(
-                    .legacyMigration(bookIDs: [legacy.id]),
-                    transactions: [transaction],
-                    affectedBookIDs: [legacy.id]
-                )
-                guard result.isFullyPublished else { return false }
-            } catch {
-                Log.persistence.error("Legacy migration save failed: \(error.localizedDescription, privacy: .public)")
-                return false
+            defaults.set(index + 1, forKey: progressKey)
+            onProgress(index + 1, legacyBooks.count)
+            if (index + 1).isMultiple(of: max(1, batchSize)) {
+                await Task.yield()
             }
         }
 
+        guard !Task.isCancelled else { return .cancelled }
         let backup = AppPaths.appSupportDirectory.appending(path: "library.v1.bak")
         do {
             try await Task.detached(priority: .utility) {
@@ -142,9 +121,93 @@ enum LegacyLibraryMigrator {
                 }
                 try fileManager.moveItem(at: legacyFile, to: backup)
             }.value
-            return true
+            defaults.removeObject(forKey: progressKey)
+            return .completed
         } catch {
             Log.persistence.error("Legacy migration checkpoint failed: \(error.localizedDescription, privacy: .public)")
+            return .failed
+        }
+    }
+
+    @MainActor
+    private static func migrate(
+        _ legacy: LegacyBook,
+        sourceURL: URL,
+        context: ModelContext,
+        mutations: CatalogMutationService,
+        managedFiles: ManagedFileCoordinator
+    ) async -> Bool {
+        guard FileManager.default.fileExists(atPath: sourceURL.path(percentEncoded: false)) else {
+            Log.persistence.error("Legacy migration source is unavailable: \(sourceURL.lastPathComponent, privacy: .private)")
+            return false
+        }
+
+        let source: ManagedFileSource
+        do {
+            source = try .book(sourceURL: sourceURL, fileID: legacy.id)
+        } catch {
+            return false
+        }
+        let fileName = source.finalRelativeName
+        let transaction: ManagedFileTransaction
+        do {
+            transaction = try await managedFiles.stage(
+                intent: .legacyMigration,
+                sources: [source],
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [legacy.id],
+                    referencedBookFileNames: [fileName]
+                )
+            )
+        } catch {
+            Log.persistence.error("Legacy file staging failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+
+        guard let staged = transaction.files.first else {
+            await managedFiles.abort(transaction)
+            return false
+        }
+        let book = Book(
+            uuid: legacy.id,
+            fileName: fileName,
+            originalFileName: legacy.fileURL.lastPathComponent,
+            dateAdded: legacy.dateAdded
+        )
+        book.fileSizeBytes = staged.byteCount
+        book.title = legacy.metadata.title
+        book.author = legacy.metadata.author
+        book.publisher = legacy.metadata.publisher
+        book.year = legacy.metadata.year
+        book.language = legacy.metadata.language
+        book.isbn = legacy.metadata.isbn
+        book.series = legacy.metadata.series
+        book.seriesIndex = legacy.metadata.seriesIndex
+        book.tags = legacy.metadata.tags ?? []
+        book.bookDescription = legacy.metadata.description
+        book.rating = legacy.rating
+        let asset = BookAsset(
+            uuid: legacy.id,
+            fileName: fileName,
+            origin: .original,
+            contentHash: staged.sha256,
+            sizeBytes: staged.byteCount,
+            dateAdded: legacy.dateAdded,
+            validationStatus: .ok,
+            book: book
+        )
+        context.insert(book)
+        context.insert(asset)
+
+        do {
+            let result = try await mutations.commitStagedFiles(
+                .legacyMigration(bookIDs: [legacy.id]),
+                transactions: [transaction],
+                affectedBookIDs: [legacy.id]
+            )
+            return result.isFullyPublished
+        } catch {
+            Log.persistence.error("Legacy migration save failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }

@@ -3,33 +3,10 @@ import SwiftUI
 import SwiftData
 import OSLog
 
-private enum StartupMigrationCheckpoint {
-    private static let catalogV2Key = "migration.catalog-assets-reading-history.v2"
-
-    @MainActor
-    static func runIfNeeded(
-        context: ModelContext,
-        defaults: UserDefaults = .standard,
-        restoreApplied: Bool = PersistenceController.restoreAppliedAtLaunch
-    ) {
-        // A restored backup may predate these backfills; the swapped-in store must earn the checkpoint again.
-        if restoreApplied {
-            defaults.removeObject(forKey: catalogV2Key)
-        }
-        guard !defaults.bool(forKey: catalogV2Key) else { return }
-        EditionsBackfill.run(context: context)
-        ReadingHistoryBackfill.run(context: context)
-        EditionsBackfill.pruneOrphanWorks(context: context)
-        guard !context.hasChanges else { return }
-        defaults.set(true, forKey: catalogV2Key)
-    }
-}
-
 private enum LibraryStartupState: Equatable {
     case preparing
     case ready
     case managedFileRecoveryFailed(pendingItemCount: Int)
-    case legacyMigrationFailed
 }
 
 @main
@@ -38,6 +15,7 @@ private enum WinstonEntryPoint {
         if PluginWorkerProcessMain.isWorkerInvocation {
             PluginWorkerProcessMain.run()
         }
+        StartupPerformance.begin()
         WinstonApp.main()
     }
 }
@@ -115,10 +93,6 @@ struct WinstonApp: App {
                             pendingItemCount: pendingItemCount,
                             onRetry: { libraryStartupState = .preparing }
                         )
-                    case .legacyMigrationFailed:
-                        LegacyMigrationUnavailableView(
-                            onRetry: { libraryStartupState = .preparing }
-                        )
                     }
                 }
             }
@@ -175,10 +149,10 @@ struct WinstonApp: App {
     private func prepareLibrary() async {
         let signposter = Log.persistenceSignposter
         let interval = signposter.beginInterval(
-            "StartupMigrations",
+            "CriticalStartupRecovery",
             id: signposter.makeSignpostID()
         )
-        defer { signposter.endInterval("StartupMigrations", interval) }
+        defer { signposter.endInterval("CriticalStartupRecovery", interval) }
 
         let recovery = await viewModel.recoverManagedFiles()
         guard !recovery.hasPendingWork else {
@@ -189,11 +163,6 @@ struct WinstonApp: App {
             )
             return
         }
-        guard await viewModel.migrateLegacyLibraryIfNeeded() else {
-            libraryStartupState = .legacyMigrationFailed
-            return
-        }
-        StartupMigrationCheckpoint.runIfNeeded(context: container.mainContext)
         libraryStartupState = .ready
     }
 }
@@ -226,32 +195,6 @@ private struct ManagedFileRecoveryUnavailableView: View {
             Text("Library Files Need Attention")
                 .font(.title2.bold())
             Text("Winston could not safely finish \(pendingItemCount) pending file operation(s). The catalog remains closed so it cannot expose incomplete books or covers.")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 560)
-            HStack {
-                Button("Retry", action: onRetry)
-                Button("Quit Winston") { NSApplication.shared.terminate(nil) }
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-private struct LegacyMigrationUnavailableView: View {
-    let onRetry: () -> Void
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "externaldrive.badge.exclamationmark")
-                .font(.largeTitle)
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            Text("Legacy Library Migration Paused")
-                .font(.title2.bold())
-            Text("The original legacy catalog remains untouched. Resolve the file access problem, then retry the migration.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 560)

@@ -36,3 +36,23 @@ nonisolated enum Log {
     static let persistenceSignposter = OSSignposter(subsystem: subsystem, category: "persistence")
     static let searchSignposter = OSSignposter(subsystem: subsystem, category: "search")
 }
+
+@MainActor
+enum StartupPerformance {
+    private static let signposter = Log.persistenceSignposter
+    private static let interval = signposter.beginInterval(
+        "ProcessToInteractiveLibrary",
+        id: signposter.makeSignpostID()
+    )
+    private static var didFinish = false
+
+    static func begin() {
+        _ = interval
+    }
+
+    static func markInteractive() {
+        guard !didFinish else { return }
+        didFinish = true
+        signposter.endInterval("ProcessToInteractiveLibrary", interval)
+    }
+}
