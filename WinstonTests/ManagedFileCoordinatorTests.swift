@@ -544,6 +544,7 @@ struct ManagedFileCoordinatorTests {
     @Test func copyHashPublishAndCleanupUseDedicatedExecutorAndReportProgress() async throws {
         let library = try await TestLibrary()
         let source = try sourceFile(in: library.root, contents: "replacement")
+        let expectedHash = try ContentHasher.sha256(of: source)
         let oldName = "old.epub"
         try Data("old".utf8).write(to: BookFileStore.url(for: oldName))
         let managedSource = try ManagedFileSource.book(sourceURL: source)
@@ -570,6 +571,8 @@ struct ManagedFileCoordinatorTests {
             cleanups: [.book(oldName)],
             progress: progress.record
         )
+        #expect(transaction.files.first?.sourceReadPassCount == 1)
+        #expect(transaction.files.first?.sha256 == expectedHash)
         try await coordinator.catalogDidCommit(transaction)
         let snapshot = ManagedFileCatalogSnapshot(
             presentBookIDs: [bookID],

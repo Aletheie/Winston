@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import OSLog
 
@@ -169,6 +170,9 @@ nonisolated struct StagedManagedFile: Identifiable, Codable, Sendable, Equatable
     let byteCount: Int64
     let generation: UUID
     let replacesExisting: Bool?
+    /// Number of sequential source reads used to create this immutable
+    /// generation. Optional so journals written by older versions still decode.
+    let sourceReadPassCount: Int?
 }
 
 nonisolated struct ManagedFileTransaction: Identifiable, Codable, Sendable, Equatable {
@@ -660,7 +664,14 @@ actor ManagedFileCoordinator {
         guard ManagedLeafName(rawValue: source.finalRelativeName) != nil else {
             throw ManagedFileCoordinatorError.unsafeRelativeName(source.finalRelativeName)
         }
-        let stagedURL = transactionStaging.appending(path: "\(UUID().uuidString).payload")
+        let finalExtension = URL(filePath: source.finalRelativeName).pathExtension
+        let stagedLeaf = finalExtension.isEmpty
+            ? "\(UUID().uuidString).payload"
+            : "\(UUID().uuidString).\(finalExtension)"
+        let stagedURL = transactionStaging.appending(path: stagedLeaf)
+        let byteCount: Int64
+        let digest: String
+        let sourceReadPassCount: Int
         switch (source.sourceURL, source.data) {
         case (.some(let sourceURL), nil):
             if source.kind == .book,
@@ -685,8 +696,18 @@ actor ManagedFileCoordinator {
                     completedBytes: Int64(portableHTML.count),
                     totalBytes: Int64(portableHTML.count)
                 ))
+                byteCount = Int64(portableHTML.count)
+                digest = try hashCancellable(
+                    portableHTML,
+                    intent: intent,
+                    transactionID: transactionID,
+                    itemIndex: itemIndex,
+                    totalItems: totalItems,
+                    progress: progress
+                )
+                sourceReadPassCount = 1
             } else {
-                try copyCancellable(
+                let copy = try copyCancellable(
                     from: sourceURL,
                     to: stagedURL,
                     intent: intent,
@@ -695,6 +716,9 @@ actor ManagedFileCoordinator {
                     totalItems: totalItems,
                     progress: progress
                 )
+                byteCount = copy.byteCount
+                digest = copy.sha256
+                sourceReadPassCount = 1
             }
         case (nil, .some(let data)):
             try Task.checkCancellation()
@@ -717,34 +741,21 @@ actor ManagedFileCoordinator {
                 completedBytes: Int64(data.count),
                 totalBytes: Int64(data.count)
             ))
+            byteCount = Int64(data.count)
+            digest = try hashCancellable(
+                data,
+                intent: intent,
+                transactionID: transactionID,
+                itemIndex: itemIndex,
+                totalItems: totalItems,
+                progress: progress
+            )
+            sourceReadPassCount = 0
         default:
             throw CocoaError(.fileReadUnknown)
         }
 
         try Task.checkCancellation()
-        let attributes = try fileManager.attributesOfItem(
-            atPath: stagedURL.path(percentEncoded: false)
-        )
-        let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-        progress?(ManagedFileProgress(
-            transactionID: transactionID,
-            intent: intent,
-            phase: .hashing,
-            completedItems: itemIndex,
-            totalItems: totalItems,
-            completedBytes: 0,
-            totalBytes: byteCount
-        ))
-        let digest = try ContentHasher.sha256Cancellable(of: stagedURL)
-        progress?(ManagedFileProgress(
-            transactionID: transactionID,
-            intent: intent,
-            phase: .hashing,
-            completedItems: itemIndex,
-            totalItems: totalItems,
-            completedBytes: byteCount,
-            totalBytes: byteCount
-        ))
         return StagedManagedFile(
             id: UUID(),
             kind: source.kind,
@@ -754,7 +765,8 @@ actor ManagedFileCoordinator {
             sha256: digest,
             byteCount: byteCount,
             generation: transactionID,
-            replacesExisting: source.replacesExisting
+            replacesExisting: source.replacesExisting,
+            sourceReadPassCount: sourceReadPassCount
         )
     }
 
@@ -766,7 +778,7 @@ actor ManagedFileCoordinator {
         itemIndex: Int,
         totalItems: Int,
         progress: ManagedFileProgressHandler?
-    ) throws {
+    ) throws -> (byteCount: Int64, sha256: String) {
         let attributes = try fileManager.attributesOfItem(
             atPath: sourceURL.path(percentEncoded: false)
         )
@@ -785,6 +797,7 @@ actor ManagedFileCoordinator {
 
         var copiedBytes: Int64 = 0
         var lastReportedBytes: Int64 = 0
+        var hasher = SHA256()
         progress?(ManagedFileProgress(
             transactionID: transactionID,
             intent: intent,
@@ -798,6 +811,7 @@ actor ManagedFileCoordinator {
             try Task.checkCancellation()
             guard let data = try source.read(upToCount: 1_048_576), !data.isEmpty else { break }
             try destination.write(contentsOf: data)
+            hasher.update(data: data)
             copiedBytes += Int64(data.count)
             if copiedBytes - lastReportedBytes >= 4 * 1_048_576
                 || totalBytes.map({ copiedBytes >= $0 }) == true {
@@ -825,6 +839,59 @@ actor ManagedFileCoordinator {
                 totalBytes: totalBytes
             ))
         }
+        progress?(ManagedFileProgress(
+            transactionID: transactionID,
+            intent: intent,
+            phase: .hashing,
+            completedItems: itemIndex,
+            totalItems: totalItems,
+            completedBytes: copiedBytes,
+            totalBytes: copiedBytes
+        ))
+        let digest = hasher.finalize()
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return (copiedBytes, digest)
+    }
+
+    private func hashCancellable(
+        _ data: Data,
+        intent: ManagedFileIntent,
+        transactionID: UUID,
+        itemIndex: Int,
+        totalItems: Int,
+        progress: ManagedFileProgressHandler?
+    ) throws -> String {
+        let byteCount = Int64(data.count)
+        progress?(ManagedFileProgress(
+            transactionID: transactionID,
+            intent: intent,
+            phase: .hashing,
+            completedItems: itemIndex,
+            totalItems: totalItems,
+            completedBytes: 0,
+            totalBytes: byteCount
+        ))
+        var hasher = SHA256()
+        var offset = 0
+        while offset < data.count {
+            try Task.checkCancellation()
+            let end = min(offset + 1_048_576, data.count)
+            hasher.update(data: data[offset ..< end])
+            offset = end
+        }
+        progress?(ManagedFileProgress(
+            transactionID: transactionID,
+            intent: intent,
+            phase: .hashing,
+            completedItems: itemIndex,
+            totalItems: totalItems,
+            completedBytes: byteCount,
+            totalBytes: byteCount
+        ))
+        return hasher.finalize()
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 
     private func shouldReportProgress(index: Int, total: Int) -> Bool {
