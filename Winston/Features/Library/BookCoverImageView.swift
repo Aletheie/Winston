@@ -30,33 +30,29 @@ struct BookCoverImageView: View {
     private func resolvedCover(for url: URL, uuid: UUID) async -> NSImage? {
         let maxDimension = tier.maxDimension
         let maxPixel = Int(maxDimension)
-        return await CoverCache.shared.resolve(for: url, tier: tier) {
-            if let stored = await Task.detached(priority: .background, operation: {
-                if let data = CoverStore.loadData(for: uuid),
-                   let decoded = ImageTranscoder.decodedImage(from: data, maxPixel: maxPixel) {
-                    return NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height))
-                }
-                return nil
-            }).value {
+        let lease = await CoverCache.shared.lease(for: url, tier: tier) {
+            if let stored = await CoverWorkScheduler.shared.storedCover(
+                for: uuid,
+                maxPixel: maxPixel
+            ) {
                 return stored
             }
+            guard !Task.isCancelled else { return nil }
+
             let token = await CoverRepository.shared.beginBackgroundMutation(for: uuid)
-            let prepared = await Task.detached(priority: .background) { () -> (NSImage, Data)? in
-                guard let extracted = CoverExtractor.extractCover(from: url),
-                      let data = ImageTranscoder.jpegData(from: extracted) else { return nil }
-                return (extracted, data)
-            }.value
-            guard let (extracted, data) = prepared else { return nil }
-            if await CoverRepository.shared.install(data, using: token, onlyIfMissing: true) != nil {
-                return CoverCache.downscaled(extracted, maxDimension: maxDimension)
+            guard let prepared = await CoverWorkScheduler.shared.extractAndEncode(
+                from: url,
+                maxDimension: maxDimension
+            ), !Task.isCancelled else { return nil }
+            if await CoverWorkScheduler.shared.install(prepared.data, using: token) {
+                return prepared.image
             }
-            return await Task.detached(priority: .background) {
-                guard let data = CoverStore.loadData(for: uuid),
-                      let decoded = ImageTranscoder.decodedImage(from: data, maxPixel: maxPixel) else {
-                    return nil
-                }
-                return NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height))
-            }.value
+            guard !Task.isCancelled else { return nil }
+            return await CoverWorkScheduler.shared.storedCover(
+                for: uuid,
+                maxPixel: maxPixel
+            )
         }
+        return await lease.image()
     }
 }

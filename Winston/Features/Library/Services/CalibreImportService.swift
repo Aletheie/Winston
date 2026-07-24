@@ -253,7 +253,14 @@ final class CalibreImportService {
             UUID(uuidString: $0.deletingPathExtension().lastPathComponent)
         })
         let manifest = await session.snapshot()
-        let books = modelContext.allBooks()
+        let recoveryItems = manifest.items.filter {
+            $0.state == .prepared || $0.state == .failed
+        }
+        let recoveryBookIDs = Set(recoveryItems.compactMap { item -> UUID? in
+            guard let decision = item.decision else { return nil }
+            return Self.targetBookID(for: decision, item: item)
+        })
+        let books = recoveryBookIDs.compactMap { try? mutations.book(id: $0) }
         let booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
         let assetsByID = Dictionary(
             books.flatMap(\.assets).map { ($0.uuid, $0) },
@@ -262,7 +269,7 @@ final class CalibreImportService {
 
         var durableOutcomes: [CalibreImportOutcome] = []
         var preserve: Set<Int64> = []
-        for item in manifest.items where item.state == .prepared || item.state == .failed {
+        for item in recoveryItems {
             guard let decision = item.decision else { continue }
             let pending = !pendingTransactionIDs.isDisjoint(with: item.transactionIDs)
             let evidence = catalogEvidence(
@@ -318,7 +325,7 @@ final class CalibreImportService {
     }
 
     private func makeReconciler() -> CalibreImportReconciler {
-        CalibreImportReconciler(books: modelContext.allBooks().map { book in
+        CalibreImportReconciler(books: ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []).map { book in
             CalibreImportCatalogBook(
                 bookID: book.uuid,
                 workID: book.work?.uuid,
@@ -562,13 +569,14 @@ final class CalibreImportService {
                 for: candidate.item,
                 decision: candidate.decision
             ))
+            let coverURL = book(withID: Self.targetBookID(
+                for: candidate.decision,
+                item: candidate.item
+            ))?.fileURL
             if let data = candidate.coverData,
                let image = NSImage(data: data),
-               let book = book(withID: Self.targetBookID(
-                   for: candidate.decision,
-                   item: candidate.item
-               )) {
-                await CoverCache.shared.replace(image, for: book.fileURL)
+               let coverURL {
+                await CoverCache.shared.replace(image, for: coverURL)
             }
         }
         return result
@@ -578,10 +586,48 @@ final class CalibreImportService {
         _ candidates: [PreparedCandidate],
         manifest: CalibreImportManifest
     ) async throws -> CatalogFileCommitResult {
-        let allBooks = modelContext.allBooks()
-        var booksByID = Dictionary(uniqueKeysWithValues: allBooks.map { ($0.uuid, $0) })
-        let allWorks = (try? modelContext.fetch(FetchDescriptor<Work>())) ?? []
-        var worksByID = Dictionary(uniqueKeysWithValues: allWorks.map { ($0.uuid, $0) })
+        let createdBookIDs = Set(candidates.compactMap { candidate -> UUID? in
+            switch candidate.decision {
+            case .addEdition, .newWork, .needsReview:
+                candidate.item.bookID
+            case .skipExact, .merge:
+                nil
+            }
+        })
+        var requiredBookIDs = Set(candidates.compactMap { candidate -> UUID? in
+            guard case .merge(let existingBookID, _) = candidate.decision else {
+                return nil
+            }
+            return existingBookID
+        })
+        requiredBookIDs.subtract(createdBookIDs)
+        var booksByID = Dictionary(
+            uniqueKeysWithValues: try requiredBookIDs.map {
+                let book = try mutations.book(id: $0)
+                return (book.uuid, book)
+            }
+        )
+        let createdWorkIDs = Set(candidates.compactMap { candidate -> UUID? in
+            switch candidate.decision {
+            case .newWork, .needsReview:
+                candidate.item.workID
+            case .skipExact, .merge, .addEdition:
+                nil
+            }
+        })
+        var requiredWorkIDs = Set(candidates.compactMap { candidate -> UUID? in
+            guard case .addEdition(let workID) = candidate.decision else {
+                return nil
+            }
+            return workID
+        })
+        requiredWorkIDs.subtract(createdWorkIDs)
+        var worksByID = Dictionary(
+            uniqueKeysWithValues: try requiredWorkIDs.map {
+                let work = try mutations.work(id: $0)
+                return (work.uuid, work)
+            }
+        )
 
         var collectionDescriptor = FetchDescriptor<BookCollection>(
             predicate: #Predicate { $0.id == manifest.collectionID }
@@ -764,7 +810,7 @@ final class CalibreImportService {
                 return nil
             }
         })
-        let imported = modelContext.allBooks().filter { importedIDs.contains($0.uuid) }
+        let imported = importedIDs.compactMap { try? mutations.book(id: $0) }
         wishlist.fulfil(with: imported)
 
         if let editions {
@@ -781,7 +827,9 @@ final class CalibreImportService {
                 )
             }
         }
-        if settings.onlineMetadataEnabled { metadata.backfillMissingOnlineMetadata() }
+        if settings.onlineMetadataEnabled {
+            await metadata.backfillMissingOnlineMetadata()
+        }
     }
 
     private func present(_ importSummary: CalibreImportSummary) {

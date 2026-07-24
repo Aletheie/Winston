@@ -10,6 +10,29 @@ private actor CoverLoadCounter {
     func increment() { value += 1 }
 }
 
+private actor CancellationAwareCoverLoad {
+    private(set) var startCount = 0
+    private(set) var wasCancelled = false
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func load(duration: Duration = .seconds(60)) async -> NSImage? {
+        startCount += 1
+        startedWaiters.forEach { $0.resume() }
+        startedWaiters.removeAll()
+        do {
+            try await Task.sleep(for: duration)
+        } catch {
+            wasCancelled = true
+        }
+        return nil
+    }
+
+    func waitUntilStarted() async {
+        if startCount > 0 { return }
+        await withCheckedContinuation { startedWaiters.append($0) }
+    }
+}
+
 @MainActor
 struct ImageTranscoderTests {
 
@@ -89,5 +112,64 @@ struct ImageTranscoderTests {
 
         let loadCount = await counter.value
         #expect(loadCount == 1)
+    }
+
+    @Test func lastCoverLeaseCancelsUnobservedLoadAfterGracePeriod() async {
+        let cache = CoverCache(cancellationGrace: .milliseconds(20))
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "cover-lease-cancel-\(UUID().uuidString).epub")
+        let loader = CancellationAwareCoverLoad()
+
+        let request = Task {
+            let lease = await cache.lease(for: url, tier: .display) {
+                await loader.load()
+            }
+            _ = await lease.image()
+        }
+        await loader.waitUntilStarted()
+        request.cancel()
+        await request.value
+
+        let diagnostics = await cache.diagnostics()
+        #expect(await loader.wasCancelled)
+        #expect(diagnostics.startedJobCount == 1)
+        #expect(diagnostics.cancelledJobCount == 1)
+        #expect(diagnostics.completedJobCount == 0)
+        #expect(diagnostics.activeJobCount == 0)
+        #expect(diagnostics.activeSubscriberCount == 0)
+    }
+
+    @Test func newCoverLeaseDuringGracePeriodReusesPendingLoad() async {
+        let cache = CoverCache(cancellationGrace: .milliseconds(80))
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "cover-lease-grace-\(UUID().uuidString).epub")
+        let loader = CancellationAwareCoverLoad()
+
+        let first = Task {
+            let lease = await cache.lease(for: url, tier: .display) {
+                await loader.load(duration: .milliseconds(45))
+            }
+            _ = await lease.image()
+        }
+        await loader.waitUntilStarted()
+        first.cancel()
+        try? await Task.sleep(for: .milliseconds(10))
+
+        let second = Task {
+            let lease = await cache.lease(for: url, tier: .display) {
+                await loader.load(duration: .milliseconds(45))
+            }
+            _ = await lease.image()
+        }
+        await first.value
+        await second.value
+
+        let diagnostics = await cache.diagnostics()
+        #expect(await loader.startCount == 1)
+        #expect(!(await loader.wasCancelled))
+        #expect(diagnostics.startedJobCount == 1)
+        #expect(diagnostics.coalescedRequestCount == 1)
+        #expect(diagnostics.completedJobCount == 1)
+        #expect(diagnostics.cancelledJobCount == 0)
     }
 }

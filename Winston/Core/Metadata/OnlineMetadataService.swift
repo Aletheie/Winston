@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 nonisolated struct FetchedMetadata: Sendable, Equatable {
@@ -39,41 +40,129 @@ private nonisolated struct HardcoverRating: Sendable {
     var bookID: String?
 }
 
+nonisolated struct OnlineMetadataCacheDiagnostics: Sendable, Equatable {
+    var cacheEntryCount = 0
+    var metadataRequestCount = 0
+    var coverDownloadCount = 0
+    var cacheHitCount = 0
+    var cacheMissCount = 0
+    var coalescedMetadataRequestCount = 0
+    var coalescedCoverDownloadCount = 0
+    var evictionCount = 0
+    var expirationCount = 0
+    var metadataInFlightCount = 0
+    var coverInFlightCount = 0
+}
+
 actor OnlineMetadataService: OnlineMetadataFetching {
-    private struct CacheKey: Hashable {
+    private struct CacheKey: Hashable, Sendable {
         var lookup: String
         var language: MetadataLanguage
-        var hardcoverToken: String?
+        var providerConfiguration: String
     }
 
-    private let session: URLSession = {
+    private struct CacheEntry: Sendable {
+        var metadata: FetchedMetadata
+        var expiresAt: Date
+        var lastAccess: UInt64
+    }
+
+    private struct InFlight<Value: Sendable>: Sendable {
+        let id: UUID
+        let task: Task<Value, Never>
+    }
+
+    private static func makeSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         config.timeoutIntervalForResource = 12
         config.httpAdditionalHeaders = ["User-Agent": "Winston/1.0 (macOS eBook manager)"]
         return URLSession(configuration: config)
-    }()
+    }
 
+    private let session: URLSession
+    private let cacheCapacity: Int
+    private let cacheTTL: TimeInterval
+    private let providerConfigurationGeneration: Int
+    private let now: @Sendable () -> Date
     private var nextRequestAt: Date = .distantPast
-    private let minInterval: TimeInterval = 0.34
+    private let minInterval: TimeInterval
 
-    private var cache: [CacheKey: FetchedMetadata] = [:]
+    private var cache: [CacheKey: CacheEntry] = [:]
+    private var inFlightMetadata: [CacheKey: InFlight<OnlineMetadataFetchResult>] = [:]
+    private var inFlightCoverDownloads: [String: InFlight<Data?>] = [:]
+    private var accessGeneration: UInt64 = 0
+    private var diagnosticsState = OnlineMetadataCacheDiagnostics()
+
+    init(
+        session: URLSession? = nil,
+        cacheCapacity: Int = 256,
+        cacheTTL: TimeInterval = 30 * 60,
+        minInterval: TimeInterval = 0.34,
+        providerConfigurationGeneration: Int = 1,
+        now: @escaping @Sendable () -> Date = { .now }
+    ) {
+        self.session = session ?? Self.makeSession()
+        self.cacheCapacity = max(1, cacheCapacity)
+        self.cacheTTL = max(0, cacheTTL)
+        self.minInterval = max(0, minInterval)
+        self.providerConfigurationGeneration = providerConfigurationGeneration
+        self.now = now
+    }
 
     func fetch(isbn: String?, title: String, author: String?, language: MetadataLanguage = .english,
                hardcoverToken: String? = nil) async -> OnlineMetadataFetchResult {
-        let lookup: String
-        if let isbn, !isbn.isEmpty {
-            lookup = "isbn:\(isbn)"
-        } else {
-            lookup = "t:\(title.lowercased())|a:\(author?.lowercased() ?? "")"
-        }
         let token = hardcoverToken?.trimmingCharacters(in: .whitespacesAndNewlines)
         let configuredToken = token?.isEmpty == false ? token : nil
-        let key = CacheKey(lookup: lookup, language: language, hardcoverToken: configuredToken)
-        if let cached = cache[key] {
+        let key = cacheKey(
+            isbn: isbn,
+            title: title,
+            author: author,
+            language: language,
+            hardcoverToken: configuredToken
+        )
+        if let cached = cachedMetadata(for: key) {
             return OnlineMetadataFetchResult(metadata: cached, reachedNetwork: false)
         }
+        diagnosticsState.cacheMissCount += 1
 
+        let request: InFlight<OnlineMetadataFetchResult>
+        if let existing = inFlightMetadata[key] {
+            diagnosticsState.coalescedMetadataRequestCount += 1
+            request = existing
+        } else {
+            let id = UUID()
+            let task = Task {
+                await self.performFetch(
+                    isbn: isbn,
+                    title: title,
+                    author: author,
+                    language: language,
+                    hardcoverToken: configuredToken
+                )
+            }
+            request = InFlight(id: id, task: task)
+            inFlightMetadata[key] = request
+            diagnosticsState.metadataRequestCount += 1
+        }
+
+        let outcome = await request.task.value
+        if inFlightMetadata[key]?.id == request.id {
+            inFlightMetadata.removeValue(forKey: key)
+            if let metadata = outcome.metadata {
+                insert(metadata, for: key)
+            }
+        }
+        return outcome
+    }
+
+    private func performFetch(
+        isbn: String?,
+        title: String,
+        author: String?,
+        language: MetadataLanguage,
+        hardcoverToken: String?
+    ) async -> OnlineMetadataFetchResult {
         var reachedNetwork = false
         let openLibraryResult = await openLibrary(isbn: isbn, title: title, author: author)
         reachedNetwork = reachedNetwork || openLibraryResult.reachedNetwork
@@ -87,11 +176,11 @@ actor OnlineMetadataService: OnlineMetadataFetching {
             return OnlineMetadataFetchResult(metadata: nil, reachedNetwork: reachedNetwork)
         }
 
-        if let configuredToken {
+        if let hardcoverToken {
             let hardcover = await hardcoverRating(
                 title: result.title ?? title,
                 author: result.authors.first ?? author,
-                token: configuredToken
+                token: hardcoverToken
             )
             reachedNetwork = reachedNetwork || hardcover.reachedNetwork
             if let rating = hardcover.value {
@@ -134,16 +223,122 @@ actor OnlineMetadataService: OnlineMetadataFetching {
             }
         }
 
-        cache[key] = result
         return OnlineMetadataFetchResult(metadata: result, reachedNetwork: reachedNetwork)
     }
 
     func downloadCover(_ url: URL) async -> Data? {
+        let key = url.absoluteString
+        let request: InFlight<Data?>
+        if let existing = inFlightCoverDownloads[key] {
+            diagnosticsState.coalescedCoverDownloadCount += 1
+            request = existing
+        } else {
+            let id = UUID()
+            let task = Task { await self.performCoverDownload(url) }
+            request = InFlight(id: id, task: task)
+            inFlightCoverDownloads[key] = request
+            diagnosticsState.coverDownloadCount += 1
+        }
+
+        let data = await request.task.value
+        if inFlightCoverDownloads[key]?.id == request.id {
+            inFlightCoverDownloads.removeValue(forKey: key)
+        }
+        return data
+    }
+
+    private func performCoverDownload(_ url: URL) async -> Data? {
         guard await throttle() else { return nil }
         guard let (data, response) = try? await session.data(from: url),
               (response as? HTTPURLResponse)?.statusCode == 200,
               data.count > 1_000 else { return nil }
         return data
+    }
+
+    func cacheDiagnostics() -> OnlineMetadataCacheDiagnostics {
+        var result = diagnosticsState
+        result.cacheEntryCount = cache.count
+        result.metadataInFlightCount = inFlightMetadata.count
+        result.coverInFlightCount = inFlightCoverDownloads.count
+        return result
+    }
+
+    func resetCache(cancelInFlight: Bool = true) {
+        cache.removeAll(keepingCapacity: true)
+        accessGeneration = 0
+        if cancelInFlight {
+            for request in inFlightMetadata.values { request.task.cancel() }
+            for request in inFlightCoverDownloads.values { request.task.cancel() }
+            inFlightMetadata.removeAll()
+            inFlightCoverDownloads.removeAll()
+        }
+    }
+
+    private func cacheKey(
+        isbn: String?,
+        title: String,
+        author: String?,
+        language: MetadataLanguage,
+        hardcoverToken: String?
+    ) -> CacheKey {
+        let normalizedISBN = (isbn ?? "")
+            .uppercased()
+            .filter { $0.isNumber || $0 == "X" }
+        let lookup = normalizedISBN.isEmpty
+            ? "t:\(title.normalizedMatchKey)|a:\((author ?? "").normalizedMatchKey)"
+            : "isbn:\(normalizedISBN)"
+        let tokenConfiguration = hardcoverToken.map(Self.tokenDigest) ?? "none"
+        return CacheKey(
+            lookup: lookup,
+            language: language,
+            providerConfiguration: "v\(providerConfigurationGeneration)|hardcover:\(tokenConfiguration)"
+        )
+    }
+
+    private static func tokenDigest(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8))
+            .prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private func cachedMetadata(for key: CacheKey) -> FetchedMetadata? {
+        guard var entry = cache[key] else { return nil }
+        guard entry.expiresAt > now() else {
+            cache.removeValue(forKey: key)
+            diagnosticsState.expirationCount += 1
+            return nil
+        }
+        accessGeneration &+= 1
+        entry.lastAccess = accessGeneration
+        cache[key] = entry
+        diagnosticsState.cacheHitCount += 1
+        return entry.metadata
+    }
+
+    private func insert(_ metadata: FetchedMetadata, for key: CacheKey) {
+        let currentTime = now()
+        let expiredKeys = cache.compactMap { cacheKey, entry in
+            entry.expiresAt <= currentTime ? cacheKey : nil
+        }
+        for expiredKey in expiredKeys {
+            cache.removeValue(forKey: expiredKey)
+            diagnosticsState.expirationCount += 1
+        }
+
+        accessGeneration &+= 1
+        cache[key] = CacheEntry(
+            metadata: metadata,
+            expiresAt: currentTime.addingTimeInterval(cacheTTL),
+            lastAccess: accessGeneration
+        )
+        while cache.count > cacheCapacity,
+              let leastRecentlyUsed = cache.min(by: {
+                  $0.value.lastAccess < $1.value.lastAccess
+              })?.key {
+            cache.removeValue(forKey: leastRecentlyUsed)
+            diagnosticsState.evictionCount += 1
+        }
     }
 
     // MARK: - Throttle
