@@ -154,6 +154,7 @@ nonisolated struct LibraryTimeMachineWorkSnapshot: Equatable, Sendable, Identifi
 nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifiable {
     let id: UUID
     var fileName: String
+    var primaryAssetID: UUID?
     var originalFileName: String
     var dateAdded: Date
     var fileSizeBytes: Int64
@@ -170,6 +171,7 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
     init(
         id: UUID,
         fileName: String,
+        primaryAssetID: UUID? = nil,
         originalFileName: String,
         dateAdded: Date = .now,
         fileSizeBytes: Int64 = 0,
@@ -185,6 +187,7 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
     ) {
         self.id = id
         self.fileName = fileName
+        self.primaryAssetID = primaryAssetID
         self.originalFileName = originalFileName
         self.dateAdded = dateAdded
         self.fileSizeBytes = fileSizeBytes
@@ -787,10 +790,13 @@ private nonisolated enum LibraryTimeMachineSnapshotBuilder {
             )
         }
 
-        let primaryFile = booksDirectory.appending(path: book.fileName)
+        let primaryAsset = book.primaryAsset
+        let primaryFileName = primaryAsset?.fileName ?? book.fileName
+        let primaryFile = booksDirectory.appending(path: primaryFileName)
         return LibraryTimeMachineBookSnapshot(
             id: book.uuid,
-            fileName: book.fileName,
+            fileName: primaryFileName,
+            primaryAssetID: primaryAsset?.uuid,
             originalFileName: book.originalFileName,
             dateAdded: book.dateAdded,
             fileSizeBytes: book.fileSizeBytes,

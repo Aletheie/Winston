@@ -182,7 +182,7 @@ final class FullTextSearchViewModel {
                                 dateAdded: asset.dateAdded
                             )
                         ),
-                        isPrimary: asset.fileName == book.fileName,
+                        isPrimary: asset.uuid == book.primaryAsset?.uuid,
                         originRank: rank(asset.origin)
                     )
                 }

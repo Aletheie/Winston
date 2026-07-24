@@ -108,13 +108,14 @@ nonisolated struct AssetInspectionInput: Equatable, Sendable {
     let storedHash: String?
     let storedSize: Int64
     let storedValidation: AssetValidation?
+    let primaryAssetID: UUID?
     let primaryFileName: String
     let primaryDRM: Bool?
     let primarySize: Int64
     let requirements: AssetInspectionRequirements
 
     var fileURL: URL { BookFileStore.url(for: fileName) }
-    var isPrimary: Bool { fileName == primaryFileName }
+    var isPrimary: Bool { assetID == primaryAssetID }
 
     @MainActor
     init?(asset: BookAsset, book: Book) {
@@ -124,7 +125,9 @@ nonisolated struct AssetInspectionInput: Equatable, Sendable {
               ManagedLeafName(rawValue: asset.fileName) != nil else {
             return nil
         }
-        let isPrimary = asset.fileName == book.fileName
+        let primaryAsset = book.primaryAsset
+        let primaryFileName = primaryAsset?.fileName ?? book.fileName
+        let isPrimary = asset.uuid == primaryAsset?.uuid
         bookID = book.uuid
         assetID = asset.uuid
         fileName = asset.fileName
@@ -132,9 +135,10 @@ nonisolated struct AssetInspectionInput: Equatable, Sendable {
         storedHash = asset.contentHash
         storedSize = asset.sizeBytes
         storedValidation = asset.validationStatus
-        primaryFileName = book.fileName
+        self.primaryAssetID = primaryAsset?.uuid
+        self.primaryFileName = primaryFileName
         primaryDRM = book.drmProtected
-        primarySize = book.fileSizeBytes
+        primarySize = primaryAsset?.sizeBytes ?? book.fileSizeBytes
         requirements = AssetInspectionRequirements(
             size: asset.sizeBytes <= 0 || (isPrimary && book.fileSizeBytes <= 0),
             hash: asset.contentHash == nil,
@@ -163,7 +167,8 @@ nonisolated struct AssetInspectionInput: Equatable, Sendable {
             && asset.book?.uuid == bookID
             && asset.fileName == fileName
             && asset.dateAdded == assetDateAdded
-            && book.fileName == primaryFileName
+            && book.primaryAsset?.uuid == primaryAssetID
+            && (book.primaryAsset?.fileName ?? book.fileName) == primaryFileName
     }
 }
 
@@ -430,9 +435,19 @@ enum CatalogStructureBackfill {
         descriptor.fetchLimit = max(1, limit)
         let books = try context.fetch(descriptor)
         var changedBookIDs: Set<UUID> = []
+        var changedWorkIDs: Set<UUID> = []
+        var changedAssetIDs: Set<UUID> = []
         var fullTextBookIDs: Set<UUID> = []
 
         for book in books {
+            if book.repairPrimaryAssetInvariant() {
+                changedBookIDs.insert(book.uuid)
+                if let primaryAssetID = book.primaryAssetUUID {
+                    changedAssetIDs.insert(primaryAssetID)
+                }
+                fullTextBookIDs.insert(book.uuid)
+            }
+
             if book.assets.isEmpty,
                !book.fileName.isEmpty,
                ManagedLeafName(rawValue: book.fileName) != nil {
@@ -445,7 +460,9 @@ enum CatalogStructureBackfill {
                     book: book
                 )
                 context.insert(asset)
+                book.primaryAssetUUID = asset.uuid
                 changedBookIDs.insert(book.uuid)
+                changedAssetIDs.insert(asset.uuid)
                 fullTextBookIDs.insert(book.uuid)
             }
 
@@ -459,6 +476,13 @@ enum CatalogStructureBackfill {
                 book.work = work
                 work.preferredEditionUUID = book.uuid
                 changedBookIDs.insert(book.uuid)
+                changedWorkIDs.insert(work.uuid)
+            }
+
+            if let work = book.work,
+               WorkService.repairPreferredEditionInvariant(work) {
+                changedBookIDs.formUnion(work.editions.map(\.uuid))
+                changedWorkIDs.insert(work.uuid)
             }
 
             if book.readingSessions.isEmpty,
@@ -471,6 +495,15 @@ enum CatalogStructureBackfill {
         if !changedBookIDs.isEmpty {
             try context.saveAndPublish(
                 affectedBookIDs: changedBookIDs,
+                affectedWorkIDs: changedWorkIDs,
+                affectedAssetIDs: changedAssetIDs,
+                fields: [
+                    .assetAvailability,
+                    .displayMetadata,
+                    .fullTextSource,
+                    .readingState,
+                    .workMembership,
+                ],
                 fullTextAffectedBookIDs: fullTextBookIDs
             )
         }
@@ -708,7 +741,7 @@ enum MaintenanceSchedulerError: Error, LocalizedError {
 @MainActor
 @Observable
 final class MaintenanceScheduler {
-    private static let catalogStructureVersion = 3
+    private static let catalogStructureVersion = 4
     private static let catalogCleanupVersion = 1
     private static let assetInspectionVersion = 1
     private static let metadataExtractionVersion = 1

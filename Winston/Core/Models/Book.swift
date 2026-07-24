@@ -20,6 +20,7 @@ nonisolated struct BookMetadata: Codable, Sendable, Hashable {
 final class Book {
     @Attribute(.unique) var uuid: UUID
     var fileName: String
+    var primaryAssetUUID: UUID?
     var originalFileName: String
 
     var title: String?
@@ -76,11 +77,11 @@ final class Book {
     // MARK: - Derived
 
     var fileURL: URL {
-        BookFileStore.url(for: fileName)
+        BookFileStore.url(for: primaryAsset?.fileName ?? fileName)
     }
 
     var primaryFileURL: URL? {
-        BookFileStore.validatedURL(for: fileName)
+        BookFileStore.validatedURL(for: primaryAsset?.fileName ?? fileName)
     }
 
     var coverCacheURL: URL {
@@ -94,13 +95,56 @@ final class Book {
     /// Persisted catalog availability used by read models and other hot paths.
     /// Filesystem validation belongs to explicit health/transfer operations.
     var hasCatalogDigitalFile: Bool {
-        guard !fileName.isEmpty else { return false }
-        guard let primaryAsset = assets.first(where: { $0.fileName == fileName })
-            ?? assets.first(where: { $0.uuid == uuid }) else {
+        let primaryFileName = primaryAsset?.fileName ?? fileName
+        guard !primaryFileName.isEmpty else { return false }
+        guard let primaryAsset else {
             // Legacy rows may predate BookAsset backfill.
-            return true
+            return assets.isEmpty
         }
         return primaryAsset.validationStatus != .missing
+    }
+
+    /// The single authoritative primary relation. `fileName` remains a
+    /// compatibility mirror while existing stores are migrated.
+    var primaryAsset: BookAsset? {
+        if let primaryAssetUUID {
+            return assets.first(where: { $0.uuid == primaryAssetUUID })
+        }
+        return assets.first(where: { $0.fileName == fileName })
+            ?? assets.first(where: { $0.uuid == uuid })
+    }
+
+    @discardableResult
+    func repairPrimaryAssetInvariant() -> Bool {
+        guard !assets.isEmpty else {
+            let changed = primaryAssetUUID != nil
+            primaryAssetUUID = nil
+            return changed
+        }
+        let selected = primaryAsset
+            ?? assets
+                .filter {
+                    $0.validationStatus != .missing
+                        && $0.validationStatus != .corrupt
+                }
+                .sorted { $0.dateAdded < $1.dateAdded }
+                .first
+            ?? assets.sorted { $0.dateAdded < $1.dateAdded }.first
+        guard let selected else { return false }
+        var changed = false
+        if primaryAssetUUID != selected.uuid {
+            primaryAssetUUID = selected.uuid
+            changed = true
+        }
+        if fileName != selected.fileName {
+            fileName = selected.fileName
+            changed = true
+        }
+        if selected.sizeBytes > 0, fileSizeBytes != selected.sizeBytes {
+            fileSizeBytes = selected.sizeBytes
+            changed = true
+        }
+        return changed
     }
 
     var hasPhysicalCopy: Bool {
@@ -116,7 +160,7 @@ final class Book {
 
     var format: String {
         Self.catalogFormat(
-            fileName: fileName,
+            fileName: primaryAsset?.fileName ?? fileName,
             hasDigitalFile: hasCatalogDigitalFile,
             hasPhysicalCopy: hasPhysicalCopy
         )

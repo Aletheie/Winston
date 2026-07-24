@@ -68,6 +68,8 @@ struct MaintenanceSchedulerTests {
         #expect(try library.context.fetchCount(FetchDescriptor<BookAsset>()) == books.count)
         #expect(try library.context.fetchCount(FetchDescriptor<Work>()) == books.count)
         #expect(try library.context.fetchCount(FetchDescriptor<ReadingSession>()) == books.count)
+        #expect(books.allSatisfy { $0.primaryAssetUUID == $0.uuid })
+        #expect(books.allSatisfy { $0.work?.preferredEditionUUID == $0.uuid })
 
         offset = 0
         while offset < books.count {
@@ -83,6 +85,31 @@ struct MaintenanceSchedulerTests {
         #expect(try library.context.fetchCount(FetchDescriptor<BookAsset>()) == books.count)
         #expect(try library.context.fetchCount(FetchDescriptor<Work>()) == books.count)
         #expect(try library.context.fetchCount(FetchDescriptor<ReadingSession>()) == books.count)
+    }
+
+    @Test func catalogStructureRepairsExistingPrimaryAssetDrift() async throws {
+        let library = try await TestLibrary()
+        let book = Book(fileName: "legacy.epub", originalFileName: "Legacy.epub")
+        let asset = BookAsset(
+            fileName: "authoritative.pdf",
+            sizeBytes: 123,
+            validationStatus: .ok,
+            book: book
+        )
+        library.context.insert(book)
+        library.context.insert(asset)
+        book.primaryAssetUUID = UUID()
+        try library.context.save()
+
+        _ = try CatalogStructureBackfill.processChunk(
+            context: library.context,
+            offset: 0,
+            limit: 10
+        )
+
+        #expect(book.primaryAssetUUID == asset.uuid)
+        #expect(book.fileName == asset.fileName)
+        #expect(book.fileSizeBytes == asset.sizeBytes)
     }
 
     @Test func catalogCleanupPrunesOrphansInChunksAndRemainsIdempotent() async throws {

@@ -128,7 +128,7 @@ nonisolated struct BookAnalysisSnapshot: Hashable, Sendable {
     @MainActor
     private init(book: Book, primary: BookAsset?, source: BookAsset?) {
         bookID = book.uuid
-        primaryFileName = book.fileName
+        primaryFileName = primary?.fileName ?? book.fileName
         primaryAsset = primary.map(BookAssetRevision.init)
         sourceAsset = source.map(BookAssetRevision.init)
         identityRevision = BookIdentityRevision(book: book)
@@ -141,7 +141,7 @@ nonisolated struct BookAnalysisSnapshot: Hashable, Sendable {
     func matches(_ book: Book) -> Bool {
         guard book.modelContext != nil,
               book.uuid == bookID,
-              book.fileName == primaryFileName,
+              (book.primaryAsset?.fileName ?? book.fileName) == primaryFileName,
               BookIdentityRevision(book: book) == identityRevision,
               Self.primaryAsset(in: book).map(BookAssetRevision.init) == primaryAsset
         else { return false }
@@ -156,9 +156,7 @@ nonisolated struct BookAnalysisSnapshot: Hashable, Sendable {
 
     @MainActor
     private static func primaryAsset(in book: Book) -> BookAsset? {
-        let matches = book.assets.filter { $0.fileName == book.fileName }
-        return matches.first(where: { $0.uuid == book.uuid })
-            ?? matches.min { $0.uuid.uuidString < $1.uuid.uuidString }
+        book.primaryAsset
     }
 }
 

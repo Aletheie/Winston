@@ -905,7 +905,7 @@ struct DetailFiles: View {
                 DetailFileRow(
                     book: book,
                     asset: asset,
-                    isPrimary: asset.fileName == book.fileName,
+                    isPrimary: asset.uuid == book.primaryAsset?.uuid,
                     canRemove: assets.count == 1 || asset.fileName != book.fileName,
                     viewModel: viewModel,
                     onReplace: replaceFile,
@@ -932,8 +932,8 @@ struct DetailFiles: View {
 
     private var sortedAssets: [BookAsset] {
         book.assets.sorted {
-            if ($0.fileName == book.fileName) != ($1.fileName == book.fileName) {
-                return $0.fileName == book.fileName
+            if ($0.uuid == book.primaryAsset?.uuid) != ($1.uuid == book.primaryAsset?.uuid) {
+                return $0.uuid == book.primaryAsset?.uuid
             }
             return $0.format < $1.format
         }

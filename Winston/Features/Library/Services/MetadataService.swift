@@ -24,6 +24,8 @@ final class MetadataService {
     private(set) var enrichingUUIDs: Set<UUID> = []
     private(set) var metadataFetchSummary: String?
     private var enrichmentRuns: [UUID: UUID] = [:]
+    private var manualFetchTask: Task<Void, Never>?
+    private var manualFetchGeneration = 0
 
     init(
         modelContext: ModelContext,
@@ -61,27 +63,56 @@ final class MetadataService {
         for book: Book,
         title: String?, author: String?, publisher: String?, year: String?,
         series: String?, seriesIndex: String?, language: String?, translator: String?, isbn: String?,
-        description: String?, tags: [String], shelfLocation: String?
+        description: String?, tags: [String], shelfLocation: String?,
+        identityScope: EditionIdentityScope = .editionOnly
     ) -> Bool {
         let bookID = book.uuid
         let fields: Set<String> = [
             "title", "author", "publisher", "year", "series", "seriesIndex",
             "language", "translator", "isbn", "description", "tags", "shelfLocation",
         ]
-        return commit(.updateMetadata(bookID: bookID, fields: fields), bookIDs: [bookID]) {
-            let book = try mutations.book(id: bookID)
-            book.title = title
-            book.author = author
-            book.publisher = publisher
-            book.year = year
-            book.series = series
-            book.seriesIndex = seriesIndex
-            book.language = language
-            book.translator = translator
-            book.isbn = isbn
-            book.bookDescription = description
-            book.tags = tags
-            book.shelfLocation = shelfLocation
+        let affected = mutations.editionIdentity.affectedModels(
+            for: book,
+            scope: identityScope
+        )
+        let bookPreimages = ((try? mutations.books(ids: affected.affectedBookIDs)) ?? [])
+            .map(CatalogBookMetadataPreimage.init)
+        let workPreimages = ((try? mutations.works(ids: affected.affectedWorkIDs)) ?? [])
+            .map(CatalogWorkPreimage.init)
+        do {
+            try mutations.commit(
+                .updateMetadata(bookID: bookID, fields: fields),
+                affectedBookIDs: affected.affectedBookIDs,
+                affectedWorkIDs: affected.affectedWorkIDs,
+                revertingOnFailure: {
+                    bookPreimages.forEach { $0.restore() }
+                    workPreimages.forEach { $0.restore() }
+                }
+            ) {
+                let book = try mutations.book(id: bookID)
+                mutations.editionIdentity.apply(
+                    EditionIdentityPatch(
+                        fields: [.title, .author, .isbn],
+                        title: title,
+                        author: author,
+                        isbn: isbn
+                    ),
+                    to: book,
+                    scope: identityScope
+                )
+                book.publisher = publisher
+                book.year = year
+                book.series = series
+                book.seriesIndex = seriesIndex
+                book.language = language
+                book.translator = translator
+                book.bookDescription = description
+                book.tags = tags
+                book.shelfLocation = shelfLocation
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -160,7 +191,19 @@ final class MetadataService {
 
     @discardableResult
     func bulkUpdate(_ books: [Book], _ edit: BulkEdit) -> Bool {
-        let ids = Set(books.map(\.uuid))
+        let selectedIDs = Set(books.map(\.uuid))
+        var affectedBookIDs = selectedIDs
+        var affectedWorkIDs: Set<UUID> = []
+        if edit.author != nil {
+            for book in books {
+                let affected = mutations.editionIdentity.affectedModels(
+                    for: book,
+                    scope: edit.authorIdentityScope
+                )
+                affectedBookIDs.formUnion(affected.affectedBookIDs)
+                affectedWorkIDs.formUnion(affected.affectedWorkIDs)
+            }
+        }
         var fields: Set<String> = []
         if edit.author != nil { fields.insert("author") }
         if edit.publisher != nil { fields.insert("publisher") }
@@ -170,25 +213,59 @@ final class MetadataService {
         if edit.translator != nil { fields.insert("translator") }
         if edit.status != nil { fields.insert("readingStatus") }
         if edit.tags != nil { fields.insert("tags") }
-        return commit(
-            .updateMetadataBatch(bookIDs: Array(ids), operation: "bulkEdit", fields: fields),
-            bookIDs: ids
-        ) {
-            for book in try mutations.books(ids: ids) {
-                if let author = edit.author       { book.author = author.isEmpty ? nil : author }
-                if let publisher = edit.publisher { book.publisher = publisher.isEmpty ? nil : publisher }
-                if let year = edit.year           { book.year = year.isEmpty ? nil : year }
-                if let series = edit.series       { book.series = series.isEmpty ? nil : series }
-                if let language = edit.language   { book.language = language.isEmpty ? nil : language }
-                if let translator = edit.translator { book.translator = translator.isEmpty ? nil : translator }
-                if let status = edit.status       { book.setStatus(status) }
-                if let tags = edit.tags {
-                    switch edit.tagMode {
-                    case .replace: book.tags = tags
-                    case .add:     book.tags = (book.tags + tags).uniquedSorted()
+        let bookPreimages = ((try? mutations.books(ids: affectedBookIDs)) ?? [])
+            .map(CatalogBookMetadataPreimage.init)
+        let workPreimages = ((try? mutations.works(ids: affectedWorkIDs)) ?? [])
+            .map(CatalogWorkPreimage.init)
+        do {
+            try mutations.commit(
+                .updateMetadataBatch(
+                    bookIDs: Array(affectedBookIDs),
+                    operation: "bulkEdit",
+                    fields: fields
+                ),
+                affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs,
+                revertingOnFailure: {
+                    bookPreimages.forEach { $0.restore() }
+                    workPreimages.forEach { $0.restore() }
+                }
+            ) {
+                let selectedBooks = try mutations.books(ids: selectedIDs)
+                for book in selectedBooks {
+                    if let author = edit.author {
+                        mutations.editionIdentity.apply(
+                            EditionIdentityPatch(
+                                fields: [.author],
+                                author: author.isEmpty ? nil : author
+                            ),
+                            to: book,
+                            scope: edit.authorIdentityScope
+                        )
+                    }
+                    if let publisher = edit.publisher {
+                        book.publisher = publisher.isEmpty ? nil : publisher
+                    }
+                    if let year = edit.year { book.year = year.isEmpty ? nil : year }
+                    if let series = edit.series { book.series = series.isEmpty ? nil : series }
+                    if let language = edit.language {
+                        book.language = language.isEmpty ? nil : language
+                    }
+                    if let translator = edit.translator {
+                        book.translator = translator.isEmpty ? nil : translator
+                    }
+                    if let status = edit.status { book.setStatus(status) }
+                    if let tags = edit.tags {
+                        switch edit.tagMode {
+                        case .replace: book.tags = tags
+                        case .add: book.tags = (book.tags + tags).uniquedSorted()
+                        }
                     }
                 }
             }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -198,7 +275,8 @@ final class MetadataService {
     func renameTag(_ old: String, to new: String) -> Bool {
         let name = new.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty, name != old else { return true }
-        let ids = Set(modelContext.allBooks().filter { $0.tags.contains(old) }.map(\.uuid))
+        let ids = Set(((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? [])
+            .filter { $0.tags.contains(old) }.map(\.uuid))
         guard !ids.isEmpty else { return true }
         return commit(
             .updateMetadataBatch(bookIDs: Array(ids), operation: "renameTag", fields: ["tags"]),
@@ -212,7 +290,8 @@ final class MetadataService {
 
     @discardableResult
     func deleteTag(_ tag: String) -> Bool {
-        let ids = Set(modelContext.allBooks().filter { $0.tags.contains(tag) }.map(\.uuid))
+        let ids = Set(((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? [])
+            .filter { $0.tags.contains(tag) }.map(\.uuid))
         guard !ids.isEmpty else { return true }
         return commit(
             .updateMetadataBatch(bookIDs: Array(ids), operation: "deleteTag", fields: ["tags"]),
@@ -226,7 +305,8 @@ final class MetadataService {
 
     @discardableResult
     func renameSeries(_ old: String, to new: String) -> Bool {
-        let ids = Set(modelContext.allBooks().filter { $0.series == old }.map(\.uuid))
+        let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.series == old })
+        let ids = Set(((try? modelContext.fetch(descriptor)) ?? []).map(\.uuid))
         guard !ids.isEmpty else { return true }
         return commit(
             .updateMetadataBatch(bookIDs: Array(ids), operation: "renameSeries", fields: ["series"]),
@@ -238,13 +318,53 @@ final class MetadataService {
 
     @discardableResult
     func renameAuthor(_ old: String, to new: String) -> Bool {
-        let ids = Set(modelContext.allBooks().filter { $0.displayAuthor == old }.map(\.uuid))
+        let ids = Set(((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? [])
+            .filter { $0.displayAuthor == old }.map(\.uuid))
         guard !ids.isEmpty else { return true }
-        return commit(
-            .updateMetadataBatch(bookIDs: Array(ids), operation: "renameAuthor", fields: ["author"]),
-            bookIDs: ids
-        ) {
-            applyAuthorRename(old, to: new)
+        let books = (try? mutations.books(ids: ids)) ?? []
+        var affectedBookIDs = ids
+        var affectedWorkIDs: Set<UUID> = []
+        for book in books {
+            let affected = mutations.editionIdentity.affectedModels(
+                for: book,
+                scope: .workIdentity
+            )
+            affectedBookIDs.formUnion(affected.affectedBookIDs)
+            affectedWorkIDs.formUnion(affected.affectedWorkIDs)
+        }
+        let bookPreimages = ((try? mutations.books(ids: affectedBookIDs)) ?? [])
+            .map(CatalogBookMetadataPreimage.init)
+        let workPreimages = ((try? mutations.works(ids: affectedWorkIDs)) ?? [])
+            .map(CatalogWorkPreimage.init)
+        do {
+            try mutations.commit(
+                .updateMetadataBatch(
+                    bookIDs: Array(affectedBookIDs),
+                    operation: "renameAuthor",
+                    fields: ["author"]
+                ),
+                affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs,
+                revertingOnFailure: {
+                    bookPreimages.forEach { $0.restore() }
+                    workPreimages.forEach { $0.restore() }
+                }
+            ) {
+                let name = new.trimmingCharacters(in: .whitespaces)
+                for book in try mutations.books(ids: ids) {
+                    mutations.editionIdentity.apply(
+                        EditionIdentityPatch(
+                            fields: [.author],
+                            author: name.isEmpty ? nil : name
+                        ),
+                        to: book,
+                        scope: .workIdentity
+                    )
+                }
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -256,7 +376,36 @@ final class MetadataService {
     @discardableResult
     func applyMetadataFixes(_ fixes: [MetadataFix]) -> Bool {
         guard !fixes.isEmpty else { return true }
-        let ids = Set(modelContext.allBooks().map(\.uuid))
+        let catalogBooks = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
+        var targetIDsByFixIndex: [Int: Set<UUID>] = [:]
+        var affectedBookIDs: Set<UUID> = []
+        var affectedWorkIDs: Set<UUID> = []
+        for (index, fix) in fixes.enumerated() {
+            let targetIDs: Set<UUID>
+            switch fix.kind {
+            case .author:
+                let matching = catalogBooks.filter { $0.displayAuthor == fix.original }
+                targetIDs = Set(matching.map(\.uuid))
+                for book in matching {
+                    let affected = mutations.editionIdentity.affectedModels(
+                        for: book,
+                        scope: .workIdentity
+                    )
+                    affectedBookIDs.formUnion(affected.affectedBookIDs)
+                    affectedWorkIDs.formUnion(affected.affectedWorkIDs)
+                }
+            case .series:
+                targetIDs = Set(catalogBooks.filter {
+                    $0.series == fix.original
+                }.map(\.uuid))
+                affectedBookIDs.formUnion(targetIDs)
+            case .seriesAssignment:
+                targetIDs = Set([fix.bookID].compactMap { $0 })
+                affectedBookIDs.formUnion(targetIDs)
+            }
+            targetIDsByFixIndex[index] = targetIDs
+        }
+        guard !affectedBookIDs.isEmpty else { return true }
         let fields = Set(fixes.flatMap { fix -> [String] in
             switch fix.kind {
             case .author: ["author"]
@@ -264,11 +413,52 @@ final class MetadataService {
             case .seriesAssignment: ["series", "seriesIndex"]
             }
         })
-        return commit(
-            .updateMetadataBatch(bookIDs: Array(ids), operation: "metadataFixes", fields: fields),
-            bookIDs: ids
-        ) {
-            for fix in fixes { applyMetadataFixCore(fix) }
+        let bookPreimages = ((try? mutations.books(ids: affectedBookIDs)) ?? [])
+            .map(CatalogBookMetadataPreimage.init)
+        let workPreimages = ((try? mutations.works(ids: affectedWorkIDs)) ?? [])
+            .map(CatalogWorkPreimage.init)
+        do {
+            try mutations.commit(
+                .updateMetadataBatch(
+                    bookIDs: Array(affectedBookIDs),
+                    operation: "metadataFixes",
+                    fields: fields
+                ),
+                affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs,
+                revertingOnFailure: {
+                    bookPreimages.forEach { $0.restore() }
+                    workPreimages.forEach { $0.restore() }
+                }
+            ) {
+                for (index, fix) in fixes.enumerated() {
+                    let targetIDs = targetIDsByFixIndex[index] ?? []
+                    switch fix.kind {
+                    case .author:
+                        let name = fix.suggestion.trimmingCharacters(in: .whitespaces)
+                        for book in try mutations.books(ids: targetIDs) {
+                            mutations.editionIdentity.apply(
+                                EditionIdentityPatch(
+                                    fields: [.author],
+                                    author: name.isEmpty ? nil : name
+                                ),
+                                to: book,
+                                scope: .workIdentity
+                            )
+                        }
+                    case .series:
+                        let name = fix.suggestion.trimmingCharacters(in: .whitespaces)
+                        for book in try mutations.books(ids: targetIDs) {
+                            book.series = name.isEmpty ? nil : name
+                        }
+                    case .seriesAssignment:
+                        applySeriesAssignment(fix)
+                    }
+                }
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -292,29 +482,11 @@ final class MetadataService {
         }
     }
 
-    private func applyMetadataFixCore(_ fix: MetadataFix) {
-        switch fix.kind {
-        case .author:
-            applyAuthorRename(fix.original, to: fix.suggestion)
-        case .series:
-            applySeriesRename(fix.original, to: fix.suggestion)
-        case .seriesAssignment:
-            applySeriesAssignment(fix)
-        }
-    }
-
     private func applySeriesRename(_ old: String, to new: String) {
         let name = new.trimmingCharacters(in: .whitespaces)
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.series == old })
         for book in (try? modelContext.fetch(descriptor)) ?? [] {
             book.series = name.isEmpty ? nil : name
-        }
-    }
-
-    private func applyAuthorRename(_ old: String, to new: String) {
-        let name = new.trimmingCharacters(in: .whitespaces)
-        for book in modelContext.allBooks() where book.displayAuthor == old {
-            book.author = name.isEmpty ? nil : name
         }
     }
 
@@ -346,26 +518,42 @@ final class MetadataService {
         }
         let bookIDs = books.map(\.uuid)
         metadataFetchSummary = nil
-        Task {
+        manualFetchTask?.cancel()
+        manualFetchGeneration &+= 1
+        let generation = manualFetchGeneration
+        manualFetchTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if manualFetchGeneration == generation {
+                    manualFetchTask = nil
+                }
+            }
             var matched = 0
             for bookID in bookIDs {
                 guard !Task.isCancelled,
+                      manualFetchGeneration == generation,
                       let book = try? mutations.book(id: bookID) else { continue }
                 if await performEnrich(book, replaceCover: true) { matched += 1 }
             }
+            guard !Task.isCancelled,
+                  manualFetchGeneration == generation else { return }
             metadataFetchSummary = matched > 0
                 ? String(localized: "Updated \(matched) of \(bookIDs.count) from online catalogs.")
                 : String(localized: "No matching records found online.")
             try? await Task.sleep(for: .seconds(6))
-            if !isFetchingOnline { metadataFetchSummary = nil }
+            if !Task.isCancelled,
+               manualFetchGeneration == generation,
+               !isFetchingOnline {
+                metadataFetchSummary = nil
+            }
         }
     }
 
-    func backfillMissingOnlineMetadata() {
+    func backfillMissingOnlineMetadata() async {
         guard settings.onlineMetadataEnabled else { return }
         let language = preferredLanguage
         let token = normalizedHardcoverToken
-        let candidates = modelContext.allBooks()
+        let candidates = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
         let books: [Book]
         if let token {
             let configuration = lookupConfiguration(language: language, hardcoverToken: token)
@@ -380,13 +568,22 @@ final class MetadataService {
         }
         let bookIDs = books.map(\.uuid)
         guard !bookIDs.isEmpty else { return }
-        Task {
-            for bookID in bookIDs {
-                guard !Task.isCancelled,
-                      let book = try? mutations.book(id: bookID) else { continue }
-                await performEnrich(book, replaceCover: false)
-            }
+        for bookID in bookIDs {
+            guard !Task.isCancelled,
+                  let book = try? mutations.book(id: bookID) else { continue }
+            await performEnrich(book, replaceCover: false)
         }
+    }
+
+    func cancelOnlineMetadataJobs() {
+        manualFetchGeneration &+= 1
+        manualFetchTask?.cancel()
+        manualFetchTask = nil
+        for bookID in enrichingUUIDs {
+            analysisCoordinator.cancelAll(for: bookID)
+        }
+        enrichmentRuns.removeAll()
+        enrichingUUIDs.removeAll()
     }
 
     @discardableResult

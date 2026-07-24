@@ -1,18 +1,70 @@
 import Foundation
 import Observation
 
+nonisolated struct CatalogChangeFields: OptionSet, Equatable, Sendable {
+    let rawValue: UInt64
+
+    static let identity = CatalogChangeFields(rawValue: 1 << 0)
+    static let displayMetadata = CatalogChangeFields(rawValue: 1 << 1)
+    static let assetAvailability = CatalogChangeFields(rawValue: 1 << 2)
+    static let fullTextSource = CatalogChangeFields(rawValue: 1 << 3)
+    static let collectionMembership = CatalogChangeFields(rawValue: 1 << 4)
+    static let readingState = CatalogChangeFields(rawValue: 1 << 5)
+    static let cover = CatalogChangeFields(rawValue: 1 << 6)
+    static let workMembership = CatalogChangeFields(rawValue: 1 << 7)
+
+    static let all: CatalogChangeFields = [
+        .identity,
+        .displayMetadata,
+        .assetAvailability,
+        .fullTextSource,
+        .collectionMembership,
+        .readingState,
+        .cover,
+        .workMembership,
+    ]
+}
+
 nonisolated struct LibraryCatalogDelta: Equatable, Sendable {
     let fromRevision: Int
     let toRevision: Int
     let affectedBookIDs: Set<UUID>
+    let affectedWorkIDs: Set<UUID>
+    let affectedAssetIDs: Set<UUID>
     let affectedCollectionIDs: Set<UUID>
+    let fields: CatalogChangeFields
     let requiresFullRebuild: Bool
     let changesBookMembership: Bool
+
+    init(
+        fromRevision: Int,
+        toRevision: Int,
+        affectedBookIDs: Set<UUID>,
+        affectedWorkIDs: Set<UUID> = [],
+        affectedAssetIDs: Set<UUID> = [],
+        affectedCollectionIDs: Set<UUID>,
+        fields: CatalogChangeFields = .all,
+        requiresFullRebuild: Bool,
+        changesBookMembership: Bool
+    ) {
+        self.fromRevision = fromRevision
+        self.toRevision = toRevision
+        self.affectedBookIDs = affectedBookIDs
+        self.affectedWorkIDs = affectedWorkIDs
+        self.affectedAssetIDs = affectedAssetIDs
+        self.affectedCollectionIDs = affectedCollectionIDs
+        self.fields = fields
+        self.requiresFullRebuild = requiresFullRebuild
+        self.changesBookMembership = changesBookMembership
+    }
 
     var isEmpty: Bool {
         fromRevision == toRevision
             && affectedBookIDs.isEmpty
+            && affectedWorkIDs.isEmpty
+            && affectedAssetIDs.isEmpty
             && affectedCollectionIDs.isEmpty
+            && fields.isEmpty
             && !requiresFullRebuild
             && !changesBookMembership
     }
@@ -34,7 +86,10 @@ nonisolated struct FullTextCatalogDelta: Equatable, Sendable {
 private nonisolated struct LibraryCatalogChange: Sendable {
     let revision: Int
     let affectedBookIDs: Set<UUID>?
+    let affectedWorkIDs: Set<UUID>
+    let affectedAssetIDs: Set<UUID>
     let affectedCollectionIDs: Set<UUID>
+    let fields: CatalogChangeFields
     let changesBookMembership: Bool
 }
 
@@ -59,7 +114,10 @@ final class LibraryMutationLog {
     func bump(
         catalogChanged: Bool = true,
         affectedBookIDs: Set<UUID>? = nil,
+        affectedWorkIDs: Set<UUID> = [],
+        affectedAssetIDs: Set<UUID> = [],
         affectedCollectionIDs: Set<UUID> = [],
+        fields: CatalogChangeFields = .all,
         changesBookMembership: Bool = false,
         fullTextAffectedBookIDs: Set<UUID>? = []
     ) {
@@ -71,7 +129,10 @@ final class LibraryMutationLog {
             LibraryCatalogChange(
                 revision: catalogRevision,
                 affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs,
+                affectedAssetIDs: affectedAssetIDs,
                 affectedCollectionIDs: affectedCollectionIDs,
+                fields: fields,
                 changesBookMembership: changesBookMembership
             )
         )
@@ -102,7 +163,10 @@ final class LibraryMutationLog {
                 fromRevision: revision,
                 toRevision: catalogRevision,
                 affectedBookIDs: [],
+                affectedWorkIDs: [],
+                affectedAssetIDs: [],
                 affectedCollectionIDs: [],
+                fields: [],
                 requiresFullRebuild: false,
                 changesBookMembership: false
             )
@@ -115,7 +179,10 @@ final class LibraryMutationLog {
         }
 
         var affectedBookIDs: Set<UUID> = []
+        var affectedWorkIDs: Set<UUID> = []
+        var affectedAssetIDs: Set<UUID> = []
         var affectedCollectionIDs: Set<UUID> = []
+        var fields: CatalogChangeFields = []
         var requiresFullRebuild = false
         var changesBookMembership = false
         for change in changes {
@@ -124,14 +191,20 @@ final class LibraryMutationLog {
             } else {
                 requiresFullRebuild = true
             }
+            affectedWorkIDs.formUnion(change.affectedWorkIDs)
+            affectedAssetIDs.formUnion(change.affectedAssetIDs)
             affectedCollectionIDs.formUnion(change.affectedCollectionIDs)
+            fields.formUnion(change.fields)
             changesBookMembership = changesBookMembership || change.changesBookMembership
         }
         return LibraryCatalogDelta(
             fromRevision: revision,
             toRevision: catalogRevision,
             affectedBookIDs: affectedBookIDs,
+            affectedWorkIDs: affectedWorkIDs,
+            affectedAssetIDs: affectedAssetIDs,
             affectedCollectionIDs: affectedCollectionIDs,
+            fields: fields,
             requiresFullRebuild: requiresFullRebuild,
             changesBookMembership: changesBookMembership
         )
@@ -178,7 +251,10 @@ final class LibraryMutationLog {
             fromRevision: revision,
             toRevision: catalogRevision,
             affectedBookIDs: [],
+            affectedWorkIDs: [],
+            affectedAssetIDs: [],
             affectedCollectionIDs: [],
+            fields: .all,
             requiresFullRebuild: true,
             changesBookMembership: true
         )

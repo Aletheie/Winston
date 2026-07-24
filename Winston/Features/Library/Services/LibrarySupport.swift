@@ -3,15 +3,22 @@ import SwiftData
 import OSLog
 
 extension ModelContext {
-    // Fetch-all on purpose: callers match on computed/fuzzy keys #Predicate can't express.
-    func allBooks() -> [Book] {
-        (try? fetch(FetchDescriptor<Book>())) ?? []
+    /// Explicit global scan for recovery/analysis paths whose fuzzy or
+    /// relationship logic cannot be represented by a SwiftData predicate.
+    /// Callers must decide how a fetch failure affects their operation.
+    func fetchAllBooksForGlobalAnalysis() throws -> [Book] {
+        let interval = Log.librarySignposter.beginInterval("GlobalBookFetch")
+        defer { Log.librarySignposter.endInterval("GlobalBookFetch", interval) }
+        return try fetch(FetchDescriptor<Book>())
     }
 
     func saveAndPublish(
         catalogChanged: Bool = true,
         affectedBookIDs: Set<UUID>? = nil,
+        affectedWorkIDs: Set<UUID> = [],
+        affectedAssetIDs: Set<UUID> = [],
         affectedCollectionIDs: Set<UUID> = [],
+        fields: CatalogChangeFields = .all,
         changesBookMembership: Bool = false,
         fullTextAffectedBookIDs: Set<UUID>? = []
     ) throws {
@@ -19,7 +26,10 @@ extension ModelContext {
         LibraryMutationLog.shared.bump(
             catalogChanged: catalogChanged,
             affectedBookIDs: affectedBookIDs,
+            affectedWorkIDs: affectedWorkIDs,
+            affectedAssetIDs: affectedAssetIDs,
             affectedCollectionIDs: affectedCollectionIDs,
+            fields: fields,
             changesBookMembership: changesBookMembership,
             fullTextAffectedBookIDs: fullTextAffectedBookIDs
         )
@@ -30,7 +40,10 @@ extension ModelContext {
         rollbackOnFailure _: Bool = true,
         catalogChanged: Bool = true,
         affectedBookIDs: Set<UUID>? = nil,
+        affectedWorkIDs: Set<UUID> = [],
+        affectedAssetIDs: Set<UUID> = [],
         affectedCollectionIDs: Set<UUID> = [],
+        fields: CatalogChangeFields = .all,
         changesBookMembership: Bool = false,
         fullTextAffectedBookIDs: Set<UUID>? = []
     ) -> Bool {
@@ -38,7 +51,10 @@ extension ModelContext {
             try saveAndPublish(
                 catalogChanged: catalogChanged,
                 affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs,
+                affectedAssetIDs: affectedAssetIDs,
                 affectedCollectionIDs: affectedCollectionIDs,
+                fields: fields,
                 changesBookMembership: changesBookMembership,
                 fullTextAffectedBookIDs: fullTextAffectedBookIDs
             )

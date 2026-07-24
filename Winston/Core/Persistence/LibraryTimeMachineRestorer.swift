@@ -86,15 +86,18 @@ struct LibraryTimeMachineRestorer {
     private let coversDirectory: URL
     private let createSafetyBackup: SafetyBackupAction
     private let covers: CoverRepository
+    private let mutations: CatalogMutationService
 
     init(
         modelContext: ModelContext,
         liveStoreURL: URL = PersistenceController.storeURL,
         coversDirectory: URL = AppPaths.coversDirectory,
         createSafetyBackup: SafetyBackupAction? = nil,
-        coverRepository: CoverRepository? = nil
+        coverRepository: CoverRepository? = nil,
+        mutationService: CatalogMutationService? = nil
     ) {
         self.modelContext = modelContext
+        mutations = mutationService ?? CatalogMutationService(modelContext: modelContext)
         self.coversDirectory = coversDirectory
         if let coverRepository {
             covers = coverRepository
@@ -138,7 +141,7 @@ struct LibraryTimeMachineRestorer {
         scope: LibraryTimeMachineRestoreScope,
         from sourceBackup: URL
     ) async throws -> LibraryTimeMachineRestoreResult {
-        let existing = modelContext.allBooks().first { $0.uuid == snapshot.id }
+        let existing = try? mutations.book(id: snapshot.id)
         if scope != .book, existing == nil {
             throw LibraryTimeMachineRestoreError.bookUnavailable
         }
@@ -202,7 +205,11 @@ struct LibraryTimeMachineRestorer {
                     from: snapshot.collections
                 )
                 if createdBook {
-                    restoreAssets(on: book, from: snapshot.assets)
+                    restoreAssets(
+                        on: book,
+                        from: snapshot.assets,
+                        primaryAssetID: snapshot.primaryAssetID
+                    )
                     try restoreWork(on: book, from: snapshot.work)
                 }
                 restoredBook = book
@@ -224,8 +231,16 @@ struct LibraryTimeMachineRestorer {
             }
 
             do {
+                let fields: CatalogChangeFields = switch scope {
+                case .metadata: [.identity, .displayMetadata, .fullTextSource]
+                case .cover: [.cover]
+                case .book: .all
+                }
                 try modelContext.saveAndPublish(
                     affectedBookIDs: [snapshot.id],
+                    affectedWorkIDs: Set([restoredBook?.work?.uuid].compactMap { $0 }),
+                    affectedAssetIDs: Set(restoredBook?.assets.map(\.uuid) ?? []),
+                    fields: fields,
                     changesBookMembership: createdBook,
                     fullTextAffectedBookIDs: scope == .cover ? [] : [snapshot.id]
                 )
@@ -278,13 +293,20 @@ struct LibraryTimeMachineRestorer {
         _ metadata: LibraryTimeMachineMetadataSnapshot,
         to book: Book
     ) {
-        book.title = metadata.title
-        book.author = metadata.author
+        mutations.editionIdentity.apply(
+            EditionIdentityPatch(
+                fields: [.title, .author, .isbn],
+                title: metadata.title,
+                author: metadata.author,
+                isbn: metadata.isbn
+            ),
+            to: book,
+            scope: .editionOnly
+        )
         book.publisher = metadata.publisher
         book.year = metadata.year
         book.language = metadata.language
         book.translator = metadata.translator
-        book.isbn = metadata.isbn
         book.series = metadata.series
         book.seriesIndex = metadata.seriesIndex
         book.tags = metadata.tags
@@ -385,7 +407,8 @@ struct LibraryTimeMachineRestorer {
 
     private func restoreAssets(
         on book: Book,
-        from snapshots: [LibraryTimeMachineAssetSnapshot]
+        from snapshots: [LibraryTimeMachineAssetSnapshot],
+        primaryAssetID: UUID?
     ) {
         for snapshot in snapshots {
             let asset = BookAsset(
@@ -403,6 +426,10 @@ struct LibraryTimeMachineRestorer {
             asset.validationStatusRaw = snapshot.validationStatusRaw
             modelContext.insert(asset)
         }
+        book.primaryAssetUUID = primaryAssetID.flatMap { requestedID in
+            snapshots.contains(where: { $0.id == requestedID }) ? requestedID : nil
+        } ?? snapshots.first(where: { $0.id == book.uuid })?.id
+            ?? snapshots.first(where: { $0.fileName == book.fileName })?.id
     }
 
     private func restoreWork(
@@ -413,6 +440,13 @@ struct LibraryTimeMachineRestorer {
         let works = try modelContext.fetch(FetchDescriptor<Work>())
         if let existing = works.first(where: { $0.uuid == snapshot.id }) {
             book.work = existing
+            if let preferred = existing.preferredEditionUUID,
+               preferred != book.uuid,
+               !existing.editions.contains(where: { $0.uuid == preferred }) {
+                existing.preferredEditionUUID = book.uuid
+            } else if existing.preferredEditionUUID == nil {
+                existing.preferredEditionUUID = book.uuid
+            }
             return
         }
         let work = Work(
@@ -427,6 +461,7 @@ struct LibraryTimeMachineRestorer {
         work.hardcoverBookID = snapshot.hardcoverBookID
         work.preferredEditionUUID = snapshot.preferredEditionUUID
         work.notes = snapshot.notes
+        work.preferredEditionUUID = book.uuid
         modelContext.insert(work)
         book.work = work
     }

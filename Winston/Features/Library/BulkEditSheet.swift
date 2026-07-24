@@ -17,6 +17,7 @@ enum TagMode: String, CaseIterable, Identifiable {
 
 struct BulkEdit {
     var author: String?
+    var authorIdentityScope: EditionIdentityScope = .editionOnly
     var publisher: String?
     var year: String?
     var series: String?
@@ -36,6 +37,7 @@ struct BulkEditSheet: View {
 
     @State private var applyAuthor = false
     @State private var author = ""
+    @State private var authorIdentityScope: EditionIdentityScope = .editionOnly
     @State private var applyPublisher = false
     @State private var publisher = ""
     @State private var applyYear = false
@@ -63,6 +65,17 @@ struct BulkEditSheet: View {
 
             Section("Fields") {
                 bulkRow("Author", isOn: $applyAuthor) { TextField("Author", text: $author) }
+                if applyAuthor {
+                    Picker("Author scope", selection: $authorIdentityScope) {
+                        Text("Selected editions").tag(EditionIdentityScope.editionOnly)
+                        Text("Works").tag(EditionIdentityScope.workIdentity)
+                        Text("All grouped editions").tag(EditionIdentityScope.allEditions)
+                    }
+                    .pickerStyle(.segmented)
+                    Text("Choose whether the author correction belongs only to the selected editions or also to their shared works.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 bulkRow("Publisher", isOn: $applyPublisher) { TextField("Publisher", text: $publisher) }
                 bulkRow("Year", isOn: $applyYear) { TextField("Year", text: $year) }
                 bulkRow("Series", isOn: $applySeries) {
@@ -133,7 +146,10 @@ struct BulkEditSheet: View {
 
     private func apply() {
         var edit = BulkEdit()
-        if applyAuthor { edit.author = author }
+        if applyAuthor {
+            edit.author = author
+            edit.authorIdentityScope = authorIdentityScope
+        }
         if applyPublisher { edit.publisher = publisher }
         if applyYear { edit.year = year }
         if applySeries { edit.series = series }

@@ -258,7 +258,7 @@ final class ReadingRecommendationViewModel {
     }
 
     private static func candidateSource(from book: Book) -> ReadingRecommendationCandidateSource {
-        let primaryAsset = book.assets.first { $0.fileName == book.fileName }
+        let primaryAsset = book.primaryAsset
         let validationAllowsReading = primaryAsset?.validationStatus != .missing
             && primaryAsset?.validationStatus != .corrupt
         return ReadingRecommendationCandidateSource(

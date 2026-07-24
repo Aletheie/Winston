@@ -21,6 +21,7 @@ struct EditMetadataSheet: View {
     @State private var bookDescription: String = ""
     @State private var shelfLocation: String = ""
     @State private var seriesSuggestions: [String] = []
+    @State private var identityScope: EditionIdentityScope = .editionOnly
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -44,6 +45,20 @@ struct EditMetadataSheet: View {
             VStack(spacing: 12) {
                 MetaField(label: theme.styledText(terminal: "TITLE", native: "Title"), text: $title)
                 MetaField(label: theme.styledText(terminal: "AUTHOR", native: "Author"), text: $author)
+                if book.work != nil {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Picker("Identity scope", selection: $identityScope) {
+                            Text("This edition").tag(EditionIdentityScope.editionOnly)
+                            Text("Work").tag(EditionIdentityScope.workIdentity)
+                            Text("All editions").tag(EditionIdentityScope.allEditions)
+                        }
+                        .pickerStyle(.segmented)
+
+                        Text(identityScopeHelp)
+                            .font(theme.label(size: 9))
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                }
                 MetaField(label: theme.styledText(terminal: "PUBLISHER", native: "Publisher"), text: $publisher)
                 MetaField(label: theme.styledText(terminal: "PREKLAD", native: "Translator"), text: $translator)
 
@@ -115,7 +130,8 @@ struct EditMetadataSheet: View {
                         isbn: isbn.isEmpty ? nil : isbn,
                         description: bookDescription.isEmpty ? nil : bookDescription,
                         tags: tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty },
-                        shelfLocation: shelfLocation.isEmpty ? nil : shelfLocation
+                        shelfLocation: shelfLocation.isEmpty ? nil : shelfLocation,
+                        identityScope: identityScope
                     ) {
                         dismiss()
                     }
@@ -148,6 +164,13 @@ struct EditMetadataSheet: View {
             tags = book.tags.joined(separator: ", ")
             bookDescription = book.bookDescription ?? ""
             shelfLocation = book.shelfLocation ?? ""
+            if let work = book.work {
+                identityScope = work.editions.count <= 1
+                    ? .workIdentity
+                    : .editionOnly
+            } else {
+                identityScope = .editionOnly
+            }
         }
         .task {
             let suggestions = await viewModel.seriesSuggestions()
@@ -162,6 +185,17 @@ struct EditMetadataSheet: View {
 
     private var saveLabelColor: Color {
         theme.colorScheme == .dark ? theme.background : .white
+    }
+
+    private var identityScopeHelp: String {
+        switch identityScope {
+        case .editionOnly:
+            String(localized: "Title, author, and ISBN change only on this edition.")
+        case .workIdentity:
+            String(localized: "Title and author also update the shared work identity.")
+        case .allEditions:
+            String(localized: "Title and author update the work and every grouped edition.")
+        }
     }
 }
 

@@ -24,6 +24,7 @@ enum EditionsBackfill {
                     book: book
                 )
                 context.insert(asset)
+                book.primaryAssetUUID = asset.uuid
                 inserted += 1
             }
 

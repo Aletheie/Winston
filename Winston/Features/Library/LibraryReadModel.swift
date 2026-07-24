@@ -245,6 +245,8 @@ private nonisolated struct LibraryReadModelUpdate: Sendable {
 }
 
 private actor LibraryReadModelWorker {
+    private var pluginRecords: [PluginBookDTO] = []
+
     func makeFacets(
         records: [LibraryDisplaySnapshot],
         smartCollections: [LibrarySmartCollectionSnapshot],
@@ -264,6 +266,55 @@ private actor LibraryReadModelWorker {
         query: LibraryDisplayQuery
     ) -> [UUID] {
         LibraryQuery.displayIDs(for: records, query: query)
+    }
+
+    func replacePluginRecords(_ records: [PluginBookDTO]) {
+        pluginRecords = records.sorted(by: PluginBookDTO.precedes)
+    }
+
+    func upsertPluginRecords(_ records: [PluginBookDTO]) {
+        guard !records.isEmpty else { return }
+        let replacements = Dictionary(
+            records.compactMap { record in
+                record.stableID.map { ($0, record) }
+            },
+            uniquingKeysWith: { _, rhs in rhs }
+        )
+        pluginRecords.removeAll { record in
+            record.stableID.map(replacements.keys.contains) == true
+        }
+        pluginRecords.append(contentsOf: replacements.values)
+        pluginRecords.sort(by: PluginBookDTO.precedes)
+    }
+
+    func pluginBooks(
+        matching searchText: String,
+        offset: Int,
+        limit: Int,
+        scanLimit: Int,
+        maximumOffset: Int
+    ) -> PluginBookReadPage {
+        guard offset < pluginRecords.count else {
+            return PluginBookReadPage(items: [], nextOffset: nil)
+        }
+        let upperBound = min(pluginRecords.count, offset + scanLimit)
+        var items: [PluginBookDTO] = []
+        items.reserveCapacity(limit)
+        var consumed = 0
+        for record in pluginRecords[offset ..< upperBound] {
+            guard !Task.isCancelled else { break }
+            consumed += 1
+            if record.matches(searchText) {
+                items.append(record)
+                if items.count == limit { break }
+            }
+        }
+        let nextOffset = offset + consumed
+        return PluginBookReadPage(
+            items: items,
+            nextOffset: nextOffset < pluginRecords.count
+                && nextOffset <= maximumOffset ? nextOffset : nil
+        )
     }
 }
 
@@ -323,8 +374,25 @@ final class LibraryReadModel {
             return
         }
 
+        let recordRelevantFields: CatalogChangeFields = [
+            .identity,
+            .displayMetadata,
+            .assetAvailability,
+            .collectionMembership,
+            .readingState,
+            .workMembership,
+        ]
+        if !configurationChanged,
+           delta.fields.isDisjoint(with: recordRelevantFields) {
+            catalogRevision = delta.toRevision
+            diagnostics.lastCapturedRecordCount = 0
+            return
+        }
+
         var recordChanges: [LibraryReadModelRecordChange] = []
+        var pluginRecordChanges: [PluginBookDTO] = []
         recordChanges.reserveCapacity(delta.affectedBookIDs.count)
+        pluginRecordChanges.reserveCapacity(delta.affectedBookIDs.count)
         for id in delta.affectedBookIDs {
             guard let book = booksByID[id],
                   let old = recordsByID[id],
@@ -344,6 +412,7 @@ final class LibraryReadModel {
                 includeCollections: true,
                 includeHighlights: true
             )
+            pluginRecordChanges.append(PluginBookDTO(book))
             guard old != updated else { continue }
             orderedRecords[index] = updated
             recordsByID[id] = updated
@@ -355,6 +424,8 @@ final class LibraryReadModel {
         diagnostics.lastCapturedRecordCount = delta.affectedBookIDs.count
         diagnostics.incrementallyCapturedRecordCount += delta.affectedBookIDs.count
         catalogRevision = delta.toRevision
+        await worker.upsertPluginRecords(pluginRecordChanges)
+        guard !Task.isCancelled else { return }
 
         if configurationChanged {
             let interval = Log.librarySignposter.beginInterval("SidebarFacets")
@@ -394,6 +465,23 @@ final class LibraryReadModel {
 
     func displayIDs(query: LibraryDisplayQuery) async -> [UUID] {
         await worker.displayIDs(records: orderedRecords, query: query)
+    }
+
+    func pluginBooks(
+        matching searchText: String,
+        offset: Int,
+        limit: Int,
+        scanLimit: Int,
+        maximumOffset: Int
+    ) async -> PluginBookReadPage? {
+        guard didBootstrap else { return nil }
+        return await worker.pluginBooks(
+            matching: searchText,
+            offset: offset,
+            limit: limit,
+            scanLimit: scanLimit,
+            maximumOffset: maximumOffset
+        )
     }
 
     func record(for id: UUID) -> LibraryDisplaySnapshot? {
@@ -536,12 +624,14 @@ final class LibraryReadModel {
     ) async {
         let interval = Log.librarySignposter.beginInterval("LibrarySnapshot")
         var records: [LibraryDisplaySnapshot] = []
+        var pluginRecords: [PluginBookDTO] = []
         var nextRecordsByID: [UUID: LibraryDisplaySnapshot] = [:]
         var nextBooksByID: [UUID: Book] = [:]
         var nextBooksByPersistentID: [Book.ID: Book] = [:]
         var nextSourceIndexByID: [UUID: Int] = [:]
         var nextSourceIndexByPersistentID: [Book.ID: Int] = [:]
         records.reserveCapacity(books.count)
+        pluginRecords.reserveCapacity(books.count)
         nextRecordsByID.reserveCapacity(books.count)
         nextBooksByID.reserveCapacity(books.count)
         nextBooksByPersistentID.reserveCapacity(books.count)
@@ -555,6 +645,7 @@ final class LibraryReadModel {
                 includeHighlights: true
             )
             records.append(record)
+            pluginRecords.append(PluginBookDTO(book))
             nextRecordsByID[record.id] = record
             nextBooksByID[record.id] = book
             nextBooksByPersistentID[book.id] = book
@@ -571,6 +662,11 @@ final class LibraryReadModel {
         Log.librarySignposter.endInterval("LibrarySnapshot", interval)
 
         let facetInterval = Log.librarySignposter.beginInterval("SidebarFacets")
+        await worker.replacePluginRecords(pluginRecords)
+        guard !Task.isCancelled else {
+            Log.librarySignposter.endInterval("SidebarFacets", facetInterval)
+            return
+        }
         let nextFacets = await worker.makeFacets(
             records: records,
             smartCollections: smartCollections,

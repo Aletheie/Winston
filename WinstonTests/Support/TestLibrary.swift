@@ -2,6 +2,14 @@ import Foundation
 import SwiftData
 @testable import Winston
 
+extension ModelContext {
+    /// Test-only convenience. Production code must use a targeted repository
+    /// query or the explicitly named global-analysis fetch.
+    func allBooks() -> [Book] {
+        (try? fetch(FetchDescriptor<Book>())) ?? []
+    }
+}
+
 private actor TestLibraryAccess {
     static let shared = TestLibraryAccess()
 

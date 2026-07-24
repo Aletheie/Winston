@@ -204,6 +204,33 @@ nonisolated enum ImportFileInspectionPipeline {
 }
 
 @MainActor
+final class ImportSession {
+    let id = UUID()
+    let generation = UUID()
+    let requestedBookIDs: Set<UUID>
+    private var task: Task<Void, Never>?
+
+    init(requestedBookIDs: Set<UUID>) {
+        self.requestedBookIDs = requestedBookIDs
+    }
+
+    var isCancelled: Bool { task?.isCancelled ?? false }
+
+    func cancel() {
+        task?.cancel()
+    }
+
+    fileprivate func start(_ task: Task<Void, Never>) {
+        precondition(self.task == nil)
+        self.task = task
+    }
+
+    fileprivate func finish() {
+        task = nil
+    }
+}
+
+@MainActor
 @Observable
 final class ImportService {
     typealias ImportCompletion = @MainActor ([Book]) -> Void
@@ -281,6 +308,7 @@ final class ImportService {
     private var matchBatches: [UUID: MatchBatch] = [:]
     private var queuedMetadataJobs: ArraySlice<MetadataJob> = []
     private var activeMetadataTasks: [UUID: Task<Void, Never>] = [:]
+    private var activeImportSessions: [UUID: ImportSession] = [:]
 
     init(
         modelContext: ModelContext,
@@ -327,15 +355,20 @@ final class ImportService {
         activePreparationJobCount + activeMetadataTasks.count
     }
 
-    func addBooks(from urls: [URL], completion: ImportCompletion? = nil) {
+    @discardableResult
+    func addBooks(
+        from urls: [URL],
+        completion: ImportCompletion? = nil
+    ) -> ImportSession? {
         addBooks(from: urls, assigningTo: nil, completion: completion)
     }
 
+    @discardableResult
     func addBooks(
         from urls: [URL],
         assigningTo targetWork: Work?,
         completion: ImportCompletion? = nil
-    ) {
+    ) -> ImportSession? {
         var requests: [CopyRequest] = []
         var failed = 0
         for url in urls {
@@ -350,7 +383,7 @@ final class ImportService {
         guard !requests.isEmpty else {
             reportImportFailures(failed)
             completion?([])
-            return
+            return nil
         }
 
         let targetWorkID = targetWork?.uuid
@@ -364,18 +397,28 @@ final class ImportService {
         pendingMetadataUUIDs.formUnion(requestIDs)
         preparingImportUUIDs.formUnion(requestIDs)
         activeImportOperationCount += 1
-        Task { [weak self, requests] in
+        let session = ImportSession(requestedBookIDs: requestIDs)
+        activeImportSessions[session.id] = session
+        let task = Task { [weak self, requests, session] in
             guard let self else {
                 completion?([])
                 return
             }
-            defer { activeImportOperationCount -= 1 }
+            defer {
+                activeImportOperationCount -= 1
+                session.finish()
+                if activeImportSessions[session.id] === session {
+                    activeImportSessions.removeValue(forKey: session.id)
+                }
+            }
 
             var importedBookIDs: [UUID] = []
             var failureCount = validationFailures
             var pendingRecoveryCount = 0
             var nextIndex = 0
-            while nextIndex < requests.count, !Task.isCancelled {
+            while nextIndex < requests.count,
+                  !Task.isCancelled,
+                  activeImportSessions[session.id] === session {
                 let end = min(nextIndex + importCommitChunkSize, requests.count)
                 let requestChunk = Array(requests[nextIndex..<end])
                 let outcomes = await prepareImports(requestChunk)
@@ -396,7 +439,8 @@ final class ImportService {
                         failureCount += 1
                     }
                 }
-                if Task.isCancelled {
+                if Task.isCancelled
+                    || activeImportSessions[session.id] !== session {
                     await abort(prepared.flatMap(\.transactions))
                     break
                 }
@@ -443,7 +487,8 @@ final class ImportService {
                 await Task.yield()
             }
 
-            if Task.isCancelled {
+            if Task.isCancelled
+                || activeImportSessions[session.id] !== session {
                 for request in requests[nextIndex...] {
                     preparingImportUUIDs.remove(request.uuid)
                     cancelledImportUUIDs.remove(request.uuid)
@@ -454,6 +499,11 @@ final class ImportService {
                 }
             }
 
+            guard !Task.isCancelled,
+                  activeImportSessions[session.id] === session else {
+                completion?([])
+                return
+            }
             if targetWorkID != nil, !importedBookIDs.isEmpty {
                 editions?.refreshEditionCounts()
             }
@@ -486,6 +536,8 @@ final class ImportService {
             let imported = importedBookIDs.compactMap { try? mutations.book(id: $0) }
             completion?(imported)
         }
+        session.start(task)
+        return session
     }
 
     func cancelPending(_ uuid: UUID) {
@@ -506,6 +558,19 @@ final class ImportService {
         if queuedMetadataJobs.isEmpty { queuedMetadataJobs = [] }
         pendingMetadataUUIDs.remove(uuid)
         if let batchID = job.matchBatchID { finishMatchBatch(batchID, completed: uuid) }
+    }
+
+    func cancelAllSessions() {
+        for session in activeImportSessions.values {
+            session.cancel()
+        }
+        for (bookID, task) in activeMetadataTasks {
+            task.cancel()
+            analysisCoordinator.cancelAll(for: bookID)
+        }
+        pendingMetadataUUIDs.subtract(queuedMetadataJobs.map(\.bookID))
+        queuedMetadataJobs = []
+        matchBatches.removeAll()
     }
 
     // MARK: - Maintenance
@@ -1172,17 +1237,12 @@ final class ImportService {
 
     private func refreshWorkIdentity(for book: Book, allowDisplayTitleFallback: Bool) {
         guard let work = book.work else { return }
-        if work.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
-            if let title = book.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
-                work.title = title
-            } else if allowDisplayTitleFallback {
-                work.title = book.displayTitle
-            }
+        mutations.editionIdentity.seedWorkIdentityIfMissing(from: book, work: work)
+        if allowDisplayTitleFallback,
+           work.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            work.title = book.displayTitle
+            work.refreshMatchKey()
         }
-        if work.author?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
-            work.author = book.displayAuthor
-        }
-        work.refreshMatchKey()
     }
 
     private func reportImportFailures(_ count: Int) {

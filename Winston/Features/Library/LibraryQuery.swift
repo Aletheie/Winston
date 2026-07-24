@@ -89,7 +89,7 @@ nonisolated struct LibraryDisplaySnapshot: Equatable, Sendable {
     ) {
         let hasDigitalFile = book.hasCatalogDigitalFile
         let catalogFormat = Book.catalogFormat(
-            fileName: book.fileName,
+            fileName: book.primaryAsset?.fileName ?? book.fileName,
             hasDigitalFile: hasDigitalFile,
             hasPhysicalCopy: book.hasPhysicalCopy
         )

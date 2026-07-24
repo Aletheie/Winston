@@ -7,6 +7,23 @@ enum BookCollectionSystemKind: String, Codable, Sendable {
 
 @Model
 final class BookCollection {
+    nonisolated private final class SmartShelfDefinitionBox: NSObject {
+        let value: SmartShelfDefinition?
+
+        init(_ value: SmartShelfDefinition?) {
+            self.value = value
+        }
+    }
+
+    nonisolated(unsafe) private static let decodedSmartShelves: NSCache<
+        NSData,
+        SmartShelfDefinitionBox
+    > = {
+        let cache = NSCache<NSData, SmartShelfDefinitionBox>()
+        cache.countLimit = 2_048
+        return cache
+    }()
+
     @Attribute(.unique) var id: UUID
     var name: String
     var dateCreated: Date
@@ -23,10 +40,29 @@ final class BookCollection {
     var smartShelfDefinition: SmartShelfDefinition? {
         get {
             guard let smartShelfRulesData else { return nil }
-            return try? JSONDecoder().decode(SmartShelfDefinition.self, from: smartShelfRulesData)
+            let key = smartShelfRulesData as NSData
+            if let cached = Self.decodedSmartShelves.object(forKey: key) {
+                return cached.value
+            }
+            let decoded = try? JSONDecoder().decode(
+                SmartShelfDefinition.self,
+                from: smartShelfRulesData
+            )
+            Self.decodedSmartShelves.setObject(
+                SmartShelfDefinitionBox(decoded),
+                forKey: key
+            )
+            return decoded
         }
         set {
-            smartShelfRulesData = newValue.flatMap { try? JSONEncoder().encode($0) }
+            let encoded = newValue.flatMap { try? JSONEncoder().encode($0) }
+            smartShelfRulesData = encoded
+            if let encoded {
+                Self.decodedSmartShelves.setObject(
+                    SmartShelfDefinitionBox(newValue),
+                    forKey: encoded as NSData
+                )
+            }
         }
     }
 

@@ -701,7 +701,8 @@ final class ReadingHistoryImporter {
     func apply(_ rows: [ReadingHistoryImportPreviewRow]) throws -> ReadingHistoryImportResult {
         let selected = rows.filter { $0.isIncluded && $0.matchedBookID != nil }
         let bookIDs = Set(selected.compactMap(\.matchedBookID))
-        let booksByID = Dictionary(uniqueKeysWithValues: modelContext.allBooks()
+        let booksByID = Dictionary(uniqueKeysWithValues:
+            ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? [])
             .filter { bookIDs.contains($0.uuid) }
             .map { ($0.uuid, $0) })
         let rollbackStates = booksByID.values.map {

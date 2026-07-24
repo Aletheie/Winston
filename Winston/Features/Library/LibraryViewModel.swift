@@ -155,13 +155,17 @@ final class LibraryViewModel {
 
     // MARK: - Add / Remove
 
+    @discardableResult
     func addBooks(
         from urls: [URL],
         completion: ImportService.ImportCompletion? = nil
-    ) {
+    ) -> ImportSession? {
         importer.addBooks(from: urls, completion: completion)
     }
-    func addEditions(from urls: [URL], to work: Work) { importer.addBooks(from: urls, assigningTo: work) }
+    @discardableResult
+    func addEditions(from urls: [URL], to work: Work) -> ImportSession? {
+        importer.addBooks(from: urls, assigningTo: work)
+    }
     func importCalibreLibrary(at root: URL) { calibreImporter.importLibrary(at: root) }
     func cancelCalibreImport() { calibreImporter.cancelImport() }
 
@@ -175,33 +179,47 @@ final class LibraryViewModel {
         }
 
         let author = optional(draft.author)
-        let book = Book(fileName: "", originalFileName: title)
-        book.title = title
-        book.author = author
-        book.publisher = optional(draft.publisher)
-        book.year = optional(draft.year)
-        book.isbn = optional(draft.isbn)
-        book.shelfLocation = optional(draft.shelfLocation)
-        book.notes = optional(draft.notes)
-        book.hasPhysicalCopy = true
-        if draft.readingStatus != .unread { book.setStatus(draft.readingStatus) }
-
-        let work = Work(title: title, author: author, dateCreated: book.dateAdded)
-        work.preferredEditionUUID = book.uuid
-        modelContext.insert(work)
-        modelContext.insert(book)
-        book.work = work
-
+        let bookID = UUID()
+        let workID = UUID()
+        var insertedBook: Book?
         do {
-            try modelContext.saveAndPublish(
-                affectedBookIDs: [book.uuid],
-                changesBookMembership: true
-            )
+            try mutations.commit(
+                .addPhysicalBook(bookID: bookID, workID: workID),
+                affectedBookIDs: [bookID],
+                affectedWorkIDs: [workID]
+            ) {
+                let book = Book(
+                    uuid: bookID,
+                    fileName: "",
+                    originalFileName: title
+                )
+                book.title = title
+                book.author = author
+                book.publisher = optional(draft.publisher)
+                book.year = optional(draft.year)
+                book.isbn = optional(draft.isbn)
+                book.shelfLocation = optional(draft.shelfLocation)
+                book.notes = optional(draft.notes)
+                book.hasPhysicalCopy = true
+                if draft.readingStatus != .unread {
+                    book.setStatus(draft.readingStatus)
+                }
+                let work = Work(
+                    uuid: workID,
+                    title: title,
+                    author: author,
+                    dateCreated: book.dateAdded
+                )
+                work.preferredEditionUUID = book.uuid
+                modelContext.insert(work)
+                modelContext.insert(book)
+                book.work = work
+                insertedBook = book
+            }
             editions.refreshEditionCounts()
             toasts.success(String(localized: "Added physical book “\(title)”"))
-            return book
+            return insertedBook
         } catch {
-            modelContext.rollback()
             toasts.error(String(localized: "Couldn’t add the physical book."))
             return nil
         }
@@ -260,11 +278,13 @@ final class LibraryViewModel {
             guard let book = try? mutations.book(id: removal.uuid) else { return nil }
             return (book, book.work, book.work?.preferredEditionUUID)
         }
+        let affectedWorkIDs = Set(removalPreimages.compactMap { $0.1?.uuid })
         do {
             let result = try await mutations.commitFileMutation(
                 .removeBooks(bookIDs: Array(bookIDs)),
                 transaction: transaction,
                 affectedBookIDs: bookIDs,
+                affectedWorkIDs: affectedWorkIDs,
                 progress: progress,
                 revertingOnFailure: {
                     for (book, work, preferredEditionUUID) in removalPreimages {
@@ -347,12 +367,14 @@ final class LibraryViewModel {
         for book: Book,
         title: String?, author: String?, publisher: String?, year: String?,
         series: String?, seriesIndex: String?, language: String?, translator: String?, isbn: String?,
-        description: String?, tags: [String], shelfLocation: String?
+        description: String?, tags: [String], shelfLocation: String?,
+        identityScope: EditionIdentityScope = .editionOnly
     ) -> Bool {
         reportMutationResult(metadata.updateMetadata(
             for: book, title: title, author: author, publisher: publisher, year: year,
             series: series, seriesIndex: seriesIndex, language: language, translator: translator, isbn: isbn,
-            description: description, tags: tags, shelfLocation: shelfLocation
+            description: description, tags: tags, shelfLocation: shelfLocation,
+            identityScope: identityScope
         ))
     }
     @discardableResult
@@ -398,7 +420,12 @@ final class LibraryViewModel {
     }
     func fetchOnlineMetadata(for book: Book) { metadata.fetchOnlineMetadata(for: book) }
     func fetchOnlineMetadata(for books: [Book]) { metadata.fetchOnlineMetadata(for: books) }
-    func backfillOnlineMetadata() { metadata.backfillMissingOnlineMetadata() }
+    func backfillOnlineMetadata() async { await metadata.backfillMissingOnlineMetadata() }
+    func cancelOnlineMetadataJobs() { metadata.cancelOnlineMetadataJobs() }
+    func cancelLongRunningSessions() {
+        importer.cancelAllSessions()
+        metadata.cancelOnlineMetadataJobs()
+    }
 
     // MARK: - Convert (forwarded)
 
@@ -450,6 +477,7 @@ final class LibraryViewModel {
         let shouldBecomePrimary = !book.hasCatalogDigitalFile
         let bookID = book.uuid
         let originalPrimaryName = book.fileName
+        let originalPrimaryAssetUUID = book.primaryAssetUUID
         let originalFileSize = book.fileSizeBytes
         let originalDRMProtected = book.drmProtected
         let originalCoverVersion = book.coverVersion
@@ -479,6 +507,7 @@ final class LibraryViewModel {
 
         guard let liveBook = try? mutations.book(id: bookID),
               liveBook.fileName == originalPrimaryName,
+              liveBook.primaryAssetUUID == originalPrimaryAssetUUID,
               liveBook.coverVersion == originalCoverVersion else {
             await managedFiles.abort(transaction)
             return nil
@@ -498,6 +527,7 @@ final class LibraryViewModel {
                 progress: progress,
                 revertingOnFailure: {
                     liveBook.fileName = originalPrimaryName
+                    liveBook.primaryAssetUUID = originalPrimaryAssetUUID
                     liveBook.fileSizeBytes = originalFileSize
                     liveBook.drmProtected = originalDRMProtected
                     liveBook.coverVersion = originalCoverVersion
@@ -511,6 +541,7 @@ final class LibraryViewModel {
             ) {
                 let liveBook = try mutations.book(id: bookID)
                 guard liveBook.fileName == originalPrimaryName,
+                      liveBook.primaryAssetUUID == originalPrimaryAssetUUID,
                       liveBook.coverVersion == originalCoverVersion,
                       !liveBook.assets.contains(where: { $0.contentHash == staged.sha256 }) else {
                     throw CatalogMutationError.modelNotFound
@@ -526,6 +557,7 @@ final class LibraryViewModel {
                 )
                 modelContext.insert(asset)
                 if shouldBecomePrimary {
+                    liveBook.primaryAssetUUID = assetID
                     liveBook.fileName = fileName
                     liveBook.fileSizeBytes = asset.sizeBytes
                     liveBook.drmProtected = nil
@@ -552,9 +584,10 @@ final class LibraryViewModel {
         let oldDateAdded = asset.dateAdded
         let originalCoverVersion = book.coverVersion
         let originalBookFileName = book.fileName
+        let originalPrimaryAssetUUID = book.primaryAssetUUID
         let originalBookFileSize = book.fileSizeBytes
         let originalDRMProtected = book.drmProtected
-        let wasPrimary = book.fileName == oldName
+        let wasPrimary = book.primaryAsset?.uuid == assetID
         guard let source = try? ManagedFileSource.book(sourceURL: url) else { return }
         let fileName = source.finalRelativeName
         let expectedCoverVersion = wasPrimary ? originalCoverVersion + 1 : originalCoverVersion
@@ -612,6 +645,7 @@ final class LibraryViewModel {
                     liveAsset.validationStatus = oldValidation
                     liveAsset.dateAdded = oldDateAdded
                     liveBook.fileName = originalBookFileName
+                    liveBook.primaryAssetUUID = originalPrimaryAssetUUID
                     liveBook.fileSizeBytes = originalBookFileSize
                     liveBook.drmProtected = originalDRMProtected
                     liveBook.coverVersion = originalCoverVersion
@@ -624,6 +658,10 @@ final class LibraryViewModel {
                       liveAsset.dateAdded == oldDateAdded else {
                     throw CatalogMutationError.modelNotFound
                 }
+                let liveAssetWasPrimary = liveBook.primaryAsset?.uuid == assetID
+                guard liveAssetWasPrimary == wasPrimary else {
+                    throw CatalogMutationError.modelNotFound
+                }
                 liveAsset.fileName = fileName
                 liveAsset.sizeBytes = staged.byteCount
                 liveAsset.contentHash = staged.sha256
@@ -632,7 +670,7 @@ final class LibraryViewModel {
                 liveAsset.validationStatus = .ok
                 liveAsset.dateAdded = replacementDate
                 if wasPrimary {
-                    guard liveBook.fileName == oldName else { throw CatalogMutationError.modelNotFound }
+                    liveBook.primaryAssetUUID = assetID
                     liveBook.fileName = fileName
                     liveBook.fileSizeBytes = staged.byteCount
                     liveBook.drmProtected = drmProtected
@@ -666,20 +704,44 @@ final class LibraryViewModel {
               asset.dateAdded == assetDateAdded,
               asset.validationStatus != .missing,
               asset.validationStatus != .corrupt else { return }
-        if asset.sizeBytes == 0, analysis.1 > 0 { asset.sizeBytes = analysis.1 }
-        book.fileName = assetFileName
-        book.fileSizeBytes = asset.sizeBytes
-        book.drmProtected = analysis.0
-        book.coverVersion += 1
-        modelContext.saveQuietly(
-            affectedBookIDs: [book.uuid],
-            fullTextAffectedBookIDs: [book.uuid]
-        )
+        let bookPreimage = CatalogBookMetadataPreimage(book)
+        let assetPreimage = CatalogBookAssetPreimage(asset)
+        do {
+            try mutations.commit(
+                .selectPrimaryAsset(bookID: book.uuid, assetID: asset.uuid),
+                affectedBookIDs: [book.uuid],
+                revertingOnFailure: {
+                    bookPreimage.restore()
+                    assetPreimage.restore()
+                }
+            ) {
+                let storedBook = try mutations.book(id: book.uuid)
+                guard let storedAsset = storedBook.assets.first(where: { $0.uuid == asset.uuid }),
+                      storedAsset.fileName == assetFileName,
+                      storedAsset.dateAdded == assetDateAdded,
+                      storedAsset.validationStatus != .missing,
+                      storedAsset.validationStatus != .corrupt else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                if storedAsset.sizeBytes == 0, analysis.1 > 0 {
+                    storedAsset.sizeBytes = analysis.1
+                }
+                storedBook.primaryAssetUUID = storedAsset.uuid
+                storedBook.fileName = storedAsset.fileName
+                storedBook.fileSizeBytes = storedAsset.sizeBytes
+                storedBook.drmProtected = analysis.0
+                storedBook.coverVersion += 1
+            }
+        } catch {
+            return
+        }
     }
 
     @discardableResult
     func removeFile(_ asset: BookAsset, from book: Book) async -> Bool {
-        guard asset.book?.uuid == book.uuid, book.assets.count > 1, asset.fileName != book.fileName else { return false }
+        guard asset.book?.uuid == book.uuid,
+              book.assets.count > 1,
+              asset.uuid != book.primaryAsset?.uuid else { return false }
         let bookID = book.uuid
         let assetID = asset.uuid
         let fileName = asset.fileName
@@ -707,7 +769,7 @@ final class LibraryViewModel {
               let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
               liveAsset.fileName == fileName,
               liveAsset.dateAdded == dateAdded,
-              liveBook.fileName != fileName else {
+              liveBook.primaryAsset?.uuid != assetID else {
             await managedFiles.abort(transaction)
             return false
         }
@@ -730,7 +792,7 @@ final class LibraryViewModel {
                       let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
                       liveAsset.fileName == fileName,
                       liveAsset.dateAdded == dateAdded,
-                      liveBook.fileName != fileName else {
+                      liveBook.primaryAsset?.uuid != assetID else {
                     throw CatalogMutationError.modelNotFound
                 }
                 modelContext.delete(liveAsset)
@@ -758,10 +820,12 @@ final class LibraryViewModel {
         if let bookID = asset.book?.uuid {
             modelContext.saveQuietly(
                 affectedBookIDs: [bookID],
+                affectedAssetIDs: [asset.uuid],
+                fields: [.assetAvailability, .fullTextSource],
                 fullTextAffectedBookIDs: [bookID]
             )
         } else {
-            modelContext.saveQuietly()
+            modelContext.saveQuietly(catalogChanged: false)
         }
     }
 

@@ -60,6 +60,34 @@ struct CatalogMutationFailureTests {
         #expect(!storedCollections.contains { $0.name == "Failed Shelf" })
     }
 
+    @Test func failedPhysicalBookCreationLeavesNoBookOrWork() async throws {
+        let library = try await TestLibrary()
+        let toasts = ToastCenter()
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: toasts,
+            saveAdapter: failingSaveAdapter
+        )
+
+        let result = viewModel.addPhysicalBook(PhysicalBookDraft(
+            title: "Failed Book",
+            author: "Author",
+            publisher: "",
+            year: "",
+            isbn: "",
+            shelfLocation: "",
+            notes: "",
+            readingStatus: .unread
+        ))
+
+        #expect(result == nil)
+        #expect(try library.context.fetchCount(FetchDescriptor<Book>()) == 0)
+        #expect(try library.context.fetchCount(FetchDescriptor<Work>()) == 0)
+        #expect(!library.context.hasChanges)
+        #expect(toasts.messages.allSatisfy { $0.style != .success })
+    }
+
     @Test func failedMetadataEditRestoresThePreimage() async throws {
         let library = try await TestLibrary()
         let book = try seedBook(in: library, title: "Original")
@@ -95,6 +123,57 @@ struct CatalogMutationFailureTests {
         let stored = try #require(try fetchBook(book.uuid, from: library.container))
         #expect(stored.title == "Original")
         #expect(stored.notes == "unrelated")
+    }
+
+    @Test func failedWorkIdentityEditRestoresEveryEditionAndMatchKey() async throws {
+        let library = try await TestLibrary()
+        let work = Work(title: "Original Work", author: "Original Author")
+        let first = Book(fileName: "first.epub", originalFileName: "First.epub")
+        first.title = "First"
+        first.author = "Original Author"
+        let second = Book(fileName: "second.epub", originalFileName: "Second.epub")
+        second.title = "Second"
+        second.author = "Original Author"
+        library.context.insert(work)
+        library.context.insert(first)
+        library.context.insert(second)
+        first.work = work
+        second.work = work
+        try library.context.save()
+        let originalMatchKey = work.matchKey
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: AppSettings(),
+            toasts: ToastCenter(),
+            saveAdapter: failingSaveAdapter
+        )
+
+        let succeeded = viewModel.updateMetadata(
+            for: first,
+            title: "Changed",
+            author: "Changed Author",
+            publisher: nil,
+            year: nil,
+            series: nil,
+            seriesIndex: nil,
+            language: nil,
+            translator: nil,
+            isbn: nil,
+            description: nil,
+            tags: [],
+            shelfLocation: nil,
+            identityScope: .allEditions
+        )
+
+        #expect(!succeeded)
+        #expect(first.title == "First")
+        #expect(second.title == "Second")
+        #expect(first.author == "Original Author")
+        #expect(second.author == "Original Author")
+        #expect(work.title == "Original Work")
+        #expect(work.author == "Original Author")
+        #expect(work.matchKey == originalMatchKey)
+        #expect(!library.context.hasChanges)
     }
 
     @Test func failedEditionAssignmentRestoresTheOriginalWork() async throws {

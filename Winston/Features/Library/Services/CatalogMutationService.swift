@@ -23,10 +23,12 @@ enum CatalogMutationCommand {
     case reconcileEditions(survivorID: UUID, removedID: UUID, removesExactDuplicateFiles: Bool)
     case updateWork(workID: UUID, fields: Set<String>)
     case pluginUpdate(bookID: UUID, fields: Set<String>)
+    case addPhysicalBook(bookID: UUID, workID: UUID)
     case importBooks(bookIDs: [UUID])
     case calibreImport(bookIDs: [UUID])
     case addFile(bookID: UUID, assetID: UUID)
     case replaceFile(bookID: UUID, assetID: UUID)
+    case selectPrimaryAsset(bookID: UUID, assetID: UUID)
     case removeFile(bookID: UUID, assetID: UUID)
     case removeBooks(bookIDs: [UUID])
     case conversionOutput(bookID: UUID, assetID: UUID)
@@ -37,7 +39,7 @@ enum CatalogMutationCommand {
 
     var changesBookMembership: Bool {
         switch self {
-        case .importBooks, .calibreImport, .removeBooks, .legacyMigration,
+        case .addPhysicalBook, .importBooks, .calibreImport, .removeBooks, .legacyMigration,
              .reconcileEditions:
             true
         default:
@@ -45,41 +47,232 @@ enum CatalogMutationCommand {
         }
     }
 
-    var changesFullTextIndex: Bool {
+    var changeFields: CatalogChangeFields {
         switch self {
-        case .importBooks, .calibreImport, .addFile, .replaceFile, .removeFile,
-             .removeBooks, .conversionOutput, .legacyMigration, .reconcileEditions,
-             .assignEdition:
-            true
+        case .setReadingStatus, .setReadingProgress:
+            [.readingState]
+
+        case .createCollection, .updateCollection, .deleteCollection:
+            [.collectionMembership]
 
         case .updateMetadata(_, let fields),
              .updateMetadataBatch(_, _, let fields),
-             .pluginUpdate(_, let fields),
-             .updateWork(_, let fields):
-            !fields.isDisjoint(with: ["title", "author"])
+             .pluginUpdate(_, let fields):
+            Self.metadataChangeFields(fields)
+
+        case .updateWork(_, let fields):
+            Self.metadataChangeFields(fields).union(.workMembership)
+
+        case .assignEdition:
+            [.workMembership]
+
+        case .addFile, .replaceFile, .selectPrimaryAsset, .removeFile, .conversionOutput:
+            [.assetAvailability, .displayMetadata, .fullTextSource]
+
+        case .updateCover:
+            [.cover]
 
         case .applyAnalysis(_, let kind),
              .applyAnalysisBatch(_, let kind):
             switch kind {
-            case .metadataExtraction, .onlineEnrichment, .assetHash, .assetInspection:
-                true
-            case .pageCount, .fileSize, .drmInspection:
-                false
+            case .metadataExtraction, .onlineEnrichment:
+                [.identity, .displayMetadata, .fullTextSource]
+            case .assetHash, .assetInspection:
+                [.assetAvailability, .fullTextSource]
+            case .pageCount:
+                [.displayMetadata]
+            case .fileSize, .drmInspection:
+                [.assetAvailability]
             }
 
-        case .setReadingStatus, .setReadingProgress,
-             .createCollection, .updateCollection, .deleteCollection,
-             .updateCover:
-            false
+        case .addPhysicalBook, .importBooks, .calibreImport, .removeBooks, .legacyMigration,
+             .reconcileEditions:
+            .all
         }
     }
+
+    var changesFullTextIndex: Bool {
+        changeFields.contains(.fullTextSource)
+    }
+
+    var affectedAssetIDs: Set<UUID> {
+        switch self {
+        case .addFile(_, let assetID),
+             .replaceFile(_, let assetID),
+             .selectPrimaryAsset(_, let assetID),
+             .removeFile(_, let assetID),
+             .conversionOutput(_, let assetID):
+            [assetID]
+        default:
+            []
+        }
+    }
+
+    private static func metadataChangeFields(
+        _ fields: Set<String>
+    ) -> CatalogChangeFields {
+        var result: CatalogChangeFields = [.displayMetadata]
+        if !fields.isDisjoint(with: identityMetadataFields) {
+            result.insert(.identity)
+        }
+        if !fields.isDisjoint(with: ["title", "author"]) {
+            result.insert(.fullTextSource)
+        }
+        if fields.contains("readingStatus") || fields.contains("readingProgress") {
+            result.insert(.readingState)
+        }
+        return result
+    }
+
+    fileprivate static let identityMetadataFields: Set<String> = [
+        "title", "author", "publisher", "year", "language", "translator",
+        "isbn", "series", "seriesIndex", "editionStatement", "editionType",
+        "originalFileName", "originalTitle", "originalLanguage",
+        "openLibraryWorkKey", "hardcoverBookID",
+    ]
 }
 
 struct CatalogChangeSet {
     let command: CatalogMutationCommand
     let affectedBookIDs: Set<UUID>
     let affectedWorkIDs: Set<UUID>
+    let affectedAssetIDs: Set<UUID>
     let affectedCollectionIDs: Set<UUID>
+    let fields: CatalogChangeFields
+
+    init(
+        command: CatalogMutationCommand,
+        affectedBookIDs: Set<UUID>,
+        affectedWorkIDs: Set<UUID>,
+        affectedAssetIDs: Set<UUID>? = nil,
+        affectedCollectionIDs: Set<UUID>,
+        fields: CatalogChangeFields? = nil
+    ) {
+        self.command = command
+        self.affectedBookIDs = affectedBookIDs
+        self.affectedWorkIDs = affectedWorkIDs
+        self.affectedAssetIDs = affectedAssetIDs ?? command.affectedAssetIDs
+        self.affectedCollectionIDs = affectedCollectionIDs
+        self.fields = fields ?? command.changeFields
+    }
+}
+
+nonisolated enum EditionIdentityScope: String, CaseIterable, Identifiable, Sendable {
+    case editionOnly
+    case workIdentity
+    case allEditions
+
+    var id: Self { self }
+}
+
+nonisolated enum EditionIdentityField: Hashable, Sendable {
+    case title
+    case author
+    case isbn
+    case openLibraryWorkKey
+    case hardcoverBookID
+}
+
+nonisolated struct EditionIdentityPatch: Sendable {
+    let fields: Set<EditionIdentityField>
+    var title: String?
+    var author: String?
+    var isbn: String?
+    var openLibraryWorkKey: String?
+    var hardcoverBookID: String?
+
+    init(
+        fields: Set<EditionIdentityField>,
+        title: String? = nil,
+        author: String? = nil,
+        isbn: String? = nil,
+        openLibraryWorkKey: String? = nil,
+        hardcoverBookID: String? = nil
+    ) {
+        self.fields = fields
+        self.title = title
+        self.author = author
+        self.isbn = isbn
+        self.openLibraryWorkKey = openLibraryWorkKey
+        self.hardcoverBookID = hardcoverBookID
+    }
+}
+
+struct EditionIdentityMutation {
+    let affectedBookIDs: Set<UUID>
+    let affectedWorkIDs: Set<UUID>
+}
+
+@MainActor
+struct EditionIdentityCoordinator {
+    func affectedModels(
+        for book: Book,
+        scope: EditionIdentityScope
+    ) -> EditionIdentityMutation {
+        guard let work = book.work else {
+            return EditionIdentityMutation(
+                affectedBookIDs: [book.uuid],
+                affectedWorkIDs: []
+            )
+        }
+        let bookIDs: Set<UUID> = scope == .editionOnly
+            ? [book.uuid]
+            : Set(work.editions.map(\.uuid))
+        return EditionIdentityMutation(
+            affectedBookIDs: bookIDs,
+            affectedWorkIDs: scope == .editionOnly ? [] : [work.uuid]
+        )
+    }
+
+    @discardableResult
+    func apply(
+        _ patch: EditionIdentityPatch,
+        to book: Book,
+        scope: EditionIdentityScope
+    ) -> EditionIdentityMutation {
+        let affected = affectedModels(for: book, scope: scope)
+        applyEditionFields(patch, to: book)
+
+        guard scope != .editionOnly, let work = book.work else {
+            return affected
+        }
+        if patch.fields.contains(.title) { work.title = patch.title }
+        if patch.fields.contains(.author) { work.author = patch.author }
+        if patch.fields.contains(.openLibraryWorkKey) {
+            work.openLibraryWorkKey = patch.openLibraryWorkKey
+        }
+        if patch.fields.contains(.hardcoverBookID) {
+            work.hardcoverBookID = patch.hardcoverBookID
+        }
+        work.refreshMatchKey()
+
+        if scope == .allEditions {
+            for edition in work.editions where edition !== book {
+                if patch.fields.contains(.title) { edition.title = patch.title }
+                if patch.fields.contains(.author) { edition.author = patch.author }
+            }
+        }
+        return affected
+    }
+
+    func seedWorkIdentityIfMissing(from book: Book, work: Work) {
+        if work.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            work.title = book.title
+        }
+        if work.author?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            work.author = book.author
+        }
+        work.refreshMatchKey()
+    }
+
+    private func applyEditionFields(
+        _ patch: EditionIdentityPatch,
+        to book: Book
+    ) {
+        if patch.fields.contains(.title) { book.title = patch.title }
+        if patch.fields.contains(.author) { book.author = patch.author }
+        if patch.fields.contains(.isbn) { book.isbn = patch.isbn }
+    }
 }
 
 enum CatalogMutationError: Error, Equatable {
@@ -125,6 +318,8 @@ struct CatalogBookMetadataPreimage {
     let shelfLocation: String?
     let sampleNoticeDismissed: Bool?
     let drmProtected: Bool?
+    let fileName: String
+    let primaryAssetUUID: UUID?
     let fileSizeBytes: Int64
     let coverVersion: Int
     let pageCount: Int?
@@ -152,6 +347,8 @@ struct CatalogBookMetadataPreimage {
         shelfLocation = book.shelfLocation
         sampleNoticeDismissed = book.sampleNoticeDismissed
         drmProtected = book.drmProtected
+        fileName = book.fileName
+        primaryAssetUUID = book.primaryAssetUUID
         fileSizeBytes = book.fileSizeBytes
         coverVersion = book.coverVersion
         pageCount = book.pageCount
@@ -179,6 +376,8 @@ struct CatalogBookMetadataPreimage {
         book.shelfLocation = shelfLocation
         book.sampleNoticeDismissed = sampleNoticeDismissed
         book.drmProtected = drmProtected
+        book.fileName = fileName
+        book.primaryAssetUUID = primaryAssetUUID
         book.fileSizeBytes = fileSizeBytes
         book.coverVersion = coverVersion
         book.pageCount = pageCount
@@ -249,6 +448,7 @@ final class CatalogMutationService {
     private let saveAdapter: CatalogSaveAdapter
     private let managedFiles: ManagedFileCoordinator
     let analysisCoordinator: CatalogAnalysisCoordinator
+    let editionIdentity = EditionIdentityCoordinator()
 
     init(
         modelContext: ModelContext,
@@ -281,6 +481,12 @@ final class CatalogMutationService {
         do {
             try mutation()
             modelContext.processPendingChanges()
+            repairInvariants(
+                for: command,
+                affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs
+            )
+            modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
             return publish(CatalogChangeSet(
                 command: command,
@@ -312,6 +518,12 @@ final class CatalogMutationService {
         catalogChanged: Bool = true
     ) throws -> CatalogChangeSet {
         do {
+            modelContext.processPendingChanges()
+            repairInvariants(
+                for: command,
+                affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs
+            )
             modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
             return publish(CatalogChangeSet(
@@ -354,6 +566,12 @@ final class CatalogMutationService {
             try await managedFiles.willCommitCatalog(transaction)
             mutationStarted = true
             try mutation()
+            modelContext.processPendingChanges()
+            repairInvariants(
+                for: command,
+                affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs
+            )
             modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
         } catch let error as CatalogMutationError {
@@ -403,6 +621,12 @@ final class CatalogMutationService {
                 try await managedFiles.willCommitCatalog(transaction)
             }
             modelContext.processPendingChanges()
+            repairInvariants(
+                for: command,
+                affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs
+            )
+            modelContext.processPendingChanges()
             try saveAdapter.save(modelContext)
         } catch {
             rollbackMutation()
@@ -425,6 +649,33 @@ final class CatalogMutationService {
         ), catalogChanged: catalogChanged)
         let pending = await finalizeCommittedTransactions(transactions)
         return CatalogFileCommitResult(changeSet: changeSet, pendingTransactionIDs: pending)
+    }
+
+    private func repairInvariants(
+        for command: CatalogMutationCommand,
+        affectedBookIDs: Set<UUID>,
+        affectedWorkIDs: Set<UUID>
+    ) {
+        var workIDs = affectedWorkIDs
+        if command.changeFields.contains(.assetAvailability)
+            || command.changesBookMembership {
+            for bookID in affectedBookIDs {
+                guard let book = try? book(id: bookID), book.modelContext != nil else {
+                    continue
+                }
+                book.repairPrimaryAssetInvariant()
+                if let workID = book.work?.uuid { workIDs.insert(workID) }
+            }
+        }
+        if command.changeFields.contains(.workMembership)
+            || command.changesBookMembership {
+            for workID in workIDs {
+                guard let work = try? work(id: workID), work.modelContext != nil else {
+                    continue
+                }
+                WorkService.repairPreferredEditionInvariant(work)
+            }
+        }
     }
 
     func managedFileSnapshot() throws -> ManagedFileCatalogSnapshot {
@@ -505,16 +756,41 @@ final class CatalogMutationService {
         _ changeSet: CatalogChangeSet,
         catalogChanged: Bool
     ) -> CatalogChangeSet {
-        invalidateAnalysis(for: changeSet)
-        let fullTextAffectedBookIDs = fullTextAffectedBookIDs(for: changeSet)
+        var affectedBookIDs = changeSet.affectedBookIDs
+        let workVisibleFields: CatalogChangeFields = [
+            .identity,
+            .displayMetadata,
+            .workMembership,
+        ]
+        if !changeSet.affectedWorkIDs.isEmpty,
+           !changeSet.fields.intersection(workVisibleFields).isEmpty {
+            for workID in changeSet.affectedWorkIDs {
+                if let work = try? work(id: workID) {
+                    affectedBookIDs.formUnion(work.editions.map(\.uuid))
+                }
+            }
+        }
+        let publishedChangeSet = CatalogChangeSet(
+            command: changeSet.command,
+            affectedBookIDs: affectedBookIDs,
+            affectedWorkIDs: changeSet.affectedWorkIDs,
+            affectedAssetIDs: changeSet.affectedAssetIDs,
+            affectedCollectionIDs: changeSet.affectedCollectionIDs,
+            fields: changeSet.fields
+        )
+        invalidateAnalysis(for: publishedChangeSet)
+        let fullTextAffectedBookIDs = fullTextAffectedBookIDs(for: publishedChangeSet)
         LibraryMutationLog.shared.bump(
             catalogChanged: catalogChanged,
-            affectedBookIDs: changeSet.affectedBookIDs,
-            affectedCollectionIDs: changeSet.affectedCollectionIDs,
-            changesBookMembership: changeSet.command.changesBookMembership,
+            affectedBookIDs: publishedChangeSet.affectedBookIDs,
+            affectedWorkIDs: publishedChangeSet.affectedWorkIDs,
+            affectedAssetIDs: publishedChangeSet.affectedAssetIDs,
+            affectedCollectionIDs: publishedChangeSet.affectedCollectionIDs,
+            fields: publishedChangeSet.fields,
+            changesBookMembership: publishedChangeSet.command.changesBookMembership,
             fullTextAffectedBookIDs: fullTextAffectedBookIDs
         )
-        return changeSet
+        return publishedChangeSet
     }
 
     private func fullTextAffectedBookIDs(
@@ -528,6 +804,7 @@ final class CatalogMutationService {
              .pluginUpdate(let bookID, _),
              .addFile(let bookID, _),
              .replaceFile(let bookID, _),
+             .selectPrimaryAsset(let bookID, _),
              .removeFile(let bookID, _),
              .conversionOutput(let bookID, _),
              .applyAnalysis(let bookID, _):
@@ -541,6 +818,9 @@ final class CatalogMutationService {
              .legacyMigration(let commandBookIDs),
              .applyAnalysisBatch(let commandBookIDs, _):
             bookIDs.formUnion(commandBookIDs)
+
+        case .addPhysicalBook(let bookID, _):
+            bookIDs.insert(bookID)
 
         case .reconcileEditions(let survivorID, let removedID, _):
             bookIDs.formUnion([survivorID, removedID])
@@ -562,21 +842,19 @@ final class CatalogMutationService {
     }
 
     private func invalidateAnalysis(for changeSet: CatalogChangeSet) {
-        let identityFields: Set<String> = [
-            "title", "author", "publisher", "year", "language", "translator",
-            "isbn", "series", "seriesIndex", "editionStatement", "editionType",
-            "originalFileName", "originalTitle", "originalLanguage",
-            "openLibraryWorkKey", "hardcoverBookID",
-        ]
         var invalidatedBookIDs: Set<UUID> = []
 
         switch changeSet.command {
         case .updateMetadata(let bookID, let fields),
              .pluginUpdate(let bookID, let fields):
-            if !fields.isDisjoint(with: identityFields) { invalidatedBookIDs.insert(bookID) }
+            if !fields.isDisjoint(with: CatalogMutationCommand.identityMetadataFields) {
+                invalidatedBookIDs.insert(bookID)
+            }
 
         case .updateMetadataBatch(let bookIDs, _, let fields):
-            if !fields.isDisjoint(with: identityFields) { invalidatedBookIDs.formUnion(bookIDs) }
+            if !fields.isDisjoint(with: CatalogMutationCommand.identityMetadataFields) {
+                invalidatedBookIDs.formUnion(bookIDs)
+            }
 
         case .assignEdition(let bookIDs, _):
             invalidatedBookIDs.formUnion(bookIDs)
@@ -585,7 +863,7 @@ final class CatalogMutationService {
             invalidatedBookIDs.formUnion([survivorID, removedID])
 
         case .updateWork(_, let fields):
-            if !fields.isDisjoint(with: identityFields) {
+            if !fields.isDisjoint(with: CatalogMutationCommand.identityMetadataFields) {
                 for workID in changeSet.affectedWorkIDs {
                     if let work = try? work(id: workID) {
                         invalidatedBookIDs.formUnion(work.editions.map(\.uuid))
@@ -595,6 +873,7 @@ final class CatalogMutationService {
 
         case .addFile(let bookID, _),
              .replaceFile(let bookID, _),
+             .selectPrimaryAsset(let bookID, _),
              .removeFile(let bookID, _):
             invalidatedBookIDs.insert(bookID)
 
@@ -603,7 +882,7 @@ final class CatalogMutationService {
 
         case .setReadingStatus, .setReadingProgress,
              .createCollection, .updateCollection, .deleteCollection,
-             .importBooks, .calibreImport, .conversionOutput, .legacyMigration,
+             .addPhysicalBook, .importBooks, .calibreImport, .conversionOutput, .legacyMigration,
              .updateCover, .applyAnalysis, .applyAnalysisBatch:
             break
         }

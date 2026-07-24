@@ -14,13 +14,35 @@ enum WorkService {
     static func setPreferred(_ book: Book, in work: Work, context: ModelContext) {
         guard book.work?.uuid == work.uuid else { return }
         work.preferredEditionUUID = book.uuid
-        context.saveQuietly()
+        context.saveQuietly(
+            affectedBookIDs: Set(work.editions.map(\.uuid)),
+            affectedWorkIDs: [work.uuid],
+            fields: [.workMembership]
+        )
+    }
+
+    @discardableResult
+    static func repairPreferredEditionInvariant(_ work: Work) -> Bool {
+        if let preferredEditionUUID = work.preferredEditionUUID,
+           work.editions.contains(where: { $0.uuid == preferredEditionUUID }) {
+            return false
+        }
+        let repaired = work.editions.sorted(by: editionPrecedes).first?.uuid
+        guard work.preferredEditionUUID != repaired else { return false }
+        work.preferredEditionUUID = repaired
+        return true
     }
 
     static func pruneIfOrphaned(_ work: Work?, context: ModelContext, save: Bool = true) {
         guard let work, work.modelContext != nil, work.editions.isEmpty else { return }
         context.delete(work)
-        if save { context.saveQuietly() }
+        if save {
+            context.saveQuietly(
+                affectedWorkIDs: [work.uuid],
+                fields: [.workMembership],
+                changesBookMembership: true
+            )
+        }
     }
 
     static func editionPrecedes(_ lhs: Book, _ rhs: Book) -> Bool {

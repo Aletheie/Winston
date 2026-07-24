@@ -105,6 +105,28 @@ struct LibraryMutationTests {
         #expect(!delta.changesBookMembership)
     }
 
+    @Test func catalogJournalPreservesTypedIDsAndFieldMasks() {
+        let log = LibraryMutationLog()
+        let before = log.catalogRevision
+        let bookID = UUID()
+        let workID = UUID()
+        let assetID = UUID()
+
+        log.bump(
+            affectedBookIDs: [bookID],
+            affectedWorkIDs: [workID],
+            affectedAssetIDs: [assetID],
+            fields: [.assetAvailability, .cover]
+        )
+
+        let delta = log.catalogDelta(since: before)
+        #expect(delta.affectedBookIDs == [bookID])
+        #expect(delta.affectedWorkIDs == [workID])
+        #expect(delta.affectedAssetIDs == [assetID])
+        #expect(delta.fields == [.assetAvailability, .cover])
+        #expect(!delta.requiresFullRebuild)
+    }
+
     @Test func fullTextJournalIgnoresUnrelatedCatalogChangesAndPreservesAssetIDs() {
         let log = LibraryMutationLog()
         let before = log.fullTextRevision
@@ -135,6 +157,14 @@ struct LibraryMutationTests {
         #expect(CatalogMutationCommand.updateMetadata(
             bookID: UUID(),
             fields: ["title"]
+        ).changesFullTextIndex)
+        #expect(CatalogMutationCommand.pluginUpdate(
+            bookID: UUID(),
+            fields: ["openLibraryWorkKey"]
+        ).changeFields.contains(.identity))
+        #expect(!CatalogMutationCommand.pluginUpdate(
+            bookID: UUID(),
+            fields: ["openLibraryWorkKey"]
         ).changesFullTextIndex)
         #expect(!CatalogMutationCommand.updateWork(
             workID: UUID(),
@@ -173,6 +203,35 @@ struct LibraryMutationTests {
 
         let delta = LibraryMutationLog.shared.fullTextDelta(since: before)
         #expect(delta.affectedBookIDs == [first.uuid, second.uuid])
+        #expect(!delta.requiresFullRebuild)
+    }
+
+    @Test func analysisThatChangesSharedWorkMetadataInvalidatesEveryEdition() async throws {
+        let lib = try await TestLibrary()
+        let work = Work(title: "Original")
+        let first = Book(fileName: "first.epub", originalFileName: "First.epub")
+        let second = Book(fileName: "second.epub", originalFileName: "Second.epub")
+        lib.context.insert(work)
+        lib.context.insert(first)
+        lib.context.insert(second)
+        first.work = work
+        second.work = work
+        try lib.context.save()
+        let mutations = CatalogMutationService(modelContext: lib.context)
+        let before = LibraryMutationLog.shared.catalogRevision
+
+        try mutations.commit(
+            .applyAnalysis(bookID: first.uuid, kind: .onlineEnrichment),
+            affectedBookIDs: [first.uuid],
+            affectedWorkIDs: [work.uuid]
+        ) {
+            work.title = "Updated"
+        }
+
+        let delta = LibraryMutationLog.shared.catalogDelta(since: before)
+        #expect(delta.affectedBookIDs == [first.uuid, second.uuid])
+        #expect(delta.affectedWorkIDs == [work.uuid])
+        #expect(delta.fields.contains(.identity))
         #expect(!delta.requiresFullRebuild)
     }
 
@@ -230,6 +289,33 @@ struct LibraryMutationTests {
         #expect(!FileManager.default.fileExists(atPath: sibling.fileURL.path(percentEncoded: false)))
         #expect(try lib.context.fetch(FetchDescriptor<Book>()).isEmpty)
         #expect(try lib.context.fetch(FetchDescriptor<Work>()).isEmpty)
+    }
+
+    @Test func removingPreferredEditionRepairsTheWorkReference() async throws {
+        let lib = try await TestLibrary()
+        let work = Work(title: "Work")
+        let removed = Book(fileName: "", originalFileName: "Removed")
+        let survivor = Book(fileName: "", originalFileName: "Survivor")
+        removed.hasPhysicalCopy = true
+        survivor.hasPhysicalCopy = true
+        lib.context.insert(work)
+        lib.context.insert(removed)
+        lib.context.insert(survivor)
+        removed.work = work
+        survivor.work = work
+        work.preferredEditionUUID = removed.uuid
+        try lib.context.save()
+        let viewModel = LibraryViewModel(
+            modelContext: lib.context,
+            settings: AppSettings(),
+            toasts: ToastCenter()
+        )
+
+        await viewModel.remove(removed)
+
+        #expect(work.modelContext != nil)
+        #expect(work.editions.map(\.uuid) == [survivor.uuid])
+        #expect(work.preferredEditionUUID == survivor.uuid)
     }
 
 }

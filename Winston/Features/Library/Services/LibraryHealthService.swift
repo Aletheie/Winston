@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftData
 
 @MainActor
@@ -40,7 +41,7 @@ final class LibraryHealthService {
             if let inFlight = metadataAnalysisTask, inFlight.revision == revision {
                 task = inFlight.task
             } else {
-                let books = modelContext.allBooks()
+                let books = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
                 var rows: [MetadataFixRow] = []
                 rows.reserveCapacity(books.count)
                 for (index, book) in books.enumerated() {
@@ -79,13 +80,23 @@ final class LibraryHealthService {
 
     @discardableResult
     func scanForMissingFiles() async -> Int {
-        let books = modelContext.allBooks()
+        let books = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
         let assets = (try? modelContext.fetch(FetchDescriptor<BookAsset>())) ?? []
         var primaryEntries: [(uuid: UUID, fileName: String)] = []
         primaryEntries.reserveCapacity(books.count)
         for (index, book) in books.enumerated() {
             guard !Task.isCancelled else { return 0 }
-            if book.hasDigitalFile { primaryEntries.append((book.uuid, book.fileName)) }
+            let primaryFileName = book.primaryAsset?.fileName ?? book.fileName
+            if !primaryFileName.isEmpty {
+                primaryEntries.append((book.uuid, primaryFileName))
+            }
+            if let primaryAsset = book.primaryAsset,
+               book.fileName != primaryAsset.fileName
+                    || book.primaryAssetUUID != primaryAsset.uuid {
+                Log.persistence.error(
+                    "Primary asset invariant drift for book \(book.uuid.uuidString, privacy: .public)"
+                )
+            }
             if index > 0, index.isMultiple(of: 256) { await Task.yield() }
         }
         var assetEntries: [(uuid: UUID, fileName: String)] = []
@@ -127,6 +138,7 @@ final class LibraryHealthService {
         if !changedBookIDs.isEmpty {
             modelContext.saveQuietly(
                 affectedBookIDs: changedBookIDs,
+                fields: [.assetAvailability, .displayMetadata, .fullTextSource],
                 fullTextAffectedBookIDs: changedBookIDs
             )
         }
@@ -135,9 +147,10 @@ final class LibraryHealthService {
 
     func relink(_ book: Book, from url: URL) async {
         guard book.modelContext != nil else { return }
-        let oldFileName = book.fileName
-        let asset = book.assets.first { $0.fileName == oldFileName }
-            ?? book.assets.first { $0.uuid == book.uuid }
+        let asset = book.primaryAsset
+        let primaryAssetID = asset?.uuid
+        let primaryAssetDateAdded = asset?.dateAdded
+        let oldFileName = asset?.fileName ?? book.fileName
         let replacementUUID = asset?.uuid ?? book.uuid
         let replacement: (fileName: String, size: Int64)? = await Task.detached(priority: .userInitiated) {
             let accessing = url.startAccessingSecurityScopedResource()
@@ -151,7 +164,14 @@ final class LibraryHealthService {
         }.value
         guard let replacement else { return }
         let fileName = replacement.fileName
-        guard book.modelContext != nil, book.fileName == oldFileName else {
+        let primaryIsCurrent = if let primaryAssetID {
+            book.primaryAsset?.uuid == primaryAssetID
+                && book.primaryAsset?.fileName == oldFileName
+                && book.primaryAsset?.dateAdded == primaryAssetDateAdded
+        } else {
+            book.assets.isEmpty && book.fileName == oldFileName
+        }
+        guard book.modelContext != nil, primaryIsCurrent else {
             Task.detached(priority: .utility) {
                 BookFileStore.delete(fileName: fileName)
             }
@@ -186,9 +206,12 @@ final class LibraryHealthService {
             modelContext.insert(asset)
             updatedAsset = asset
         }
+        book.primaryAssetUUID = updatedAsset.uuid
         guard modelContext.saveQuietly(
             rollbackOnFailure: true,
             affectedBookIDs: [book.uuid],
+            affectedAssetIDs: [updatedAsset.uuid],
+            fields: [.assetAvailability, .displayMetadata, .cover],
             fullTextAffectedBookIDs: [book.uuid]
         ) else {
             Task.detached(priority: .utility) {
@@ -216,9 +239,13 @@ final class LibraryHealthService {
               updatedAsset.fileName == fileName,
               updatedAsset.dateAdded == replacementDate else { return }
         updatedAsset.contentHash = analysis.0
-        if book.fileName == fileName { book.drmProtected = analysis.1 }
+        if book.primaryAsset?.uuid == updatedAsset.uuid {
+            book.drmProtected = analysis.1
+        }
         modelContext.saveQuietly(
             affectedBookIDs: [book.uuid],
+            affectedAssetIDs: [updatedAsset.uuid],
+            fields: [.assetAvailability, .fullTextSource],
             fullTextAffectedBookIDs: [book.uuid]
         )
     }

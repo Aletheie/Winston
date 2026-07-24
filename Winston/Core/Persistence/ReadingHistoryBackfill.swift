@@ -5,6 +5,7 @@ enum ReadingHistoryBackfill {
     @discardableResult
     static func run(context: ModelContext) -> Int {
         var inserted = 0
+        var affectedBookIDs: Set<UUID> = []
         var descriptor = FetchDescriptor<Book>()
         descriptor.relationshipKeyPathsForPrefetching = [\.readingSessions]
 
@@ -45,9 +46,15 @@ enum ReadingHistoryBackfill {
             )
             context.insert(session)
             inserted += 1
+            affectedBookIDs.insert(book.uuid)
         }
 
-        if inserted > 0 { context.saveQuietly() }
+        if inserted > 0 {
+            context.saveQuietly(
+                affectedBookIDs: affectedBookIDs,
+                fields: [.readingState]
+            )
+        }
         return inserted
     }
 }

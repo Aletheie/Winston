@@ -949,6 +949,8 @@ struct MultiFileBackendTests {
 
         await viewModel.makePrimary(sibling, for: book)
 
+        #expect(book.primaryAssetUUID == sibling.uuid)
+        #expect(book.primaryAsset?.uuid == sibling.uuid)
         #expect(book.fileName == plainName)
         #expect(book.drmProtected == false)
     }

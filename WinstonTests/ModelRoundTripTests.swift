@@ -179,6 +179,37 @@ struct ModelRoundTripTests {
         #expect(try context.fetchCount(FetchDescriptor<BookAsset>()) == 0)
     }
 
+    @Test func explicitPrimaryAssetIsAuthoritativeAndRepairsCompatibilityMirror() throws {
+        let (container, context) = makeContext()
+        _ = container
+        let book = Book(fileName: "stale.epub", originalFileName: "Book.epub")
+        let first = BookAsset(fileName: "first.epub", sizeBytes: 10, book: book)
+        let selected = BookAsset(fileName: "selected.pdf", sizeBytes: 42, book: book)
+        context.insert(book)
+        context.insert(first)
+        context.insert(selected)
+        book.primaryAssetUUID = selected.uuid
+
+        #expect(book.primaryAsset?.uuid == selected.uuid)
+        #expect(book.repairPrimaryAssetInvariant())
+        #expect(book.fileName == "selected.pdf")
+        #expect(book.fileSizeBytes == 42)
+        #expect(book.format == "PDF")
+    }
+
+    @Test func invalidPrimaryReferenceDoesNotHideAssetInvariantDrift() {
+        let book = Book(fileName: "ghost.epub", originalFileName: "Ghost.epub")
+        let asset = BookAsset(fileName: "real.epub", validationStatus: .ok, book: book)
+        book.primaryAssetUUID = UUID()
+
+        #expect(book.primaryAsset == nil)
+        #expect(!book.hasCatalogDigitalFile)
+        #expect(book.repairPrimaryAssetInvariant())
+        #expect(book.primaryAssetUUID == asset.uuid)
+        #expect(book.fileName == asset.fileName)
+        #expect(book.hasCatalogDigitalFile)
+    }
+
     @Test func nilRawEditionAndAssetValuesUseSafeDefaults() {
         let book = Book(fileName: "a.epub", originalFileName: "A.epub")
         book.editionTypeRaw = nil
