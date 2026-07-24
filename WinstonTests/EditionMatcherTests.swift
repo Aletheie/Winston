@@ -138,6 +138,78 @@ struct EditionMatcherTests {
         #expect(proposals.isEmpty)
     }
 
+    @Test func candidateIndexRemovesStaleBucketsAfterIdentityEdit() {
+        let editedID = UUID()
+        let original = candidate(uuid: editedID, title: "Dune", author: "Frank Herbert")
+        let peer = candidate(title: "Dune", author: "Frank Herbert")
+        var index = EditionCandidateIndex([original, peer])
+
+        #expect(index.lookup(for: peer).matches.contains { $0.uuid == editedID })
+
+        index.update(candidate(
+            uuid: editedID,
+            title: "Foundation",
+            author: "Isaac Asimov"
+        ))
+
+        #expect(!index.lookup(for: peer).matches.contains { $0.uuid == editedID })
+        let foundationPeer = candidate(title: "Foundation", author: "Isaac Asimov")
+        #expect(index.lookup(for: foundationPeer).matches.contains { $0.uuid == editedID })
+    }
+
+    @Test func wideFuzzyBucketReturnsOneManualReviewWithoutQuadraticComparisons() async throws {
+        let candidates = (0..<2_000).map { index in
+            candidate(
+                title: "Collected Works",
+                author: "Author \(index)"
+            )
+        }
+
+        let result = await EditionMatcher.scanWithMetrics(candidates)
+        let manual = try #require(result.proposals.first { $0.needsManualReview })
+
+        #expect(result.metrics.maximumBucketSize == candidates.count)
+        #expect(result.metrics.truncatedBucketCount == 1)
+        #expect(result.metrics.pairComparisonCount == 0)
+        #expect(result.proposals.count == 1)
+        #expect(manual.memberUUIDs.count == EditionMatcher.maximumManualReviewMembers)
+        #expect(!manual.canApply)
+    }
+
+    @Test func wideStrongBucketUsesBoundedStarComparisons() async throws {
+        let candidates = (0..<2_000).map { index in
+            candidate(
+                title: "Unique Title \(index)",
+                author: "Unique Author \(index)",
+                isbn: "978-0-00-000000-1"
+            )
+        }
+
+        let result = await EditionMatcher.scanWithMetrics(candidates)
+
+        #expect(result.metrics.maximumBucketSize == candidates.count)
+        #expect(result.metrics.truncatedBucketCount == 1)
+        #expect(result.metrics.pairComparisonCount == EditionMatcher.maximumStrongBucketComparisons)
+        #expect(result.proposals.contains { $0.needsManualReview })
+    }
+
+    @Test func wideFuzzyBucketAlreadyGroupedInOneWorkNeedsNoManualReview() async {
+        let workID = UUID()
+        let candidates = (0..<2_000).map { index in
+            candidate(
+                workUUID: workID,
+                title: "Collected Works",
+                author: "Author \(index)"
+            )
+        }
+
+        let result = await EditionMatcher.scanWithMetrics(candidates)
+
+        #expect(result.metrics.truncatedBucketCount == 1)
+        #expect(result.metrics.pairComparisonCount == 0)
+        #expect(result.proposals.isEmpty)
+    }
+
     @Test(arguments: [
         ReconciliationScenario(
             name: "translation",

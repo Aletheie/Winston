@@ -40,6 +40,7 @@ nonisolated enum MatchSignal: String, Codable, CaseIterable, Hashable, Sendable 
     case differentPublisher
     case differentPublicationYear
     case sameTitle
+    case broadCandidateBucket
 
     var label: LocalizedStringResource {
         switch self {
@@ -53,6 +54,7 @@ nonisolated enum MatchSignal: String, Codable, CaseIterable, Hashable, Sendable 
         case .differentPublisher: "Different publisher"
         case .differentPublicationYear: "Different publication year"
         case .sameTitle: "Same title"
+        case .broadCandidateBucket: "Too many similar catalog candidates"
         }
     }
 
@@ -68,6 +70,7 @@ nonisolated enum MatchSignal: String, Codable, CaseIterable, Hashable, Sendable 
         case .differentPublisher: "DIFFERENT_PUBLISHER"
         case .differentPublicationYear: "DIFFERENT_YEAR"
         case .sameTitle: "SAME_TITLE"
+        case .broadCandidateBucket: "BROAD_CANDIDATE_BUCKET"
         }
     }
 }
@@ -105,6 +108,7 @@ nonisolated struct EditionCandidate: Hashable, Sendable {
     let sizeBytes: Int64
     let contentHashes: Set<String>
     let openLibraryWorkKey: String
+    let workMatchKey: String
 
     init(
         uuid: UUID,
@@ -119,7 +123,8 @@ nonisolated struct EditionCandidate: Hashable, Sendable {
         format: String,
         sizeBytes: Int64,
         contentHashes: Set<String> = [],
-        openLibraryWorkKey: String? = nil
+        openLibraryWorkKey: String? = nil,
+        workMatchKey: String? = nil
     ) {
         self.uuid = uuid
         self.workUUID = workUUID
@@ -134,6 +139,7 @@ nonisolated struct EditionCandidate: Hashable, Sendable {
         self.sizeBytes = sizeBytes
         self.contentHashes = Set(contentHashes.map { $0.lowercased() }.filter { !$0.isEmpty })
         self.openLibraryWorkKey = (openLibraryWorkKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.workMatchKey = (workMatchKey ?? "").normalizedMatchKey
     }
 
     var matchKey: String? {
@@ -162,6 +168,10 @@ nonisolated struct EditionMatchProposal: Identifiable, Hashable, Sendable {
     var isAutomaticallySafe: Bool { isExactContentDuplicate }
 
     var canApply: Bool { verdict != .similarItem }
+
+    var needsManualReview: Bool {
+        signals.contains(.broadCandidateBucket)
+    }
 
     var changePlan: ReconciliationChangePlan {
         switch verdict {
@@ -209,33 +219,200 @@ nonisolated struct EditionMatchProposal: Identifiable, Hashable, Sendable {
     }
 }
 
-nonisolated enum EditionMatcher {
-    struct CandidateIndex: Sendable {
-        private var candidates: [UUID: EditionCandidate]
-        private var buckets: [String: [UUID]] = [:]
+nonisolated struct EditionCountPatch: Sendable, Equatable {
+    let removedBookIDs: Set<UUID>
+    let countsByBookID: [UUID: Int]
+}
 
-        init(_ candidates: [EditionCandidate]) {
-            self.candidates = Dictionary(uniqueKeysWithValues: candidates.map { ($0.uuid, $0) })
-            for candidate in candidates {
-                for key in EditionMatcher.bucketKeys(for: candidate) {
-                    buckets[key, default: []].append(candidate.uuid)
-                }
-            }
-        }
+nonisolated struct EditionCandidateLookup: Sendable, Equatable {
+    let matches: [EditionCandidate]
+    let manualReviewProposals: [EditionMatchProposal]
+    let bucketCandidateCount: Int
+    let truncatedBucketCount: Int
+}
 
-        func matches(for candidate: EditionCandidate) -> [EditionCandidate] {
-            var seen: Set<UUID> = [candidate.uuid]
-            return EditionMatcher.bucketKeys(for: candidate).flatMap { buckets[$0] ?? [] }
-                .compactMap { uuid in
-                    guard seen.insert(uuid).inserted else { return nil }
-                    return candidates[uuid]
-                }
-        }
+nonisolated struct EditionMatcherMetrics: Sendable, Equatable {
+    var candidateCount = 0
+    var bucketCount = 0
+    var pairComparisonCount = 0
+    var truncatedBucketCount = 0
+    var maximumBucketSize = 0
+}
 
-        mutating func update(_ candidate: EditionCandidate) {
-            candidates[candidate.uuid] = candidate
+nonisolated struct EditionMatcherScanResult: Sendable, Equatable {
+    let proposals: [EditionMatchProposal]
+    let metrics: EditionMatcherMetrics
+}
+
+/// Rebuildable read index. Updates remove the previous candidate from every
+/// bucket before inserting its new generation, so identity edits never leave
+/// stale candidate keys behind.
+nonisolated struct EditionCandidateIndex: Sendable {
+    private var candidates: [UUID: EditionCandidate] = [:]
+    private var buckets: [String: Set<UUID>] = [:]
+    private var keysByCandidate: [UUID: Set<String>] = [:]
+    private var membersByWork: [UUID: Set<UUID>] = [:]
+
+    init(_ candidates: [EditionCandidate] = []) {
+        for candidate in candidates {
+            insert(candidate)
         }
     }
+
+    var count: Int { candidates.count }
+    var allCandidates: [EditionCandidate] {
+        candidates.values.sorted { $0.uuid.uuidString < $1.uuid.uuidString }
+    }
+
+    func candidate(id: UUID) -> EditionCandidate? {
+        candidates[id]
+    }
+
+    func editionCounts() -> [UUID: Int] {
+        var result: [UUID: Int] = [:]
+        for members in membersByWork.values where members.count > 1 {
+            for id in members { result[id] = members.count }
+        }
+        return result
+    }
+
+    @discardableResult
+    mutating func update(_ candidate: EditionCandidate) -> EditionCountPatch {
+        update([candidate])
+    }
+
+    @discardableResult
+    mutating func update(_ values: [EditionCandidate]) -> EditionCountPatch {
+        let workIDs = Set(values.flatMap {
+            [candidates[$0.uuid]?.workUUID, $0.workUUID].compactMap { $0 }
+        })
+        let oldMembers = members(in: workIDs)
+        for candidate in values { removeCandidate(id: candidate.uuid) }
+        for candidate in values { insert(candidate) }
+        return countPatch(workIDs: workIDs, oldMembers: oldMembers)
+    }
+
+    @discardableResult
+    mutating func remove(id: UUID) -> EditionCountPatch {
+        remove(ids: [id])
+    }
+
+    @discardableResult
+    mutating func remove(ids: Set<UUID>) -> EditionCountPatch {
+        let workIDs = Set(ids.compactMap { candidates[$0]?.workUUID })
+        let oldMembers = members(in: workIDs)
+        for id in ids { removeCandidate(id: id) }
+        return countPatch(workIDs: workIDs, oldMembers: oldMembers)
+    }
+
+    func lookup(for candidate: EditionCandidate) -> EditionCandidateLookup {
+        var seen: Set<UUID> = [candidate.uuid]
+        var matches: [EditionCandidate] = []
+        var manualReviewProposals: [EditionMatchProposal] = []
+        var bucketCandidateCount = 0
+        var truncatedBucketCount = 0
+
+        for key in EditionMatcher.bucketKeys(for: candidate).sorted() {
+            let bucket = buckets[key] ?? []
+            let memberCount = bucket.count - (bucket.contains(candidate.uuid) ? 1 : 0)
+            bucketCandidateCount += memberCount
+            let limit = EditionMatcher.isStrongBucket(key)
+                ? EditionMatcher.maximumStrongBucketComparisons
+                : EditionMatcher.maximumFuzzyBucketSize
+            let memberIDs = Array(
+                bucket.lazy
+                    .filter { $0 != candidate.uuid }
+                    .prefix(limit)
+            ).sorted { $0.uuidString < $1.uuidString }
+            if memberCount > limit {
+                truncatedBucketCount += 1
+                let requiresReview = key.hasPrefix("h:")
+                    || key.hasPrefix("i:")
+                    || candidate.workUUID == nil
+                    || bucket.contains { id in
+                        guard id != candidate.uuid else { return false }
+                        return candidates[id]?.workUUID != candidate.workUUID
+                    }
+                let bucketCandidates = ([candidate.uuid] + memberIDs).compactMap {
+                    $0 == candidate.uuid ? candidate : candidates[$0]
+                }
+                if let proposal = EditionMatcher.manualReviewProposal(
+                    bucketKey: key,
+                    candidates: bucketCandidates,
+                    requiresReview: requiresReview
+                ) {
+                    manualReviewProposals.append(proposal)
+                }
+                guard EditionMatcher.isStrongBucket(key) else { continue }
+            }
+            for id in memberIDs.prefix(limit) {
+                guard seen.insert(id).inserted, let match = candidates[id] else { continue }
+                matches.append(match)
+            }
+        }
+        return EditionCandidateLookup(
+            matches: matches,
+            manualReviewProposals: manualReviewProposals,
+            bucketCandidateCount: bucketCandidateCount,
+            truncatedBucketCount: truncatedBucketCount
+        )
+    }
+
+    private mutating func insert(_ candidate: EditionCandidate) {
+        candidates[candidate.uuid] = candidate
+        let keys = Set(EditionMatcher.bucketKeys(for: candidate))
+        keysByCandidate[candidate.uuid] = keys
+        for key in keys { buckets[key, default: []].insert(candidate.uuid) }
+        if let workID = candidate.workUUID {
+            membersByWork[workID, default: []].insert(candidate.uuid)
+        }
+    }
+
+    private mutating func removeCandidate(id: UUID) {
+        guard let candidate = candidates.removeValue(forKey: id) else { return }
+        for key in keysByCandidate.removeValue(forKey: id) ?? [] {
+            buckets[key]?.remove(id)
+            if buckets[key]?.isEmpty == true { buckets.removeValue(forKey: key) }
+        }
+        if let workID = candidate.workUUID {
+            membersByWork[workID]?.remove(id)
+            if membersByWork[workID]?.isEmpty == true {
+                membersByWork.removeValue(forKey: workID)
+            }
+        }
+    }
+
+    private func members(in workIDs: Set<UUID>) -> Set<UUID> {
+        workIDs.reduce(into: Set<UUID>()) { result, workID in
+            result.formUnion(membersByWork[workID] ?? [])
+        }
+    }
+
+    private func countPatch(
+        workIDs: Set<UUID>,
+        oldMembers: Set<UUID>
+    ) -> EditionCountPatch {
+        let newMembers = members(in: workIDs)
+        var counts: [UUID: Int] = [:]
+        for workID in workIDs {
+            let members = membersByWork[workID] ?? []
+            guard members.count > 1 else { continue }
+            for id in members { counts[id] = members.count }
+        }
+        return EditionCountPatch(
+            removedBookIDs: oldMembers.union(newMembers),
+            countsByBookID: counts
+        )
+    }
+}
+
+nonisolated enum EditionMatcher {
+    typealias CandidateIndex = EditionCandidateIndex
+
+    static let maximumFuzzyBucketSize = 64
+    static let maximumStrongBucketComparisons = 512
+    static let maximumScanPairComparisons = 25_000
+    static let maximumManualReviewMembers = 64
 
     static func normalizedISBN(_ value: String?) -> String {
         (value ?? "")
@@ -253,46 +430,155 @@ nonisolated enum EditionMatcher {
 
     @concurrent
     static func scan(_ candidates: [EditionCandidate]) async -> [EditionMatchProposal] {
+        await scanWithMetrics(candidates).proposals
+    }
+
+    @concurrent
+    static func scanWithMetrics(
+        _ candidates: [EditionCandidate]
+    ) async -> EditionMatcherScanResult {
         var buckets: [String: [Int]] = [:]
         for (index, candidate) in candidates.enumerated() {
-            for hash in candidate.contentHashes { buckets["h:\(hash)", default: []].append(index) }
-            if !candidate.isbn.isEmpty { buckets["i:\(candidate.isbn)", default: []].append(index) }
-            if !candidate.openLibraryWorkKey.isEmpty {
-                buckets["o:\(candidate.openLibraryWorkKey)", default: []].append(index)
+            for key in bucketKeys(for: candidate) {
+                buckets[key, default: []].append(index)
             }
-            if let matchKey = candidate.matchKey { buckets["k:\(matchKey)", default: []].append(index) }
-            if !candidate.title.isEmpty { buckets["t:\(candidate.title)", default: []].append(index) }
         }
 
         var seen: Set<String> = []
         var proposals: [EditionMatchProposal] = []
-        for indices in buckets.values where indices.count > 1 {
-            for leftOffset in indices.indices {
+        var metrics = EditionMatcherMetrics(
+            candidateCount: candidates.count,
+            bucketCount: buckets.count
+        )
+        for key in buckets.keys.sorted() {
+            guard let indices = buckets[key], indices.count > 1 else { continue }
+            metrics.maximumBucketSize = max(metrics.maximumBucketSize, indices.count)
+            let isStrong = isStrongBucket(key)
+            if (!isStrong && indices.count > maximumFuzzyBucketSize)
+                || metrics.pairComparisonCount >= maximumScanPairComparisons {
+                metrics.truncatedBucketCount += 1
+                if let proposal = manualReviewProposal(
+                    bucketKey: key,
+                    candidates: indices.map { candidates[$0] }
+                ) {
+                    proposals.append(proposal)
+                }
+                continue
+            }
+
+            if isStrong, indices.count > maximumFuzzyBucketSize {
+                metrics.truncatedBucketCount += 1
+                if let proposal = manualReviewProposal(
+                    bucketKey: key,
+                    candidates: indices.map { candidates[$0] }
+                ) {
+                    proposals.append(proposal)
+                }
+                let lhs = candidates[indices[0]]
+                for index in indices.dropFirst().prefix(maximumStrongBucketComparisons) {
+                    let rhs = candidates[index]
+                    let pair = pairKey(lhs.uuid, rhs.uuid)
+                    guard seen.insert(pair).inserted else { continue }
+                    guard metrics.pairComparisonCount < maximumScanPairComparisons else { break }
+                    metrics.pairComparisonCount += 1
+                    guard let proposal = proposal(between: lhs, and: rhs) else { continue }
+                    proposals.append(proposal)
+                }
+                continue
+            }
+
+            comparisonLoop: for leftOffset in indices.indices {
                 for rightOffset in indices.index(after: leftOffset)..<indices.endIndex {
                     let lhs = candidates[indices[leftOffset]]
                     let rhs = candidates[indices[rightOffset]]
-                    let key = pairKey(lhs.uuid, rhs.uuid)
-                    guard seen.insert(key).inserted,
+                    let pair = pairKey(lhs.uuid, rhs.uuid)
+                    guard seen.insert(pair).inserted else { continue }
+                    guard metrics.pairComparisonCount < maximumScanPairComparisons else {
+                        metrics.truncatedBucketCount += 1
+                        if let proposal = manualReviewProposal(
+                            bucketKey: key,
+                            candidates: indices.map { candidates[$0] }
+                        ) {
+                            proposals.append(proposal)
+                        }
+                        break comparisonLoop
+                    }
+                    metrics.pairComparisonCount += 1
+                    guard
                           let proposal = proposal(between: lhs, and: rhs)
                     else { continue }
                     proposals.append(proposal)
                 }
             }
         }
-        return proposals.sorted(by: proposalPrecedes)
+        let unique = Dictionary(
+            proposals.map { ($0.pairKey, $0) },
+            uniquingKeysWith: { first, second in
+                proposalPrecedes(first, second) ? first : second
+            }
+        )
+        return EditionMatcherScanResult(
+            proposals: unique.values.sorted(by: proposalPrecedes),
+            metrics: metrics
+        )
     }
 
     static func pairKey(_ lhs: UUID, _ rhs: UUID) -> String {
         [lhs.uuidString.lowercased(), rhs.uuidString.lowercased()].sorted().joined(separator: ":")
     }
 
-    private static func bucketKeys(for candidate: EditionCandidate) -> [String] {
+    static func bucketKeys(for candidate: EditionCandidate) -> [String] {
         var keys = candidate.contentHashes.map { "h:\($0)" }
         if !candidate.isbn.isEmpty { keys.append("i:\(candidate.isbn)") }
         if !candidate.openLibraryWorkKey.isEmpty { keys.append("o:\(candidate.openLibraryWorkKey)") }
+        if !candidate.workMatchKey.isEmpty { keys.append("w:\(candidate.workMatchKey)") }
         if let matchKey = candidate.matchKey { keys.append("k:\(matchKey)") }
         if !candidate.title.isEmpty { keys.append("t:\(candidate.title)") }
         return keys
+    }
+
+    static func isStrongBucket(_ key: String) -> Bool {
+        key.hasPrefix("h:") || key.hasPrefix("i:") || key.hasPrefix("o:")
+    }
+
+    static func manualReviewProposal(
+        bucketKey: String,
+        candidates: [EditionCandidate],
+        requiresReview: Bool? = nil
+    ) -> EditionMatchProposal? {
+        guard let first = candidates.first,
+              requiresReview
+                ?? (
+                    bucketKey.hasPrefix("h:")
+                        || bucketKey.hasPrefix("i:")
+                        || first.workUUID == nil
+                        || candidates.contains(where: { $0.workUUID != first.workUUID })
+                )
+        else { return nil }
+        let members = candidates
+            .prefix(maximumManualReviewMembers)
+            .map(\.uuid)
+            .sorted { $0.uuidString < $1.uuidString }
+        return EditionMatchProposal(
+            memberUUIDs: members,
+            verdict: .similarItem,
+            confidence: .uncertain,
+            signals: [.broadCandidateBucket],
+            pairKey: manualReviewPairKey(bucketKey: bucketKey)
+        )
+    }
+
+    static func manualReviewPairKey(bucketKey: String) -> String {
+        "manual:\(stableBucketToken(bucketKey))"
+    }
+
+    private static func stableBucketToken(_ value: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
     }
 
     private static func proposal(
@@ -331,7 +617,9 @@ nonisolated enum EditionMatcher {
                 pairKey: pair
             )
         }
-        if let key = lhs.matchKey, key == rhs.matchKey {
+        let sharesTitleAuthor = lhs.matchKey.map { $0 == rhs.matchKey } == true
+            || (!lhs.workMatchKey.isEmpty && lhs.workMatchKey == rhs.workMatchKey)
+        if sharesTitleAuthor {
             var signals: [MatchSignal] = [.sameTitleAndAuthor]
             let differentLanguage = valuesDiffer(lhs.language, rhs.language)
             let differentTranslator = valuesDiffer(lhs.translator, rhs.translator)

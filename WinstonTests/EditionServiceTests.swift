@@ -262,6 +262,84 @@ struct EditionServiceTests {
         })
     }
 
+    @Test func catalogDeltaRefreshFetchesAndEvaluatesOnlyChangedBook() async throws {
+        let library = try await TestLibrary()
+        let existing = insertBook(
+            library,
+            name: "indexed-existing",
+            title: "Indexed Title",
+            author: "Indexed Author"
+        )
+        for index in 0..<250 {
+            _ = insertBook(
+                library,
+                name: "unrelated-\(index)",
+                title: "Unrelated \(index)",
+                author: "Author \(index)"
+            )
+        }
+        try library.context.save()
+        let service = CatalogReconciliationService(modelContext: library.context)
+        #expect(service.lastIndexSynchronizationFetchCount == 251)
+
+        let changed = insertBook(
+            library,
+            name: "indexed-changed",
+            title: "Indexed Title",
+            author: "Indexed Author",
+            format: "mobi"
+        )
+        try library.context.saveAndPublish(
+            affectedBookIDs: [changed.uuid],
+            changesBookMembership: true
+        )
+
+        service.refreshEditionCounts()
+
+        #expect(service.lastIndexSynchronizationFetchCount == 1)
+        #expect(service.lastEvaluationComparisonCount == 1)
+        #expect(service.pendingProposals.contains { proposal in
+            proposal.memberUUIDs.contains(existing.uuid)
+                && proposal.memberUUIDs.contains(changed.uuid)
+        })
+
+        let stalePair = EditionMatcher.pairKey(existing.uuid, changed.uuid)
+        changed.title = "A Completely Different Title"
+        changed.work?.title = changed.title
+        changed.work?.refreshMatchKey()
+        try library.context.saveAndPublish(affectedBookIDs: [changed.uuid])
+        service.refreshEditionCounts()
+
+        #expect(service.lastIndexSynchronizationFetchCount == 1)
+        #expect(!service.pendingProposals.contains { $0.pairKey == stalePair })
+    }
+
+    @Test func incrementalCountsStayConsistentAfterGroupingAndDelete() async throws {
+        let library = try await TestLibrary()
+        let first = insertBook(library, name: "count-first")
+        let second = insertBook(library, name: "count-second")
+        try library.context.save()
+        let service = CatalogReconciliationService(modelContext: library.context)
+
+        _ = try #require(service.groupIntoWork([first, second]))
+
+        #expect(service.editionCounts[first.uuid] == 2)
+        #expect(service.editionCounts[second.uuid] == 2)
+        #expect(service.lastIndexSynchronizationFetchCount == 2)
+
+        second.work = nil
+        library.context.delete(second)
+        try library.context.saveAndPublish(
+            affectedBookIDs: [second.uuid],
+            changesBookMembership: true
+        )
+        service.refreshEditionCounts()
+
+        #expect(service.editionCounts[first.uuid] == nil)
+        #expect(service.editionCounts[second.uuid] == nil)
+        #expect(service.lastIndexSynchronizationFetchCount == 0)
+    }
+
     @Test func sameEditionApprovalRetainsEveryBookAssetAndPhysicalFile() async throws {
         let library = try await TestLibrary()
         let epub = insertBook(library, name: "edition-epub")

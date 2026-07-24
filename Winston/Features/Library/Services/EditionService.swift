@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 import SwiftData
 
 @MainActor
@@ -11,11 +12,20 @@ final class CatalogReconciliationService {
     private let mutations: CatalogMutationService
     private let managedFiles: ManagedFileCoordinator
     private let toasts: ToastCenter?
+    private let mutationLog: LibraryMutationLog
     private let dismissedDefaultsKey = "editionMatcherDismissedPairKeys"
 
     private(set) var pendingProposals: [EditionMatchProposal] = []
     private(set) var editionCounts: [UUID: Int] = [:]
+    private(set) var lastScanMetrics = EditionMatcherMetrics()
+    private(set) var lastEvaluationCandidateCount = 0
+    private(set) var lastEvaluationComparisonCount = 0
+    private(set) var lastEvaluationTruncatedBucketCount = 0
+    private(set) var lastIndexSynchronizationFetchCount = 0
     private var dismissedPairKeys: Set<String>
+    private var candidateIndex = EditionCandidateIndex()
+    private var candidateIndexIsComplete = false
+    private var indexedCatalogRevision: Int
 
     private enum AssetMergePolicy {
         case retainAll
@@ -26,6 +36,11 @@ final class CatalogReconciliationService {
         let assetID: UUID
         let fileName: String
         let storedSHA256: String
+    }
+
+    private struct CandidateIndexSnapshot {
+        let candidates: [EditionCandidate]
+        let catalogRevision: Int
     }
 
     private struct ExactDuplicateEvidence: Hashable, Sendable {
@@ -171,6 +186,7 @@ final class CatalogReconciliationService {
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared,
         toasts: ToastCenter? = nil,
+        mutationLog: LibraryMutationLog = .shared,
         loadEditionCountsImmediately: Bool = true
     ) {
         self.modelContext = modelContext
@@ -182,52 +198,31 @@ final class CatalogReconciliationService {
         )
         self.managedFiles = managedFiles
         self.toasts = toasts
+        self.mutationLog = mutationLog
+        self.indexedCatalogRevision = mutationLog.catalogRevision
         self.dismissedPairKeys = Set(defaults.stringArray(forKey: dismissedDefaultsKey) ?? [])
         if loadEditionCountsImmediately {
-            refreshEditionCounts()
+            rebuildCandidateIndexSynchronously()
         }
     }
 
     var pendingCount: Int { pendingProposals.count }
 
     func refreshEditionCounts() {
-        var counts: [UUID: Int] = [:]
-        var descriptor = FetchDescriptor<Work>()
-        descriptor.relationshipKeyPathsForPrefetching = [\.editions]
-        let works = (try? modelContext.fetch(descriptor)) ?? []
-        for work in works {
-            let editions = work.editions
-            guard editions.count > 1 else { continue }
-            for edition in editions { counts[edition.uuid] = editions.count }
-        }
-        editionCounts = counts
+        ensureCandidateIndex()
+        synchronizeCandidateIndex(regenerateProposals: true)
     }
 
     func refreshEditionCountsInChunks(chunkSize: Int = 256) async {
-        var counts: [UUID: Int] = [:]
-        var offset = 0
-        while true {
-            guard !Task.isCancelled else { return }
-            var descriptor = FetchDescriptor<Work>(
-                sortBy: [SortDescriptor(\Work.uuid)]
-            )
-            descriptor.relationshipKeyPathsForPrefetching = [\Work.editions]
-            descriptor.fetchOffset = offset
-            descriptor.fetchLimit = max(1, chunkSize)
-            guard let works = try? modelContext.fetch(descriptor) else { return }
-            for work in works {
-                let editions = work.editions
-                guard editions.count > 1 else { continue }
-                for edition in editions {
-                    counts[edition.uuid] = editions.count
-                }
-            }
-            offset += works.count
-            guard works.count == max(1, chunkSize) else { break }
-            await Task.yield()
-        }
-        guard !Task.isCancelled else { return }
-        editionCounts = counts
+        guard let snapshot = await loadCandidatesInChunks(chunkSize: chunkSize) else { return }
+        installCandidateIndex(
+            snapshot.candidates,
+            catalogRevision: snapshot.catalogRevision
+        )
+        synchronizeCandidateIndex(
+            regenerateProposals: true,
+            rebuildForMembershipChanges: true
+        )
     }
 
     @discardableResult
@@ -245,6 +240,7 @@ final class CatalogReconciliationService {
                 storedWork.author = trimmedAuthor.isEmpty ? nil : trimmedAuthor
                 storedWork.refreshMatchKey()
             }
+            evaluate(work.editions)
             return true
         } catch {
             return reportMutationFailure()
@@ -268,6 +264,7 @@ final class CatalogReconciliationService {
                 }
                 storedWork.preferredEditionUUID = storedBook.uuid
             }
+            refreshEditionCounts()
             return true
         } catch {
             return reportMutationFailure()
@@ -275,62 +272,105 @@ final class CatalogReconciliationService {
     }
 
     func scanLibrary(chunkSize: Int = 256) async {
-        var candidates: [EditionCandidate] = []
-        var offset = 0
-        while true {
+        guard let snapshot = await loadCandidatesInChunks(chunkSize: chunkSize) else { return }
+        installCandidateIndex(
+            snapshot.candidates,
+            catalogRevision: snapshot.catalogRevision
+        )
+        synchronizeCandidateIndex(rebuildForMembershipChanges: true)
+
+        while !Task.isCancelled {
+            synchronizeCandidateIndex()
+            let scanRevision = indexedCatalogRevision
+            let candidates = candidateIndex.allCandidates
+            let result = await EditionMatcher.scanWithMetrics(candidates)
             guard !Task.isCancelled else { return }
-            var descriptor = FetchDescriptor<Book>(
-                sortBy: [
-                    SortDescriptor(\Book.dateAdded),
-                    SortDescriptor(\Book.uuid),
-                ]
+            guard mutationLog.catalogRevision == scanRevision else { continue }
+
+            lastScanMetrics = result.metrics
+            pendingProposals = result.proposals.filter {
+                !dismissedPairKeys.contains($0.pairKey)
+            }
+            Log.persistence.debug(
+                "Edition scan indexed \(result.metrics.candidateCount) candidate(s), compared \(result.metrics.pairComparisonCount) pair(s), and truncated \(result.metrics.truncatedBucketCount) broad bucket(s)."
             )
-            descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
-            descriptor.fetchOffset = offset
-            descriptor.fetchLimit = max(1, chunkSize)
-            guard let books = try? modelContext.fetch(descriptor) else { return }
-            candidates.append(contentsOf: books.map(Self.candidate))
-            offset += books.count
-            guard books.count == max(1, chunkSize) else { break }
-            await Task.yield()
+            return
         }
-        let proposals = await EditionMatcher.scan(candidates)
-        guard !Task.isCancelled else { return }
-        pendingProposals = proposals.filter { !dismissedPairKeys.contains($0.pairKey) }
     }
 
     func evaluate(_ book: Book) {
-        let allBooks = modelContext.allBooks()
-        var index = EditionMatcher.CandidateIndex(allBooks.map(Self.candidate))
-        evaluate(
-            book,
-            index: &index
+        guard book.modelContext != nil else { return }
+        ensureCandidateIndex()
+        synchronizeCandidateIndex()
+        let candidate = Self.candidate(book)
+        let previousCandidate = candidateIndex.candidate(id: candidate.uuid)
+        apply(candidateIndex.update(candidate))
+        invalidateProposals(
+            affectedIDs: [candidate.uuid],
+            previousCandidates: [previousCandidate].compactMap { $0 },
+            updatedCandidates: [candidate]
+        )
+        let lookup = evaluate(candidate)
+        logEvaluation(
+            changedCandidateCount: 1,
+            bucketCandidateCount: lookup.bucketCandidateCount,
+            comparisonCount: lookup.matches.count,
+            truncatedBucketCount: lookup.truncatedBucketCount
         )
     }
 
     func evaluate(_ books: [Book]) {
         let books = books.filter { $0.modelContext != nil }
         guard !books.isEmpty else { return }
-        let allBooks = modelContext.allBooks()
-        var index = EditionMatcher.CandidateIndex(allBooks.map(Self.candidate))
-        for book in books {
-            evaluate(book, index: &index)
+        ensureCandidateIndex()
+        synchronizeCandidateIndex()
+        let candidates = books.map(Self.candidate)
+        let previousCandidates = candidates.compactMap {
+            candidateIndex.candidate(id: $0.uuid)
         }
+        apply(candidateIndex.update(candidates))
+        invalidateProposals(
+            affectedIDs: Set(candidates.map(\.uuid)),
+            previousCandidates: previousCandidates,
+            updatedCandidates: candidates
+        )
+        var bucketCandidateCount = 0
+        var comparisonCount = 0
+        var truncatedBucketCount = 0
+        for candidate in candidates {
+            let lookup = evaluate(candidate)
+            bucketCandidateCount += lookup.bucketCandidateCount
+            comparisonCount += lookup.matches.count
+            truncatedBucketCount += lookup.truncatedBucketCount
+        }
+        lastEvaluationCandidateCount = bucketCandidateCount
+        lastEvaluationComparisonCount = comparisonCount
+        lastEvaluationTruncatedBucketCount = truncatedBucketCount
+        logEvaluation(
+            changedCandidateCount: candidates.count,
+            bucketCandidateCount: bucketCandidateCount,
+            comparisonCount: comparisonCount,
+            truncatedBucketCount: truncatedBucketCount
+        )
     }
 
-    private func evaluate(
-        _ book: Book,
-        index: inout EditionMatcher.CandidateIndex
-    ) {
-        let candidate = Self.candidate(book)
-        let matches = index.matches(for: candidate)
-        let proposals = EditionMatcher.proposals(for: candidate, against: matches)
+    @discardableResult
+    private func evaluate(_ candidate: EditionCandidate) -> EditionCandidateLookup {
+        let lookup = candidateIndex.lookup(for: candidate)
+        lastEvaluationCandidateCount = lookup.bucketCandidateCount
+        lastEvaluationComparisonCount = lookup.matches.count
+        lastEvaluationTruncatedBucketCount = lookup.truncatedBucketCount
+        let proposals = (
+            EditionMatcher.proposals(for: candidate, against: lookup.matches)
+                + lookup.manualReviewProposals
+        )
             .filter { !dismissedPairKeys.contains($0.pairKey) }
-        guard !proposals.isEmpty else { return }
+        guard !proposals.isEmpty else { return lookup }
 
         let existing = Set(pendingProposals.map(\.pairKey))
         pendingProposals.append(contentsOf: proposals.filter { !existing.contains($0.pairKey) })
         pendingProposals.sort(by: EditionMatcher.proposalPrecedes)
+        return lookup
     }
 
     func dismiss(_ proposal: EditionMatchProposal) {
@@ -409,6 +449,28 @@ final class CatalogReconciliationService {
         pendingProposals.removeAll { proposal in
             proposal.memberUUIDs.contains { bookUUIDs.contains($0) }
         }
+        var removedIDs: Set<UUID> = []
+        var removedCandidates: [EditionCandidate] = []
+        for id in bookUUIDs {
+            do {
+                _ = try mutations.book(id: id)
+            } catch CatalogMutationError.modelNotFound {
+                removedIDs.insert(id)
+                if let candidate = candidateIndex.candidate(id: id) {
+                    removedCandidates.append(candidate)
+                }
+            } catch {
+                Log.persistence.error(
+                    "Edition index could not verify removed book \(id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+        apply(candidateIndex.remove(ids: removedIDs))
+        invalidateProposals(
+            affectedIDs: removedIDs,
+            previousCandidates: removedCandidates,
+            updatedCandidates: []
+        )
     }
 
     @discardableResult
@@ -853,6 +915,187 @@ final class CatalogReconciliationService {
         return AssetFileSnapshot(assetID: asset.uuid, fileName: asset.fileName, storedSHA256: hash)
     }
 
+    private func ensureCandidateIndex() {
+        guard !candidateIndexIsComplete else { return }
+        rebuildCandidateIndexSynchronously()
+    }
+
+    private func rebuildCandidateIndexSynchronously() {
+        var descriptor = FetchDescriptor<Book>(
+            sortBy: [
+                SortDescriptor(\Book.dateAdded),
+                SortDescriptor(\Book.uuid),
+            ]
+        )
+        descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
+        guard let books = try? modelContext.fetch(descriptor) else { return }
+        lastIndexSynchronizationFetchCount = books.count
+        installCandidateIndex(
+            books.map(Self.candidate),
+            catalogRevision: mutationLog.catalogRevision
+        )
+    }
+
+    private func loadCandidatesInChunks(
+        chunkSize: Int
+    ) async -> CandidateIndexSnapshot? {
+        let catalogRevision = mutationLog.catalogRevision
+        var candidates: [EditionCandidate] = []
+        var offset = 0
+        let limit = max(1, chunkSize)
+        while true {
+            guard !Task.isCancelled else { return nil }
+            var descriptor = FetchDescriptor<Book>(
+                sortBy: [
+                    SortDescriptor(\Book.dateAdded),
+                    SortDescriptor(\Book.uuid),
+                ]
+            )
+            descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
+            descriptor.fetchOffset = offset
+            descriptor.fetchLimit = limit
+            guard let books = try? modelContext.fetch(descriptor) else { return nil }
+            candidates.append(contentsOf: books.map(Self.candidate))
+            offset += books.count
+            guard books.count == limit else { break }
+            await Task.yield()
+        }
+        lastIndexSynchronizationFetchCount = candidates.count
+        return CandidateIndexSnapshot(
+            candidates: candidates,
+            catalogRevision: catalogRevision
+        )
+    }
+
+    private func installCandidateIndex(
+        _ candidates: [EditionCandidate],
+        catalogRevision: Int
+    ) {
+        candidateIndex = EditionCandidateIndex(candidates)
+        candidateIndexIsComplete = true
+        indexedCatalogRevision = catalogRevision
+        editionCounts = candidateIndex.editionCounts()
+    }
+
+    private func synchronizeCandidateIndex(
+        regenerateProposals: Bool = false,
+        rebuildForMembershipChanges: Bool = false
+    ) {
+        guard candidateIndexIsComplete else { return }
+        let delta = mutationLog.catalogDelta(since: indexedCatalogRevision)
+        guard !delta.isEmpty else { return }
+        guard !delta.requiresFullRebuild else {
+            rebuildCandidateIndexSynchronously()
+            // The journal no longer identifies which proposals became stale.
+            // A maintenance scan can rebuild them from the recovered index.
+            pendingProposals.removeAll()
+            return
+        }
+
+        let affectedIDs = delta.affectedBookIDs
+        let previousCandidates = affectedIDs.compactMap {
+            candidateIndex.candidate(id: $0)
+        }
+        if rebuildForMembershipChanges, delta.changesBookMembership {
+            rebuildCandidateIndexSynchronously()
+            let updatedCandidates = affectedIDs.compactMap {
+                candidateIndex.candidate(id: $0)
+            }
+            invalidateProposals(
+                affectedIDs: affectedIDs,
+                previousCandidates: previousCandidates,
+                updatedCandidates: updatedCandidates
+            )
+            if regenerateProposals {
+                evaluateAndLog(updatedCandidates)
+            }
+            return
+        }
+
+        lastIndexSynchronizationFetchCount = 0
+        var updatedCandidates: [EditionCandidate] = []
+        var removedIDs: Set<UUID> = []
+        for id in affectedIDs {
+            do {
+                let book = try mutations.book(id: id)
+                lastIndexSynchronizationFetchCount += 1
+                updatedCandidates.append(Self.candidate(book))
+            } catch CatalogMutationError.modelNotFound {
+                removedIDs.insert(id)
+            } catch {
+                Log.persistence.error(
+                    "Edition index could not load changed book \(id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+                return
+            }
+        }
+        apply(candidateIndex.remove(ids: removedIDs))
+        apply(candidateIndex.update(updatedCandidates))
+        indexedCatalogRevision = delta.toRevision
+        invalidateProposals(
+            affectedIDs: affectedIDs,
+            previousCandidates: previousCandidates,
+            updatedCandidates: updatedCandidates
+        )
+        if regenerateProposals {
+            evaluateAndLog(updatedCandidates)
+        }
+    }
+
+    private func apply(_ patch: EditionCountPatch) {
+        for id in patch.removedBookIDs { editionCounts.removeValue(forKey: id) }
+        editionCounts.merge(patch.countsByBookID) { _, new in new }
+    }
+
+    private func invalidateProposals(
+        affectedIDs: Set<UUID>,
+        previousCandidates: [EditionCandidate],
+        updatedCandidates: [EditionCandidate]
+    ) {
+        let manualReviewKeys = Set(
+            (previousCandidates + updatedCandidates)
+                .flatMap(EditionMatcher.bucketKeys)
+                .map(EditionMatcher.manualReviewPairKey)
+        )
+        pendingProposals.removeAll { proposal in
+            proposal.memberUUIDs.contains(where: affectedIDs.contains)
+                || manualReviewKeys.contains(proposal.pairKey)
+        }
+    }
+
+    private func evaluateAndLog(_ candidates: [EditionCandidate]) {
+        guard !candidates.isEmpty else { return }
+        var bucketCandidateCount = 0
+        var comparisonCount = 0
+        var truncatedBucketCount = 0
+        for candidate in candidates {
+            let lookup = evaluate(candidate)
+            bucketCandidateCount += lookup.bucketCandidateCount
+            comparisonCount += lookup.matches.count
+            truncatedBucketCount += lookup.truncatedBucketCount
+        }
+        lastEvaluationCandidateCount = bucketCandidateCount
+        lastEvaluationComparisonCount = comparisonCount
+        lastEvaluationTruncatedBucketCount = truncatedBucketCount
+        logEvaluation(
+            changedCandidateCount: candidates.count,
+            bucketCandidateCount: bucketCandidateCount,
+            comparisonCount: comparisonCount,
+            truncatedBucketCount: truncatedBucketCount
+        )
+    }
+
+    private func logEvaluation(
+        changedCandidateCount: Int,
+        bucketCandidateCount: Int,
+        comparisonCount: Int,
+        truncatedBucketCount: Int
+    ) {
+        Log.persistence.debug(
+            "Edition index updated \(changedCandidateCount) candidate(s), fetched \(self.lastIndexSynchronizationFetchCount) model(s), visited \(bucketCandidateCount) bucket member(s), compared \(comparisonCount) pair(s), and truncated \(truncatedBucketCount) broad bucket(s)."
+        )
+    }
+
     private func lookupBook(uuid: UUID) -> Book? {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == uuid })
         return try? modelContext.fetch(descriptor).first
@@ -882,13 +1125,19 @@ final class CatalogReconciliationService {
     }
 
     private func removeResolvedProposals() {
-        let workByBook = Dictionary(uniqueKeysWithValues: modelContext.allBooks().compactMap { book in
-            book.work.map { (book.uuid, $0.uuid) }
-        })
+        ensureCandidateIndex()
+        synchronizeCandidateIndex()
+        let index = candidateIndex
         pendingProposals.removeAll { proposal in
+            if proposal.needsManualReview {
+                return proposal.memberUUIDs.filter {
+                    index.candidate(id: $0) != nil
+                }.count < 2
+            }
             guard proposal.memberUUIDs.count == 2,
-                  let left = workByBook[proposal.memberUUIDs[0]],
-                  let right = workByBook[proposal.memberUUIDs[1]] else { return true }
+                  let left = index.candidate(id: proposal.memberUUIDs[0])?.workUUID,
+                  let right = index.candidate(id: proposal.memberUUIDs[1])?.workUUID
+            else { return true }
             guard left == right else { return false }
             switch proposal.verdict {
             case .sameWorkOtherEdition, .similarItem:
@@ -915,7 +1164,8 @@ final class CatalogReconciliationService {
             format: book.format,
             sizeBytes: book.fileSizeBytes,
             contentHashes: Set(book.assets.compactMap(\.contentHash)),
-            openLibraryWorkKey: book.work?.openLibraryWorkKey
+            openLibraryWorkKey: book.work?.openLibraryWorkKey,
+            workMatchKey: book.work?.matchKey
         )
     }
 

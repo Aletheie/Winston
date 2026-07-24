@@ -1016,7 +1016,6 @@ final class MaintenanceScheduler {
     private func runEditionDiscovery() async throws {
         let progress = MaintenanceProgress(job: .editionDiscovery, completed: 0, total: 1)
         try await waitUntilRunnable(progress)
-        await editions.refreshEditionCountsInChunks()
         await editions.scanLibrary()
         try Task.checkCancellation()
         phase = .running(MaintenanceProgress(

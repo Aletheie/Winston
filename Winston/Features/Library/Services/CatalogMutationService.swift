@@ -622,8 +622,11 @@ final class CatalogMutationService {
 
     func books(ids: Set<UUID>) throws -> [Book] {
         guard !ids.isEmpty else { return [] }
-        let books = try modelContext.fetch(FetchDescriptor<Book>())
-            .filter { ids.contains($0.uuid) }
+        let requestedIDs = Array(ids)
+        let descriptor = FetchDescriptor<Book>(
+            predicate: #Predicate { requestedIDs.contains($0.uuid) }
+        )
+        let books = try modelContext.fetch(descriptor)
         guard books.count == ids.count else {
             throw CatalogMutationError.modelNotFound
         }
@@ -641,8 +644,11 @@ final class CatalogMutationService {
 
     func works(ids: Set<UUID>) throws -> [Work] {
         guard !ids.isEmpty else { return [] }
-        let works = try modelContext.fetch(FetchDescriptor<Work>())
-            .filter { ids.contains($0.uuid) }
+        let requestedIDs = Array(ids)
+        let descriptor = FetchDescriptor<Work>(
+            predicate: #Predicate { requestedIDs.contains($0.uuid) }
+        )
+        let works = try modelContext.fetch(descriptor)
         guard works.count == ids.count else {
             throw CatalogMutationError.modelNotFound
         }
