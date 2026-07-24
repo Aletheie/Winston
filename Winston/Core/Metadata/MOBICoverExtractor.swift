@@ -4,9 +4,12 @@ nonisolated enum MOBICoverExtractor {
     private static let maxImageRecordBytes = 32 * 1_024 * 1_024
 
     static func coverData(from url: URL) -> Data? {
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
-              data.count > 132 else { return nil }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+        return coverData(from: data)
+    }
 
+    static func coverData(from data: Data) -> Data? {
+        guard data.count > 132 else { return nil }
         let recordCount = Int(data.readUInt16BE(at: 76))
         guard recordCount > 1,
               78 + recordCount * 8 <= data.count else { return nil }

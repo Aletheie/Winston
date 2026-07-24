@@ -391,10 +391,33 @@ final class MetadataService {
 
     @discardableResult
     func performEnrich(_ book: Book, replaceCover: Bool) async -> Bool {
-        guard let snapshot = BookAnalysisSnapshot(book: book) else { return false }
+        await performEnrich(bookID: book.uuid, replaceCover: replaceCover)
+    }
+
+    /// ID-only entry point for import/background jobs. The context-bound model
+    /// is released before the first suspension point.
+    @discardableResult
+    func performEnrich(bookID: UUID, replaceCover: Bool) async -> Bool {
+        let input: (BookAnalysisSnapshot, Int)
+        do {
+            guard let book = try? mutations.book(id: bookID),
+                  let snapshot = BookAnalysisSnapshot(book: book) else { return false }
+            input = (snapshot, book.coverVersion)
+        }
+        return await performEnrich(
+            snapshot: input.0,
+            coverVersion: input.1,
+            replaceCover: replaceCover
+        )
+    }
+
+    private func performEnrich(
+        snapshot: BookAnalysisSnapshot,
+        coverVersion: Int,
+        replaceCover: Bool
+    ) async -> Bool {
         let uuid = snapshot.bookID
         let hasCover = CoverStore.exists(for: uuid)
-        let coverVersion = book.coverVersion
         let coverToken = replaceCover
             ? await covers.beginUserMutation(for: uuid)
             : await covers.beginBackgroundMutation(for: uuid)

@@ -13,6 +13,11 @@ nonisolated enum DRMDetector {
 
     private static func mobiEncrypted(_ url: URL) -> Bool {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), data.count > 132 else { return false }
+        return mobiEncrypted(data)
+    }
+
+    static func mobiEncrypted(_ data: Data) -> Bool {
+        guard data.count > 132 else { return false }
         guard Int(data.readUInt16BE(at: 76)) > 0 else { return false }
         let record0 = Int(data.readUInt32BE(at: 78))
         guard record0 + 14 <= data.count else { return false }

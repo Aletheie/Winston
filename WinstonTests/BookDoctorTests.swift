@@ -131,6 +131,21 @@ struct BookDoctorTests {
         #expect(analysis.validation == .corrupt)
     }
 
+    @Test func importAnalysisSharesOneEPUBArchiveAcrossAllExtractors() async throws {
+        let url = try EPUBFixture.make(title: "One Pass", author: "A")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        #expect(EPUBArchive.openCount(for: url) == 0)
+        let analysis = await ImportService.defaultAnalysis(for: url)
+
+        #expect(EPUBArchive.openCount(for: url) == 1)
+        #expect(analysis.fileOpenCount == 1)
+        #expect(analysis.metadata.title == "One Pass")
+        #expect(analysis.metadata.author == "A")
+        #expect(analysis.coverJPEGData != nil)
+        #expect(analysis.validation == .ok)
+    }
+
     @Test func drmEPUBCanBeArchivedButNotSent() throws {
         let url = try EPUBFixture.makeWithOPF(
             """

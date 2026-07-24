@@ -223,9 +223,32 @@ nonisolated enum BookDoctorService {
 
     private static func inspectEPUB(_ source: BookDoctorSource) -> BookDoctorReport {
         do {
-            let inspection = try inspectEPUBArchive(source.url)
+            let archive = try EPUBArchive(url: source.url)
+            return try inspectEPUB(source, archive: archive)
+        } catch let error as EPUBReader.ReadError {
+            return report(source, "epub", nil, [issue(
+                .unreadable, .error,
+                "Unreadable EPUB",
+                LocalizedStringResource(stringLiteral: error.localizedDescription)
+            )])
+        } catch {
+            return report(source, "epub", nil, [issue(
+                .unreadable, .error,
+                "Unreadable EPUB",
+                "The EPUB container or package document is damaged."
+            )])
+        }
+    }
+
+    /// Import inspection threads one already-open archive through validation,
+    /// metadata and cover extraction instead of reopening the same EPUB.
+    static func inspectEPUB(
+        _ source: BookDoctorSource,
+        archive: EPUBArchive
+    ) throws -> BookDoctorReport {
+            let inspection = try inspectEPUBArchive(archive)
             var issues: [BookDoctorIssue] = []
-            if DRMDetector.isProtected(url: source.url) {
+            if archive.entry("META-INF/rights.xml") != nil {
                 issues.append(issue(
                     .drm, .error,
                     "DRM protection detected",
@@ -280,19 +303,6 @@ nonisolated enum BookDoctorService {
             }
             appendSampleIssue(pageCount: inspection.pageCount, to: &issues)
             return report(source, "epub", inspection.pageCount, issues)
-        } catch let error as EPUBReader.ReadError {
-            return report(source, "epub", nil, [issue(
-                .unreadable, .error,
-                "Unreadable EPUB",
-                LocalizedStringResource(stringLiteral: error.localizedDescription)
-            )])
-        } catch {
-            return report(source, "epub", nil, [issue(
-                .unreadable, .error,
-                "Unreadable EPUB",
-                "The EPUB container or package document is damaged."
-            )])
-        }
     }
 
     private static func inspectPDF(_ source: BookDoctorSource) -> BookDoctorReport {
@@ -370,6 +380,10 @@ nonisolated enum BookDoctorService {
 
     private static func inspectEPUBArchive(_ url: URL) throws -> EPUBInspection {
         let archive = try EPUBArchive(url: url)
+        return try inspectEPUBArchive(archive)
+    }
+
+    private static func inspectEPUBArchive(_ archive: EPUBArchive) throws -> EPUBInspection {
         guard let container = archive.entry("META-INF/container.xml"),
               let opfPath = MetadataExtractor.parseOPFPath(from: container) else {
             throw EPUBReader.ReadError.notAnEPUB

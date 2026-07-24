@@ -20,8 +20,12 @@ enum MetadataExtractor {
     // MARK: - EPUB
 
     nonisolated private static func extractEPUB(from url: URL) -> BookMetadata {
-        guard let archive = try? EPUBArchive(url: url),
-              let containerData = archive.entry("META-INF/container.xml"),
+        guard let archive = try? EPUBArchive(url: url) else { return BookMetadata() }
+        return extractEPUB(from: archive)
+    }
+
+    nonisolated static func extractEPUB(from archive: EPUBArchive) -> BookMetadata {
+        guard let containerData = archive.entry("META-INF/container.xml"),
               let opfPath = parseOPFPath(from: containerData),
               let opfData = archive.entry(opfPath),
               let doc = try? XMLDocument(data: opfData, options: .nodeLoadExternalEntitiesNever) else {
@@ -85,9 +89,14 @@ enum MetadataExtractor {
     // MARK: - MOBI / AZW3
 
     nonisolated private static func extractMOBI(from url: URL) -> BookMetadata {
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
-              data.count > 132 else { return BookMetadata() }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            return BookMetadata()
+        }
+        return extractMOBI(from: data)
+    }
 
+    nonisolated static func extractMOBI(from data: Data) -> BookMetadata {
+        guard data.count > 132 else { return BookMetadata() }
         let numRecords = Int(data.readUInt16BE(at: 76))
         guard numRecords > 0 else { return BookMetadata() }
 
@@ -143,6 +152,10 @@ enum MetadataExtractor {
     nonisolated private static func extractPDF(from url: URL) -> BookMetadata {
         guard PDFReader.isWithinSizeLimit(url),
               let doc = PDFDocument(url: url) else { return BookMetadata() }
+        return extractPDF(from: doc)
+    }
+
+    nonisolated static func extractPDF(from doc: PDFDocument) -> BookMetadata {
         var meta = BookMetadata()
         let attrs = doc.documentAttributes ?? [:]
         meta.title = attrs[PDFDocumentAttribute.titleAttribute] as? String
@@ -157,8 +170,14 @@ enum MetadataExtractor {
     // MARK: - HTML
 
     nonisolated private static func extractHTML(from url: URL) -> BookMetadata {
-        guard let data = PageCountEstimator.boundedTextData(at: url),
-              let raw = String(data: data, encoding: .utf8)
+        guard let data = PageCountEstimator.boundedTextData(at: url) else {
+            return BookMetadata()
+        }
+        return extractHTML(from: data)
+    }
+
+    nonisolated static func extractHTML(from data: Data) -> BookMetadata {
+        guard let raw = String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1) else {
             return BookMetadata()
         }
@@ -180,8 +199,18 @@ enum MetadataExtractor {
     // MARK: - TXT
 
     nonisolated private static func extractTXT(from url: URL) -> BookMetadata {
+        guard let data = PageCountEstimator.boundedTextData(at: url) else {
+            return BookMetadata()
+        }
+        return extractTXT(from: data)
+    }
+
+    nonisolated static func extractTXT(from data: Data) -> BookMetadata {
         var meta = BookMetadata()
-        meta.pageCount = PageCountEstimator.pageCountSync(at: url, format: "txt")
+        if let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1) {
+            meta.pageCount = PageCountEstimator.pages(forCharacters: text.count)
+        }
         return meta
     }
 

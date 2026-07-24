@@ -47,6 +47,16 @@ private actor ImmediateConversionWorker {
     }
 }
 
+@MainActor
+private final class ImportSaveCounter {
+    private(set) var count = 0
+
+    func save(_ context: ModelContext) throws {
+        count += 1
+        try context.save()
+    }
+}
+
 private actor ConversionCheckpointGate {
     private var reached = false
     private var reachWaiters: [CheckedContinuation<Void, Never>] = []
@@ -695,6 +705,47 @@ struct MultiFileBackendTests {
 
         #expect(!importer.isExtracting)
         #expect(await gate.maximumConcurrency() == 2)
+    }
+
+    @Test func bulkImportCommitsOnlyOneSavePerDurableChunk() async throws {
+        let library = try await TestLibrary()
+        let sources = try (0..<7).map { index in
+            let url = library.root.appending(path: "chunked-\(index).epub")
+            try Data("book \(index)".utf8).write(to: url)
+            return url
+        }
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let saveCounter = ImportSaveCounter()
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            saveAdapter: CatalogSaveAdapter { context in
+                try saveCounter.save(context)
+            }
+        )
+        let importer = ImportService(
+            modelContext: library.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: library.context, settings: settings),
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
+            toasts: ToastCenter(),
+            mutations: mutations,
+            maximumConcurrentMetadataJobs: 2,
+            importCommitChunkSize: 3,
+            analyzeBook: { _ in
+                ImportBookAnalysis(metadata: BookMetadata(), drmProtected: false)
+            }
+        )
+
+        let importedCount = await withCheckedContinuation { continuation in
+            importer.addBooks(from: sources) { books in
+                continuation.resume(returning: books.count)
+            }
+        }
+
+        #expect(importedCount == sources.count)
+        #expect(library.context.allBooks().count == sources.count)
+        #expect(saveCounter.count == 3)
     }
 
     @Test func relinkAfterMakePrimaryUpdatesTheCurrentPrimaryAsset() async throws {

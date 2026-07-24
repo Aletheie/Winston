@@ -11,13 +11,21 @@ nonisolated final class EPUBArchive {
         var rejectedEntry = false
     }
 
+    private struct EntryCache {
+        var dataByPath: [String: Data] = [:]
+        var missingPaths: Set<String> = []
+        var byteCount = 0
+    }
+
     private static let maxEntryBytes: UInt64 = 64 * 1_024 * 1_024
     private static let maxArchiveBytes: UInt64 = 256 * 1_024 * 1_024
     private static let maxCompressionRatio: UInt64 = 200
+    private static let maxCachedBytes = 32 * 1_024 * 1_024
 
     private let archive: Archive
     private let url: URL
     private let extractionBudget = OSAllocatedUnfairLock(initialState: ExtractionBudget())
+    private let entryCache = OSAllocatedUnfairLock(initialState: EntryCache())
 
     var rejectedUnsafeEntry: Bool {
         extractionBudget.withLock { $0.rejectedEntry }
@@ -49,7 +57,17 @@ nonisolated final class EPUBArchive {
     }
 
     private func rawEntry(_ path: String) -> Data? {
-        guard let entry = archive[path] else { return nil }
+        let cached = entryCache.withLock { cache -> (known: Bool, data: Data?) in
+            if let data = cache.dataByPath[path] { return (true, data) }
+            return (cache.missingPaths.contains(path), nil)
+        }
+        if cached.known { return cached.data }
+        guard let entry = archive[path] else {
+            entryCache.withLock { cache in
+                _ = cache.missingPaths.insert(path)
+            }
+            return nil
+        }
         guard reserve(entry, path: path) else {
             Log.metadata.error("Refusing oversized EPUB entry \(path, privacy: .public) in \(self.url.lastPathComponent, privacy: .public)")
             return nil
@@ -61,10 +79,25 @@ nonisolated final class EPUBArchive {
             }
         } catch {
             release(size: entry.uncompressedSize, path: path)
+            entryCache.withLock { cache in
+                _ = cache.missingPaths.insert(path)
+            }
             Log.metadata.error("Extracting \(path, privacy: .public) from \(self.url.lastPathComponent, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
-        return data.isEmpty ? nil : data
+        guard !data.isEmpty else {
+            entryCache.withLock { cache in
+                _ = cache.missingPaths.insert(path)
+            }
+            return nil
+        }
+        let extractedData = data
+        entryCache.withLock { cache in
+            guard extractedData.count <= Self.maxCachedBytes - cache.byteCount else { return }
+            cache.dataByPath[path] = extractedData
+            cache.byteCount += extractedData.count
+        }
+        return extractedData
     }
 
     private func reserve(_ entry: Entry, path: String) -> Bool {

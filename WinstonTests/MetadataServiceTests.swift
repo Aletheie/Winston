@@ -578,7 +578,7 @@ struct MetadataServiceTests {
         #expect(service.enrichingUUIDs.isEmpty)
     }
 
-    @Test func deletingBookDuringImportAnalysisDiscardsLateMetadata() async throws {
+    @Test func cancellingImportAnalysisLeavesNoLiveModelOrManagedFile() async throws {
         let lib = try await TestLibrary()
         let settings = AppSettings()
         let oldOnline = settings.onlineMetadataEnabled
@@ -602,28 +602,23 @@ struct MetadataServiceTests {
 
         importer.addBooks(from: [source])
         await gate.waitUntilStarted()
-        let imported = try #require(lib.context.allBooks().first)
-        let fileName = imported.fileName
-        let uuid = imported.uuid
-        BookFileStore.delete(fileName: fileName)
-        CoverStore.delete(for: uuid)
+        #expect(lib.context.allBooks().isEmpty)
+        let uuid = try #require(importer.pendingMetadataUUIDs.first)
         importer.cancelPending(uuid)
-        lib.context.delete(imported)
-        lib.context.saveQuietly()
         await gate.resume()
 
         let deadline = Date.now.addingTimeInterval(1)
-        while importer.pendingMetadataUUIDs.contains(uuid), Date.now < deadline {
+        while importer.isExtracting, Date.now < deadline {
             try? await Task.sleep(for: .milliseconds(10))
         }
         #expect(lib.context.allBooks().isEmpty)
         #expect(!FileManager.default.fileExists(
-            atPath: BookFileStore.url(for: fileName).path(percentEncoded: false)
+            atPath: BookFileStore.url(for: "\(uuid.uuidString).epub").path(percentEncoded: false)
         ))
         #expect(!importer.pendingMetadataUUIDs.contains(uuid))
     }
 
-    @Test func replacingPrimaryAssetDuringImportAnalysisDiscardsTheEntireInspection() async throws {
+    @Test func replacingSourceDuringImportAnalysisDoesNotChangeStagedGeneration() async throws {
         let lib = try await TestLibrary()
         let settings = AppSettings()
         let oldOnline = settings.onlineMetadataEnabled
@@ -631,7 +626,9 @@ struct MetadataServiceTests {
         defer { settings.onlineMetadataEnabled = oldOnline }
 
         let source = lib.root.appending(path: "replace-during-analysis.epub")
-        try Data("original fixture".utf8).write(to: source)
+        let originalData = Data("original fixture".utf8)
+        try originalData.write(to: source)
+        let originalHash = try ContentHasher.sha256(of: source)
         let metadata = MetadataService(
             modelContext: lib.context,
             settings: settings,
@@ -649,31 +646,27 @@ struct MetadataServiceTests {
 
         importer.addBooks(from: [source])
         await gate.waitUntilStarted()
-        let book = try #require(lib.context.allBooks().first)
-        let asset = try #require(book.assets.first(where: { $0.fileName == book.fileName }))
-        asset.contentHash = "replacement-content"
-        asset.dateAdded = asset.dateAdded.addingTimeInterval(1)
-        try lib.context.save()
+        #expect(lib.context.allBooks().isEmpty)
+        try Data("replacement content".utf8).write(to: source)
 
-        var staleMetadata = BookMetadata()
-        staleMetadata.title = "Metadata From Old Bytes"
-        staleMetadata.isbn = "9780000000999"
-        staleMetadata.pageCount = 999
+        var inspectedMetadata = BookMetadata()
+        inspectedMetadata.title = "Metadata From Staged Bytes"
         await gate.resume(with: ImportBookAnalysis(
-            metadata: staleMetadata,
-            drmProtected: true,
-            validation: .corrupt
+            metadata: inspectedMetadata,
+            drmProtected: false,
+            validation: .ok
         ))
 
         let deadline = Date.now.addingTimeInterval(1)
-        while importer.pendingMetadataUUIDs.contains(book.uuid), Date.now < deadline {
+        while (lib.context.allBooks().isEmpty || importer.isExtracting), Date.now < deadline {
             try? await Task.sleep(for: .milliseconds(10))
         }
-        #expect(book.title == nil)
-        #expect(book.isbn == nil)
-        #expect(book.pageCount == nil)
-        #expect(book.drmProtected == nil)
-        #expect(asset.validationStatus == nil)
+        let book = try #require(lib.context.allBooks().first)
+        let asset = try #require(book.assets.first)
+        #expect(book.title == "Metadata From Staged Bytes")
+        #expect(try Data(contentsOf: book.fileURL) == originalData)
+        #expect(asset.contentHash == originalHash)
+        #expect(asset.validationStatus == .ok)
     }
 
     @Test func importRefreshesWorkIdentityAfterOnlineEnrichment() async throws {
