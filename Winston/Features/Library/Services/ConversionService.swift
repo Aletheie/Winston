@@ -124,18 +124,21 @@ final class ConversionService {
     private struct BookPreimage {
         let book: Book
         let fileName: String
+        let primaryAssetUUID: UUID?
         let fileSizeBytes: Int64
         let coverVersion: Int
 
         init(_ book: Book) {
             self.book = book
             fileName = book.fileName
+            primaryAssetUUID = book.primaryAssetUUID
             fileSizeBytes = book.fileSizeBytes
             coverVersion = book.coverVersion
         }
 
         func restore() {
             book.fileName = fileName
+            book.primaryAssetUUID = primaryAssetUUID
             book.fileSizeBytes = fileSizeBytes
             book.coverVersion = coverVersion
         }
@@ -301,19 +304,21 @@ final class ConversionService {
         for book: Book,
         to format: EbookConverter.OutputFormat
     ) -> Request? {
-        let sourceAsset = primaryAsset(in: book).map {
-            Self.sourceGeneration(of: $0, primaryFileName: book.fileName)
+        let primaryAsset = primaryAsset(in: book)
+        let sourceFileName = primaryAsset?.fileName ?? book.fileName
+        let sourceAsset = primaryAsset.map {
+            Self.sourceGeneration(of: $0, primaryAssetID: $0.uuid)
         }
         let target = Self.targetGeneration(for: book, format: format.ext)
         if let replacementAssetUUID = target.replacementAssetUUID,
            replacementAssetUUID == sourceAsset?.uuid {
             return nil
         }
-        guard let sourceURL = BookFileStore.catalogURL(for: book.fileName) else { return nil }
+        guard let sourceURL = BookFileStore.catalogURL(for: sourceFileName) else { return nil }
         return Request(
             uuid: book.uuid,
             sourceURL: sourceURL,
-            sourceFileName: book.fileName,
+            sourceFileName: sourceFileName,
             sourceAsset: sourceAsset,
             coverVersion: book.coverVersion,
             newAssetUUID: UUID(),
@@ -557,6 +562,7 @@ final class ConversionService {
                     insertedAsset = asset
                 }
                 if replacement?.isPrimary == true {
+                    liveBook.primaryAssetUUID = liveTarget?.uuid
                     liveBook.fileName = newFileName
                     liveBook.fileSizeBytes = stagedBook.byteCount
                 }
@@ -588,13 +594,16 @@ final class ConversionService {
         if Self.targetGeneration(for: book, format: request.target.format) != request.target {
             return .targetChanged
         }
-        guard book.fileName == request.sourceFileName,
+        guard (book.primaryAsset?.fileName ?? book.fileName) == request.sourceFileName,
               book.coverVersion == request.coverVersion else {
             return .sourceChanged
         }
         if let expectedSource = request.sourceAsset {
             guard let source = book.assets.first(where: { $0.uuid == expectedSource.uuid }),
-                  Self.sourceGeneration(of: source, primaryFileName: book.fileName) == expectedSource else {
+                  Self.sourceGeneration(
+                    of: source,
+                    primaryAssetID: book.primaryAsset?.uuid
+                  ) == expectedSource else {
                 return .sourceChanged
             }
         } else if book.assets.contains(where: { $0.fileName == request.sourceFileName }) {
@@ -659,15 +668,14 @@ final class ConversionService {
     }
 
     private func primaryAsset(in book: Book) -> BookAsset? {
-        let candidates = book.assets.filter { $0.fileName == book.fileName }
-        return candidates.first(where: { $0.uuid == book.uuid })
-            ?? candidates.min { $0.uuid.uuidString < $1.uuid.uuidString }
+        book.primaryAsset
     }
 
     private static func targetGeneration(for book: Book, format: String) -> TargetGeneration {
+        let primaryAssetID = book.primaryAsset?.uuid
         let assets = book.assets
             .filter { $0.format.lowercased() == format }
-            .map { generation(of: $0, primaryFileName: book.fileName) }
+            .map { generation(of: $0, primaryAssetID: primaryAssetID) }
             .sorted { $0.uuid.uuidString < $1.uuid.uuidString }
         let replacement = assets
             .filter { $0.originRaw == AssetOrigin.generated.rawValue }
@@ -681,7 +689,7 @@ final class ConversionService {
 
     private static func generation(
         of asset: BookAsset,
-        primaryFileName: String
+        primaryAssetID: UUID?
     ) -> AssetGeneration {
         AssetGeneration(
             uuid: asset.uuid,
@@ -692,19 +700,19 @@ final class ConversionService {
             sizeBytes: asset.sizeBytes,
             originRaw: asset.originRaw,
             validationStatusRaw: asset.validationStatusRaw,
-            isPrimary: asset.fileName == primaryFileName
+            isPrimary: asset.uuid == primaryAssetID
         )
     }
 
     private static func sourceGeneration(
         of asset: BookAsset,
-        primaryFileName: String
+        primaryAssetID: UUID?
     ) -> SourceGeneration {
         SourceGeneration(
             uuid: asset.uuid,
             fileName: asset.fileName,
             dateAdded: asset.dateAdded,
-            isPrimary: asset.fileName == primaryFileName
+            isPrimary: asset.uuid == primaryAssetID
         )
     }
 }

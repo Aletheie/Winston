@@ -223,7 +223,7 @@ struct TransferQueueTests {
         #expect(receipt.coverVersion == book.coverVersion)
     }
 
-    @Test func actualReceiptHashMatchesLaterSyncCandidateWithoutCatalogHash() async throws {
+    @Test func unhashedCatalogCandidateUsesAssetIdentityWithoutReadingFileDuringPlanning() async throws {
         let lib = try await TestLibrary()
         let book = try makeMOBIBook(in: lib, title: "Unhashed Receipt")
         var records: [KindleSyncTransferRecord] = []
@@ -264,7 +264,8 @@ struct TransferQueueTests {
             )
         )
 
-        #expect(candidate.sourceFingerprint == record.sourceFingerprint)
+        #expect(candidate.sourceFingerprint.hasPrefix("fallback:"))
+        #expect(candidate.sourceFingerprint != record.sourceFingerprint)
         #expect(plan.items.first?.action == .keep)
     }
 

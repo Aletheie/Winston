@@ -387,15 +387,85 @@ struct MetadataServiceTests {
         #expect(c.tags == ["romance"])
     }
 
+    @Test func identityScopeKeepsEditionAndWorkIdentityConsistent() async throws {
+        let lib = try await TestLibrary()
+        let work = Work(title: "Old Work", author: "Old Author")
+        let selected = Book(fileName: "selected.epub", originalFileName: "Selected.epub")
+        selected.title = "Old Edition"
+        selected.author = "Old Author"
+        let sibling = Book(fileName: "sibling.epub", originalFileName: "Sibling.epub")
+        sibling.title = "Translated Edition"
+        sibling.author = "Old Author"
+        for model in [selected, sibling] { lib.context.insert(model) }
+        lib.context.insert(work)
+        selected.work = work
+        sibling.work = work
+        try lib.context.save()
+        let service = makeService(in: lib, online: FakeOnlineClient())
+
+        #expect(service.updateMetadata(
+            for: selected,
+            title: "Correct Work",
+            author: "Correct Author",
+            publisher: nil,
+            year: nil,
+            series: nil,
+            seriesIndex: nil,
+            language: nil,
+            translator: nil,
+            isbn: nil,
+            description: nil,
+            tags: [],
+            shelfLocation: nil,
+            identityScope: .workIdentity
+        ))
+        #expect(selected.title == "Correct Work")
+        #expect(selected.author == "Correct Author")
+        #expect(work.title == "Correct Work")
+        #expect(work.author == "Correct Author")
+        #expect(sibling.title == "Translated Edition")
+        #expect(sibling.author == "Old Author")
+        #expect(work.matchKey == BookMatchKey(
+            title: "Correct Work",
+            author: "Correct Author"
+        ).storageValue)
+
+        #expect(service.updateMetadata(
+            for: selected,
+            title: "Shared Title",
+            author: "Shared Author",
+            publisher: nil,
+            year: nil,
+            series: nil,
+            seriesIndex: nil,
+            language: nil,
+            translator: nil,
+            isbn: nil,
+            description: nil,
+            tags: [],
+            shelfLocation: nil,
+            identityScope: .allEditions
+        ))
+        #expect(selected.title == "Shared Title")
+        #expect(sibling.title == "Shared Title")
+        #expect(selected.author == "Shared Author")
+        #expect(sibling.author == "Shared Author")
+        #expect(work.title == "Shared Title")
+        #expect(work.author == "Shared Author")
+    }
+
     @Test func renameSeriesAndAuthorTouchOnlyMatchingBooks() async throws {
         let lib = try await TestLibrary()
+        let work = Work(title: "A", author: "Old Author")
         let a = Book(fileName: "a.epub", originalFileName: "A.epub")
         a.series = "Old Series"
         a.author = "Old Author"
         let b = Book(fileName: "b.epub", originalFileName: "B.epub")
         b.series = "Other Series"
         b.author = "Other Author"
+        lib.context.insert(work)
         for book in [a, b] { lib.context.insert(book) }
+        a.work = work
         try lib.context.save()
 
         let service = makeService(in: lib, online: FakeOnlineClient())
@@ -404,6 +474,8 @@ struct MetadataServiceTests {
 
         #expect(a.series == "New Series")
         #expect(a.author == "New Author")
+        #expect(work.author == "New Author")
+        #expect(work.matchKey == BookMatchKey(title: "A", author: "New Author").storageValue)
         #expect(b.series == "Other Series")
         #expect(b.author == "Other Author")
     }
@@ -514,17 +586,12 @@ struct MetadataServiceTests {
         let online = FakeOnlineClient(result: fetched)
         let service = MetadataService(modelContext: lib.context, settings: settings, online: online)
 
-        service.backfillMissingOnlineMetadata()
-        let deadline = Date.now.addingTimeInterval(2)
-        while book.communityRating == nil, Date.now < deadline {
-            try? await Task.sleep(for: .milliseconds(20))
-        }
+        await service.backfillMissingOnlineMetadata()
 
         #expect(book.communityRating == 4.7)
         #expect(book.onlineLookupConfiguration?.contains("hardcover:none") == false)
         let callsAfterFirstBackfill = await online.fetchCalls
-        service.backfillMissingOnlineMetadata()
-        try? await Task.sleep(for: .milliseconds(100))
+        await service.backfillMissingOnlineMetadata()
         #expect(await online.fetchCalls == callsAfterFirstBackfill)
     }
 

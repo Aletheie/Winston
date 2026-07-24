@@ -102,7 +102,7 @@ final class NoticeService {
         isChecking = true
         defer { isChecking = false }
         let token = settings.hardcoverToken
-        let books = modelContext.allBooks()
+        let books = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
         prune(existingBookUUIDs: Set(books.map(\.uuid)))
         let seriesSources = books.compactMap { book -> NoticeSeriesSource? in
             guard let series = book.series, !series.isEmpty else { return nil }
@@ -283,7 +283,7 @@ final class NoticeService {
         let revision = LibraryMutationLog.shared.catalogRevision
         if cachedBooksRevision != revision {
             cachedBooksByID = Dictionary(
-                modelContext.allBooks().map { ($0.uuid, $0) },
+                ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []).map { ($0.uuid, $0) },
                 uniquingKeysWith: { first, _ in first }
             )
             cachedBooksRevision = revision

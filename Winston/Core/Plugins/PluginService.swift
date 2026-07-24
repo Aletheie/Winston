@@ -46,11 +46,13 @@ final class PluginService {
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
          online: any OnlineMetadataFetching = OnlineMetadataService(),
-         saveAdapter: CatalogSaveAdapter = .live) {
+         saveAdapter: CatalogSaveAdapter = .live,
+         libraryReadModel: LibraryReadModel? = nil) {
         self.settings = settings
         let mutations = CatalogMutationService(modelContext: modelContext, saveAdapter: saveAdapter)
         self.hostAPI = PluginHostAPI(modelContext: modelContext, settings: settings,
-                                     toasts: toasts, online: online, mutations: mutations)
+                                     toasts: toasts, online: online, mutations: mutations,
+                                     libraryReadModel: libraryReadModel)
     }
 
     // MARK: - Discovery

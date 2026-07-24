@@ -44,7 +44,7 @@ final class HighlightsService {
                 return
             }
             let clippings = await Task.detached(priority: .userInitiated) { KindleClippings.parse(text) }.value
-            let libraryBooks = modelContext.allBooks()
+            let libraryBooks = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
             let snapshots = libraryBooks.map { book in
                 BookSnapshot(
                     uuid: book.uuid,
@@ -69,7 +69,10 @@ final class HighlightsService {
                 affectedBookIDs.insert(book.uuid)
             }
             if !affectedBookIDs.isEmpty {
-                modelContext.saveQuietly(affectedBookIDs: affectedBookIDs)
+                modelContext.saveQuietly(
+                    affectedBookIDs: affectedBookIDs,
+                    fields: [.displayMetadata]
+                )
             }
             highlightImportSummary = added > 0
                 ? String(localized: "Imported \(added) highlight(s).")

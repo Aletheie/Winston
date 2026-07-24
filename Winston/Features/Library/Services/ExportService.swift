@@ -17,7 +17,9 @@ final class ExportService {
         guard !isExporting else { return }
         isExporting = true
         Task {
-            let rows = await Self.rowsYielding(for: modelContext.allBooks())
+            let rows = await Self.rowsYielding(
+                for: (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
+            )
             guard !rows.isEmpty else {
                 isExporting = false
                 return

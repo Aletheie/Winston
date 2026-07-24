@@ -47,7 +47,7 @@ nonisolated enum PluginValueLimits {
     }
 }
 
-nonisolated struct PluginBookDTO: Codable, Sendable {
+nonisolated struct PluginBookDTO: Codable, Sendable, Equatable {
     let uuid: String
     let title: String?
     let author: String?
@@ -123,6 +123,20 @@ nonisolated struct PluginBookDTO: Codable, Sendable {
             maximumBytes: PluginValueLimits.maximumShortTextBytes
         )
     }
+
+    var stableID: UUID? { UUID(uuidString: uuid) }
+
+    func matches(_ searchText: String) -> Bool {
+        searchText.isEmpty
+            || displayTitle.localizedCaseInsensitiveContains(searchText)
+            || displayAuthor?.localizedCaseInsensitiveContains(searchText) == true
+    }
+
+    static func precedes(_ lhs: PluginBookDTO, _ rhs: PluginBookDTO) -> Bool {
+        let titleOrder = lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle)
+        if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
+        return lhs.uuid < rhs.uuid
+    }
 }
 
 nonisolated struct PluginFetchedMetadataDTO: Codable, Sendable {
@@ -162,6 +176,11 @@ nonisolated struct PluginApplyResultDTO: Codable, Sendable {
 nonisolated struct PluginBookPageDTO: Codable, Sendable {
     let items: [PluginBookDTO]
     let nextCursor: String?
+}
+
+nonisolated struct PluginBookReadPage: Sendable, Equatable {
+    let items: [PluginBookDTO]
+    let nextOffset: Int?
 }
 
 nonisolated enum PluginLibraryLimits {
@@ -349,17 +368,20 @@ final class PluginHostAPI {
     private let toasts: ToastCenter
     private let online: any OnlineMetadataFetching
     private let mutations: CatalogMutationService
+    private let libraryReadModel: LibraryReadModel?
     private let storage = PluginStorageRepository()
     private let sessions = PluginSessionRegistry()
 
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
          online: any OnlineMetadataFetching = OnlineMetadataService(),
-         mutations: CatalogMutationService? = nil) {
+         mutations: CatalogMutationService? = nil,
+         libraryReadModel: LibraryReadModel? = nil) {
         self.modelContext = modelContext
         self.settings = settings
         self.toasts = toasts
         self.online = online
         self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
+        self.libraryReadModel = libraryReadModel
     }
 
     func openSession(for manifest: PluginManifest, contentDigest: String) -> PluginSessionLease {
@@ -409,7 +431,7 @@ final class PluginHostAPI {
         switch call {
         case .libraryList(let searchText, let cursor, let limit):
             if let denied = require(.libraryRead) { return .failure(denied) }
-            switch listBooks(matching: searchText, cursor: cursor, limit: limit) {
+            switch await listBooks(matching: searchText, cursor: cursor, limit: limit) {
             case .success(let page): return encode(page)
             case .failure(let error): return .failure(error)
             }
@@ -497,7 +519,7 @@ final class PluginHostAPI {
         matching searchText: String?,
         cursor: String?,
         limit: Int
-    ) -> Result<PluginBookPageDTO, PluginError> {
+    ) async -> Result<PluginBookPageDTO, PluginError> {
         guard (1 ... PluginLibraryLimits.maximumPageSize).contains(limit) else {
             return .failure(.invalidArgument(
                 "library.list limit must be between 1 and \(PluginLibraryLimits.maximumPageSize)"
@@ -520,6 +542,22 @@ final class PluginHostAPI {
         let scanLimit = needle.isEmpty
             ? limit
             : min(PluginLibraryLimits.maximumScannedBooksPerPage, max(limit * 5, limit))
+        if let page = await libraryReadModel?.pluginBooks(
+            matching: needle,
+            offset: offset,
+            limit: limit,
+            scanLimit: scanLimit,
+            maximumOffset: PluginLibraryLimits.maximumCursorOffset
+        ) {
+            return .success(PluginBookPageDTO(
+                items: page.items,
+                nextCursor: page.nextOffset.map { "v1:\($0)" }
+            ))
+        }
+
+        // Compatibility path for tests and the brief interval before the
+        // shared read model has bootstrapped. It is cursor-bounded and never
+        // performs the old unbounded fetch-all.
         var descriptor = FetchDescriptor<Book>(sortBy: [
             SortDescriptor(\Book.title),
             SortDescriptor(\Book.uuid),
@@ -588,7 +626,32 @@ final class PluginHostAPI {
                 revertingOnFailure: preimage.restore
             ) {
                 guard sessions.contains(session) else { throw Self.inactiveSessionError }
-                applied = applyFields(in: patch, to: try mutations.book(id: bookID))
+                let storedBook = try mutations.book(id: bookID)
+                let expected = Set(expectedFields)
+                var identityFields: Set<EditionIdentityField> = []
+                if expected.contains("title") { identityFields.insert(.title) }
+                if expected.contains("author") { identityFields.insert(.author) }
+                if expected.contains("isbn") { identityFields.insert(.isbn) }
+                if !identityFields.isEmpty {
+                    mutations.editionIdentity.apply(
+                        EditionIdentityPatch(
+                            fields: identityFields,
+                            title: patch.title,
+                            author: patch.author,
+                            isbn: patch.isbn
+                        ),
+                        to: storedBook,
+                        scope: .editionOnly
+                    )
+                    applied.append(contentsOf: expectedFields.filter {
+                        ["title", "author", "isbn"].contains($0)
+                    })
+                }
+                applied.append(contentsOf: applyFields(
+                    in: patch,
+                    to: storedBook,
+                    excluding: identityFields
+                ))
             }
             return .success(PluginApplyResultDTO(applied: applied))
         } catch {
@@ -616,20 +679,24 @@ final class PluginHostAPI {
         return fields
     }
 
-    private func applyFields(in patch: PluginMetadataPatch, to book: Book) -> [String] {
+    private func applyFields(
+        in patch: PluginMetadataPatch,
+        to book: Book,
+        excluding identityFields: Set<EditionIdentityField> = []
+    ) -> [String] {
         var applied: [String] = []
         func fill(_ keyPath: ReferenceWritableKeyPath<Book, String?>, _ value: String?, _ name: String) {
             guard let value, !value.isEmpty, (book[keyPath: keyPath] ?? "").isEmpty else { return }
             book[keyPath: keyPath] = value
             applied.append(name)
         }
-        fill(\.title, patch.title, "title")
-        fill(\.author, patch.author, "author")
+        if !identityFields.contains(.title) { fill(\.title, patch.title, "title") }
+        if !identityFields.contains(.author) { fill(\.author, patch.author, "author") }
         fill(\.publisher, patch.publisher, "publisher")
         fill(\.year, patch.year, "year")
         fill(\.language, patch.language, "language")
         fill(\.translator, patch.translator, "translator")
-        fill(\.isbn, patch.isbn, "isbn")
+        if !identityFields.contains(.isbn) { fill(\.isbn, patch.isbn, "isbn") }
         fill(\.series, patch.series, "series")
         fill(\.seriesIndex, patch.seriesIndex, "seriesIndex")
         fill(\.bookDescription, patch.description, "description")

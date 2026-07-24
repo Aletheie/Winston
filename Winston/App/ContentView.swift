@@ -12,6 +12,7 @@ enum MainDestination: Hashable {
 
 struct ContentView: View {
     var viewModel: LibraryViewModel
+    let libraryReadModel: LibraryReadModel
 
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
@@ -27,7 +28,13 @@ struct ContentView: View {
     @State private var watchStability = WatchFolderStabilityTracker()
     @State private var watchScanTask: Task<Void, Never>?
     @State private var activeLibrarySheet: LibrarySheet?
-    @State private var libraryReadModel = LibraryReadModel()
+    init(
+        viewModel: LibraryViewModel,
+        libraryReadModel: LibraryReadModel = LibraryReadModel()
+    ) {
+        self.viewModel = viewModel
+        self.libraryReadModel = libraryReadModel
+    }
 
     private var destination: MainDestination {
         switch sidebarSelection {
@@ -131,7 +138,7 @@ struct ContentView: View {
                 }
             }
             guard !Task.isCancelled else { return }
-            viewModel.backfillOnlineMetadata()
+            await viewModel.backfillOnlineMetadata()
             await viewModel.notices.checkForNewReleasesIfDue()
         }
         .onChange(of: deviceMonitor.isConnected) { _, connected in
@@ -159,6 +166,10 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .showCatalogsDestination)) { _ in
             sidebarSelection = .catalogs
+        }
+        .onDisappear {
+            watchScanTask?.cancel()
+            viewModel.cancelLongRunningSessions()
         }
     }
 

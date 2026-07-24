@@ -25,6 +25,8 @@ nonisolated struct KindleTransferAssetGeneration: Equatable, Sendable {
     let assetID: UUID
     let fileName: String
     let format: String
+    let validationStatus: AssetValidation?
+    let origin: AssetOrigin
     let contentHash: String?
     let sizeBytes: Int64
     let dateAdded: Date
@@ -138,7 +140,6 @@ nonisolated enum DevicePathAllocator {
 nonisolated struct KindleSendDescriptor: Sendable {
     let bookUUID: UUID
     let assetGeneration: KindleTransferAssetGeneration
-    let sourceFileGeneration: TransferFileGeneration?
     let sourceIsPrimary: Bool
     let displayName: String
     let sourceURL: URL
@@ -167,15 +168,17 @@ nonisolated struct TransferArtifact: Sendable {
     let targetFileName: String
     let coverVersion: Int
 
-    init?(descriptor: KindleSendDescriptor) {
-        guard !descriptor.fileUnavailable,
-              let sourceFileGeneration = descriptor.sourceFileGeneration else { return nil }
+    init(
+        descriptor: KindleSendDescriptor,
+        sourceURL: URL,
+        sourceFileGeneration: TransferFileGeneration
+    ) {
         bookID = descriptor.bookUUID
         assetGeneration = descriptor.assetGeneration
         self.sourceFileGeneration = sourceFileGeneration
         sourceIsPrimary = descriptor.sourceIsPrimary
         displayName = descriptor.displayName
-        sourceURL = descriptor.sourceURL
+        self.sourceURL = sourceURL
         sourceFormat = descriptor.sourceFormat
         targetFileName = descriptor.targetFileName
         coverVersion = descriptor.coverVersion
@@ -188,6 +191,32 @@ nonisolated struct TransferArtifact: Sendable {
     func materialize(in directory: URL) async throws -> MaterializedTransferArtifact {
         try await TransferArtifactMaterializer.materialize(self, in: directory)
     }
+
+    /// Performs the only filesystem validation used by send preparation.
+    /// Descriptors and sync candidates remain cheap immutable catalog values;
+    /// the concrete file generation is captured immediately before staging.
+    @concurrent
+    static func prepare(
+        descriptor: KindleSendDescriptor
+    ) async throws -> TransferArtifact {
+        guard !descriptor.fileUnavailable,
+              let sourceURL = BookFileStore.validatedURL(
+                for: descriptor.assetGeneration.fileName
+              ),
+              let generation = TransferFileGeneration.capture(at: sourceURL)
+        else {
+            throw TransferArtifactError.sourceUnavailable
+        }
+        let catalogSize = descriptor.assetGeneration.sizeBytes
+        guard catalogSize <= 0 || generation.fileSize == catalogSize else {
+            throw TransferArtifactError.sourceChanged
+        }
+        return TransferArtifact(
+            descriptor: descriptor,
+            sourceURL: sourceURL,
+            sourceFileGeneration: generation
+        )
+    }
 }
 
 nonisolated struct MaterializedTransferArtifact: Sendable {
@@ -198,11 +227,13 @@ nonisolated struct MaterializedTransferArtifact: Sendable {
 }
 
 nonisolated enum TransferArtifactError: Error, LocalizedError {
+    case sourceUnavailable
     case sourceChanged
     case stagingFailed
 
     var errorDescription: String? {
         switch self {
+        case .sourceUnavailable: "The source file is unavailable."
         case .sourceChanged: "The source file changed while waiting to transfer."
         case .stagingFailed: "The source file could not be prepared for transfer."
         }
@@ -256,6 +287,10 @@ nonisolated private enum TransferArtifactMaterializer {
                 ofItemAtPath: destination.path(percentEncoded: false)
             )
             let fingerprint = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            if let expectedFingerprint = artifact.assetGeneration.contentHash,
+               expectedFingerprint.caseInsensitiveCompare(fingerprint) != .orderedSame {
+                throw TransferArtifactError.sourceChanged
+            }
             return MaterializedTransferArtifact(
                 artifact: artifact,
                 sourceURL: destination,
@@ -299,15 +334,16 @@ nonisolated struct KindleSendBookSnapshot: Sendable {
 enum KindleSendPreparation {
     @MainActor
     static func snapshot(for book: Book) -> KindleSendBookSnapshot {
-        KindleSendBookSnapshot(
+        let primaryAsset = book.primaryAsset
+        return KindleSendBookSnapshot(
             uuid: book.uuid,
             displayTitle: book.displayTitle,
             displayAuthor: book.displayAuthor,
             deviceMatchKey: book.deviceMatchKey,
             originalFileName: book.originalFileName,
-            primaryFileName: book.fileName,
-            primaryFormat: book.format,
-            primarySizeBytes: book.fileSizeBytes,
+            primaryFileName: primaryAsset?.fileName ?? book.fileName,
+            primaryFormat: primaryAsset?.format ?? book.format,
+            primarySizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
             dateAdded: book.dateAdded,
             coverVersion: book.coverVersion,
             drmProtected: book.drmProtected == true,
@@ -385,8 +421,8 @@ enum KindleSendPreparation {
             return option.generatedFromContentHash == primarySourceHash
         }
         let staleTarget = !generatedTargets.isEmpty && !hasCurrentTarget
-        let validatedSourceURL = BookFileStore.validatedURL(for: chosen.fileName)
-        let sourceURL = validatedSourceURL
+        let catalogSourceURL = BookFileStore.catalogURL(for: chosen.fileName)
+        let sourceURL = catalogSourceURL
             ?? AppPaths.booksDirectory.appending(path: ".invalid-managed-reference")
         let selectedAssetWasFound = selectedAssetID == nil || chosen.id == selectedAssetID
         let selectedAssetIsAvailable = chosen.validation != .missing
@@ -401,13 +437,9 @@ enum KindleSendPreparation {
             : selectedAssetIsAvailable
         let unavailable = !selectedAssetWasFound
             || !chosenAssetIsUsable
-            || validatedSourceURL == nil
-        let sourceFileGeneration = validatedSourceURL.flatMap(TransferFileGeneration.capture)
+            || catalogSourceURL == nil
         let supportsCoverThumbnail = ["azw", "azw3", "mobi"].contains(targetFormat)
         let storedSize = UInt64(max(0, chosen.sizeBytes))
-        let resolvedSize = storedSize > 0
-            ? storedSize
-            : UInt64(max(0, BookFileStore.size(of: chosen.fileName)))
 
         return KindleSendDescriptor(
             bookUUID: snapshot.uuid,
@@ -415,13 +447,14 @@ enum KindleSendPreparation {
                 assetID: chosen.id,
                 fileName: chosen.fileName,
                 format: chosen.format,
+                validationStatus: chosen.validation,
+                origin: chosen.origin,
                 contentHash: chosen.contentHash,
                 sizeBytes: chosen.sizeBytes,
                 dateAdded: chosen.dateAdded,
                 generatedFromContentHash: chosen.generatedFromContentHash,
                 isCatalogued: snapshot.assets.contains(where: { $0.id == chosen.id })
             ),
-            sourceFileGeneration: sourceFileGeneration,
             sourceIsPrimary: chosen.fileName == snapshot.primaryFileName,
             displayName: snapshot.displayTitle,
             sourceURL: sourceURL,
@@ -430,13 +463,13 @@ enum KindleSendPreparation {
             targetFileName: targetFileName,
             targetFormat: targetFormat,
             sourceFingerprint: sourceFingerprint,
-            sendSizeBytes: requiresConversion ? 0 : resolvedSize,
+            sendSizeBytes: requiresConversion ? 0 : storedSize,
             requiresConversion: requiresConversion,
             hasStaleTargetConversion: staleTarget,
             coverVersion: snapshot.coverVersion,
-            hasCover: supportsCoverThumbnail && CoverStore.exists(for: snapshot.uuid),
+            hasCover: supportsCoverThumbnail && snapshot.coverVersion > 0,
             drmProtected: snapshot.drmProtected,
-            fileUnavailable: unavailable || sourceFileGeneration == nil
+            fileUnavailable: unavailable
         )
     }
 
@@ -447,11 +480,10 @@ enum KindleSendPreparation {
 
     nonisolated static func candidate(for snapshot: KindleSendBookSnapshot) -> KindleSyncCandidate {
         let descriptor = descriptor(for: snapshot)
-        let resolvedFingerprint = resolvedSourceFingerprint(for: descriptor)
         let blockReason: KindleSyncReason?
         if descriptor.drmProtected {
             blockReason = .drmProtected
-        } else if descriptor.fileUnavailable || resolvedFingerprint == nil {
+        } else if descriptor.fileUnavailable {
             blockReason = .fileUnavailable
         } else {
             blockReason = nil
@@ -464,7 +496,10 @@ enum KindleSendPreparation {
             sourceFormat: descriptor.sourceFormat.uppercased(),
             targetFileName: descriptor.targetFileName,
             targetFormat: descriptor.targetFormat.uppercased(),
-            sourceFingerprint: resolvedFingerprint ?? descriptor.sourceFingerprint,
+            sourceFingerprint: descriptor.sourceFingerprint,
+            sourceAssetID: descriptor.assetGeneration.assetID,
+            sourceFingerprintIsAuthoritative:
+                descriptor.assetGeneration.contentHash != nil,
             sourceLineageFingerprint: descriptor.assetGeneration.generatedFromContentHash,
             sendSizeBytes: descriptor.sendSizeBytes,
             requiresConversion: descriptor.requiresConversion,
@@ -473,22 +508,6 @@ enum KindleSendPreparation {
             hasCover: descriptor.hasCover,
             blockReason: blockReason
         )
-    }
-
-    nonisolated private static func resolvedSourceFingerprint(
-        for descriptor: KindleSendDescriptor
-    ) -> String? {
-        if let contentHash = descriptor.assetGeneration.contentHash {
-            return contentHash
-        }
-        guard !descriptor.fileUnavailable,
-              let generation = descriptor.sourceFileGeneration,
-              TransferFileGeneration.capture(at: descriptor.sourceURL) == generation,
-              let fingerprint = try? ContentHasher.sha256(of: descriptor.sourceURL),
-              TransferFileGeneration.capture(at: descriptor.sourceURL) == generation else {
-            return nil
-        }
-        return fingerprint
     }
 
     nonisolated private static func assetOptions(

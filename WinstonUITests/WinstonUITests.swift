@@ -27,9 +27,10 @@ final class WinstonUITests: XCTestCase {
             "/private/tmp/WinstonReadingRecommendationUITest"
         app.launch()
 
-        let recommendationButton = app.buttons["readingRecommendation.open"]
-        XCTAssertTrue(recommendationButton.waitForExistence(timeout: 5))
-        recommendationButton.click()
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        window.click()
+        app.typeKey("s", modifierFlags: [.command, .option])
 
         let sheet = app.sheets.firstMatch
         XCTAssertTrue(sheet.waitForExistence(timeout: 5))

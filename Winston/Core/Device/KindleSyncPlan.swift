@@ -32,6 +32,8 @@ nonisolated struct KindleSyncCandidate: Equatable, Identifiable, Sendable {
     let targetFileName: String
     let targetFormat: String
     let sourceFingerprint: String
+    let sourceAssetID: UUID?
+    let sourceFingerprintIsAuthoritative: Bool
     let sourceLineageFingerprint: String?
     let sendSizeBytes: UInt64
     let requiresConversion: Bool
@@ -39,6 +41,44 @@ nonisolated struct KindleSyncCandidate: Equatable, Identifiable, Sendable {
     let coverVersion: Int
     let hasCover: Bool
     let blockReason: KindleSyncReason?
+
+    init(
+        id: UUID,
+        title: String,
+        author: String?,
+        matchKey: String,
+        sourceFormat: String,
+        targetFileName: String,
+        targetFormat: String,
+        sourceFingerprint: String,
+        sourceAssetID: UUID? = nil,
+        sourceFingerprintIsAuthoritative: Bool = true,
+        sourceLineageFingerprint: String?,
+        sendSizeBytes: UInt64,
+        requiresConversion: Bool,
+        hasStaleTargetConversion: Bool,
+        coverVersion: Int,
+        hasCover: Bool,
+        blockReason: KindleSyncReason?
+    ) {
+        self.id = id
+        self.title = title
+        self.author = author
+        self.matchKey = matchKey
+        self.sourceFormat = sourceFormat
+        self.targetFileName = targetFileName
+        self.targetFormat = targetFormat
+        self.sourceFingerprint = sourceFingerprint
+        self.sourceAssetID = sourceAssetID
+        self.sourceFingerprintIsAuthoritative = sourceFingerprintIsAuthoritative
+        self.sourceLineageFingerprint = sourceLineageFingerprint
+        self.sendSizeBytes = sendSizeBytes
+        self.requiresConversion = requiresConversion
+        self.hasStaleTargetConversion = hasStaleTargetConversion
+        self.coverVersion = coverVersion
+        self.hasCover = hasCover
+        self.blockReason = blockReason
+    }
 
     func allocatingDevicePath() -> KindleSyncCandidate {
         let allocated = DevicePathAllocator.allocate(
@@ -55,6 +95,8 @@ nonisolated struct KindleSyncCandidate: Equatable, Identifiable, Sendable {
             targetFileName: allocated,
             targetFormat: targetFormat,
             sourceFingerprint: sourceFingerprint,
+            sourceAssetID: sourceAssetID,
+            sourceFingerprintIsAuthoritative: sourceFingerprintIsAuthoritative,
             sourceLineageFingerprint: sourceLineageFingerprint,
             sendSizeBytes: sendSizeBytes,
             requiresConversion: requiresConversion,
@@ -233,8 +275,17 @@ nonisolated enum KindleSyncPlanner {
             return (.update, .formatChanged)
         }
         if let receipt {
-            let receiptMatchesSource = receipt.sourceFingerprint == candidate.sourceFingerprint
-                || receipt.sourceFingerprint == candidate.sourceLineageFingerprint
+            let receiptMatchesSource: Bool
+            if candidate.sourceFingerprintIsAuthoritative {
+                receiptMatchesSource = receipt.sourceFingerprint == candidate.sourceFingerprint
+                    || receipt.sourceFingerprint == candidate.sourceLineageFingerprint
+            } else {
+                // Legacy rows may not have a persisted content hash yet. Avoid
+                // opening the source during plan construction: the receipt still
+                // belongs to the same immutable asset identity and the transfer
+                // path will perform the authoritative byte validation.
+                receiptMatchesSource = receipt.assetID == candidate.sourceAssetID
+            }
             if !receiptMatchesSource {
                 return (.update, .sourceChanged)
             }

@@ -152,6 +152,78 @@ struct LibraryReadModelTests {
         #expect(model.diagnostics.lastCapturedRecordCount == 1)
     }
 
+    @Test func pluginPagesComeFromTheSharedImmutableSnapshot() async throws {
+        let books = makeBooks(250)
+        let model = LibraryReadModel()
+        await bootstrap(model, books: books)
+
+        let first = try #require(await model.pluginBooks(
+            matching: "",
+            offset: 0,
+            limit: 17,
+            scanLimit: 17,
+            maximumOffset: 100_000
+        ))
+        #expect(first.items.count == 17)
+        #expect(first.nextOffset == 17)
+
+        let changed = books[137]
+        changed.title = "AAAA Incremental"
+        await model.synchronize(
+            books: books,
+            collections: [],
+            delta: LibraryCatalogDelta(
+                fromRevision: 0,
+                toRevision: 1,
+                affectedBookIDs: [changed.uuid],
+                affectedCollectionIDs: [],
+                fields: [.identity, .displayMetadata],
+                requiresFullRebuild: false,
+                changesBookMembership: false
+            ),
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+
+        let updated = try #require(await model.pluginBooks(
+            matching: "incremental",
+            offset: 0,
+            limit: 10,
+            scanLimit: 250,
+            maximumOffset: 100_000
+        ))
+        #expect(updated.items.map(\.uuid) == [changed.uuid.uuidString])
+        #expect(model.diagnostics.lastCapturedRecordCount == 1)
+    }
+
+    @Test func coverOnlyChangeDoesNotRecaptureLibraryOrPluginRecords() async {
+        let books = makeBooks(500)
+        let model = LibraryReadModel()
+        await bootstrap(model, books: books)
+        let generation = model.generation
+
+        books[42].coverVersion += 1
+        await model.synchronize(
+            books: books,
+            collections: [],
+            delta: LibraryCatalogDelta(
+                fromRevision: 0,
+                toRevision: 1,
+                affectedBookIDs: [books[42].uuid],
+                affectedCollectionIDs: [],
+                fields: [.cover],
+                requiresFullRebuild: false,
+                changesBookMembership: false
+            ),
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+
+        #expect(model.catalogRevision == 1)
+        #expect(model.generation == generation)
+        #expect(model.diagnostics.lastCapturedRecordCount == 0)
+    }
+
     @Test(arguments: [1_000, 10_000, 50_000])
     func lightweightRecordFilteringBenchmark(_ count: Int) async {
         let records = makeRecords(count)

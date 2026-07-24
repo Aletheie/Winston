@@ -39,7 +39,9 @@ nonisolated struct LibraryStats: Sendable {
                     .filter { $0.validationStatus != .missing }
                     .reduce(0) { total, asset in
                         if asset.sizeBytes > 0 { return total + asset.sizeBytes }
-                        return total + (asset.fileName == book.fileName ? book.fileSizeBytes : 0)
+                        return total + (asset.uuid == book.primaryAsset?.uuid
+                            ? max(asset.sizeBytes, book.fileSizeBytes)
+                            : 0)
                     }
             }
             let readingCycles: [Input.ReadingCycle]

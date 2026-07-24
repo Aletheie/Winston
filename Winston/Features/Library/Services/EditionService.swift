@@ -1151,7 +1151,8 @@ final class CatalogReconciliationService {
     }
 
     private static func candidate(_ book: Book) -> EditionCandidate {
-        EditionCandidate(
+        let primaryAsset = book.primaryAsset
+        return EditionCandidate(
             uuid: book.uuid,
             workUUID: book.work?.uuid,
             title: book.displayTitle,
@@ -1162,7 +1163,7 @@ final class CatalogReconciliationService {
             publisher: book.publisher,
             year: book.year,
             format: book.format,
-            sizeBytes: book.fileSizeBytes,
+            sizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
             contentHashes: Set(book.assets.compactMap(\.contentHash)),
             openLibraryWorkKey: book.work?.openLibraryWorkKey,
             workMatchKey: book.work?.matchKey
@@ -1170,10 +1171,11 @@ final class CatalogReconciliationService {
     }
 
     private static func generation(of book: Book) -> BookGeneration {
-        BookGeneration(
+        let primaryAsset = book.primaryAsset
+        return BookGeneration(
             candidate: candidate(book),
-            fileName: book.fileName,
-            fileSizeBytes: book.fileSizeBytes,
+            fileName: primaryAsset?.fileName ?? book.fileName,
+            fileSizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
             coverVersion: book.coverVersion,
             assets: book.assets.map { asset in
                 AssetGeneration(

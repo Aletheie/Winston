@@ -26,6 +26,7 @@ struct WinstonApp: App {
     @State private var settings: AppSettings
     @State private var toastCenter: ToastCenter
     @State private var viewModel: LibraryViewModel
+    @State private var libraryReadModel: LibraryReadModel
     @State private var deviceMonitor = DeviceMonitor()
     @State private var kindleSyncProfiles: KindleSyncProfileStore
     @State private var transferQueue: TransferQueue
@@ -57,6 +58,8 @@ struct WinstonApp: App {
         _toastCenter = State(initialValue: toastCenter)
         let viewModel = LibraryViewModel(modelContext: context, settings: settings, toasts: toastCenter)
         _viewModel = State(initialValue: viewModel)
+        let libraryReadModel = LibraryReadModel()
+        _libraryReadModel = State(initialValue: libraryReadModel)
         let kindleSyncProfiles = KindleSyncProfileStore()
         _kindleSyncProfiles = State(initialValue: kindleSyncProfiles)
         _transferQueue = State(initialValue: TransferQueue(
@@ -69,7 +72,12 @@ struct WinstonApp: App {
             }
         ))
         _updater = State(initialValue: SoftwareUpdater())
-        _pluginService = State(initialValue: PluginService(modelContext: context, settings: settings, toasts: toastCenter))
+        _pluginService = State(initialValue: PluginService(
+            modelContext: context,
+            settings: settings,
+            toasts: toastCenter,
+            libraryReadModel: libraryReadModel
+        ))
         _discoveryViewModel = State(initialValue: DiscoveryViewModel(settings: settings))
         _opdsViewModel = State(initialValue: OPDSViewModel(settings: settings, toasts: toastCenter))
     }
@@ -86,7 +94,10 @@ struct WinstonApp: App {
                         LibraryStartupProgressView()
                             .task { await prepareLibrary() }
                     case .ready:
-                        ContentView(viewModel: viewModel)
+                        ContentView(
+                            viewModel: viewModel,
+                            libraryReadModel: libraryReadModel
+                        )
                             .task { await pluginService.refresh() }
                     case .managedFileRecoveryFailed(let pendingItemCount):
                         ManagedFileRecoveryUnavailableView(

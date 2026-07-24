@@ -28,14 +28,13 @@ private nonisolated final class TransferProgressGate: @unchecked Sendable {
 final class TransferQueue {
     private struct SendRequest: Sendable {
         let descriptor: KindleSendDescriptor
-        let artifact: TransferArtifact?
         let drmProtected: Bool
         let generationIsCurrent: @MainActor @Sendable () -> Bool
 
         var uuid: UUID { descriptor.bookUUID }
         var displayName: String { descriptor.displayName }
         var targetFileName: String { descriptor.targetFileName }
-        var fileUnavailable: Bool { descriptor.fileUnavailable || artifact == nil }
+        var fileUnavailable: Bool { descriptor.fileUnavailable }
     }
 
     enum Direction: Sendable, Equatable {
@@ -208,20 +207,24 @@ final class TransferQueue {
                 markFailed(itemID)
                 continue
             }
-            guard !request.fileUnavailable, !request.drmProtected,
-                  let artifact = request.artifact else { continue }
-            guard request.generationIsCurrent(), artifact.sourceGenerationIsCurrent() else {
+            guard !request.fileUnavailable, !request.drmProtected else { continue }
+            guard request.generationIsCurrent() else {
                 lastError = TransferArtifactError.sourceChanged.localizedDescription
                 markFailed(itemID)
                 continue
             }
             setStage(.preparing, for: itemID)
             do {
+                let artifact = try await TransferArtifact.prepare(
+                    descriptor: request.descriptor
+                )
+                guard request.generationIsCurrent(),
+                      artifact.sourceGenerationIsCurrent() else {
+                    throw TransferArtifactError.sourceChanged
+                }
                 let prepared = try await artifact.materialize(in: stagingDirectory)
                 guard request.generationIsCurrent(), artifact.sourceGenerationIsCurrent() else {
-                    lastError = TransferArtifactError.sourceChanged.localizedDescription
-                    markFailed(itemID)
-                    continue
+                    throw TransferArtifactError.sourceChanged
                 }
                 preparedArtifacts[index] = prepared
                 setStage(.waiting, for: itemID)
@@ -303,6 +306,7 @@ final class TransferQueue {
 
         var sourceURL = preparedArtifact.sourceURL
         var temporaryConversion: URL?
+        var shouldAdoptConversion = false
         defer {
             if let temporaryConversion { try? FileManager.default.removeItem(at: temporaryConversion) }
         }
@@ -312,9 +316,7 @@ final class TransferQueue {
             do {
                 sourceURL = try await EbookConverter.convertForKindle(sourceURL)
                 temporaryConversion = sourceURL
-                if preparedArtifact.artifact.sourceIsPrimary {
-                    await onConversionArtifact?(request.uuid, sourceURL)
-                }
+                shouldAdoptConversion = preparedArtifact.artifact.sourceIsPrimary
             } catch {
                 if error is CancellationError {
                     markCancelled(itemID)
@@ -361,6 +363,9 @@ final class TransferQueue {
                 }
             )
             Log.device.notice("Transferred \(fileName, privacy: .public)")
+            if shouldAdoptConversion {
+                await onConversionArtifact?(request.uuid, sourceURL)
+            }
             try await connection.removeStaleVariants(baseName: base, keeping: fileName)
             let coverPushed = await pushThumbnail(
                 for: request.uuid,
@@ -395,7 +400,8 @@ final class TransferQueue {
     private static func makeRequests(for books: [Book]) -> [SendRequest] {
         var seenBookIDs: Set<UUID> = []
         return books.compactMap { book in
-            guard book.hasDigitalFile, seenBookIDs.insert(book.uuid).inserted else { return nil }
+            guard book.hasCatalogDigitalFile,
+                  seenBookIDs.insert(book.uuid).inserted else { return nil }
             return makeRequest(for: book)
         }
     }
@@ -425,7 +431,6 @@ final class TransferQueue {
         let expectedDRMProtected = descriptor.drmProtected
         return SendRequest(
             descriptor: descriptor,
-            artifact: TransferArtifact(descriptor: descriptor),
             drmProtected: descriptor.drmProtected,
             generationIsCurrent: { [book] in
                 if bookWasAttached, book.modelContext == nil { return false }
@@ -438,9 +443,17 @@ final class TransferQueue {
                         return false
                     }
                     return asset.fileName == generation.fileName
+                        && asset.format == generation.format
+                        && asset.validationStatus == generation.validationStatus
+                        && asset.origin == generation.origin
+                        && asset.contentHash == generation.contentHash
+                        && asset.sizeBytes == generation.sizeBytes
                         && asset.dateAdded == generation.dateAdded
+                        && asset.generatedFromContentHash == generation.generatedFromContentHash
                 }
                 return book.fileName == generation.fileName
+                    && book.format == generation.format
+                    && book.fileSizeBytes == generation.sizeBytes
                     && book.dateAdded == generation.dateAdded
             }
         )
@@ -549,9 +562,7 @@ final class TransferQueue {
         }
         let request = Self.makeRequest(descriptor: descriptor, book: book)
         guard !request.fileUnavailable, !request.drmProtected,
-              let artifact = request.artifact,
-              request.generationIsCurrent(),
-              artifact.sourceGenerationIsCurrent() else {
+              request.generationIsCurrent() else {
             lastError = TransferArtifactError.sourceChanged.localizedDescription
             markFailed(item.id)
             return false
@@ -559,6 +570,13 @@ final class TransferQueue {
         let preparedArtifact: MaterializedTransferArtifact
         setStage(.preparing, for: item.id)
         do {
+            let artifact = try await TransferArtifact.prepare(
+                descriptor: request.descriptor
+            )
+            guard request.generationIsCurrent(),
+                  artifact.sourceGenerationIsCurrent() else {
+                throw TransferArtifactError.sourceChanged
+            }
             preparedArtifact = try await artifact.materialize(in: stagingDirectory)
             guard request.generationIsCurrent(), artifact.sourceGenerationIsCurrent() else {
                 throw TransferArtifactError.sourceChanged

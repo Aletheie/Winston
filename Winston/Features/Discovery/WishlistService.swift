@@ -107,7 +107,7 @@ final class WishlistService {
     private func libraryKeys() -> Set<BookMatchKey> {
         let revision = LibraryMutationLog.shared.catalogRevision
         if cachedLibraryRevision != revision {
-            cachedLibraryKeys = Set(modelContext.allBooks().compactMap { book in
+            cachedLibraryKeys = Set(((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []).compactMap { book in
                 let key = BookMatchKey(title: book.displayTitle, author: book.displayAuthor)
                 return key.isComplete ? key : nil
             })

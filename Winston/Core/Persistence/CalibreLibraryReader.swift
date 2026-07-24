@@ -63,6 +63,14 @@ nonisolated enum CalibreImportError: Error, Equatable {
 
 nonisolated enum CalibreLibraryReader {
     static let metadataDBName = "metadata.db"
+    private nonisolated static let dateFormatterLock = NSLock()
+    private nonisolated static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
 
     @concurrent
     static func read(
@@ -262,11 +270,10 @@ nonisolated enum CalibreLibraryReader {
 
     static func date(from raw: String?) -> Date? {
         guard let raw, raw.count >= 19 else { return nil }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return formatter.date(from: String(raw.prefix(19)).replacingOccurrences(of: "T", with: " "))
+        let normalized = String(raw.prefix(19)).replacingOccurrences(of: "T", with: " ")
+        dateFormatterLock.lock()
+        defer { dateFormatterLock.unlock() }
+        return dateFormatter.date(from: normalized)
     }
 
     // MARK: - SQLite helpers
