@@ -15,7 +15,7 @@
 <p>
 <img alt="macOS 26.4+" src="https://img.shields.io/badge/macOS-26.4%2B-000000?style=flat-square&logo=apple">
 <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-arm64-333333?style=flat-square">
-<img alt="early access" src="https://img.shields.io/badge/status-early%20access%200.1-e8590c?style=flat-square">
+<img alt="early access" src="https://img.shields.io/badge/status-early%20access%200.2-e8590c?style=flat-square">
 <img alt="MIT" src="https://img.shields.io/badge/license-MIT-4c9a2a?style=flat-square">
 <img alt="249 tests" src="https://img.shields.io/badge/tests-249-4c9a2a?style=flat-square">
 </p>
@@ -115,6 +115,11 @@ Winston models **works, editions and files** separately. Two translations of Dun
 
 ## Where it's going
 
+Completed:
+
+- [x] **Works and editions:** separate works, editions and files, with multiple formats per edition.
+- [x] **Series watch:** release notifications for series already in the library.
+
 Near term:
 
 - [ ] Notarized releases
@@ -125,7 +130,6 @@ Near term:
 
 Longer term:
 
-- [ ] **Series watch:** release notifications for series already in the library
 - [ ] **Translation plugin:** optional AI-assisted book translation, starting with English and Czech
 - [ ] **Import inbox:** preview changes before import, with one-click undo
 - [ ] **Metadata provenance:** store the source of each value and lock hand-edited fields
