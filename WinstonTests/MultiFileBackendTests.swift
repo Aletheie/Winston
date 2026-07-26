@@ -780,10 +780,12 @@ struct MultiFileBackendTests {
         #expect(!FileManager.default.fileExists(atPath: BookFileStore.url(for: mobiName).path(percentEncoded: false)))
     }
 
-    @Test func sameBytesWithDifferentNamesCreatesDuplicateProposal() async throws {
+    @Test func sameBytesWithDifferentNamesAreReconciledAsExactDuplicate() async throws {
         let library = try await TestLibrary()
         let settings = AppSettings()
+        let previousOnlineMetadata = settings.onlineMetadataEnabled
         settings.onlineMetadataEnabled = false
+        defer { settings.onlineMetadataEnabled = previousOnlineMetadata }
         let source = try EPUBFixture.make(title: "Duplicate", author: "A")
         defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
         let second = source.deletingLastPathComponent().appending(path: "same-content.epub")
@@ -800,18 +802,23 @@ struct MultiFileBackendTests {
             editions: editions
         )
 
-        importer.addBooks(from: [source, second])
-        #expect(importer.isExtracting)
+        let importedCount = await withCheckedContinuation { continuation in
+            importer.addBooks(from: [source, second]) { books in
+                continuation.resume(returning: books.count)
+            }
+        }
         let deadline = Date.now.addingTimeInterval(4)
-        while (library.context.allBooks().count < 2 || importer.isExtracting), Date.now < deadline {
+        while importer.isExtracting, Date.now < deadline {
             try? await Task.sleep(for: .milliseconds(20))
         }
 
-        #expect(library.context.allBooks().count == 2)
-        let hasDuplicate = editions.pendingProposals.contains(where: {
+        #expect(importedCount == 1)
+        #expect(library.context.allBooks().count == 1)
+        #expect(library.context.allBooks().first?.assets.count == 1)
+        let hasLegacyDuplicateProposal = editions.pendingProposals.contains(where: {
             $0.verdict == .duplicateFile && $0.confidence == .high
         })
-        #expect(hasDuplicate)
+        #expect(!hasLegacyDuplicateProposal)
     }
 
     @Test func validatorDistinguishesMissingCorruptAndValidAssets() async throws {

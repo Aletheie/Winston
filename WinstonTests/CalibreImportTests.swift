@@ -753,7 +753,7 @@ struct CalibreImportManifestTests {
             libraryRoot: fixture.root,
             formatPreference: CalibreImportService.kindlePreference
         )
-        let session = try await CalibreImportSession.create(
+        let session = try await CalibreImportJournal.create(
             libraryRoot: fixture.root,
             books: read.books,
             unsafeRejectedSources: 0,
@@ -782,7 +782,7 @@ struct CalibreImportManifestTests {
         #expect(cancelled.imported == 1)
         #expect(cancelled.pending == 1)
 
-        let resumed = try #require(try await CalibreImportSession.resumable(
+        let resumed = try #require(try await CalibreImportJournal.resumable(
             for: fixture.root,
             directory: sessions
         ))
@@ -816,7 +816,7 @@ struct CalibreImportManifestTests {
             }
         )
         #expect(await counter.current() == callsBeforeReplay)
-        #expect(try await CalibreImportSession.resumable(
+        #expect(try await CalibreImportJournal.resumable(
             for: fixture.root,
             directory: sessions
         ) == nil)
@@ -830,7 +830,7 @@ struct CalibreImportManifestTests {
             libraryRoot: fixture.root,
             formatPreference: CalibreImportService.kindlePreference
         )
-        let session = try await CalibreImportSession.create(
+        let session = try await CalibreImportJournal.create(
             libraryRoot: fixture.root,
             books: read.books,
             unsafeRejectedSources: 0,
@@ -855,7 +855,7 @@ struct CalibreImportManifestTests {
         )
         #expect(failed.unsafeRejectedSources == 1)
 
-        let resumed = try #require(try await CalibreImportSession.resumable(
+        let resumed = try #require(try await CalibreImportJournal.resumable(
             for: fixture.root,
             directory: sessions
         ))

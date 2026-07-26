@@ -54,7 +54,7 @@ final class CalibreImportService {
     private let maximumConcurrentInspections: Int
 
     @ObservationIgnored private var importTask: Task<Void, Never>?
-    @ObservationIgnored private var activeSession: CalibreImportSession?
+    @ObservationIgnored private var activeJournal: CalibreImportJournal?
     @ObservationIgnored private var activePipelineSession: ImportSession?
     @ObservationIgnored private var activeReconciler: ImportReconciler?
 
@@ -142,8 +142,8 @@ final class CalibreImportService {
         isCancelling = true
         activePipelineSession?.cancel()
         importTask?.cancel()
-        if let activeSession {
-            Task { await activeSession.requestCancellation() }
+        if let activeJournal {
+            Task { await activeJournal.requestCancellation() }
         }
     }
 
@@ -167,7 +167,7 @@ final class CalibreImportService {
             isImporting = false
             isCancelling = false
             isResuming = false
-            activeSession = nil
+            activeJournal = nil
             activePipelineSession = nil
             activeReconciler = nil
             importTask = nil
@@ -176,13 +176,13 @@ final class CalibreImportService {
             )
         }
 
-        let session: CalibreImportSession
+        let journal: CalibreImportJournal
         do {
-            if let resumable = try await CalibreImportSession.resumable(
+            if let resumable = try await CalibreImportJournal.resumable(
                 for: root,
                 directory: sessionDirectory
             ) {
-                session = resumable
+                journal = resumable
                 isResuming = true
             } else {
                 let readResult = try await CalibreLibraryReader.read(
@@ -193,7 +193,7 @@ final class CalibreImportService {
                     reportEmptyImport(unsafeRejectedSources: readResult.unsafeRejectionCount)
                     return
                 }
-                session = try await CalibreImportSession.create(
+                journal = try await CalibreImportJournal.create(
                     libraryRoot: root,
                     books: readResult.books,
                     unsafeRejectedSources: readResult.unsafeRejectionCount,
@@ -209,31 +209,31 @@ final class CalibreImportService {
             return
         }
 
-        activeSession = session
-        let manifest = await session.snapshot()
+        activeJournal = journal
+        let manifest = await journal.snapshot()
         pipelineSession.discover(Set(manifest.items.map(\.bookID)))
         do {
-            let canContinue = try await reconcileInterruptedWork(in: session)
+            let canContinue = try await reconcileInterruptedWork(in: journal)
             guard canContinue else {
-                let failedSummary = await session.summary()
+                let failedSummary = await journal.summary()
                 present(failedSummary)
                 toasts.error(String(localized: "Some Calibre files are still waiting for recovery."))
                 return
             }
         } catch {
-            let failedSummary = await session.summary()
+            let failedSummary = await journal.summary()
             present(failedSummary)
             toasts.error(String(localized: "Couldn\u{2019}t resume the Calibre import."))
             return
         }
 
         activeReconciler = makeReconciler()
-        let finalSummary = await session.run(
+        let finalSummary = await journal.run(
             chunkSize: chunkSize,
             progressHandler: { [weak self] progress in
                 await self?.setProgress(progress)
             },
-            processor: { [weak self, session] items in
+            processor: { [weak self, journal] items in
                 guard let self else {
                     return CalibreImportChunkResult(failure: CalibreImportChunkFailure(
                         calibreID: items.first?.calibreID,
@@ -244,7 +244,7 @@ final class CalibreImportService {
                 }
                 return await self.process(
                     items,
-                    in: session,
+                    in: journal,
                     pipelineSession: pipelineSession
                 )
             }
@@ -254,7 +254,7 @@ final class CalibreImportService {
 
         if finalSummary.isComplete {
             pipelineSession.advance(to: .derivedJobs)
-            await performPostImportActions(for: session)
+            await performPostImportActions(for: journal)
         }
         finalPipelineStep = switch finalSummary.phase {
         case .completed:
@@ -274,7 +274,7 @@ final class CalibreImportService {
     }
 
     private func reconcileInterruptedWork(
-        in session: CalibreImportSession
+        in journal: CalibreImportJournal
     ) async throws -> Bool {
         let recovery = await mutations.recoverManagedFiles()
         var pendingTransactionIDs = Set((await managedFiles.pendingTransactions()).map(\.id))
@@ -282,7 +282,7 @@ final class CalibreImportService {
         pendingTransactionIDs.formUnion(recovery.unreadableJournalURLs.compactMap {
             UUID(uuidString: $0.deletingPathExtension().lastPathComponent)
         })
-        let manifest = await session.snapshot()
+        let manifest = await journal.snapshot()
         let recoveryItems = manifest.items.filter {
             $0.state == .prepared || $0.state == .failed
         }
@@ -318,7 +318,7 @@ final class CalibreImportService {
                 }
             }
         }
-        try await session.reconcileForResume(
+        try await journal.reconcileForResume(
             durableOutcomes: durableOutcomes,
             preservingPreparedItemIDs: preserve
         )
@@ -377,7 +377,7 @@ final class CalibreImportService {
 
     private func process(
         _ items: [CalibreImportManifest.Item],
-        in session: CalibreImportSession,
+        in journal: CalibreImportJournal,
         pipelineSession: ImportSession
     ) async -> CalibreImportChunkResult {
         guard !modelContext.hasChanges else {
@@ -407,7 +407,7 @@ final class CalibreImportService {
         var coveredBookIDs: Set<UUID> = []
 
         for item in items {
-            if await cancellationRequested(in: session) {
+            if await cancellationRequested(in: journal) {
                 await abort(stagedTransactions)
                 result.resetItemIDs.formUnion(preparedCandidates.map { $0.item.calibreID })
                 result.failure = CalibreImportChunkFailure(
@@ -557,7 +557,7 @@ final class CalibreImportService {
         }
 
         guard !preparedCandidates.isEmpty else { return result }
-        if await cancellationRequested(in: session) {
+        if await cancellationRequested(in: journal) {
             await abort(stagedTransactions)
             result.failure = CalibreImportChunkFailure(
                 calibreID: nil,
@@ -569,7 +569,7 @@ final class CalibreImportService {
         }
 
         do {
-            try await session.prepare(preparedCandidates.map {
+            try await journal.prepare(preparedCandidates.map {
                 CalibreImportPreparedItem(
                     calibreID: $0.item.calibreID,
                     decision: $0.decision,
@@ -591,7 +591,7 @@ final class CalibreImportService {
             pipelineSession.advance(to: .chunkCommit)
             let commitResult = try await commit(
                 preparedCandidates,
-                manifest: await session.snapshot()
+                manifest: await journal.snapshot()
             )
             pipelineSession.advance(to: .publishing)
             activeReconciler = tentativeReconciler
@@ -837,9 +837,9 @@ final class CalibreImportService {
         for transaction in transactions { await managedFiles.abort(transaction) }
     }
 
-    private func cancellationRequested(in session: CalibreImportSession) async -> Bool {
+    private func cancellationRequested(in journal: CalibreImportJournal) async -> Bool {
         if Task.isCancelled { return true }
-        return await session.shouldCancel()
+        return await journal.shouldCancel()
     }
 
     private func failureResult(
@@ -854,8 +854,8 @@ final class CalibreImportService {
         ))
     }
 
-    private func performPostImportActions(for session: CalibreImportSession) async {
-        let manifest = await session.snapshot()
+    private func performPostImportActions(for journal: CalibreImportJournal) async {
+        let manifest = await journal.snapshot()
         let importedIDs = Set(manifest.items.compactMap { item -> UUID? in
             guard let outcome = item.outcome else { return nil }
             switch outcome.category {

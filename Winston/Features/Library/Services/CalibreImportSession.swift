@@ -141,12 +141,12 @@ nonisolated struct CalibreImportChunkResult: Sendable, Equatable {
     var failure: CalibreImportChunkFailure?
 }
 
-/// Durable orchestration and cancellation boundary for one Calibre import.
+/// Durable recovery journal for the Calibre adapter.
 ///
-/// The actor owns the manifest state machine. File staging and catalog commits
-/// are supplied by the main-actor service, but a chunk cannot reach the catalog
-/// until its decision and managed-file transaction IDs are durably journaled.
-actor CalibreImportSession {
+/// The shared `ImportSession` owns pipeline progress and cancellation. This
+/// actor only persists Calibre resume evidence; a chunk cannot reach the catalog
+/// until its proposal and managed-file transaction IDs are durably journaled.
+actor CalibreImportJournal {
     typealias ChunkProcessor = @Sendable ([CalibreImportManifest.Item]) async -> CalibreImportChunkResult
     typealias ProgressHandler = @Sendable (CalibreImportProgress) async -> Void
 
@@ -170,7 +170,7 @@ actor CalibreImportSession {
         directory: URL = AppPaths.calibreImportSessionsDirectory,
         id: UUID = UUID(),
         now: Date = .now
-    ) async throws -> CalibreImportSession {
+    ) async throws -> CalibreImportJournal {
         let items = books.sorted { lhs, rhs in
             if lhs.calibreID == rhs.calibreID { return lhs.title < rhs.title }
             return lhs.calibreID < rhs.calibreID
@@ -201,7 +201,7 @@ actor CalibreImportSession {
             unsafeRejectedSources: unsafeRejectedSources,
             items: items
         )
-        let session = CalibreImportSession(
+        let session = CalibreImportJournal(
             manifest: manifest,
             directory: directory
         )
@@ -212,7 +212,7 @@ actor CalibreImportSession {
     nonisolated static func resumable(
         for libraryRoot: URL,
         directory: URL = AppPaths.calibreImportSessionsDirectory
-    ) async throws -> CalibreImportSession? {
+    ) async throws -> CalibreImportJournal? {
         let canonicalRoot = libraryRoot.standardizedFileURL.resolvingSymlinksInPath()
         return try await Task.detached(priority: .utility) {
             let fileManager = FileManager.default
@@ -237,7 +237,7 @@ actor CalibreImportSession {
             guard let manifest = candidates.max(by: { $0.updatedAt < $1.updatedAt }) else {
                 return nil
             }
-            return CalibreImportSession(
+            return CalibreImportJournal(
                 manifest: manifest,
                 directory: directory
             )

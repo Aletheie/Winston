@@ -758,6 +758,7 @@ struct MetadataServiceTests {
             value.language = "eng"
             return value
         }()
+        let coverData = EPUBFixture.jpegData()
         let toasts = ToastCenter()
         let importer = ImportService(
             modelContext: lib.context,
@@ -773,7 +774,8 @@ struct MetadataServiceTests {
                 ImportBookAnalysis(
                     metadata: inspected,
                     drmProtected: false,
-                    validation: .ok
+                    validation: .ok,
+                    coverJPEGData: coverData
                 )
             }
         )
@@ -786,22 +788,21 @@ struct MetadataServiceTests {
             }
         }
 
-        let first = await importFiles([epub])
+        let first = await importFiles([epub, pdf])
         #expect(first.count == 1)
         let originalBookID = try #require(first.first)
-
-        let duplicate = await importFiles([exactCopy])
-        #expect(duplicate.isEmpty)
-        #expect(lib.context.allBooks().count == 1)
-        #expect(lib.context.allBooks().first?.assets.count == 1)
-
-        let merged = await importFiles([pdf])
-        #expect(merged == [originalBookID])
         let book = try #require(lib.context.allBooks().first)
         #expect(book.uuid == originalBookID)
         #expect(book.assets.count == 2)
         #expect(Set(book.assets.map { $0.format.lowercased() }) == ["epub", "pdf"])
+        #expect(book.coverVersion == 1)
+        #expect(CoverStore.exists(for: book.uuid))
         #expect(try lib.context.fetch(FetchDescriptor<Work>()).count == 1)
+
+        let duplicate = await importFiles([exactCopy])
+        #expect(duplicate.isEmpty)
+        #expect(lib.context.allBooks().count == 1)
+        #expect(book.assets.count == 2)
         #expect(!lib.context.hasChanges)
     }
 

@@ -1043,6 +1043,7 @@ final class ImportService {
 
         session.advance(to: .modelProposal)
         var resolved: [ResolvedPreparedImport] = []
+        var coveredBookIDs: Set<UUID> = []
         do {
             for (candidate, proposal) in proposals {
                 let existingCoverVersion: Int = switch proposal.reconciliation {
@@ -1055,6 +1056,7 @@ final class ImportService {
                 }
                 let shouldPublishCover = candidate.inspection.coverJPEGData != nil
                     && existingCoverVersion == 0
+                    && coveredBookIDs.insert(proposal.targetBookID).inserted
                 let coverTransaction: ManagedFileTransaction?
                 if shouldPublishCover, let coverData = candidate.inspection.coverJPEGData {
                     coverTransaction = try await managedFiles.stage(
@@ -1083,18 +1085,36 @@ final class ImportService {
             return result
         }
 
-        let requiredBookIDs = Set(resolved.compactMap { candidate -> UUID? in
+        let createdBookIDs = Set(resolved.compactMap { candidate -> UUID? in
+            switch candidate.proposal.reconciliation {
+            case .createAnotherEdition, .createNewWork, .ambiguousReview:
+                candidate.proposal.candidate.proposedBookID
+            case .exactDuplicate, .addFormatToEdition:
+                nil
+            }
+        })
+        var requiredBookIDs = Set(resolved.compactMap { candidate -> UUID? in
             guard case .addFormatToEdition(let existingBookID, _) =
                 candidate.proposal.reconciliation else { return nil }
             return existingBookID
         })
-        let requiredWorkIDs = Set(resolved.compactMap { candidate -> UUID? in
+        requiredBookIDs.subtract(createdBookIDs)
+        let createdWorkIDs = Set(resolved.compactMap { candidate -> UUID? in
+            switch candidate.proposal.reconciliation {
+            case .createNewWork, .ambiguousReview:
+                candidate.proposal.candidate.proposedWorkID
+            case .exactDuplicate, .addFormatToEdition, .createAnotherEdition:
+                nil
+            }
+        })
+        var requiredWorkIDs = Set(resolved.compactMap { candidate -> UUID? in
             guard case .createAnotherEdition(let workID) =
                 candidate.proposal.reconciliation else { return nil }
             return workID
         })
-        let booksByID: [UUID: Book]
-        let worksByID: [UUID: Work]
+        requiredWorkIDs.subtract(createdWorkIDs)
+        var booksByID: [UUID: Book]
+        var worksByID: [UUID: Work]
         do {
             booksByID = Dictionary(
                 uniqueKeysWithValues: try requiredBookIDs.map {
@@ -1130,7 +1150,8 @@ final class ImportService {
 
             case .addFormatToEdition(let existingBookID, let workID):
                 guard let existing = booksByID[existingBookID] else { continue }
-                if bookPreimages[existingBookID] == nil {
+                if !createdBookIDs.contains(existingBookID),
+                   bookPreimages[existingBookID] == nil {
                     bookPreimages[existingBookID] = ImportedBookPreimage(
                         book: existing,
                         assets: existing.assets,
@@ -1142,7 +1163,8 @@ final class ImportService {
 
             case .createAnotherEdition(let workID):
                 guard let work = worksByID[workID] else { continue }
-                if workPreimages[workID] == nil {
+                if !createdWorkIDs.contains(workID),
+                   workPreimages[workID] == nil {
                     workPreimages[workID] = ImportedWorkPreimage(
                         work: work,
                         editions: work.editions,
@@ -1150,6 +1172,7 @@ final class ImportService {
                     )
                 }
                 book = makeImportedBook(from: prepared, work: work)
+                booksByID[book.uuid] = book
 
             case .createNewWork, .ambiguousReview:
                 let work = Work(
@@ -1158,7 +1181,9 @@ final class ImportService {
                     author: inspection.metadata.author
                 )
                 modelContext.insert(work)
+                worksByID[work.uuid] = work
                 book = makeImportedBook(from: prepared, work: work)
+                booksByID[book.uuid] = book
             }
 
             let asset = BookAsset(
