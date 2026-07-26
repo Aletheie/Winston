@@ -70,7 +70,7 @@ nonisolated struct LibraryCatalogDelta: Equatable, Sendable {
     }
 }
 
-nonisolated struct FullTextCatalogDelta: Equatable, Sendable {
+nonisolated struct FullTextIndexDelta: Equatable, Sendable {
     let fromRevision: Int
     let toRevision: Int
     let affectedBookIDs: Set<UUID>
@@ -93,7 +93,7 @@ private nonisolated struct LibraryCatalogChange: Sendable {
     let changesBookMembership: Bool
 }
 
-private nonisolated struct FullTextCatalogChange: Sendable {
+private nonisolated struct FullTextIndexChange: Sendable {
     let revision: Int
     let affectedBookIDs: Set<UUID>?
 }
@@ -106,10 +106,12 @@ final class LibraryMutationLog {
     static let shared = LibraryMutationLog()
 
     private(set) var revision = 0
+    /// Drives `LibraryReadModel` and its metadata query engine.
     private(set) var catalogRevision = 0
+    /// Drives only FTS asset synchronization, never metadata presentation.
     private(set) var fullTextRevision = 0
     @ObservationIgnored private var catalogChanges: [LibraryCatalogChange] = []
-    @ObservationIgnored private var fullTextChanges: [FullTextCatalogChange] = []
+    @ObservationIgnored private var fullTextChanges: [FullTextIndexChange] = []
 
     func bump(
         catalogChanged: Bool = true,
@@ -143,7 +145,7 @@ final class LibraryMutationLog {
         if fullTextAffectedBookIDs == nil || fullTextAffectedBookIDs?.isEmpty == false {
             fullTextRevision &+= 1
             fullTextChanges.append(
-                FullTextCatalogChange(
+                FullTextIndexChange(
                     revision: fullTextRevision,
                     affectedBookIDs: fullTextAffectedBookIDs
                 )
@@ -210,12 +212,12 @@ final class LibraryMutationLog {
         )
     }
 
-    func fullTextDelta(since revision: Int) -> FullTextCatalogDelta {
+    func fullTextDelta(since revision: Int) -> FullTextIndexDelta {
         guard revision >= 0, revision <= fullTextRevision else {
             return fullTextFullDelta(since: revision)
         }
         guard revision != fullTextRevision else {
-            return FullTextCatalogDelta(
+            return FullTextIndexDelta(
                 fromRevision: revision,
                 toRevision: fullTextRevision,
                 affectedBookIDs: [],
@@ -238,7 +240,7 @@ final class LibraryMutationLog {
                 requiresFullRebuild = true
             }
         }
-        return FullTextCatalogDelta(
+        return FullTextIndexDelta(
             fromRevision: revision,
             toRevision: fullTextRevision,
             affectedBookIDs: affectedBookIDs,
@@ -260,8 +262,8 @@ final class LibraryMutationLog {
         )
     }
 
-    private func fullTextFullDelta(since revision: Int) -> FullTextCatalogDelta {
-        FullTextCatalogDelta(
+    private func fullTextFullDelta(since revision: Int) -> FullTextIndexDelta {
+        FullTextIndexDelta(
             fromRevision: revision,
             toRevision: fullTextRevision,
             affectedBookIDs: [],

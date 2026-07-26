@@ -1,6 +1,18 @@
 import Observation
 import SwiftUI
 
+nonisolated struct FullTextBookPresentation: Sendable, Equatable, Identifiable {
+    let bookID: UUID
+    let title: String
+    let author: String?
+    let format: String
+    let relevanceScore: Double
+    let chapters: [FullTextChapterResult]
+
+    var id: UUID { bookID }
+    var matchCount: Int { chapters.reduce(0) { $0 + $1.excerpts.count } }
+}
+
 @MainActor
 @Observable
 final class FullTextSearchViewModel {
@@ -18,7 +30,7 @@ final class FullTextSearchViewModel {
         }
     }
     private(set) var phase: Phase = .idle
-    private(set) var results: [FullTextBookResult] = []
+    private(set) var results: [FullTextBookPresentation] = []
     private(set) var isSearching = false
 
     @ObservationIgnored private let service: FullTextIndexService
@@ -28,9 +40,36 @@ final class FullTextSearchViewModel {
     @ObservationIgnored private var searchGeneration = 0
     @ObservationIgnored private var lastPreparedRevision: Int?
     @ObservationIgnored private var lastManualRefreshGeneration = 0
+    @ObservationIgnored private var hits: [FullTextSearchHit] = []
+    @ObservationIgnored private var metadataByBookID: [UUID: FullTextResultMetadata] = [:]
+
+    private struct FullTextResultMetadata {
+        let title: String
+        let author: String?
+    }
 
     init(service: FullTextIndexService = .shared) {
         self.service = service
+    }
+
+    /// Combines FTS hits with presentation metadata without touching the FTS index
+    /// or cancelling its independent query lifecycle.
+    func updateMetadata(from records: [LibraryBookRecord]) {
+        metadataByBookID = Dictionary(
+            uniqueKeysWithValues: records.map { record in
+                let author = record.author.flatMap {
+                    $0.isEmpty ? nil : $0
+                } ?? (record.displayAuthor.isEmpty ? nil : record.displayAuthor)
+                return (
+                    record.id,
+                    FullTextResultMetadata(
+                        title: record.displayTitle,
+                        author: author
+                    )
+                )
+            }
+        )
+        publishResults()
     }
 
     func prepare(
@@ -115,11 +154,13 @@ final class FullTextSearchViewModel {
         searchTask?.cancel()
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count >= 2 else {
+            hits = []
             results = []
             isSearching = false
             return
         }
         guard case .ready = phase else {
+            hits = []
             results = []
             isSearching = false
             return
@@ -136,7 +177,7 @@ final class FullTextSearchViewModel {
                 }
             }
             guard !Task.isCancelled else { return }
-            let found: [FullTextBookResult]
+            let found: [FullTextSearchHit]
             do {
                 found = try await service.search(trimmed)
             } catch is CancellationError {
@@ -144,6 +185,7 @@ final class FullTextSearchViewModel {
             } catch {
                 guard !Task.isCancelled, let self,
                       generation == self.searchGeneration else { return }
+                self.hits = []
                 self.results = []
                 self.isSearching = false
                 self.phase = .failed(String(localized: "The local search index couldn’t be searched."))
@@ -152,8 +194,23 @@ final class FullTextSearchViewModel {
             guard !Task.isCancelled, let self,
                   generation == self.searchGeneration,
                   self.query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
-            self.results = found
+            self.hits = found
+            self.publishResults()
             self.isSearching = false
+        }
+    }
+
+    private func publishResults() {
+        results = hits.compactMap { hit in
+            guard let metadata = metadataByBookID[hit.bookID] else { return nil }
+            return FullTextBookPresentation(
+                bookID: hit.bookID,
+                title: metadata.title,
+                author: metadata.author,
+                format: hit.format,
+                relevanceScore: hit.relevanceScore,
+                chapters: hit.chapters
+            )
         }
     }
 
@@ -207,8 +264,6 @@ final class FullTextSearchViewModel {
                 .first?.source
             return FullTextBookSnapshot(
                 bookID: book.uuid,
-                title: book.displayTitle,
-                author: book.displayAuthor,
                 source: source
             )
         }
@@ -249,6 +304,7 @@ struct FullTextSearchSheet: View {
     }
 
     let books: [Book]
+    let readModel: LibraryReadModel
     let onOpen: (UUID) -> Void
     let onShowInLibrary: (UUID) -> Void
 
@@ -295,11 +351,26 @@ struct FullTextSearchSheet: View {
                 manualRefreshGeneration: manualRefreshGeneration
             )
         }
+        .modifier(FullTextMetadataHydrationModifier(
+            readModel: readModel,
+            model: model
+        ))
         .onDisappear { model.cancel() }
     }
 
     private func refreshIndex() {
         manualRefreshGeneration &+= 1
+    }
+}
+
+private struct FullTextMetadataHydrationModifier: ViewModifier {
+    let readModel: LibraryReadModel
+    let model: FullTextSearchViewModel
+
+    func body(content: Content) -> some View {
+        content.onChange(of: readModel.generation, initial: true) {
+            model.updateMetadata(from: readModel.recordSnapshot())
+        }
     }
 }
 
@@ -433,7 +504,7 @@ private struct FullTextIndexStatus: View {
 private struct FullTextSearchContent: View {
     let phase: FullTextSearchViewModel.Phase
     let query: String
-    let results: [FullTextBookResult]
+    let results: [FullTextBookPresentation]
     let isSearching: Bool
     let onOpen: (UUID) -> Void
     let onShowInLibrary: (UUID) -> Void
@@ -540,7 +611,7 @@ private struct FullTextNoMatchesState: View {
 }
 
 private struct FullTextResultsList: View {
-    let results: [FullTextBookResult]
+    let results: [FullTextBookPresentation]
     let query: String
     let onOpen: (UUID) -> Void
     let onShowInLibrary: (UUID) -> Void
@@ -564,7 +635,7 @@ private struct FullTextResultsList: View {
 }
 
 private struct FullTextBookResultSection: View {
-    let result: FullTextBookResult
+    let result: FullTextBookPresentation
     let query: String
     let onOpen: () -> Void
     let onShowInLibrary: () -> Void

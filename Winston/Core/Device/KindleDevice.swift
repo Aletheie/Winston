@@ -79,6 +79,40 @@ nonisolated struct DeviceBook: Identifiable, Sendable, Hashable {
     }
 }
 
+/// A validated, allocator-owned path in the device documents namespace.
+/// Transport implementations receive this value instead of catalog identity.
+nonisolated struct DeviceTransferPath: Sendable, Equatable, Hashable {
+    let fileName: String
+
+    var relativePath: String { "documents/\(fileName)" }
+
+    init?(fileName: String) {
+        guard let leaf = ManagedLeafName(rawValue: fileName) else { return nil }
+        self.fileName = leaf.rawValue
+    }
+}
+
+/// The complete input understood by a device transport: immutable bytes and
+/// their already-allocated destination. It contains no book or edition identity.
+nonisolated struct DeviceByteTransfer: Sendable, Equatable {
+    let sourceURL: URL
+    let destination: DeviceTransferPath
+    let expectedByteCount: UInt64
+}
+
+/// Purely technical transport output. Catalog receipts are assembled above this
+/// boundary from this result and the exact immutable transfer artifact.
+nonisolated struct DeviceTransferResult: Sendable, Equatable {
+    let destination: DeviceTransferPath
+    let bytesTransferred: UInt64
+    let transportIdentifier: String?
+}
+
+nonisolated struct DeviceInventorySnapshot: Sendable, Equatable {
+    let info: DeviceInfo
+    let books: [DeviceBook]
+}
+
 nonisolated enum DeviceError: Error, LocalizedError, Equatable {
     case notConnected
     case openFailed
@@ -106,7 +140,10 @@ nonisolated enum DeviceError: Error, LocalizedError, Equatable {
 nonisolated protocol KindleDeviceConnection: Sendable {
     func info() async throws -> DeviceInfo
     func listBooks() async throws -> [DeviceBook]
-    func send(fileURL: URL, fileName: String, progress: @escaping @Sendable (Double) -> Void) async throws
+    func transfer(
+        _ request: DeviceByteTransfer,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> DeviceTransferResult
     func copyBook(_ book: DeviceBook, to destination: URL, progress: @escaping @Sendable (Double) -> Void) async throws
     func delete(_ book: DeviceBook) async throws
     func pushCoverThumbnail(_ fileURL: URL, named name: String) async throws
@@ -121,6 +158,31 @@ nonisolated protocol KindleDeviceConnection: Sendable {
 nonisolated extension KindleDeviceConnection {
     func eject() async { await disconnect() }
     func removeStaleVariants(baseName: String, keeping fileName: String) async throws {}
+
+    /// Compatibility adapter for callers that already own a leaf name. New send
+    /// flows allocate `DeviceTransferPath` in `TransferPlanner`.
+    func send(
+        fileURL: URL,
+        fileName: String,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws {
+        guard let destination = DeviceTransferPath(fileName: fileName),
+              let values = try? fileURL.resourceValues(forKeys: [
+                .fileSizeKey,
+                .isRegularFileKey,
+              ]),
+              values.isRegularFile == true else {
+            throw DeviceError.invalidFileName
+        }
+        _ = try await transfer(
+            DeviceByteTransfer(
+                sourceURL: fileURL,
+                destination: destination,
+                expectedByteCount: UInt64(max(0, values.fileSize ?? 0))
+            ),
+            progress: progress
+        )
+    }
 }
 
 nonisolated let deviceBookExtensions: Set<String> = ["epub", "mobi", "azw", "azw3", "pdf", "txt", "kfx"]

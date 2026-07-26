@@ -39,6 +39,10 @@ final class DeviceMonitor {
         return nil
     }
 
+    var inventory: DeviceInventorySnapshot? {
+        info.map { DeviceInventorySnapshot(info: $0, books: books) }
+    }
+
     // MARK: - Lifecycle
 
     func start() {

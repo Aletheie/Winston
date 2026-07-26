@@ -35,11 +35,14 @@ nonisolated struct FullTextBookSnapshot: Sendable, Equatable, Identifiable {
     }
 
     let bookID: UUID
-    let title: String
-    let author: String?
     let source: Source?
 
     var id: UUID { bookID }
+
+    init(bookID: UUID, source: Source?) {
+        self.bookID = bookID
+        self.source = source
+    }
 }
 
 nonisolated struct FullTextIndexSummary: Sendable, Equatable {
@@ -50,11 +53,16 @@ nonisolated struct FullTextIndexSummary: Sendable, Equatable {
     let unsupportedBooks: Int
 }
 
-nonisolated struct FullTextBookResult: Sendable, Equatable, Identifiable {
+/// A relevance-ranked hit returned directly by SQLite FTS5.
+///
+/// Catalog presentation metadata deliberately does not live here. UI consumers
+/// hydrate the book ID through `LibraryReadModel`, so metadata edits never require
+/// full-text synchronization.
+nonisolated struct FullTextSearchHit: Sendable, Equatable, Identifiable {
     let bookID: UUID
-    let title: String
-    let author: String?
     let format: String
+    /// Higher values are more relevant. Hits are returned in descending order.
+    let relevanceScore: Double
     let chapters: [FullTextChapterResult]
 
     var id: UUID { bookID }
@@ -75,7 +83,7 @@ nonisolated struct FullTextExcerpt: Sendable, Equatable, Identifiable {
 }
 
 nonisolated struct FullTextSearchPage: Sendable, Equatable {
-    let results: [FullTextBookResult]
+    let hits: [FullTextSearchHit]
     let offset: Int
     let limit: Int
     let nextOffset: Int?
@@ -98,8 +106,6 @@ nonisolated struct StoredFullTextSection: Codable, Sendable {
 private nonisolated struct IndexedFullTextDocument: Sendable {
     let assetID: UUID
     let assetGeneration: String
-    let title: String
-    let author: String?
     let format: String
     let sourcePath: String
     let sourceHash: String
@@ -152,21 +158,19 @@ private nonisolated enum FullTextIndexError: Error, LocalizedError, Sendable {
 
 private nonisolated struct FullTextResultRow: Sendable {
     let bookID: UUID
-    let title: String
-    let author: String?
     let format: String
     let sectionID: String
     let sectionTitle: String?
     let sectionKind: FullTextSectionKind
     let sectionOrdinal: Int
     let snippet: String
+    let relevanceScore: Double
 }
 
-private nonisolated struct FullTextBookResultBuilder: Sendable {
+private nonisolated struct FullTextSearchHitBuilder: Sendable {
     let bookID: UUID
-    let title: String
-    let author: String?
     let format: String
+    let relevanceScore: Double
     var chapters: [FullTextChapterResult] = []
 
     mutating func append(_ row: FullTextResultRow) {
@@ -184,12 +188,11 @@ private nonisolated struct FullTextBookResultBuilder: Sendable {
         ))
     }
 
-    func result() -> FullTextBookResult {
-        FullTextBookResult(
+    func hit() -> FullTextSearchHit {
+        FullTextSearchHit(
             bookID: bookID,
-            title: title,
-            author: author,
             format: format.uppercased(),
+            relevanceScore: relevanceScore,
             chapters: chapters.sorted {
                 if $0.ordinal != $1.ordinal { return $0.ordinal < $1.ordinal }
                 return $0.id < $1.id
@@ -202,7 +205,7 @@ actor FullTextSearchIndex {
     nonisolated static let shared = FullTextSearchIndex()
     nonisolated static let supportedFormats: Set<String> = ["epub", "pdf", "txt", "html", "htm"]
 
-    private static let schemaVersion: Int32 = 1
+    private static let schemaVersion: Int32 = 2
     private static let maximumBookResults = 80
     private static let maximumExcerpts = 240
 
@@ -250,8 +253,8 @@ actor FullTextSearchIndex {
         }
     }
 
-    func search(_ rawQuery: String) throws -> [FullTextBookResult] {
-        try searchPage(rawQuery).results
+    func search(_ rawQuery: String) throws -> [FullTextSearchHit] {
+        try searchPage(rawQuery).hits
     }
 
     func searchPage(
@@ -446,7 +449,7 @@ actor FullTextSearchIndex {
     ) throws -> FullTextSearchPage {
         let query = Self.collapsedWhitespace(rawQuery)
         guard query.count >= 2 else {
-            return FullTextSearchPage(results: [], offset: offset, limit: limit, nextOffset: nil)
+            return FullTextSearchPage(hits: [], offset: offset, limit: limit, nextOffset: nil)
         }
         try Task.checkCancellation()
         let database = try openDatabase()
@@ -460,14 +463,15 @@ actor FullTextSearchIndex {
         defer { signposter.endInterval("SearchFullTextIndex", interval) }
 
         let sql = """
-        SELECT d.book_id, d.title, d.author, d.format,
+        SELECT d.book_id, d.format,
                sections.section_id, sections.section_title, sections.section_kind,
                sections.section_ordinal,
-               snippet(sections, 7, '', '', '…', 40)
+               snippet(sections, 7, '', '', '…', 40),
+               bm25(sections)
         FROM sections
         JOIN documents AS d ON d.book_id = sections.book_id
         WHERE sections MATCH ?
-        ORDER BY bm25(sections), d.title COLLATE NOCASE, sections.section_ordinal
+        ORDER BY bm25(sections), d.book_id, sections.section_ordinal
         """
         let statement = try prepare(sql, database: database)
         defer { sqlite3_finalize(statement) }
@@ -481,7 +485,7 @@ actor FullTextSearchIndex {
         var discoveredBookIDs: Set<UUID> = []
         var includedBookIDs: Set<UUID> = []
         var order: [UUID] = []
-        var builders: [UUID: FullTextBookResultBuilder] = [:]
+        var builders: [UUID: FullTextSearchHitBuilder] = [:]
         var excerptCount = 0
         var hasMore = false
 
@@ -508,11 +512,10 @@ actor FullTextSearchIndex {
                 }
                 includedBookIDs.insert(row.bookID)
                 order.append(row.bookID)
-                builders[row.bookID] = FullTextBookResultBuilder(
+                builders[row.bookID] = FullTextSearchHitBuilder(
                     bookID: row.bookID,
-                    title: row.title,
-                    author: row.author,
-                    format: row.format
+                    format: row.format,
+                    relevanceScore: row.relevanceScore
                 )
             }
 
@@ -522,36 +525,34 @@ actor FullTextSearchIndex {
             excerptCount += 1
         }
 
-        let results = order.compactMap { builders[$0]?.result() }
+        let hits = order.compactMap { builders[$0]?.hit() }
         return FullTextSearchPage(
-            results: results,
+            hits: hits,
             offset: offset,
             limit: limit,
-            nextOffset: hasMore ? offset + results.count : nil
+            nextOffset: hasMore ? offset + hits.count : nil
         )
     }
 
     private func resultRow(_ statement: OpaquePointer) -> FullTextResultRow? {
         guard let bookIDString = columnText(statement, at: 0),
               let bookID = UUID(uuidString: bookIDString),
-              let title = columnText(statement, at: 1),
-              let format = columnText(statement, at: 3),
-              let sectionID = columnText(statement, at: 4),
-              let kindRaw = columnText(statement, at: 6),
+              let format = columnText(statement, at: 1),
+              let sectionID = columnText(statement, at: 2),
+              let kindRaw = columnText(statement, at: 4),
               let kind = FullTextSectionKind(rawValue: kindRaw),
-              let snippet = columnText(statement, at: 8) else {
+              let snippet = columnText(statement, at: 6) else {
             return nil
         }
         return FullTextResultRow(
             bookID: bookID,
-            title: title,
-            author: columnText(statement, at: 2),
             format: format,
             sectionID: sectionID,
-            sectionTitle: columnText(statement, at: 5),
+            sectionTitle: columnText(statement, at: 3),
             sectionKind: kind,
-            sectionOrdinal: Int(sqlite3_column_int64(statement, 7)),
-            snippet: snippet
+            sectionOrdinal: Int(sqlite3_column_int64(statement, 5)),
+            snippet: snippet,
+            relevanceScore: -sqlite3_column_double(statement, 7)
         )
     }
 
@@ -561,7 +562,7 @@ actor FullTextSearchIndex {
     ) throws -> IndexedFullTextDocument? {
         let statement = try prepare(
             """
-            SELECT asset_id, asset_generation, title, author, format, source_path,
+            SELECT asset_id, asset_generation, format, source_path,
                    source_hash, source_resource_id, source_modified, source_size
             FROM documents WHERE book_id = ?
             """,
@@ -577,27 +578,24 @@ actor FullTextSearchIndex {
         guard let assetIDString = columnText(statement, at: 0),
               let assetID = UUID(uuidString: assetIDString),
               let assetGeneration = columnText(statement, at: 1),
-              let title = columnText(statement, at: 2),
-              let format = columnText(statement, at: 4),
-              let sourcePath = columnText(statement, at: 5),
-              let sourceHash = columnText(statement, at: 6) else {
+              let format = columnText(statement, at: 2),
+              let sourcePath = columnText(statement, at: 3),
+              let sourceHash = columnText(statement, at: 4) else {
             throw sqliteError(SQLITE_CORRUPT, operation: "Decode indexed document", database: database)
         }
-        let modificationDate = sqlite3_column_type(statement, 8) == SQLITE_NULL
+        let modificationDate = sqlite3_column_type(statement, 6) == SQLITE_NULL
             ? nil
-            : Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 8))
+            : Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 6))
         return IndexedFullTextDocument(
             assetID: assetID,
             assetGeneration: assetGeneration,
-            title: title,
-            author: columnText(statement, at: 3),
             format: format,
             sourcePath: sourcePath,
             sourceHash: sourceHash,
             sourceFileGeneration: CatalogFileGeneration(
-                resourceIdentifier: columnText(statement, at: 7),
+                resourceIdentifier: columnText(statement, at: 5),
                 modificationDate: modificationDate,
-                fileSize: sqlite3_column_int64(statement, 9)
+                fileSize: sqlite3_column_int64(statement, 7)
             )
         )
     }
@@ -695,14 +693,12 @@ actor FullTextSearchIndex {
         let statement = try prepare(
             """
             INSERT INTO documents(
-                book_id, asset_id, asset_generation, title, author, format,
+                book_id, asset_id, asset_generation, format,
                 source_path, source_hash, source_resource_id, source_modified, source_size
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(book_id) DO UPDATE SET
                 asset_id = excluded.asset_id,
                 asset_generation = excluded.asset_generation,
-                title = excluded.title,
-                author = excluded.author,
                 format = excluded.format,
                 source_path = excluded.source_path,
                 source_hash = excluded.source_hash,
@@ -716,16 +712,14 @@ actor FullTextSearchIndex {
         try bind(snapshot.bookID.uuidString.lowercased(), at: 1, statement: statement, database: database)
         try bind(source.assetID.uuidString.lowercased(), at: 2, statement: statement, database: database)
         try bind(source.generation.storageKey, at: 3, statement: statement, database: database)
-        try bind(snapshot.title, at: 4, statement: statement, database: database)
-        try bind(snapshot.author, at: 5, statement: statement, database: database)
-        try bind(source.format, at: 6, statement: statement, database: database)
-        try bind(sourcePath, at: 7, statement: statement, database: database)
-        try bind(sourceHash, at: 8, statement: statement, database: database)
-        try bind(sourceFileGeneration.resourceIdentifier, at: 9, statement: statement, database: database)
+        try bind(source.format, at: 4, statement: statement, database: database)
+        try bind(sourcePath, at: 5, statement: statement, database: database)
+        try bind(sourceHash, at: 6, statement: statement, database: database)
+        try bind(sourceFileGeneration.resourceIdentifier, at: 7, statement: statement, database: database)
         if let modificationDate = sourceFileGeneration.modificationDate {
             guard sqlite3_bind_double(
                 statement,
-                10,
+                8,
                 modificationDate.timeIntervalSinceReferenceDate
             ) == SQLITE_OK else {
                 throw sqliteError(
@@ -735,9 +729,9 @@ actor FullTextSearchIndex {
                 )
             }
         } else {
-            sqlite3_bind_null(statement, 10)
+            sqlite3_bind_null(statement, 8)
         }
-        guard sqlite3_bind_int64(statement, 11, sourceFileGeneration.fileSize) == SQLITE_OK else {
+        guard sqlite3_bind_int64(statement, 9, sourceFileGeneration.fileSize) == SQLITE_OK else {
             throw sqliteError(
                 sqlite3_errcode(database),
                 operation: "Bind source size",
@@ -888,8 +882,6 @@ actor FullTextSearchIndex {
                 book_id TEXT PRIMARY KEY NOT NULL,
                 asset_id TEXT NOT NULL,
                 asset_generation TEXT NOT NULL,
-                title TEXT NOT NULL,
-                author TEXT,
                 format TEXT NOT NULL,
                 source_path TEXT NOT NULL,
                 source_hash TEXT NOT NULL,

@@ -203,18 +203,22 @@ actor MTPDeviceConnection: KindleDeviceConnection {
         return books.sorted { $0.fileName.localizedCaseInsensitiveCompare($1.fileName) == .orderedAscending }
     }
 
-    func send(fileURL: URL, fileName: String, progress: @escaping @Sendable (Double) -> Void) throws {
+    func transfer(
+        _ request: DeviceByteTransfer,
+        progress: @escaping @Sendable (Double) -> Void
+    ) throws -> DeviceTransferResult {
         guard let device else { throw DeviceError.notConnected }
-        guard let fileName = ManagedLeafName(rawValue: fileName)?.rawValue else {
-            throw DeviceError.invalidFileName
-        }
+        let fileName = request.destination.fileName
         guard documentsFolderID != 0 else {
             Log.device.error("Refusing to send \(fileName, privacy: .public): documents folder unknown")
             throw DeviceError.transferFailed(code: -2)
         }
-        let path = fileURL.path(percentEncoded: false)
+        let path = request.sourceURL.path(percentEncoded: false)
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let size = attrs[.size] as? UInt64 else {
+            throw DeviceError.fileMissing
+        }
+        guard size == request.expectedByteCount else {
             throw DeviceError.fileMissing
         }
         Log.device.info("Sending \(fileName, privacy: .public) (\(size) bytes) → documents (folder \(self.documentsFolderID), storage \(self.primaryStorageID))")
@@ -244,6 +248,13 @@ actor MTPDeviceConnection: KindleDeviceConnection {
             LIBMTP_Clear_Errorstack(device)
             throw DeviceError.transferFailed(code: result)
         }
+        return DeviceTransferResult(
+            destination: request.destination,
+            bytesTransferred: size,
+            transportIdentifier: meta.pointee.item_id == 0
+                ? nil
+                : String(meta.pointee.item_id)
+        )
     }
 
     func copyBook(_ book: DeviceBook, to destination: URL, progress: @escaping @Sendable (Double) -> Void) throws {

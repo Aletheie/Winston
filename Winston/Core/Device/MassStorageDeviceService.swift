@@ -90,23 +90,39 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
         .sorted { $0.fileName.localizedCaseInsensitiveCompare($1.fileName) == .orderedAscending }
     }
 
-    func send(fileURL: URL, fileName: String, progress: @escaping @Sendable (Double) -> Void) throws {
+    func transfer(
+        _ request: DeviceByteTransfer,
+        progress: @escaping @Sendable (Double) -> Void
+    ) throws -> DeviceTransferResult {
         try ensureConnected()
-        guard let leaf = ManagedLeafName(rawValue: fileName) else {
-            throw DeviceError.invalidFileName
+        let fileName = request.destination.fileName
+        guard let values = try? request.sourceURL.resourceValues(forKeys: [
+            .fileSizeKey,
+            .isRegularFileKey,
+        ]), values.isRegularFile == true else {
+            throw DeviceError.fileMissing
+        }
+        let byteCount = UInt64(max(0, values.fileSize ?? 0))
+        guard byteCount == request.expectedByteCount else {
+            throw DeviceError.fileMissing
         }
         try boundary.ensureDirectory(["documents"])
         suppressSpotlight()
         Log.device.info("Copying \(fileName, privacy: .public) to the mounted volume")
         progress(0)
         try boundary.writeFile(
-            from: fileURL,
-            to: ["documents", leaf.rawValue],
+            from: request.sourceURL,
+            to: ["documents", fileName],
             progress: progress,
             chunkHook: copyChunkHook,
             operationCheck: { [self] in try ensureExplicitConnection() }
         )
         progress(1)
+        return DeviceTransferResult(
+            destination: request.destination,
+            bytesTransferred: byteCount,
+            transportIdentifier: request.destination.relativePath
+        )
     }
 
     private func suppressSpotlight() {

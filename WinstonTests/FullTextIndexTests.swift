@@ -17,8 +17,6 @@ struct FullTextIndexTests {
         let service = FullTextIndexService(indexDirectory: directory)
         let snapshot = FullTextBookSnapshot(
             bookID: bookID,
-            title: "Kůň",
-            author: "Autor",
             source: source(epub, contentHash: try ContentHasher.sha256(of: epub))
         )
 
@@ -44,8 +42,6 @@ struct FullTextIndexTests {
         let service = FullTextIndexService(indexDirectory: directory)
         let snapshot = FullTextBookSnapshot(
             bookID: UUID(),
-            title: "Cached",
-            author: nil,
             source: self.source(source, contentHash: try ContentHasher.sha256(of: source))
         )
 
@@ -73,8 +69,6 @@ struct FullTextIndexTests {
         let assetID = UUID()
         let first = FullTextBookSnapshot(
             bookID: bookID,
-            title: "Changing",
-            author: nil,
             source: source(
                 firstSource,
                 assetID: assetID,
@@ -83,8 +77,6 @@ struct FullTextIndexTests {
         )
         let second = FullTextBookSnapshot(
             bookID: bookID,
-            title: "Changing",
-            author: nil,
             source: source(
                 secondSource,
                 assetID: assetID,
@@ -110,8 +102,6 @@ struct FullTextIndexTests {
         let originalHash = try ContentHasher.sha256(of: source)
         let snapshot = FullTextBookSnapshot(
             bookID: UUID(),
-            title: "Externally Changed",
-            author: nil,
             source: self.source(source, contentHash: originalHash)
         )
         let service = FullTextIndexService(indexDirectory: indexDirectory)
@@ -157,8 +147,6 @@ struct FullTextIndexTests {
         _ = try await service.synchronize([
             FullTextBookSnapshot(
                 bookID: bookID,
-                title: "Relinked",
-                author: nil,
                 source: source(firstSource, assetID: assetID, contentHash: originalHash)
             ),
         ])
@@ -166,8 +154,6 @@ struct FullTextIndexTests {
         let refreshed = try await service.synchronize([
             FullTextBookSnapshot(
                 bookID: bookID,
-                title: "Relinked",
-                author: nil,
                 source: source(secondSource, assetID: assetID, contentHash: originalHash)
             ),
         ])
@@ -192,9 +178,9 @@ struct FullTextIndexTests {
             indexDirectory: directory.appending(path: "index", directoryHint: .isDirectory)
         )
         let snapshots = [
-            snapshot(title: "Essay", url: html),
-            snapshot(title: "Notes", url: text),
-            snapshot(title: "Paper", url: pdf),
+            snapshot(url: html),
+            snapshot(url: text),
+            snapshot(url: pdf),
         ]
 
         let summary = try await service.synchronize(snapshots)
@@ -229,21 +215,20 @@ struct FullTextIndexTests {
         _ = try await service.synchronize([
             FullTextBookSnapshot(
                 bookID: weakID,
-                title: "Aardvark",
-                author: nil,
                 source: source(weak, contentHash: try ContentHasher.sha256(of: weak))
             ),
             FullTextBookSnapshot(
                 bookID: strongID,
-                title: "Zebra",
-                author: nil,
                 source: source(strong, contentHash: try ContentHasher.sha256(of: strong))
             ),
         ])
 
+        let ranked = try await service.search("globalterm")
         let page = try await service.searchPage("globalterm", limit: 1)
 
-        #expect(page.results.map(\.bookID) == [strongID])
+        #expect(ranked.map(\.bookID) == [strongID, weakID])
+        #expect(ranked[0].relevanceScore > ranked[1].relevanceScore)
+        #expect(page.hits.map(\.bookID) == [strongID])
         #expect(page.nextOffset == 1)
     }
 
@@ -259,8 +244,6 @@ struct FullTextIndexTests {
             try Data("CHAPTER\npaginationtoken \(index)".utf8).write(to: url)
             snapshots.append(FullTextBookSnapshot(
                 bookID: UUID(),
-                title: "Book \(index)",
-                author: nil,
                 source: source(url, contentHash: try ContentHasher.sha256(of: url))
             ))
         }
@@ -277,13 +260,13 @@ struct FullTextIndexTests {
             limit: 2,
             offset: try #require(second.nextOffset)
         )
-        let firstIDs = Set(first.results.map(\.bookID))
-        let secondIDs = Set(second.results.map(\.bookID))
-        let thirdIDs = Set(third.results.map(\.bookID))
+        let firstIDs = Set(first.hits.map(\.bookID))
+        let secondIDs = Set(second.hits.map(\.bookID))
+        let thirdIDs = Set(third.hits.map(\.bookID))
 
-        #expect(first.results.count == 2)
-        #expect(second.results.count == 2)
-        #expect(third.results.count == 1)
+        #expect(first.hits.count == 2)
+        #expect(second.hits.count == 2)
+        #expect(third.hits.count == 1)
         #expect(firstIDs.isDisjoint(with: secondIDs))
         #expect(firstIDs.isDisjoint(with: thirdIDs))
         #expect(secondIDs.isDisjoint(with: thirdIDs))
@@ -302,8 +285,6 @@ struct FullTextIndexTests {
         _ = try await service.synchronize([
             FullTextBookSnapshot(
                 bookID: UUID(),
-                title: "Čeština",
-                author: nil,
                 source: source(url, contentHash: try ContentHasher.sha256(of: url))
             ),
         ])
@@ -326,8 +307,6 @@ struct FullTextIndexTests {
         let assetID = UUID()
         let original = FullTextBookSnapshot(
             bookID: bookID,
-            title: "Generation",
-            author: nil,
             source: source(
                 url,
                 assetID: assetID,
@@ -344,8 +323,6 @@ struct FullTextIndexTests {
         )
         let replacement = FullTextBookSnapshot(
             bookID: bookID,
-            title: "Generation",
-            author: nil,
             source: source(
                 url,
                 assetID: assetID,
@@ -399,8 +376,6 @@ struct FullTextIndexTests {
         _ = try await service.synchronize([
             FullTextBookSnapshot(
                 bookID: UUID(),
-                title: "SQLite",
-                author: nil,
                 source: source(url, contentHash: try ContentHasher.sha256(of: url))
             ),
         ])
@@ -440,8 +415,6 @@ struct FullTextIndexTests {
             try payload.prefix(byteCount).write(to: url)
             snapshots.append(FullTextBookSnapshot(
                 bookID: UUID(),
-                title: "Corpus \(fileIndex)",
-                author: "Benchmark",
                 source: source(url, contentHash: nil)
             ))
             writtenBytes += byteCount
@@ -462,11 +435,9 @@ struct FullTextIndexTests {
         )
     }
 
-    private func snapshot(title: String, url: URL) -> FullTextBookSnapshot {
+    private func snapshot(url: URL) -> FullTextBookSnapshot {
         FullTextBookSnapshot(
             bookID: UUID(),
-            title: title,
-            author: nil,
             source: source(url, contentHash: try? ContentHasher.sha256(of: url))
         )
     }

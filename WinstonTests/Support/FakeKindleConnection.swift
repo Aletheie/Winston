@@ -52,7 +52,10 @@ actor FakeKindleConnection: KindleDeviceConnection {
 
     func listBooks() async throws -> [DeviceBook] { books }
 
-    func send(fileURL: URL, fileName: String, progress: @escaping @Sendable (Double) -> Void) async throws {
+    func transfer(
+        _ request: DeviceByteTransfer,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> DeviceTransferResult {
         sendStarted = true
         let waiters = sendStartWaiters
         sendStartWaiters.removeAll()
@@ -64,10 +67,23 @@ actor FakeKindleConnection: KindleDeviceConnection {
             await withCheckedContinuation { blockedSend = $0 }
         }
         guard !failSends else { throw DeviceError.transferFailed(code: -1) }
-        let bytes = (try? Data(contentsOf: fileURL))?.count ?? 0
+        let bytes = (try? Data(contentsOf: request.sourceURL))?.count ?? 0
+        guard UInt64(bytes) == request.expectedByteCount else {
+            throw DeviceError.fileMissing
+        }
         progress(1)
+        let fileName = request.destination.fileName
         sentFiles.append(SentFile(fileName: fileName, byteCount: bytes))
-        books.append(DeviceBook(path: "/documents/\(fileName)", fileName: fileName, sizeBytes: UInt64(bytes)))
+        books.append(DeviceBook(
+            path: request.destination.relativePath,
+            fileName: fileName,
+            sizeBytes: UInt64(bytes)
+        ))
+        return DeviceTransferResult(
+            destination: request.destination,
+            bytesTransferred: UInt64(bytes),
+            transportIdentifier: "fake-\(sentFiles.count)"
+        )
     }
 
     func copyBook(_ book: DeviceBook, to destination: URL, progress: @escaping @Sendable (Double) -> Void) async throws {

@@ -69,7 +69,7 @@ struct CatalogMutationFailureTests {
         #expect(changeSet.affectedBookIDs == [book.uuid])
         #expect(changeSet.fields.contains(.identity))
         #expect(changeSet.fields.contains(.displayMetadata))
-        #expect(changeSet.fields.contains(.fullTextSource))
+        #expect(!changeSet.fields.contains(.fullTextSource))
         #expect(book.title == "Changed")
         #expect(!library.context.hasChanges)
     }

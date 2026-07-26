@@ -296,6 +296,7 @@ struct LibraryView: View {
                 case .fullTextSearch:
                     FullTextSearchSheet(
                         books: books,
+                        readModel: readModel,
                         onOpen: openBook,
                         onShowInLibrary: showBookInLibrary
                     )

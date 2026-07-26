@@ -94,7 +94,7 @@ enum CatalogMutationCommand {
              .applyAnalysisBatch(_, let kind):
             switch kind {
             case .metadataExtraction, .onlineEnrichment:
-                [.identity, .displayMetadata, .fullTextSource]
+                [.identity, .displayMetadata]
             case .coverExtraction:
                 [.cover]
             case .assetHash, .assetInspection:
@@ -124,7 +124,49 @@ enum CatalogMutationCommand {
     }
 
     var changesFullTextIndex: Bool {
-        changeFields.contains(.fullTextSource)
+        switch self {
+        case .reconcileEditions,
+             .importBooks,
+             .calibreImport,
+             .addFile,
+             .replaceFile,
+             .selectPrimaryAsset,
+             .removeFile,
+             .removeBooks,
+             .conversionOutput,
+             .legacyMigration,
+             .updateAssetValidation:
+            true
+
+        case .applyAnalysis(_, let kind),
+             .applyAnalysisBatch(_, let kind):
+            switch kind {
+            case .assetHash, .assetInspection:
+                true
+            case .metadataExtraction, .onlineEnrichment, .coverExtraction,
+                 .pageCount, .fileSize, .drmInspection:
+                false
+            }
+
+        case .restoreBook(_, let fields, _):
+            fields.contains(.fullTextSource)
+
+        case .setReadingStatus,
+             .setReadingProgress,
+             .createCollection,
+             .updateCollection,
+             .deleteCollection,
+             .updateMetadata,
+             .updateMetadataBatch,
+             .assignEdition,
+             .updateWork,
+             .pluginUpdate,
+             .addPhysicalBook,
+             .updateCover,
+             .importHighlights,
+             .maintenanceCleanup:
+            false
+        }
     }
 
     var affectedAssetIDs: Set<UUID> {
@@ -148,9 +190,6 @@ enum CatalogMutationCommand {
         var result: CatalogChangeFields = [.displayMetadata]
         if !fields.isDisjoint(with: identityMetadataFields) {
             result.insert(.identity)
-        }
-        if !fields.isDisjoint(with: ["title", "author"]) {
-            result.insert(.fullTextSource)
         }
         if fields.contains("readingStatus") || fields.contains("readingProgress") {
             result.insert(.readingState)

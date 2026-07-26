@@ -253,7 +253,8 @@ nonisolated struct LibraryReadModelRecordQueryResult: Equatable, Sendable {
     let records: [LibraryBookRecord]
 }
 
-private nonisolated struct LibraryReadModelIndexes: Sendable {
+/// Exact-match facet indexes used only by the metadata query engine.
+private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
     var all: Set<UUID> = []
     var collections: [UUID: Set<UUID>] = [:]
     var statuses: [ReadingStatus: Set<UUID>] = [:]
@@ -358,13 +359,31 @@ private nonisolated struct LibraryReadModelIndexes: Sendable {
     }
 }
 
+/// Stable, precomputed values used by metadata result ordering.
+private nonisolated struct LibraryMetadataSortKeys: Sendable {
+    let title: String
+    let author: String
+    let dateAdded: Date
+    let rating: Int
+    let seriesIndex: Double
+
+    init(_ record: LibraryBookRecord) {
+        title = record.displayTitle
+        author = record.displayAuthor
+        dateAdded = record.dateAdded
+        rating = record.rating
+        seriesIndex = record.seriesIndex
+    }
+}
+
 private nonisolated struct LibraryReadModelSnapshot: Sendable {
     var generation = 0
     var recordsByID: [UUID: LibraryBookRecord] = [:]
+    var sortKeysByID: [UUID: LibraryMetadataSortKeys] = [:]
     var sourceOrder: [UUID] = []
     var sourceRank: [UUID: Int] = [:]
     var pluginOrder: [UUID] = []
-    var indexes = LibraryReadModelIndexes()
+    var indexes = LibraryMetadataFacetIndexes()
 
     init(
         generation: Int = 0,
@@ -374,6 +393,9 @@ private nonisolated struct LibraryReadModelSnapshot: Sendable {
         self.generation = generation
         self.recordsByID = Dictionary(
             uniqueKeysWithValues: records.map { ($0.id, $0) }
+        )
+        sortKeysByID = Dictionary(
+            uniqueKeysWithValues: records.map { ($0.id, LibraryMetadataSortKeys($0)) }
         )
         self.sourceOrder = sourceOrder
         sourceRank = Dictionary(
@@ -401,10 +423,12 @@ private nonisolated struct LibraryReadModelSnapshot: Sendable {
             if let old = change.old {
                 indexes.remove(old)
                 recordsByID.removeValue(forKey: old.id)
+                sortKeysByID.removeValue(forKey: old.id)
                 pluginOrder.removeAll { $0 == old.id }
             }
             if let new = change.new {
                 recordsByID[new.id] = new
+                sortKeysByID[new.id] = LibraryMetadataSortKeys(new)
                 indexes.add(new)
                 if new.pluginBook != nil {
                     insertIntoPluginOrder(new.id)
@@ -446,7 +470,9 @@ private nonisolated struct LibraryReadModelSnapshot: Sendable {
     }
 }
 
-private actor LibraryReadModelWorker {
+/// The metadata search engine. It owns the read-model snapshot, facet indexes,
+/// cancellation checks, and sort keys; it has no dependency on SQLite FTS.
+private actor LibraryMetadataQueryEngine {
     private var snapshot = LibraryReadModelSnapshot()
 
     func rebuild(
@@ -620,8 +646,8 @@ private actor LibraryReadModelWorker {
         spec: LibraryQuerySpec,
         forceSeriesOrder: Bool
     ) -> Bool {
-        guard let lhs = snapshot.recordsByID[lhsID],
-              let rhs = snapshot.recordsByID[rhsID] else {
+        guard let lhs = snapshot.sortKeysByID[lhsID],
+              let rhs = snapshot.sortKeysByID[rhsID] else {
             return lhsID.uuidString < rhsID.uuidString
         }
         if forceSeriesOrder {
@@ -636,9 +662,9 @@ private actor LibraryReadModelWorker {
         case .source:
             return sourcePrecedes(lhsID, rhsID)
         case .title:
-            comparison = lhs.displayTitle.compare(rhs.displayTitle)
+            comparison = lhs.title.compare(rhs.title)
         case .author:
-            comparison = lhs.displayAuthor.compare(rhs.displayAuthor)
+            comparison = lhs.author.compare(rhs.author)
         case .dateAdded:
             comparison = lhs.dateAdded == rhs.dateAdded
                 ? .orderedSame
@@ -689,7 +715,7 @@ final class LibraryReadModel {
     @ObservationIgnored private var deviceFileNames: Set<String> = []
     @ObservationIgnored private var deviceIsConnected = false
     @ObservationIgnored private var updates: [LibraryReadModelUpdate] = []
-    @ObservationIgnored private let worker = LibraryReadModelWorker()
+    @ObservationIgnored private let metadataEngine = LibraryMetadataQueryEngine()
     @ObservationIgnored private(set) var diagnostics = LibraryReadModelDiagnostics()
 
     /// Applies the semantic change set returned by `CatalogMutationService`.
@@ -761,7 +787,7 @@ final class LibraryReadModel {
            !delta.changesBookMembership,
            delta.fields.isDisjoint(with: recordRelevantFields) {
             diagnostics.lastCapturedRecordCount = 0
-            await worker.apply(
+            await metadataEngine.apply(
                 changes: [],
                 sourceOrder: nil,
                 generation: delta.toRevision
@@ -886,7 +912,7 @@ final class LibraryReadModel {
         diagnostics.lastCapturedRecordCount = affectedIDs.count
         diagnostics.incrementallyCapturedRecordCount += affectedIDs.count
         let sourceOrderUpdate = sourceOrderChanged ? currentSourceOrder : nil
-        await worker.apply(
+        await metadataEngine.apply(
             changes: recordChanges,
             sourceOrder: sourceOrderUpdate,
             generation: delta.toRevision
@@ -894,7 +920,7 @@ final class LibraryReadModel {
 
         if configurationChanged {
             let interval = Log.librarySignposter.beginInterval("SidebarFacets")
-            let rebuiltFacets = await worker.makeFacets(
+            let rebuiltFacets = await metadataEngine.makeFacets(
                 smartCollections: nextSmartCollections,
                 deviceFileNames: deviceFileNames,
                 deviceIsConnected: deviceIsConnected
@@ -928,15 +954,15 @@ final class LibraryReadModel {
     }
 
     func query(_ spec: LibraryQuerySpec) async -> LibraryReadModelQueryResult {
-        await worker.query(spec)
+        await metadataEngine.query(spec)
     }
 
     func records(matching spec: LibraryQuerySpec) async -> LibraryReadModelRecordQueryResult {
-        await worker.records(matching: spec)
+        await metadataEngine.records(matching: spec)
     }
 
     func displayIDs(query: LibraryQuerySpec) async -> [UUID] {
-        await worker.query(query).ids
+        await metadataEngine.query(query).ids
     }
 
     func pluginBooks(
@@ -947,7 +973,7 @@ final class LibraryReadModel {
         maximumOffset: Int
     ) async -> PluginBookReadPage? {
         guard didBootstrap else { return nil }
-        return await worker.pluginBooks(
+        return await metadataEngine.pluginBooks(
             matching: searchText,
             offset: offset,
             limit: limit,
@@ -962,12 +988,12 @@ final class LibraryReadModel {
 
     func kindleCandidates() async -> [KindleSyncCandidate]? {
         guard didBootstrap else { return nil }
-        return await worker.kindleCandidates()
+        return await metadataEngine.kindleCandidates()
     }
 
     func deviceMetadata() async -> LibraryDeviceMetadataSnapshot? {
         guard didBootstrap else { return nil }
-        return await worker.deviceMetadata()
+        return await metadataEngine.deviceMetadata()
     }
 
     func record(for id: UUID) -> LibraryBookRecord? {
@@ -1149,12 +1175,12 @@ final class LibraryReadModel {
         Log.librarySignposter.endInterval("LibrarySnapshot", interval)
 
         let facetInterval = Log.librarySignposter.beginInterval("SidebarFacets")
-        await worker.rebuild(
+        await metadataEngine.rebuild(
             records: records,
             sourceOrder: records.map(\.id),
             generation: catalogGeneration
         )
-        let nextFacets = await worker.makeFacets(
+        let nextFacets = await metadataEngine.makeFacets(
             smartCollections: smartCollections,
             deviceFileNames: deviceFileNames,
             deviceIsConnected: deviceIsConnected

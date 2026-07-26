@@ -154,7 +154,7 @@ struct LibraryMutationTests {
             bookID: UUID(),
             fields: ["rating", "notes"]
         ).changesFullTextIndex)
-        #expect(CatalogMutationCommand.updateMetadata(
+        #expect(!CatalogMutationCommand.updateMetadata(
             bookID: UUID(),
             fields: ["title"]
         ).changesFullTextIndex)
@@ -170,9 +170,17 @@ struct LibraryMutationTests {
             workID: UUID(),
             fields: ["preferredEditionUUID"]
         ).changesFullTextIndex)
-        #expect(CatalogMutationCommand.updateWork(
+        #expect(!CatalogMutationCommand.updateWork(
             workID: UUID(),
             fields: ["author"]
+        ).changesFullTextIndex)
+        #expect(!CatalogMutationCommand.applyAnalysis(
+            bookID: UUID(),
+            kind: .onlineEnrichment
+        ).changesFullTextIndex)
+        #expect(CatalogMutationCommand.applyAnalysis(
+            bookID: UUID(),
+            kind: .assetHash(assetID: UUID())
         ).changesFullTextIndex)
         #expect(CatalogMutationCommand.replaceFile(
             bookID: UUID(),
@@ -180,7 +188,7 @@ struct LibraryMutationTests {
         ).changesFullTextIndex)
     }
 
-    @Test func workIdentityChangeInvalidatesEveryEditionForFullTextMetadata() async throws {
+    @Test func workIdentityChangeDoesNotInvalidateFullTextAssets() async throws {
         let lib = try await TestLibrary()
         let work = Work(title: "Original")
         let first = Book(fileName: "first.epub", originalFileName: "First.epub")
@@ -202,7 +210,8 @@ struct LibraryMutationTests {
         }
 
         let delta = LibraryMutationLog.shared.fullTextDelta(since: before)
-        #expect(delta.affectedBookIDs == [first.uuid, second.uuid])
+        #expect(delta.fromRevision == delta.toRevision)
+        #expect(delta.affectedBookIDs.isEmpty)
         #expect(!delta.requiresFullRebuild)
     }
 

@@ -248,7 +248,7 @@ struct LibraryTimeMachineRestorer {
         var insertedWork: Work?
         let preimage = existing.map(LibraryTimeMachineBookPreimage.init)
         let fields: CatalogChangeFields = switch scope {
-        case .metadata: [.identity, .displayMetadata, .fullTextSource]
+        case .metadata: [.identity, .displayMetadata]
         case .cover: [.cover]
         case .book: .all
         }
