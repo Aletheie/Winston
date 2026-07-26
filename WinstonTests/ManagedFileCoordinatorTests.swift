@@ -118,6 +118,44 @@ struct ManagedFileCoordinatorTests {
         #expect(try managedBookFiles().isEmpty)
     }
 
+    @Test(arguments: [
+        CocoaError.Code.fileWriteOutOfSpace,
+        CocoaError.Code.fileWriteNoPermission,
+    ])
+    func stagingIOFailureLeavesNoJournalOrOrphan(
+        _ code: CocoaError.Code
+    ) async throws {
+        let library = try await TestLibrary()
+        let source = try sourceFile(in: library.root, contents: "input")
+        let managedSource = try ManagedFileSource.book(sourceURL: source)
+        let coordinator = makeCoordinator {
+            if case .beforeStagingWrite = $0 {
+                throw CocoaError(code)
+            }
+        }
+
+        await #expect(throws: CocoaError.self) {
+            _ = try await coordinator.stage(
+                intent: .importBook,
+                sources: [managedSource],
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [UUID()],
+                    referencedBookFileNames: [managedSource.finalRelativeName]
+                )
+            )
+        }
+        #expect(await coordinator.pendingTransactions().isEmpty)
+        let staging = AppPaths.managedFilesDirectory.appending(
+            path: "Staging",
+            directoryHint: .isDirectory
+        )
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: staging,
+            includingPropertiesForKeys: nil
+        )
+        #expect(entries.isEmpty)
+    }
+
     @Test func failureBeforeCatalogSaveAbortsStageAndKeepsCatalogClean() async throws {
         let library = try await TestLibrary()
         let book = try seedPhysicalBook(in: library)
@@ -770,7 +808,11 @@ struct ManagedFileCoordinatorTests {
 
         let report = await coordinator.recover(against: emptySnapshot)
 
-        #expect(report.removedOrphanStagingURLs == [orphan])
+        #expect(report.removedOrphanStagingURLs.count == 1)
+        #expect(
+            report.removedOrphanStagingURLs.first?.lastPathComponent
+                == orphan.lastPathComponent
+        )
         #expect(!FileManager.default.fileExists(
             atPath: orphan.path(percentEncoded: false)
         ))

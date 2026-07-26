@@ -163,46 +163,45 @@ struct LibraryTimeMachineRestorer {
     typealias SafetyBackupAction = @Sendable (URL) async throws -> URL
 
     private let modelContext: ModelContext
-    private let coversDirectory: URL
     private let createSafetyBackup: SafetyBackupAction
-    private let covers: CoverRepository
     private let mutations: CatalogMutationService
+    private let managedFiles: ManagedFileCoordinator
 
     init(
         modelContext: ModelContext,
         liveStoreURL: URL = PersistenceController.storeURL,
         coversDirectory: URL = AppPaths.coversDirectory,
         createSafetyBackup: SafetyBackupAction? = nil,
-        coverRepository: CoverRepository? = nil,
+        managedFiles: ManagedFileCoordinator? = nil,
         mutationService: CatalogMutationService? = nil
     ) {
         self.modelContext = modelContext
-        mutations = mutationService ?? CatalogMutationService(modelContext: modelContext)
-        self.coversDirectory = coversDirectory
-        if let coverRepository {
-            covers = coverRepository
+        let fileCoordinator: ManagedFileCoordinator
+        if let managedFiles {
+            fileCoordinator = managedFiles
+        } else if let mutationService {
+            fileCoordinator = mutationService.managedFiles
         } else if coversDirectory.standardizedFileURL == AppPaths.coversDirectory.standardizedFileURL {
-            covers = .shared
+            fileCoordinator = .shared
         } else {
-            covers = CoverRepository(coversDirectory: coversDirectory)
+            let root = coversDirectory.deletingLastPathComponent()
+            fileCoordinator = ManagedFileCoordinator(
+                booksDirectory: root.appending(path: "Books", directoryHint: .isDirectory),
+                coversDirectory: coversDirectory,
+                stateDirectory: root.appending(path: "ManagedFiles", directoryHint: .isDirectory)
+            )
         }
+        self.managedFiles = fileCoordinator
+        mutations = mutationService ?? CatalogMutationService(
+            modelContext: modelContext,
+            managedFiles: fileCoordinator
+        )
         if let createSafetyBackup {
             self.createSafetyBackup = createSafetyBackup
         } else {
-            let backupCoordinator: ManagedFileCoordinator
-            if coversDirectory.standardizedFileURL == AppPaths.coversDirectory.standardizedFileURL {
-                backupCoordinator = .shared
-            } else {
-                let root = coversDirectory.deletingLastPathComponent()
-                backupCoordinator = ManagedFileCoordinator(
-                    booksDirectory: root.appending(path: "Books", directoryHint: .isDirectory),
-                    coversDirectory: coversDirectory,
-                    stateDirectory: root.appending(path: "ManagedFiles", directoryHint: .isDirectory)
-                )
-            }
             self.createSafetyBackup = { sourceBackup in
                 do {
-                    return try await backupCoordinator.createBackup(
+                    return try await fileCoordinator.createBackup(
                         storeURL: liveStoreURL,
                         to: sourceBackup.deletingLastPathComponent(),
                         keepLast: Int.max
@@ -243,10 +242,6 @@ struct LibraryTimeMachineRestorer {
         }
 
         let coverIsIncluded = scope == .cover || scope == .book
-        let coverToken = coverIsIncluded
-            ? await covers.beginUserMutation(for: snapshot.id)
-            : nil
-        var coverRollback: CoverRollbackTicket?
         var restoredBook: Book?
         let createdBook = scope == .book && existing == nil
         var skippedCollections = 0
@@ -267,20 +262,127 @@ struct LibraryTimeMachineRestorer {
         let affectedCollectionIDs = scope == .book
             ? Set(snapshot.collections.map(\.id))
             : []
-
-        do {
-            if let coverToken {
-                coverRollback = if let restoredCoverData {
-                    await covers.install(restoredCoverData, using: coverToken)
+        let expectedCoverVersion = max(
+            (existing?.coverVersion ?? snapshot.coverVersion) + 1,
+            snapshot.coverVersion + 1
+        )
+        let coverTransaction: ManagedFileTransaction?
+        if coverIsIncluded {
+            do {
+                let identity = try await managedFiles.captureIdentity(
+                    of: .cover(bookID: snapshot.id)
+                )
+                let requirement = ManagedFileRequirement(
+                    presentBookIDs: [snapshot.id],
+                    coverVersions: [snapshot.id: expectedCoverVersion]
+                )
+                if let restoredCoverData {
+                    coverTransaction = try await managedFiles.stage(
+                        intent: .restore,
+                        sources: [
+                            .cover(
+                                data: restoredCoverData,
+                                bookID: snapshot.id,
+                                replacing: identity
+                            ),
+                        ],
+                        requirement: requirement
+                    )
                 } else {
-                    await covers.remove(using: coverToken)
+                    coverTransaction = try await managedFiles.prepareCleanup(
+                        intent: .restore,
+                        requirement: requirement,
+                        cleanups: [.file(identity)]
+                    )
                 }
-                guard coverRollback != nil else {
-                    throw LibraryTimeMachineRestoreError.coverWriteFailed
+            } catch {
+                throw LibraryTimeMachineRestoreError.coverWriteFailed
+            }
+        } else {
+            coverTransaction = nil
+        }
+
+        let rollbackMutation = {
+            if let preimage {
+                preimage.restore(in: self.modelContext)
+            } else if let restoredBook {
+                self.discardInsertedBook(
+                    restoredBook,
+                    insertedWork: insertedWork
+                )
+            }
+        }
+        let applyMutation = {
+            switch scope {
+            case .metadata:
+                guard let existing else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                restoredBook = existing
+                applyMetadata(snapshot.metadata, to: existing)
+
+            case .cover:
+                guard let existing else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                restoredBook = existing
+
+            case .book:
+                let book: Book
+                if let existing {
+                    book = existing
+                } else {
+                    book = makeBook(from: snapshot)
+                    self.modelContext.insert(book)
+                }
+                restoredBook = book
+                applyMetadata(snapshot.metadata, to: book)
+                book.readingStatusRaw = snapshot.reading.statusRaw
+                book.dateStarted = snapshot.reading.dateStarted
+                book.dateFinished = snapshot.reading.dateFinished
+                replaceReadingSessions(on: book, with: snapshot.reading.sessions)
+                replaceHighlights(on: book, with: snapshot.highlights)
+                skippedCollections = try restoreCollectionMemberships(
+                    on: book,
+                    from: snapshot.collections
+                )
+                if createdBook {
+                    restoreAssets(
+                        on: book,
+                        from: snapshot.assets,
+                        primaryAssetID: snapshot.primaryAssetID
+                    )
+                    insertedWork = try restoreWork(
+                        on: book,
+                        from: snapshot.work
+                    )
                 }
             }
 
-            do {
+            if coverIsIncluded {
+                restoredBook?.coverVersion = expectedCoverVersion
+            }
+        }
+
+        var coverWasPublished = !coverIsIncluded
+        do {
+            if let coverTransaction {
+                let result = try await mutations.commitFileMutation(
+                    .restoreBook(
+                        bookID: snapshot.id,
+                        fields: fields,
+                        createsBook: createdBook
+                    ),
+                    transaction: coverTransaction,
+                    affectedBookIDs: [snapshot.id],
+                    affectedWorkIDs: affectedWorkIDs,
+                    affectedAssetIDs: affectedAssetIDs,
+                    affectedCollectionIDs: affectedCollectionIDs,
+                    revertingOnFailure: rollbackMutation,
+                    applying: applyMutation
+                )
+                coverWasPublished = result.isFullyPublished
+            } else {
                 try mutations.commit(
                     .restoreBook(
                         bookID: snapshot.id,
@@ -291,81 +393,15 @@ struct LibraryTimeMachineRestorer {
                     affectedWorkIDs: affectedWorkIDs,
                     affectedAssetIDs: affectedAssetIDs,
                     affectedCollectionIDs: affectedCollectionIDs,
-                    revertingOnFailure: {
-                        if let preimage {
-                            preimage.restore(in: self.modelContext)
-                        } else if let restoredBook {
-                            self.discardInsertedBook(
-                                restoredBook,
-                                insertedWork: insertedWork
-                            )
-                        }
-                    }
-                ) {
-                    switch scope {
-                    case .metadata:
-                        guard let existing else {
-                            throw CatalogMutationError.modelNotFound
-                        }
-                        restoredBook = existing
-                        applyMetadata(snapshot.metadata, to: existing)
-
-                    case .cover:
-                        guard let existing else {
-                            throw CatalogMutationError.modelNotFound
-                        }
-                        restoredBook = existing
-
-                    case .book:
-                        let book: Book
-                        if let existing {
-                            book = existing
-                        } else {
-                            book = makeBook(from: snapshot)
-                            self.modelContext.insert(book)
-                        }
-                        restoredBook = book
-                        applyMetadata(snapshot.metadata, to: book)
-                        book.readingStatusRaw = snapshot.reading.statusRaw
-                        book.dateStarted = snapshot.reading.dateStarted
-                        book.dateFinished = snapshot.reading.dateFinished
-                        replaceReadingSessions(on: book, with: snapshot.reading.sessions)
-                        replaceHighlights(on: book, with: snapshot.highlights)
-                        skippedCollections = try restoreCollectionMemberships(
-                            on: book,
-                            from: snapshot.collections
-                        )
-                        if createdBook {
-                            restoreAssets(
-                                on: book,
-                                from: snapshot.assets,
-                                primaryAssetID: snapshot.primaryAssetID
-                            )
-                            insertedWork = try restoreWork(
-                                on: book,
-                                from: snapshot.work
-                            )
-                        }
-                    }
-
-                    if coverToken != nil {
-                        restoredBook?.coverVersion = max(
-                            (restoredBook?.coverVersion ?? 0) + 1,
-                            snapshot.coverVersion + 1
-                        )
-                    }
-                }
-            } catch {
-                throw LibraryTimeMachineRestoreError.saveFailed(error.localizedDescription)
+                    revertingOnFailure: rollbackMutation,
+                    applying: applyMutation
+                )
             }
         } catch {
-            if let coverRollback {
-                _ = await covers.rollback(coverRollback)
-            }
-            throw error
+            throw LibraryTimeMachineRestoreError.saveFailed(error.localizedDescription)
         }
 
-        if coverIsIncluded, let restoredBook {
+        if coverWasPublished, coverIsIncluded, let restoredBook {
             let image = restoredCoverData.flatMap(NSImage.init(data:))
             await CoverCache.shared.replace(image, for: restoredBook.coverCacheURL)
         }

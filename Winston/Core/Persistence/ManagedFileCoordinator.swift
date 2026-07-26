@@ -265,6 +265,7 @@ nonisolated struct ManagedFileRecoveryReport: Sendable, Equatable {
 }
 
 nonisolated enum ManagedFileFaultPoint: Sendable, Equatable {
+    case beforeStagingWrite(relativeName: String)
     case afterStaging
     case beforeCatalogSave
     case afterCatalogSave
@@ -762,6 +763,7 @@ actor ManagedFileCoordinator {
             ? "\(UUID().uuidString).payload"
             : "\(UUID().uuidString).\(finalExtension)"
         let stagedURL = transactionStaging.appending(path: stagedLeaf)
+        try faultInjector(.beforeStagingWrite(relativeName: source.finalRelativeName))
         let byteCount: Int64
         let digest: String
         let sourceReadPassCount: Int

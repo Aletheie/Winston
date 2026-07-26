@@ -739,7 +739,7 @@ private struct CatalogCollectionPreimage {
 final class CatalogMutationService {
     private let modelContext: ModelContext
     private let saveAdapter: CatalogSaveAdapter
-    private let managedFiles: ManagedFileCoordinator
+    let managedFiles: ManagedFileCoordinator
     private let hooks: CatalogMutationHooks
     let analysisCoordinator: CatalogAnalysisCoordinator
     let editionIdentity = EditionIdentityCoordinator()
@@ -1345,6 +1345,7 @@ final class CatalogMutationService {
         transaction: ManagedFileTransaction,
         affectedBookIDs: Set<UUID> = [],
         affectedWorkIDs: Set<UUID> = [],
+        affectedAssetIDs: Set<UUID>? = nil,
         affectedCollectionIDs: Set<UUID> = [],
         catalogChanged: Bool = true,
         progress: ManagedFileProgressHandler? = nil,
@@ -1395,6 +1396,7 @@ final class CatalogMutationService {
             command: command,
             affectedBookIDs: affectedBookIDs,
             affectedWorkIDs: affectedWorkIDs,
+            affectedAssetIDs: affectedAssetIDs,
             affectedCollectionIDs: affectedCollectionIDs
         ), catalogChanged: catalogChanged)
         let pending = await finalizeCommittedTransactions(
