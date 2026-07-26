@@ -451,29 +451,32 @@ final class MetadataService {
     /// is released before the first suspension point.
     @discardableResult
     func performEnrich(bookID: UUID, replaceCover: Bool) async -> Bool {
-        let input: (BookAnalysisSnapshot, Int)
+        let input: (BookAnalysisSnapshot, CoverReference, Int)
         do {
             guard let book = try? mutations.book(id: bookID),
                   let snapshot = BookAnalysisSnapshot(book: book) else { return false }
-            input = (snapshot, book.coverVersion)
+            input = (snapshot, book.coverReference, book.coverVersion)
         }
         return await performEnrich(
             snapshot: input.0,
-            coverVersion: input.1,
+            coverReference: input.1,
+            editionCoverVersion: input.2,
             replaceCover: replaceCover
         )
     }
 
     private func performEnrich(
         snapshot: BookAnalysisSnapshot,
-        coverVersion: Int,
+        coverReference: CoverReference,
+        editionCoverVersion: Int,
         replaceCover: Bool
     ) async -> Bool {
         let uuid = snapshot.bookID
-        let hasCover = CoverStore.exists(for: uuid)
+        let coverOwner = CoverOwner.edition(uuid)
+        let hasCover = CoverStore.exists(for: coverReference.owner)
         let coverToken = replaceCover
-            ? await covers.beginUserMutation(for: uuid)
-            : await covers.beginBackgroundMutation(for: uuid)
+            ? await covers.beginUserMutation(for: coverOwner)
+            : await covers.beginBackgroundMutation(for: coverOwner)
 
         let runID = UUID()
         enrichmentRuns[uuid] = runID
@@ -489,7 +492,8 @@ final class MetadataService {
         let token = normalizedHardcoverToken
         let configuration = lookupConfiguration(language: language, hardcoverToken: token)
         let online = self.online
-        let shouldDownloadCover = replaceCover || !hasCover
+        let shouldDownloadCover = replaceCover
+            || (coverReference.owner.scope == .edition && !hasCover)
         let job: CatalogAnalysisJob<OnlineEnrichmentProposal> = analysisCoordinator.start(
             snapshot: snapshot,
             kind: .onlineEnrichment,
@@ -530,9 +534,10 @@ final class MetadataService {
         var coverRollback: CoverRollbackTicket?
         var installedCoverURL: URL?
         if let data = proposal.coverJPEGData,
-           currentBook.coverVersion == coverVersion,
-           (replaceCover || !CoverStore.exists(for: uuid)) {
-            installedCoverURL = currentBook.coverCacheURL
+           currentBook.coverReference == coverReference,
+           currentBook.coverVersion == editionCoverVersion,
+           (replaceCover || !CoverStore.exists(for: coverOwner)) {
+            installedCoverURL = CoverStore.url(for: coverOwner)
             coverRollback = await covers.install(
                 data,
                 using: coverToken,
@@ -547,7 +552,9 @@ final class MetadataService {
               proposal.lookupConfiguration == currentLookupConfiguration,
               let liveBook = try? mutations.book(id: snapshot.bookID),
               snapshot.matches(liveBook),
-              coverRollback == nil || liveBook.coverVersion == coverVersion else {
+              coverRollback == nil
+                || (liveBook.coverReference == coverReference
+                    && liveBook.coverVersion == editionCoverVersion) else {
             if let coverRollback, let installedCoverURL {
                 await rollbackCover(coverRollback, cacheURL: installedCoverURL)
             }
@@ -572,7 +579,9 @@ final class MetadataService {
                 guard analysisCoordinator.isCurrent(job.ticket),
                       proposal.lookupConfiguration == currentLookupConfiguration,
                       snapshot.matches(storedBook),
-                      coverRollback == nil || storedBook.coverVersion == coverVersion else {
+                      coverRollback == nil
+                        || (storedBook.coverReference == coverReference
+                            && storedBook.coverVersion == editionCoverVersion) else {
                     throw CatalogMutationError.staleAnalysis
                 }
                 if let fetched = proposal.outcome.metadata {
@@ -580,7 +589,12 @@ final class MetadataService {
                 }
                 storedBook.onlineLookupAt = proposal.completedAt
                 storedBook.onlineLookupConfiguration = proposal.lookupConfiguration
-                if coverRollback != nil { storedBook.coverVersion += 1 }
+                if coverRollback != nil {
+                    storedBook.coverVersion = editionCoverVersion + 1
+                    guard storedBook.selectCoverOwner(coverOwner) else {
+                        throw CatalogMutationError.invalidRequest
+                    }
+                }
             }
         } catch {
             if let coverRollback, let installedCoverURL {

@@ -42,7 +42,7 @@ enum WorkService {
     private static func bestAvailableFormatScore(for book: Book) -> Int {
         if book.assets.isEmpty { return formatScore(book.format) }
         return book.assets
-            .filter { $0.validationStatus != .missing && $0.validationStatus != .corrupt }
+            .filter(\.isUsable)
             .map { formatScore($0.format) }
             .max() ?? 0
     }

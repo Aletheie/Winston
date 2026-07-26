@@ -311,14 +311,14 @@ actor CoverWorkScheduler {
         cpuPermits = AsyncPermitPool(limit: cpuLimit)
     }
 
-    func storedCover(for uuid: UUID, maxPixel: Int) async -> NSImage? {
+    func storedCover(for owner: CoverOwner, maxPixel: Int) async -> NSImage? {
         let data: Data?
         do {
             data = try await ioPermits.run {
                 try Task.checkCancellation()
                 return await cancellationPropagatingDetached(priority: .background) {
                     guard !Task.isCancelled else { return nil }
-                    return CoverStore.loadData(for: uuid)
+                    return CoverStore.loadData(for: owner)
                 }
             }
         } catch {
@@ -344,6 +344,10 @@ actor CoverWorkScheduler {
         } catch {
             return nil
         }
+    }
+
+    func storedCover(for uuid: UUID, maxPixel: Int) async -> NSImage? {
+        await storedCover(for: .edition(uuid), maxPixel: maxPixel)
     }
 
     func extractAndEncode(

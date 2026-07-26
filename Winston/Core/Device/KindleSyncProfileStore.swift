@@ -9,6 +9,7 @@ nonisolated struct KindleSyncReceipt: Codable, Equatable, Identifiable, Sendable
     var sourceFingerprint: String
     var sentFileName: String
     var coverVersion: Int?
+    var coverIdentity: String?
     var syncedAt: Date
 
     var id: UUID { bookID }
@@ -21,6 +22,7 @@ nonisolated struct KindleSyncReceipt: Codable, Equatable, Identifiable, Sendable
         sourceFingerprint: String,
         sentFileName: String,
         coverVersion: Int?,
+        coverIdentity: String? = nil,
         syncedAt: Date
     ) {
         self.bookID = bookID
@@ -30,6 +32,7 @@ nonisolated struct KindleSyncReceipt: Codable, Equatable, Identifiable, Sendable
         self.sourceFingerprint = sourceFingerprint
         self.sentFileName = sentFileName
         self.coverVersion = coverVersion
+        self.coverIdentity = coverIdentity
         self.syncedAt = syncedAt
     }
 }
@@ -52,6 +55,7 @@ nonisolated struct KindleSyncTransferRecord: Equatable, Sendable {
     let sourceFingerprint: String
     let sentFileName: String
     let coverVersion: Int?
+    let coverIdentity: String?
     let completedAt: Date
 
     init(
@@ -64,6 +68,7 @@ nonisolated struct KindleSyncTransferRecord: Equatable, Sendable {
         sourceFingerprint: String,
         sentFileName: String,
         coverVersion: Int?,
+        coverIdentity: String? = nil,
         completedAt: Date
     ) {
         self.deviceIdentifier = deviceIdentifier
@@ -75,6 +80,7 @@ nonisolated struct KindleSyncTransferRecord: Equatable, Sendable {
         self.sourceFingerprint = sourceFingerprint
         self.sentFileName = sentFileName
         self.coverVersion = coverVersion
+        self.coverIdentity = coverIdentity
         self.completedAt = completedAt
     }
 }
@@ -171,6 +177,7 @@ final class KindleSyncProfileStore {
             sourceFingerprint: record.sourceFingerprint,
             sentFileName: record.sentFileName,
             coverVersion: record.coverVersion,
+            coverIdentity: record.coverIdentity,
             syncedAt: record.completedAt
         )
         if let receiptIndex = profiles[profileIndex].receipts.firstIndex(where: { $0.bookID == record.bookID }) {
@@ -187,6 +194,7 @@ final class KindleSyncProfileStore {
         sourceFingerprint: String,
         sentFileName: String,
         coverVersion: Int,
+        coverIdentity: String? = nil,
         on info: DeviceInfo,
         now: Date = .now
     ) {
@@ -197,6 +205,7 @@ final class KindleSyncProfileStore {
             sourceFingerprint: sourceFingerprint,
             sentFileName: sentFileName,
             coverVersion: coverVersion,
+            coverIdentity: coverIdentity,
             completedAt: now
         ))
     }

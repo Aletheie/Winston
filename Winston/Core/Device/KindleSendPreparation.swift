@@ -26,6 +26,7 @@ nonisolated struct KindleTransferAssetGeneration: Equatable, Sendable {
     let fileName: String
     let format: String
     let validationStatus: AssetValidation?
+    let availability: AssetAvailability
     let origin: AssetOrigin
     let contentHash: String?
     let sizeBytes: Int64
@@ -151,6 +152,7 @@ nonisolated struct KindleSendDescriptor: Sendable {
     let sendSizeBytes: UInt64
     let requiresConversion: Bool
     let hasStaleTargetConversion: Bool
+    let coverOwner: CoverOwner
     let coverVersion: Int
     let hasCover: Bool
     let drmProtected: Bool
@@ -166,6 +168,7 @@ nonisolated struct TransferArtifact: Sendable {
     let sourceURL: URL
     let sourceFormat: String
     let targetFileName: String
+    let coverOwner: CoverOwner
     let coverVersion: Int
 
     init(
@@ -181,6 +184,7 @@ nonisolated struct TransferArtifact: Sendable {
         self.sourceURL = sourceURL
         sourceFormat = descriptor.sourceFormat
         targetFileName = descriptor.targetFileName
+        coverOwner = descriptor.coverOwner
         coverVersion = descriptor.coverVersion
     }
 
@@ -310,6 +314,8 @@ nonisolated struct KindleSendBookSnapshot: Sendable {
         let fileName: String
         let format: String
         let validation: AssetValidation?
+        let availability: AssetAvailability
+        let drmProtected: Bool?
         let origin: AssetOrigin
         let generatedFromContentHash: String?
         let contentHash: String?
@@ -326,6 +332,7 @@ nonisolated struct KindleSendBookSnapshot: Sendable {
     let primaryFormat: String
     let primarySizeBytes: Int64
     let dateAdded: Date
+    let coverOwner: CoverOwner
     let coverVersion: Int
     let drmProtected: Bool
     let assets: [Asset]
@@ -345,14 +352,17 @@ enum KindleSendPreparation {
             primaryFormat: primaryAsset?.format ?? book.format,
             primarySizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
             dateAdded: book.dateAdded,
-            coverVersion: book.coverVersion,
-            drmProtected: book.drmProtected == true,
+            coverOwner: book.coverReference.owner,
+            coverVersion: book.coverReference.version,
+            drmProtected: book.primaryDRMProtected == true,
             assets: book.assets.map {
                 KindleSendBookSnapshot.Asset(
                     id: $0.uuid,
                     fileName: $0.fileName,
                     format: $0.format,
                     validation: $0.validationStatus,
+                    availability: $0.availability,
+                    drmProtected: $0.drmProtected,
                     origin: $0.origin,
                     generatedFromContentHash: $0.generatedFromContentHash,
                     contentHash: $0.contentHash,
@@ -416,7 +426,9 @@ enum KindleSendPreparation {
                 && $0.format.caseInsensitiveCompare(targetFormat) == .orderedSame
         }
         let hasCurrentTarget = generatedTargets.contains { option in
-            guard option.validation != .missing, option.validation != .corrupt,
+            guard option.availability == .available,
+                  option.validation != .missing,
+                  option.validation != .corrupt,
                   let primarySourceHash else { return false }
             return option.generatedFromContentHash == primarySourceHash
         }
@@ -425,7 +437,8 @@ enum KindleSendPreparation {
         let sourceURL = catalogSourceURL
             ?? AppPaths.booksDirectory.appending(path: ".invalid-managed-reference")
         let selectedAssetWasFound = selectedAssetID == nil || chosen.id == selectedAssetID
-        let selectedAssetIsAvailable = chosen.validation != .missing
+        let selectedAssetIsAvailable = chosen.availability == .available
+            && chosen.validation != .missing
             && chosen.validation != .corrupt
             && !chosen.fileName.isEmpty
         let chosenAssetIsUsable = selectedAssetID == nil
@@ -448,6 +461,7 @@ enum KindleSendPreparation {
                 fileName: chosen.fileName,
                 format: chosen.format,
                 validationStatus: chosen.validation,
+                availability: chosen.availability,
                 origin: chosen.origin,
                 contentHash: chosen.contentHash,
                 sizeBytes: chosen.sizeBytes,
@@ -466,9 +480,10 @@ enum KindleSendPreparation {
             sendSizeBytes: requiresConversion ? 0 : storedSize,
             requiresConversion: requiresConversion,
             hasStaleTargetConversion: staleTarget,
+            coverOwner: snapshot.coverOwner,
             coverVersion: snapshot.coverVersion,
             hasCover: supportsCoverThumbnail && snapshot.coverVersion > 0,
-            drmProtected: snapshot.drmProtected,
+            drmProtected: chosen.drmProtected ?? snapshot.drmProtected,
             fileUnavailable: unavailable
         )
     }
@@ -505,6 +520,7 @@ enum KindleSendPreparation {
             requiresConversion: descriptor.requiresConversion,
             hasStaleTargetConversion: descriptor.hasStaleTargetConversion,
             coverVersion: descriptor.coverVersion,
+            coverIdentity: descriptor.coverOwner.generationKey,
             hasCover: descriptor.hasCover,
             blockReason: blockReason
         )
@@ -527,6 +543,8 @@ enum KindleSendPreparation {
             fileName: snapshot.primaryFileName,
             format: snapshot.primaryFormat,
             validation: nil,
+            availability: .available,
+            drmProtected: snapshot.drmProtected,
             origin: .original,
             generatedFromContentHash: nil,
             contentHash: nil,
@@ -547,7 +565,9 @@ enum KindleSendPreparation {
         primaryFileName: String,
         primarySourceHash: String?
     ) -> Bool {
-        guard asset.validation != .missing, asset.validation != .corrupt else { return false }
+        guard asset.availability == .available,
+              asset.validation != .missing,
+              asset.validation != .corrupt else { return false }
         guard !asset.fileName.isEmpty else { return false }
         guard asset.fileName != primaryFileName, asset.origin == .generated else { return true }
         guard let primarySourceHash else { return false }

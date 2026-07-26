@@ -33,6 +33,8 @@ final class CalibreImportService {
         let book: Book
         let assets: [BookAsset]
         let coverVersion: Int
+        let coverScopeRaw: String?
+        let coverAssetUUID: UUID?
     }
 
     private struct WorkPreimage {
@@ -627,7 +629,7 @@ final class CalibreImportService {
             let coverURL = book(withID: Self.targetBookID(
                 for: candidate.decision,
                 item: candidate.item
-            ))?.fileURL
+            ))?.coverCacheURL
             if let data = candidate.coverData,
                let image = NSImage(data: data),
                let coverURL {
@@ -715,7 +717,9 @@ final class CalibreImportService {
                     bookPreimages[existingBookID] = BookPreimage(
                         book: existing,
                         assets: existing.assets,
-                        coverVersion: existing.coverVersion
+                        coverVersion: existing.coverVersion,
+                        coverScopeRaw: existing.coverScopeRaw,
+                        coverAssetUUID: existing.coverAssetUUID
                     )
                 }
                 targetBook = existing
@@ -753,8 +757,11 @@ final class CalibreImportService {
                     uuid: source.inspection.assetID,
                     fileName: source.inspection.managedFileName,
                     origin: .imported,
+                    sourceProvenance: .calibreImport,
+                    sourceIdentifier: "calibre:\(candidate.item.calibreID)",
                     contentHash: source.inspection.sha256,
                     sizeBytes: source.inspection.sizeBytes,
+                    drmProtected: source.inspection.drmProtected,
                     dateAdded: targetBook.dateAdded,
                     validationStatus: .ok,
                     book: targetBook
@@ -763,6 +770,7 @@ final class CalibreImportService {
             }
             if candidate.coverTransaction != nil {
                 targetBook.coverVersion += 1
+                _ = targetBook.selectCoverOwner(.edition(targetBook.uuid))
             }
             if !collection.books.contains(where: { $0.uuid == targetBook.uuid }) {
                 collection.books.append(targetBook)
@@ -782,6 +790,8 @@ final class CalibreImportService {
                 for preimage in bookPreimages.values {
                     preimage.book.assets = preimage.assets
                     preimage.book.coverVersion = preimage.coverVersion
+                    preimage.book.coverScopeRaw = preimage.coverScopeRaw
+                    preimage.book.coverAssetUUID = preimage.coverAssetUUID
                 }
                 for preimage in workPreimages.values {
                     preimage.work.editions = preimage.editions

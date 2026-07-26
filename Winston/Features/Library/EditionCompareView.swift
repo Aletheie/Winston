@@ -82,7 +82,7 @@ struct EditionCompareView: View {
     private func totalSize(_ book: Book) -> String {
         let total = book.assets.isEmpty
             ? book.fileSizeBytes
-            : book.assets.filter { $0.validationStatus != .missing }.reduce(0) { $0 + $1.sizeBytes }
+            : book.assets.filter { $0.availability == .available }.reduce(0) { $0 + $1.sizeBytes }
         return total > 0 ? ByteCountFormatter.string(fromByteCount: total, countStyle: .file) : "\u{2014}"
     }
 

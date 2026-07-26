@@ -103,7 +103,7 @@ nonisolated struct PluginBookDTO: Codable, Sendable, Equatable {
         communityRating = book.communityRating
         readingStatus = book.readingStatusRaw
         format = book.format.lowercased()
-        fileSizeBytes = book.fileSizeBytes
+        fileSizeBytes = book.primaryAsset?.sizeBytes ?? book.fileSizeBytes
         dateAdded = book.dateAdded
         workUUID = book.work?.uuid.uuidString
         workTitle = PluginValueLimits.bounded(

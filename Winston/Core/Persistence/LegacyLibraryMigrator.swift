@@ -193,6 +193,7 @@ enum LegacyLibraryMigrator {
             uuid: legacy.id,
             fileName: fileName,
             origin: .original,
+            sourceProvenance: .legacyMigration,
             contentHash: staged.sha256,
             sizeBytes: staged.byteCount,
             dateAdded: legacy.dateAdded,

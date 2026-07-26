@@ -368,7 +368,7 @@ final class TransferQueue {
             }
             try await connection.removeStaleVariants(baseName: base, keeping: fileName)
             let coverPushed = await pushThumbnail(
-                for: request.uuid,
+                for: preparedArtifact.artifact.coverOwner,
                 sentFile: sourceURL,
                 connection: connection
             )
@@ -382,6 +382,9 @@ final class TransferQueue {
                 sourceFingerprint: preparedArtifact.sourceFingerprint,
                 sentFileName: fileName,
                 coverVersion: coverPushed ? preparedArtifact.artifact.coverVersion : nil,
+                coverIdentity: coverPushed
+                    ? preparedArtifact.artifact.coverOwner.generationKey
+                    : nil,
                 completedAt: .now
             ))
             markDone(itemID)
@@ -427,6 +430,7 @@ final class TransferQueue {
         let generation = descriptor.assetGeneration
         let bookWasAttached = book.modelContext != nil
         let expectedOriginalFileName = book.originalFileName
+        let expectedCoverOwner = descriptor.coverOwner
         let expectedCoverVersion = descriptor.coverVersion
         let expectedDRMProtected = descriptor.drmProtected
         return SendRequest(
@@ -436,8 +440,8 @@ final class TransferQueue {
                 if bookWasAttached, book.modelContext == nil { return false }
                 guard book.uuid == descriptor.bookUUID,
                       book.originalFileName == expectedOriginalFileName,
-                      book.coverVersion == expectedCoverVersion,
-                      (book.drmProtected == true) == expectedDRMProtected else { return false }
+                      book.coverReference.owner == expectedCoverOwner,
+                      book.coverReference.version == expectedCoverVersion else { return false }
                 if generation.isCatalogued {
                     guard let asset = book.assets.first(where: { $0.uuid == generation.assetID }) else {
                         return false
@@ -445,16 +449,19 @@ final class TransferQueue {
                     return asset.fileName == generation.fileName
                         && asset.format == generation.format
                         && asset.validationStatus == generation.validationStatus
+                        && asset.availability == generation.availability
                         && asset.origin == generation.origin
                         && asset.contentHash == generation.contentHash
                         && asset.sizeBytes == generation.sizeBytes
                         && asset.dateAdded == generation.dateAdded
                         && asset.generatedFromContentHash == generation.generatedFromContentHash
+                        && (asset.drmProtected == true) == expectedDRMProtected
                 }
                 return book.fileName == generation.fileName
                     && book.format == generation.format
                     && book.fileSizeBytes == generation.sizeBytes
                     && book.dateAdded == generation.dateAdded
+                    && (book.primaryDRMProtected == true) == expectedDRMProtected
             }
         )
     }
@@ -592,7 +599,7 @@ final class TransferQueue {
         }
         setStage(.transferring, for: item.id)
         let pushed = await pushThumbnail(
-            for: book.uuid,
+            for: preparedArtifact.artifact.coverOwner,
             sentFile: preparedArtifact.sourceURL,
             connection: connection
         )
@@ -615,6 +622,7 @@ final class TransferQueue {
                 sourceFingerprint: preparedArtifact.sourceFingerprint,
                 sentFileName: deviceBook.fileName,
                 coverVersion: preparedArtifact.artifact.coverVersion,
+                coverIdentity: preparedArtifact.artifact.coverOwner.generationKey,
                 completedAt: .now
             ))
         } catch {
@@ -629,9 +637,13 @@ final class TransferQueue {
         return true
     }
 
-    private func pushThumbnail(for uuid: UUID, sentFile: URL, connection: any KindleDeviceConnection) async -> Bool {
+    private func pushThumbnail(
+        for owner: CoverOwner,
+        sentFile: URL,
+        connection: any KindleDeviceConnection
+    ) async -> Bool {
         let thumbnail = await Task.detached(priority: .utility) {
-            KindleCoverThumbnail.prepare(sentFile: sentFile, coverSourceUUID: uuid)
+            KindleCoverThumbnail.prepare(sentFile: sentFile, coverOwner: owner)
         }.value
         guard let thumbnail else {
             Log.device.info("No cover thumbnail to push for \(sentFile.lastPathComponent, privacy: .public)")

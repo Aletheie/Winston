@@ -511,6 +511,9 @@ final class LibraryViewModel {
             return nil
         }
         let staged = transaction.files[0]
+        let drmProtected = await Task.detached(priority: .utility) {
+            DRMDetector.isProtected(url: staged.stagedURL)
+        }.value
         if let existing = liveBook.assets.first(where: { $0.contentHash == staged.sha256 }) {
             await managedFiles.abort(transaction)
             return existing
@@ -548,8 +551,10 @@ final class LibraryViewModel {
                     uuid: assetID,
                     fileName: fileName,
                     origin: origin,
+                    sourceProvenance: .manualFile,
                     contentHash: staged.sha256,
                     sizeBytes: staged.byteCount,
+                    drmProtected: drmProtected,
                     validationStatus: .ok,
                     book: liveBook
                 )
@@ -558,7 +563,7 @@ final class LibraryViewModel {
                     liveBook.primaryAssetUUID = assetID
                     liveBook.fileName = fileName
                     liveBook.fileSizeBytes = asset.sizeBytes
-                    liveBook.drmProtected = nil
+                    liveBook.drmProtected = asset.drmProtected
                     liveBook.coverVersion = expectedCoverVersion
                 }
                 insertedAsset = asset
@@ -622,9 +627,9 @@ final class LibraryViewModel {
             return
         }
         let staged = transaction.files[0]
-        let drmProtected = wasPrimary
-            ? await Task.detached(priority: .utility) { DRMDetector.isProtected(url: staged.stagedURL) }.value
-            : nil
+        let drmProtected = await Task.detached(priority: .utility) {
+            DRMDetector.isProtected(url: staged.stagedURL)
+        }.value
         guard let liveBook = try? mutations.book(id: bookID),
               liveBook.coverVersion == originalCoverVersion,
               let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
@@ -634,10 +639,15 @@ final class LibraryViewModel {
             return
         }
         let oldSize = liveAsset.sizeBytes
+        let oldFormatRaw = liveAsset.formatRaw
         let oldHash = liveAsset.contentHash
         let oldGeneratedFromHash = liveAsset.generatedFromContentHash
         let oldOrigin = liveAsset.origin
+        let oldSourceProvenanceRaw = liveAsset.sourceProvenanceRaw
+        let oldSourceIdentifier = liveAsset.sourceIdentifier
+        let oldDRMProtected = liveAsset.drmProtected
         let oldValidation = liveAsset.validationStatus
+        let oldAvailabilityRaw = liveAsset.availabilityRaw
         let replacementDate = Date()
         do {
             let result = try await mutations.commitFileMutation(
@@ -648,10 +658,15 @@ final class LibraryViewModel {
                 revertingOnFailure: {
                     liveAsset.fileName = oldName
                     liveAsset.sizeBytes = oldSize
+                    liveAsset.formatRaw = oldFormatRaw
                     liveAsset.contentHash = oldHash
                     liveAsset.generatedFromContentHash = oldGeneratedFromHash
                     liveAsset.origin = oldOrigin
+                    liveAsset.sourceProvenanceRaw = oldSourceProvenanceRaw
+                    liveAsset.sourceIdentifier = oldSourceIdentifier
+                    liveAsset.drmProtected = oldDRMProtected
                     liveAsset.validationStatus = oldValidation
+                    liveAsset.availabilityRaw = oldAvailabilityRaw
                     liveAsset.dateAdded = oldDateAdded
                     liveBook.fileName = originalBookFileName
                     liveBook.primaryAssetUUID = originalPrimaryAssetUUID
@@ -676,7 +691,11 @@ final class LibraryViewModel {
                 liveAsset.contentHash = staged.sha256
                 liveAsset.generatedFromContentHash = nil
                 liveAsset.origin = .imported
+                liveAsset.sourceProvenance = .manualFile
+                liveAsset.sourceIdentifier = nil
+                liveAsset.drmProtected = drmProtected
                 liveAsset.validationStatus = .ok
+                liveAsset.availability = .available
                 liveAsset.dateAdded = replacementDate
                 if wasPrimary {
                     liveBook.primaryAssetUUID = assetID
@@ -696,8 +715,7 @@ final class LibraryViewModel {
 
     func makePrimary(_ asset: BookAsset, for book: Book) async {
         guard asset.book?.uuid == book.uuid,
-              asset.validationStatus != .missing,
-              asset.validationStatus != .corrupt else { return }
+              asset.isUsable else { return }
         let assetURL = asset.fileURL
         let assetFileName = asset.fileName
         let assetDateAdded = asset.dateAdded
@@ -711,8 +729,7 @@ final class LibraryViewModel {
               asset.book?.uuid == book.uuid,
               asset.fileName == assetFileName,
               asset.dateAdded == assetDateAdded,
-              asset.validationStatus != .missing,
-              asset.validationStatus != .corrupt else { return }
+              asset.isUsable else { return }
         let bookPreimage = CatalogBookMetadataPreimage(book)
         let assetPreimage = CatalogBookAssetPreimage(asset)
         do {
@@ -728,17 +745,17 @@ final class LibraryViewModel {
                 guard let storedAsset = storedBook.assets.first(where: { $0.uuid == asset.uuid }),
                       storedAsset.fileName == assetFileName,
                       storedAsset.dateAdded == assetDateAdded,
-                      storedAsset.validationStatus != .missing,
-                      storedAsset.validationStatus != .corrupt else {
+                      storedAsset.isUsable else {
                     throw CatalogMutationError.modelNotFound
                 }
                 if storedAsset.sizeBytes == 0, analysis.1 > 0 {
                     storedAsset.sizeBytes = analysis.1
                 }
+                storedAsset.drmProtected = analysis.0
                 storedBook.primaryAssetUUID = storedAsset.uuid
                 storedBook.fileName = storedAsset.fileName
                 storedBook.fileSizeBytes = storedAsset.sizeBytes
-                storedBook.drmProtected = analysis.0
+                storedBook.drmProtected = storedAsset.drmProtected
                 storedBook.coverVersion += 1
             }
         } catch {

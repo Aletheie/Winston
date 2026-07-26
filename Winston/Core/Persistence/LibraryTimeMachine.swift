@@ -121,12 +121,18 @@ nonisolated struct LibraryTimeMachineHighlightSnapshot: Equatable, Sendable {
 nonisolated struct LibraryTimeMachineAssetSnapshot: Equatable, Sendable, Identifiable {
     let id: UUID
     var fileName: String
+    var formatRaw: String? = nil
     var originRaw: String?
+    var sourceProvenanceRaw: String? = nil
+    var sourceIdentifier: String? = nil
     var contentHash: String?
     var generatedFromContentHash: String?
     var sizeBytes: Int64
+    var drmProtected: Bool? = nil
     var dateAdded: Date
     var validationStatusRaw: String?
+    var availabilityRaw: String? = nil
+    var coverVersionRaw: Int? = nil
 }
 
 nonisolated struct LibraryTimeMachineCollectionSnapshot: Equatable, Sendable, Identifiable {
@@ -147,6 +153,7 @@ nonisolated struct LibraryTimeMachineWorkSnapshot: Equatable, Sendable, Identifi
     var openLibraryWorkKey: String?
     var hardcoverBookID: String?
     var preferredEditionUUID: UUID?
+    var coverVersionRaw: Int? = nil
     var dateCreated: Date
     var notes: String?
 }
@@ -159,6 +166,8 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
     var dateAdded: Date
     var fileSizeBytes: Int64
     var coverVersion: Int
+    var coverScopeRaw: String?
+    var coverAssetUUID: UUID?
     var metadata: LibraryTimeMachineMetadataSnapshot
     var reading: LibraryTimeMachineReadingSnapshot
     var highlights: [LibraryTimeMachineHighlightSnapshot]
@@ -176,6 +185,8 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
         dateAdded: Date = .now,
         fileSizeBytes: Int64 = 0,
         coverVersion: Int = 0,
+        coverScopeRaw: String? = CoverScope.edition.rawValue,
+        coverAssetUUID: UUID? = nil,
         metadata: LibraryTimeMachineMetadataSnapshot = .init(),
         reading: LibraryTimeMachineReadingSnapshot = .init(),
         highlights: [LibraryTimeMachineHighlightSnapshot] = [],
@@ -192,6 +203,8 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
         self.dateAdded = dateAdded
         self.fileSizeBytes = fileSizeBytes
         self.coverVersion = coverVersion
+        self.coverScopeRaw = coverScopeRaw
+        self.coverAssetUUID = coverAssetUUID
         self.metadata = metadata
         self.reading = reading
         self.highlights = highlights
@@ -204,6 +217,21 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
 
     var displayTitle: String {
         Book.displayTitle(storedTitle: metadata.title, originalFileName: originalFileName)
+    }
+
+    var coverOwner: CoverOwner {
+        switch coverScopeRaw.flatMap(CoverScope.init(rawValue:)) ?? .edition {
+        case .work:
+            if let work { return .work(work.id) }
+        case .generatedAsset:
+            if let coverAssetUUID,
+               assets.contains(where: { $0.id == coverAssetUUID }) {
+                return .generatedAsset(coverAssetUUID)
+            }
+        case .edition:
+            break
+        }
+        return .edition(id)
     }
 
     var displayAuthor: String? {
@@ -456,9 +484,10 @@ nonisolated enum LibraryTimeMachineReader {
         ]
         let books = try context.fetch(descriptor)
         return books.map {
-            LibraryTimeMachineSnapshotBuilder.makeBook(
+            let owner = $0.coverReference.owner
+            return LibraryTimeMachineSnapshotBuilder.makeBook(
                 $0,
-                coverURL: LibraryBackup.coverURL(for: $0.uuid, in: backupURL),
+                coverURL: LibraryBackup.coverURL(for: owner, in: backupURL),
                 booksDirectory: liveBooksDirectory
             )
         }
@@ -501,7 +530,7 @@ enum LibraryTimeMachineDiffBuilder {
         var resolved = snapshots
         for index in resolved.indices {
             guard !Task.isCancelled else { return [] }
-            let cover = coversDirectory.appending(path: "\(resolved[index].id.uuidString).jpg")
+            let cover = coversDirectory.appending(path: resolved[index].coverOwner.storageFileName)
             if FileManager.default.fileExists(atPath: cover.path(percentEncoded: false)) {
                 resolved[index].coverURL = cover
             }
@@ -523,7 +552,9 @@ enum LibraryTimeMachineDiffBuilder {
         currentBooksDirectory: URL = AppPaths.booksDirectory
     ) -> [LibraryTimeMachineBookDiff] {
         let currentSnapshots = currentBooks.map {
-            let cover = currentCoversDirectory.appending(path: "\($0.uuid.uuidString).jpg")
+            let cover = currentCoversDirectory.appending(
+                path: $0.coverReference.owner.storageFileName
+            )
             let coverExists = FileManager.default.fileExists(atPath: cover.path(percentEncoded: false))
             return LibraryTimeMachineSnapshotBuilder.makeBook(
                 $0,
@@ -594,7 +625,9 @@ enum LibraryTimeMachineDiffBuilder {
         if backup.highlights != current.highlights { groups.append(.highlights) }
         if backup.collections.map(\.id) != current.collections.map(\.id) { groups.append(.collections) }
         if backup.hasCover != current.hasCover
-            || (backup.hasCover && backup.coverVersion != current.coverVersion) {
+            || (backup.hasCover && backup.coverVersion != current.coverVersion)
+            || backup.coverScopeRaw != current.coverScopeRaw
+            || backup.coverAssetUUID != current.coverAssetUUID {
             groups.append(.cover)
         }
         if backup.fileName != current.fileName
@@ -655,7 +688,6 @@ enum LibraryTimeMachineDiffBuilder {
             (.dateFinished, .date(current.reading.dateFinished), .date(backup.reading.dateFinished)),
             (.editionStatement, .text(current.metadata.editionStatement), .text(backup.metadata.editionStatement)),
             (.editionType, .text(current.metadata.editionTypeRaw), .text(backup.metadata.editionTypeRaw)),
-            (.drmProtected, .boolean(current.metadata.drmProtected), .boolean(backup.metadata.drmProtected)),
             (.physicalCopy, .boolean(current.metadata.hasPhysicalCopyRaw), .boolean(backup.metadata.hasPhysicalCopyRaw)),
             (.shelf, .text(current.metadata.shelfLocation), .text(backup.metadata.shelfLocation)),
         ]
@@ -689,7 +721,6 @@ enum LibraryTimeMachineDiffBuilder {
             || lhs.communityRatingCount != rhs.communityRatingCount
             || lhs.communityRatingSource != rhs.communityRatingSource
             || lhs.notes != rhs.notes
-            || lhs.drmProtected != rhs.drmProtected
             || lhs.pageCount != rhs.pageCount
             || lhs.editionStatement != rhs.editionStatement
             || lhs.editionTypeRaw != rhs.editionTypeRaw
@@ -765,12 +796,18 @@ private nonisolated enum LibraryTimeMachineSnapshotBuilder {
             LibraryTimeMachineAssetSnapshot(
                 id: $0.uuid,
                 fileName: $0.fileName,
+                formatRaw: $0.formatRaw,
                 originRaw: $0.originRaw,
+                sourceProvenanceRaw: $0.sourceProvenanceRaw,
+                sourceIdentifier: $0.sourceIdentifier,
                 contentHash: $0.contentHash,
                 generatedFromContentHash: $0.generatedFromContentHash,
                 sizeBytes: $0.sizeBytes,
+                drmProtected: $0.drmProtected,
                 dateAdded: $0.dateAdded,
-                validationStatusRaw: $0.validationStatusRaw
+                validationStatusRaw: $0.validationStatusRaw,
+                availabilityRaw: $0.availabilityRaw,
+                coverVersionRaw: $0.coverVersionRaw
             )
         }
         .sorted { $0.id.uuidString < $1.id.uuidString }
@@ -785,6 +822,7 @@ private nonisolated enum LibraryTimeMachineSnapshotBuilder {
                 openLibraryWorkKey: $0.openLibraryWorkKey,
                 hardcoverBookID: $0.hardcoverBookID,
                 preferredEditionUUID: $0.preferredEditionUUID,
+                coverVersionRaw: $0.coverVersionRaw,
                 dateCreated: $0.dateCreated,
                 notes: $0.notes
             )
@@ -799,8 +837,10 @@ private nonisolated enum LibraryTimeMachineSnapshotBuilder {
             primaryAssetID: primaryAsset?.uuid,
             originalFileName: book.originalFileName,
             dateAdded: book.dateAdded,
-            fileSizeBytes: book.fileSizeBytes,
-            coverVersion: book.coverVersion,
+            fileSizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
+            coverVersion: book.coverReference.version,
+            coverScopeRaw: book.coverScopeRaw,
+            coverAssetUUID: book.coverAssetUUID,
             metadata: LibraryTimeMachineMetadataSnapshot(
                 title: book.title,
                 author: book.author,
@@ -820,7 +860,9 @@ private nonisolated enum LibraryTimeMachineSnapshotBuilder {
                 onlineLookupAt: book.onlineLookupAt,
                 onlineLookupConfiguration: book.onlineLookupConfiguration,
                 notes: book.notes,
-                drmProtected: book.drmProtected,
+                // Kept in the snapshot only to read backups from before
+                // per-asset DRM became authoritative.
+                drmProtected: book.primaryDRMProtected,
                 pageCount: book.pageCount,
                 sampleNoticeDismissed: book.sampleNoticeDismissed,
                 editionStatement: book.editionStatement,

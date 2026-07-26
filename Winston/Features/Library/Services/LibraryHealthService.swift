@@ -271,7 +271,11 @@ final class LibraryHealthService {
                     storedAsset.contentHash = staged.sha256
                     storedAsset.generatedFromContentHash = nil
                     storedAsset.origin = .imported
+                    storedAsset.sourceProvenance = .manualFile
+                    storedAsset.sourceIdentifier = nil
+                    storedAsset.drmProtected = drmProtected
                     storedAsset.validationStatus = .ok
+                    storedAsset.availability = .available
                     storedAsset.dateAdded = replacementDate
                     updatedAsset = storedAsset
                 } else {
@@ -279,8 +283,10 @@ final class LibraryHealthService {
                         uuid: updatedAssetID,
                         fileName: fileName,
                         origin: .original,
+                        sourceProvenance: .manualFile,
                         contentHash: staged.sha256,
                         sizeBytes: staged.byteCount,
+                        drmProtected: drmProtected,
                         dateAdded: replacementDate,
                         validationStatus: .ok,
                         book: storedBook

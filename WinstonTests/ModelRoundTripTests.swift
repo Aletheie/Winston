@@ -197,6 +197,102 @@ struct ModelRoundTripTests {
         #expect(book.format == "PDF")
     }
 
+    @Test func assetFileFactsAreAuthoritativeAndLegacyMirrorsConverge() {
+        let book = Book(fileName: "legacy.epub", originalFileName: "Book.epub")
+        let asset = BookAsset(
+            fileName: "authoritative.pdf",
+            sizeBytes: 42,
+            drmProtected: true,
+            validationStatus: .ok,
+            book: book
+        )
+        asset.formatRaw = "EPUB"
+        asset.sourceProvenanceRaw = nil
+        asset.availabilityRaw = nil
+        book.primaryAssetUUID = asset.uuid
+        book.fileSizeBytes = 7
+        book.drmProtected = false
+        book.coverScopeRaw = nil
+
+        #expect(!CatalogModelInvariantService.violations(in: book).isEmpty)
+        #expect(CatalogModelInvariantService.repair(book: book))
+
+        #expect(book.explicitPrimaryAsset?.uuid == asset.uuid)
+        #expect(book.fileName == asset.fileName)
+        #expect(book.fileSizeBytes == 42)
+        #expect(book.drmProtected == true)
+        #expect(book.primaryDRMProtected == true)
+        #expect(asset.format == "PDF")
+        #expect(asset.sourceProvenance == .unknown)
+        #expect(asset.availability == .available)
+        #expect(book.coverReference.owner == .edition(book.uuid))
+        #expect(CatalogModelInvariantService.violations(in: book).isEmpty)
+        #expect(!CatalogModelInvariantService.repair(book: book))
+    }
+
+    @Test func switchingPrimaryAssetSwitchesPerFileDRMAndSize() {
+        let book = Book(fileName: "open.epub", originalFileName: "Book.epub")
+        let open = BookAsset(
+            fileName: "open.epub",
+            sizeBytes: 10,
+            drmProtected: false,
+            book: book
+        )
+        let locked = BookAsset(
+            fileName: "locked.azw3",
+            sizeBytes: 20,
+            drmProtected: true,
+            book: book
+        )
+
+        book.primaryAssetUUID = open.uuid
+        _ = CatalogModelInvariantService.repair(book: book)
+        #expect(book.primaryDRMProtected == false)
+        #expect(book.fileSizeBytes == 10)
+
+        book.primaryAssetUUID = locked.uuid
+        _ = CatalogModelInvariantService.repair(book: book)
+        #expect(book.primaryDRMProtected == true)
+        #expect(book.drmProtected == true)
+        #expect(book.fileSizeBytes == 20)
+        #expect(book.fileName == "locked.azw3")
+    }
+
+    @Test func coverSelectionHasAnExplicitValidOwner() {
+        let work = Work(title: "Dune")
+        work.coverVersion = 3
+        let book = Book(fileName: "dune.epub", originalFileName: "Dune.epub")
+        let asset = BookAsset(fileName: "dune.epub", coverVersion: 4, book: book)
+        book.work = work
+        let editionCacheURL = book.coverCacheURL
+
+        #expect(book.selectCoverOwner(.work(work.uuid)))
+        #expect(book.coverReference == CoverReference(
+            owner: .work(work.uuid),
+            version: 3
+        ))
+        #expect(book.coverCacheURL != editionCacheURL)
+        #expect(book.coverCacheURL == CoverStore.url(for: .work(work.uuid)))
+        book.coverAssetUUID = asset.uuid
+        #expect(CatalogModelInvariantService.violations(in: book).contains(.invalidCoverOwner))
+        #expect(CatalogModelInvariantService.repair(book: book))
+        #expect(book.coverAssetUUID == nil)
+        #expect(book.coverReference.owner == .work(work.uuid))
+
+        #expect(book.selectCoverOwner(.generatedAsset(asset.uuid)))
+        #expect(book.coverReference == CoverReference(
+            owner: .generatedAsset(asset.uuid),
+            version: 4
+        ))
+        #expect(book.coverCacheURL == CoverStore.url(for: .generatedAsset(asset.uuid)))
+        #expect(!book.selectCoverOwner(.generatedAsset(UUID())))
+
+        book.coverAssetUUID = UUID()
+        #expect(CatalogModelInvariantService.repair(book: book))
+        #expect(book.coverReference.owner == .edition(book.uuid))
+        #expect(book.coverCacheURL == editionCacheURL)
+    }
+
     @Test func invalidPrimaryReferenceDoesNotHideAssetInvariantDrift() {
         let book = Book(fileName: "ghost.epub", originalFileName: "Ghost.epub")
         let asset = BookAsset(fileName: "real.epub", validationStatus: .ok, book: book)
@@ -221,6 +317,9 @@ struct ModelRoundTripTests {
         #expect(asset.origin == .original)
         #expect(asset.validationStatus == nil)
         #expect(asset.generatedFromContentHash == nil)
+        #expect(asset.format == "EPUB")
+        #expect(asset.sourceProvenance == .unknown)
+        #expect(asset.availability == .available)
     }
 
     @Test func libraryNoticeKindRoundTripsAndUnknownRawValueIsSafe() throws {

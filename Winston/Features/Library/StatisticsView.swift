@@ -36,7 +36,7 @@ nonisolated struct LibraryStats: Sendable {
                 retainedBytes = book.fileSizeBytes
             } else {
                 retainedBytes = book.assets
-                    .filter { $0.validationStatus != .missing }
+                    .filter { $0.availability == .available }
                     .reduce(0) { total, asset in
                         if asset.sizeBytes > 0 { return total + asset.sizeBytes }
                         return total + (asset.uuid == book.primaryAsset?.uuid

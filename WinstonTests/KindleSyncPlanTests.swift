@@ -18,6 +18,7 @@ struct KindleSyncPlanTests {
         requiresConversion: Bool = true,
         staleConversion: Bool = false,
         coverVersion: Int = 1,
+        coverIdentity: String? = nil,
         hasCover: Bool = true,
         blockReason: KindleSyncReason? = nil
     ) -> KindleSyncCandidate {
@@ -35,6 +36,7 @@ struct KindleSyncPlanTests {
             requiresConversion: requiresConversion,
             hasStaleTargetConversion: staleConversion,
             coverVersion: coverVersion,
+            coverIdentity: coverIdentity,
             hasCover: hasCover,
             blockReason: blockReason
         )
@@ -234,6 +236,36 @@ struct KindleSyncPlanTests {
         #expect(plan.selectedByDefault.isEmpty)
     }
 
+    @Test func changingCoverOwnerRepairsThumbnailEvenWhenVersionMatches() {
+        let local = candidate(
+            fingerprint: "same",
+            coverVersion: 2,
+            coverIdentity: "work:22222222-2222-2222-2222-222222222222"
+        )
+        let receipt = KindleSyncReceipt(
+            bookID: local.id,
+            sourceFingerprint: "same",
+            sentFileName: "Dune.azw3",
+            coverVersion: 2,
+            coverIdentity: "edition:11111111-1111-1111-1111-111111111111",
+            syncedAt: .now
+        )
+        let device = DeviceBook(
+            path: "/documents/Dune.azw3",
+            fileName: "Dune.azw3",
+            sizeBytes: 900
+        )
+
+        let plan = KindleSyncPlanner.makePlan(
+            candidates: [local],
+            deviceBooks: [device],
+            profile: profile(receipts: [receipt])
+        )
+
+        #expect(plan.items.first?.action == .repairCover)
+        #expect(plan.items.first?.reason == .coverChanged)
+    }
+
     @Test func duplicateDeviceFormatBecomesOptionalRemoval() {
         let local = candidate(fingerprint: "same", coverVersion: 2)
         let receipt = KindleSyncReceipt(
@@ -425,6 +457,7 @@ struct KindleSyncPlanTests {
         #expect(receipt.assetID == nil)
         #expect(receipt.sourceFormat == nil)
         #expect(receipt.sourceSizeBytes == nil)
+        #expect(receipt.coverIdentity == nil)
         #expect(receipt.sourceFingerprint == "legacy-source")
     }
 }

@@ -112,6 +112,34 @@ struct MetadataServiceTests {
         #expect(book.coverVersion == 1)
     }
 
+    @Test func backgroundEnrichmentPreservesAnExplicitWorkCover() async throws {
+        let lib = try await TestLibrary()
+        let work = Work(title: "Covered work")
+        let book = Book(fileName: "work-cover.epub", originalFileName: "Covered Work.epub")
+        lib.context.insert(work)
+        lib.context.insert(book)
+        book.work = work
+        work.coverVersion = 3
+        #expect(book.selectCoverOwner(.work(work.uuid)))
+        #expect(CoverStore.restore(EPUBFixture.jpegData(), for: .work(work.uuid)))
+        try lib.context.save()
+        let expectedCover = try #require(CoverStore.loadData(for: .work(work.uuid)))
+
+        var fetched = FetchedMetadata()
+        fetched.title = "Covered work"
+        fetched.bookDescription = "Metadata should still be applied."
+        fetched.coverURL = URL(string: "https://example.invalid/edition-cover.jpg")
+        let online = FakeOnlineClient(result: fetched, coverData: EPUBFixture.jpegData())
+        let service = makeService(in: lib, online: online)
+
+        #expect(await service.performEnrich(book, replaceCover: false))
+        #expect(book.bookDescription == "Metadata should still be applied.")
+        #expect(book.coverReference == CoverReference(owner: .work(work.uuid), version: 3))
+        #expect(CoverStore.loadData(for: .work(work.uuid)) == expectedCover)
+        #expect(!CoverStore.exists(for: .edition(book.uuid)))
+        #expect(await online.coverDownloadCalls == 0)
+    }
+
     @Test func lateOnlineCoverDoesNotOverwriteANewerUserCover() async throws {
         let lib = try await TestLibrary()
         let book = Book(fileName: "cover.epub", originalFileName: "Cover.epub")
@@ -880,6 +908,7 @@ private actor FakeOnlineClient: OnlineMetadataFetching {
     private let reachedNetwork: Bool
     private let coverData: Data?
     private(set) var fetchCalls = 0
+    private(set) var coverDownloadCalls = 0
 
     init(result: FetchedMetadata? = nil, reachedNetwork: Bool = true, coverData: Data? = nil) {
         self.result = result
@@ -893,7 +922,10 @@ private actor FakeOnlineClient: OnlineMetadataFetching {
         return OnlineMetadataFetchResult(metadata: result, reachedNetwork: reachedNetwork)
     }
 
-    func downloadCover(_ url: URL) async -> Data? { coverData }
+    func downloadCover(_ url: URL) async -> Data? {
+        coverDownloadCalls += 1
+        return coverData
+    }
 }
 
 private actor ReentrantOnlineClient: OnlineMetadataFetching {

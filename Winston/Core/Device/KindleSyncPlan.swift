@@ -39,6 +39,7 @@ nonisolated struct KindleSyncCandidate: Equatable, Identifiable, Sendable {
     let requiresConversion: Bool
     let hasStaleTargetConversion: Bool
     let coverVersion: Int
+    let coverIdentity: String?
     let hasCover: Bool
     let blockReason: KindleSyncReason?
 
@@ -58,6 +59,7 @@ nonisolated struct KindleSyncCandidate: Equatable, Identifiable, Sendable {
         requiresConversion: Bool,
         hasStaleTargetConversion: Bool,
         coverVersion: Int,
+        coverIdentity: String? = nil,
         hasCover: Bool,
         blockReason: KindleSyncReason?
     ) {
@@ -76,6 +78,7 @@ nonisolated struct KindleSyncCandidate: Equatable, Identifiable, Sendable {
         self.requiresConversion = requiresConversion
         self.hasStaleTargetConversion = hasStaleTargetConversion
         self.coverVersion = coverVersion
+        self.coverIdentity = coverIdentity
         self.hasCover = hasCover
         self.blockReason = blockReason
     }
@@ -102,6 +105,7 @@ nonisolated struct KindleSyncCandidate: Equatable, Identifiable, Sendable {
             requiresConversion: requiresConversion,
             hasStaleTargetConversion: hasStaleTargetConversion,
             coverVersion: coverVersion,
+            coverIdentity: coverIdentity,
             hasCover: hasCover,
             blockReason: blockReason
         )
@@ -292,7 +296,9 @@ nonisolated enum KindleSyncPlanner {
             if receipt.sentFileName.caseInsensitiveCompare(deviceBook.fileName) != .orderedSame {
                 return (.update, .formatChanged)
             }
-            if candidate.hasCover, receipt.coverVersion != candidate.coverVersion {
+            if candidate.hasCover,
+               receipt.coverVersion != candidate.coverVersion
+                || receipt.coverIdentity != candidate.coverIdentity {
                 return (.repairCover, .coverChanged)
             }
         } else if !candidate.requiresConversion,

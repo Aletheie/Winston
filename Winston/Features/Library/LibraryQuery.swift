@@ -262,7 +262,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
             year: book.year.flatMap { Int($0.prefix(4)) }
         )
         hasHighlights = includeHighlights && !book.highlights.isEmpty
-        drmProtected = book.drmProtected == true
+        drmProtected = book.primaryDRMProtected == true
         self.deviceMatchKeys = deviceMatchKeys
         hasMissingMetadata = Self.isBlank(book.title)
             || Self.isBlank(book.author)

@@ -191,6 +191,38 @@ struct CoverServiceTests {
         #expect(CoverStore.loadData(for: uuid, in: directory) == Data("first".utf8))
     }
 
+    @Test func coverScopesDoNotSharePayloadsOrMutationGenerations() async throws {
+        let library = try await TestLibrary()
+        let directory = library.root.appending(
+            path: "scoped-covers",
+            directoryHint: .isDirectory
+        )
+        let repository = CoverRepository(coversDirectory: directory)
+        let id = UUID()
+        let edition = CoverOwner.edition(id)
+        let work = CoverOwner.work(id)
+        let generated = CoverOwner.generatedAsset(id)
+
+        #expect(CoverStore.restore(Data("edition".utf8), for: edition, in: directory))
+        #expect(CoverStore.restore(Data("work".utf8), for: work, in: directory))
+        #expect(CoverStore.restore(Data("asset".utf8), for: generated, in: directory))
+        #expect(CoverStore.loadData(for: edition, in: directory) == Data("edition".utf8))
+        #expect(CoverStore.loadData(for: work, in: directory) == Data("work".utf8))
+        #expect(CoverStore.loadData(for: generated, in: directory) == Data("asset".utf8))
+
+        let workBackground = await repository.beginBackgroundMutation(for: work)
+        _ = await repository.beginUserMutation(for: edition)
+        #expect(await repository.isCurrent(workBackground))
+
+        let installed = await repository.install(
+            Data("new work".utf8),
+            using: workBackground
+        )
+        #expect(installed != nil)
+        #expect(CoverStore.loadData(for: work, in: directory) == Data("new work".utf8))
+        #expect(CoverStore.loadData(for: edition, in: directory) == Data("edition".utf8))
+    }
+
     private func loadDroppedCover(from provider: NSItemProvider) async throws -> DroppedCoverImage {
         try await withCheckedThrowingContinuation { continuation in
             _ = provider.loadTransferable(type: DroppedCoverImage.self) { result in

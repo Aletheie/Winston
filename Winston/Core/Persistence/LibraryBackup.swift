@@ -79,14 +79,18 @@ nonisolated enum LibraryBackup {
         return nil
     }
 
-    static func coverURL(for bookID: UUID, in backup: URL) -> URL? {
+    static func coverURL(for owner: CoverOwner, in backup: URL) -> URL? {
         let candidate = backup
             .appending(path: "covers", directoryHint: .isDirectory)
-            .appending(path: "\(bookID.uuidString).jpg")
+            .appending(path: owner.storageFileName)
         guard FileManager.default.fileExists(atPath: candidate.path(percentEncoded: false)) else {
             return nil
         }
         return candidate
+    }
+
+    static func coverURL(for bookID: UUID, in backup: URL) -> URL? {
+        coverURL(for: .edition(bookID), in: backup)
     }
 
     static func requestRestore(from backup: URL) {

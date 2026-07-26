@@ -4,6 +4,8 @@ import SwiftData
 @Model
 final class Work {
     @Attribute(.unique) var uuid: UUID
+    // Canonical work identity. Edition identifiers such as ISBN deliberately
+    // live on Book and must not be copied here.
     var title: String?
     var author: String?
     var originalTitle: String?
@@ -12,6 +14,7 @@ final class Work {
     var openLibraryWorkKey: String?
     var hardcoverBookID: String?
     var preferredEditionUUID: UUID?
+    var coverVersionRaw: Int?
     var dateCreated: Date
     var notes: String?
 
@@ -28,6 +31,7 @@ final class Work {
         self.title = title
         self.author = author
         self.dateCreated = dateCreated
+        coverVersionRaw = 0
         refreshMatchKey()
     }
 
@@ -36,6 +40,15 @@ final class Work {
             return String(localized: "Untitled work")
         }
         return value
+    }
+
+    var coverVersion: Int {
+        get { max(0, coverVersionRaw ?? 0) }
+        set { coverVersionRaw = max(0, newValue) }
+    }
+
+    var coverReference: CoverReference {
+        CoverReference(owner: .work(uuid), version: coverVersion)
     }
 
     func refreshMatchKey() {

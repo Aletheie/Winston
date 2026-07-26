@@ -361,6 +361,10 @@ struct LibraryTimeMachineRestorer {
 
             if coverIsIncluded {
                 restoredBook?.coverVersion = expectedCoverVersion
+                guard let restoredBook,
+                      restoredBook.selectCoverOwner(.edition(snapshot.id)) else {
+                    throw CatalogMutationError.invalidRequest
+                }
             }
         }
 
@@ -462,7 +466,11 @@ struct LibraryTimeMachineRestorer {
         book.communityRatingCount = metadata.communityRatingCount
         book.communityRatingSource = metadata.communityRatingSource
         book.notes = metadata.notes
-        book.drmProtected = metadata.drmProtected
+        if book.assets.isEmpty {
+            // Legacy snapshots predate per-asset DRM. Invariant repair seeds
+            // the restored primary asset from this compatibility value.
+            book.drmProtected = metadata.drmProtected
+        }
         book.pageCount = metadata.pageCount
         book.editionStatement = metadata.editionStatement
         book.editionTypeRaw = metadata.editionTypeRaw
@@ -479,6 +487,8 @@ struct LibraryTimeMachineRestorer {
         )
         book.fileSizeBytes = snapshot.fileSizeBytes
         book.coverVersion = snapshot.coverVersion
+        book.coverScopeRaw = snapshot.coverScopeRaw
+        book.coverAssetUUID = snapshot.coverAssetUUID
         return book
     }
 
@@ -561,15 +571,28 @@ struct LibraryTimeMachineRestorer {
                 uuid: snapshot.id,
                 fileName: snapshot.fileName,
                 origin: snapshot.originRaw.flatMap(AssetOrigin.init(rawValue:)) ?? .original,
+                format: snapshot.formatRaw,
+                sourceProvenance: snapshot.sourceProvenanceRaw
+                    .flatMap(AssetSourceProvenance.init(rawValue:))
+                    ?? .backupRestore,
+                sourceIdentifier: snapshot.sourceIdentifier,
                 contentHash: snapshot.contentHash,
                 generatedFromContentHash: snapshot.generatedFromContentHash,
                 sizeBytes: snapshot.sizeBytes,
+                drmProtected: snapshot.drmProtected,
                 dateAdded: snapshot.dateAdded,
                 validationStatus: snapshot.validationStatusRaw.flatMap(AssetValidation.init(rawValue:)),
+                availability: snapshot.availabilityRaw.flatMap(AssetAvailability.init(rawValue:)),
+                coverVersion: snapshot.coverVersionRaw ?? 0,
                 book: book
             )
+            asset.formatRaw = snapshot.formatRaw
             asset.originRaw = snapshot.originRaw
+            asset.sourceProvenanceRaw = snapshot.sourceProvenanceRaw
+                ?? AssetSourceProvenance.backupRestore.rawValue
             asset.validationStatusRaw = snapshot.validationStatusRaw
+            asset.availabilityRaw = snapshot.availabilityRaw
+            asset.coverVersionRaw = snapshot.coverVersionRaw
             modelContext.insert(asset)
         }
         book.primaryAssetUUID = primaryAssetID.flatMap { requestedID in
@@ -606,6 +629,7 @@ struct LibraryTimeMachineRestorer {
         work.openLibraryWorkKey = snapshot.openLibraryWorkKey
         work.hardcoverBookID = snapshot.hardcoverBookID
         work.preferredEditionUUID = snapshot.preferredEditionUUID
+        work.coverVersionRaw = snapshot.coverVersionRaw
         work.notes = snapshot.notes
         work.preferredEditionUUID = book.uuid
         modelContext.insert(work)

@@ -259,8 +259,7 @@ final class ReadingRecommendationViewModel {
 
     private static func candidateSource(from book: Book) -> ReadingRecommendationCandidateSource {
         let primaryAsset = book.primaryAsset
-        let validationAllowsReading = primaryAsset?.validationStatus != .missing
-            && primaryAsset?.validationStatus != .corrupt
+        let validationAllowsReading = primaryAsset?.isUsable ?? true
         return ReadingRecommendationCandidateSource(
             id: book.uuid,
             title: book.displayTitle,

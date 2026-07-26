@@ -107,6 +107,7 @@ nonisolated struct AssetInspectionInput: Equatable, Sendable {
     let assetDateAdded: Date
     let storedHash: String?
     let storedSize: Int64
+    let storedDRM: Bool?
     let storedValidation: AssetValidation?
     let primaryAssetID: UUID?
     let primaryFileName: String
@@ -134,15 +135,16 @@ nonisolated struct AssetInspectionInput: Equatable, Sendable {
         assetDateAdded = asset.dateAdded
         storedHash = asset.contentHash
         storedSize = asset.sizeBytes
+        storedDRM = asset.drmProtected
         storedValidation = asset.validationStatus
         self.primaryAssetID = primaryAsset?.uuid
         self.primaryFileName = primaryFileName
-        primaryDRM = book.drmProtected
+        primaryDRM = book.primaryDRMProtected
         primarySize = primaryAsset?.sizeBytes ?? book.fileSizeBytes
         requirements = AssetInspectionRequirements(
             size: asset.sizeBytes <= 0 || (isPrimary && book.fileSizeBytes <= 0),
             hash: asset.contentHash == nil,
-            drm: isPrimary && book.drmProtected == nil,
+            drm: asset.drmProtected == nil,
             validation: asset.validationStatus == nil
         )
     }
@@ -152,9 +154,10 @@ nonisolated struct AssetInspectionInput: Equatable, Sendable {
         sourceMatches(book: book, asset: asset)
             && asset.contentHash == storedHash
             && asset.sizeBytes == storedSize
+            && asset.drmProtected == storedDRM
             && asset.validationStatus == storedValidation
             && (!isPrimary
-                || (book.drmProtected == primaryDRM
+                || (book.primaryDRMProtected == primaryDRM
                     && book.fileSizeBytes == primarySize))
     }
 
@@ -454,7 +457,9 @@ enum CatalogStructureBackfill {
                     uuid: book.uuid,
                     fileName: book.fileName,
                     origin: .original,
+                    sourceProvenance: .legacyMigration,
                     sizeBytes: book.fileSizeBytes,
+                    drmProtected: book.drmProtected,
                     dateAdded: book.dateAdded,
                     book: book
                 )
@@ -713,10 +718,9 @@ enum AssetInspectionMaintenance {
                         asset.validationStatus = validation
                     }
                     if input.requirements.drm,
-                       input.isPrimary,
-                       book.drmProtected == nil,
+                       asset.drmProtected == nil,
                        let drmProtected = output.drmProtected {
-                        book.drmProtected = drmProtected
+                        asset.drmProtected = drmProtected
                     }
                 }
             }
@@ -758,9 +762,9 @@ enum MaintenanceSchedulerError: Error, LocalizedError {
 @MainActor
 @Observable
 final class MaintenanceScheduler {
-    private static let catalogStructureVersion = 4
+    private static let catalogStructureVersion = 5
     private static let catalogCleanupVersion = 1
-    private static let assetInspectionVersion = 1
+    private static let assetInspectionVersion = 2
     private static let metadataExtractionVersion = 1
     private static let chunkSize = 64
 

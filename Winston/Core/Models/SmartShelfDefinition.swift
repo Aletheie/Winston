@@ -449,7 +449,7 @@ nonisolated struct SmartShelfBookSnapshot: Equatable, Sendable {
         rating = book.rating
         readingStatusRaw = book.readingStatus.rawValue
         hasHighlights = includeHighlights && !book.highlights.isEmpty
-        drmProtected = book.drmProtected == true
+        drmProtected = book.primaryDRMProtected == true
         self.deviceMatchKeys = deviceMatchKeys ?? book.deviceMatchKeys
         hasMissingMetadata = Self.isBlank(book.title)
             || Self.isBlank(book.author)

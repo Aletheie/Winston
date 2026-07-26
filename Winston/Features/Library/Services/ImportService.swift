@@ -397,6 +397,8 @@ final class ImportService {
         let book: Book
         let assets: [BookAsset]
         let coverVersion: Int
+        let coverScopeRaw: String?
+        let coverAssetUUID: UUID?
     }
 
     private struct ImportedWorkPreimage {
@@ -786,9 +788,14 @@ final class ImportService {
     }
 
     func detectMissingDRM() async {
-        let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.drmProtected == nil })
+        let descriptor = FetchDescriptor<Book>()
         guard let fetched = try? modelContext.fetch(descriptor) else { return }
-        let snapshots = fetched.filter(\.hasDigitalFile).compactMap(BookAnalysisSnapshot.init(book:))
+        let snapshots = fetched
+            .filter {
+                $0.hasDigitalFile
+                    && ($0.primaryAsset?.drmProtected ?? $0.drmProtected) == nil
+            }
+            .compactMap(BookAnalysisSnapshot.init(book:))
         guard !snapshots.isEmpty else { return }
 
         for chunkStart in stride(from: 0, to: snapshots.count, by: 50) {
@@ -806,34 +813,56 @@ final class ImportService {
                 return
             }
 
-            var valid: [(BookAnalysisSnapshot, CatalogAssetInspectionProposal<Bool>, Book)] = []
+            var valid: [(
+                BookAnalysisSnapshot,
+                CatalogAssetInspectionProposal<Bool>,
+                Book,
+                BookAsset?
+            )] = []
             for result in completed {
                 let snapshot = result.job.snapshot
                 guard analysisCoordinator.isCurrent(result.job.ticket),
                       result.proposal.sourceIsCurrent(for: snapshot),
                       let book = try? mutations.book(id: snapshot.bookID),
-                      snapshot.matches(book),
-                      book.drmProtected == nil else { continue }
-                valid.append((snapshot, result.proposal, book))
+                      snapshot.matches(book) else { continue }
+                let asset = snapshot.assetID.flatMap { id in
+                    book.assets.first(where: { $0.uuid == id })
+                }
+                guard (asset?.drmProtected ?? book.drmProtected) == nil else { continue }
+                valid.append((snapshot, result.proposal, book, asset))
             }
 
             if !valid.isEmpty {
                 let preimages = valid.map { CatalogBookMetadataPreimage($0.2) }
+                let assetPreimages = valid.compactMap { $0.3 }.map(CatalogBookAssetPreimage.init)
                 let bookIDs = Set(valid.map { $0.0.bookID })
                 do {
                     try mutations.commit(
                         .applyAnalysisBatch(bookIDs: Array(bookIDs), kind: .drmInspection),
                         affectedBookIDs: bookIDs,
-                        revertingOnFailure: { preimages.forEach { $0.restore() } }
+                        revertingOnFailure: {
+                            preimages.forEach { $0.restore() }
+                            assetPreimages.forEach { $0.restore() }
+                        }
                     ) {
-                        for (snapshot, proposal, _) in valid {
+                        for (snapshot, proposal, _, _) in valid {
                             let book = try mutations.book(id: snapshot.bookID)
                             guard snapshot.matches(book),
-                                  proposal.sourceIsCurrent(for: snapshot),
-                                  book.drmProtected == nil else {
+                                  proposal.sourceIsCurrent(for: snapshot) else {
                                 throw CatalogMutationError.staleAnalysis
                             }
-                            book.drmProtected = proposal.value
+                            if let assetID = snapshot.assetID,
+                               let asset = book.assets.first(where: { $0.uuid == assetID }) {
+                                guard asset.drmProtected == nil else {
+                                    throw CatalogMutationError.staleAnalysis
+                                }
+                                asset.drmProtected = proposal.value
+                            } else {
+                                guard book.drmProtected == nil else {
+                                    throw CatalogMutationError.staleAnalysis
+                                }
+                                book.drmProtected = proposal.value
+                            }
                         }
                     }
                 } catch {
@@ -1155,7 +1184,9 @@ final class ImportService {
                     bookPreimages[existingBookID] = ImportedBookPreimage(
                         book: existing,
                         assets: existing.assets,
-                        coverVersion: existing.coverVersion
+                        coverVersion: existing.coverVersion,
+                        coverScopeRaw: existing.coverScopeRaw,
+                        coverAssetUUID: existing.coverAssetUUID
                     )
                 }
                 book = existing
@@ -1190,8 +1221,10 @@ final class ImportService {
                 uuid: inspection.assetID,
                 fileName: inspection.managedFileName,
                 origin: .original,
+                sourceProvenance: .directImport,
                 contentHash: inspection.sha256,
                 sizeBytes: inspection.sizeBytes,
+                drmProtected: inspection.drmProtected,
                 dateAdded: book.dateAdded,
                 validationStatus: inspection.validation,
                 book: book
@@ -1199,6 +1232,7 @@ final class ImportService {
             modelContext.insert(asset)
             if candidate.coverTransaction != nil {
                 book.coverVersion += 1
+                _ = book.selectCoverOwner(.edition(book.uuid))
             }
             targetBooksByRequestID[prepared.request.uuid] = book
             affectedBookIDs.insert(book.uuid)
@@ -1223,6 +1257,8 @@ final class ImportService {
                     for preimage in bookPreimages.values {
                         preimage.book.assets = preimage.assets
                         preimage.book.coverVersion = preimage.coverVersion
+                        preimage.book.coverScopeRaw = preimage.coverScopeRaw
+                        preimage.book.coverAssetUUID = preimage.coverAssetUUID
                     }
                     for preimage in workPreimages.values {
                         preimage.work.editions = preimage.editions
@@ -1245,9 +1281,8 @@ final class ImportService {
                 }
                 if let coverData = prepared.inspection.coverJPEGData,
                    candidate.coverTransaction != nil,
-                   let image = NSImage(data: coverData),
-                   let fileURL = book.primaryFileURL {
-                    await CoverCache.shared.replace(image, for: fileURL)
+                   let image = NSImage(data: coverData) {
+                    await CoverCache.shared.replace(image, for: book.coverCacheURL)
                 }
             }
             return result
@@ -1402,10 +1437,12 @@ final class ImportService {
                     throw CatalogMutationError.staleAnalysis
                 }
                 storedBook.apply(proposal.value.metadata)
-                storedBook.drmProtected = proposal.value.drmProtected
                 if let assetID = snapshot.assetID,
                    let asset = storedBook.assets.first(where: { $0.uuid == assetID }) {
+                    asset.drmProtected = proposal.value.drmProtected
                     asset.validationStatus = proposal.value.validation
+                } else {
+                    storedBook.drmProtected = proposal.value.drmProtected
                 }
                 refreshWorkIdentity(
                     for: storedBook,

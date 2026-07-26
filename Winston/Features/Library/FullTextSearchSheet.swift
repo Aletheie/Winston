@@ -166,10 +166,7 @@ final class FullTextSearchViewModel {
     private static func snapshots(from books: [Book]) -> [FullTextBookSnapshot] {
         books.map { book in
             var candidates = book.assets
-                .filter {
-                    $0.validationStatus != .missing
-                        && $0.validationStatus != .corrupt
-                }
+                .filter(\.isUsable)
                 .map { asset in
                     SourceCandidate(
                         source: .init(

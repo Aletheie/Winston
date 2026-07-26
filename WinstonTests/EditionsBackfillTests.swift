@@ -22,6 +22,8 @@ struct EditionsBackfillTests {
         #expect(book.assets.first?.uuid == book.uuid)
         #expect(book.assets.first?.fileName == book.fileName)
         #expect(book.assets.first?.sizeBytes == 123)
+        #expect(book.assets.first?.sourceProvenance == .legacyMigration)
+        #expect(book.coverScope == .edition)
 
         #expect(EditionsBackfill.run(context: library.context) == 0)
         #expect(try library.context.fetchCount(FetchDescriptor<Work>()) == 1)
@@ -73,5 +75,31 @@ struct EditionsBackfillTests {
 
         #expect(book.fileSizeBytes == Int64(bytes.count))
         #expect(book.assets.first?.sizeBytes == Int64(bytes.count))
+    }
+
+    @Test func repairsAdditiveOwnershipFieldsAndIsIdempotent() async throws {
+        let library = try await TestLibrary()
+        let work = Work(title: "Legacy")
+        let book = Book(fileName: "legacy.epub", originalFileName: "Legacy.epub")
+        let asset = BookAsset(fileName: "legacy.epub", book: book)
+        library.context.insert(work)
+        library.context.insert(book)
+        library.context.insert(asset)
+        book.work = work
+        book.primaryAssetUUID = asset.uuid
+
+        book.coverScopeRaw = nil
+        asset.formatRaw = nil
+        asset.sourceProvenanceRaw = nil
+        asset.availabilityRaw = nil
+        try library.context.save()
+
+        #expect(EditionsBackfill.run(context: library.context) == 1)
+        #expect(book.coverScope == .edition)
+        #expect(book.coverReference.owner == .edition(book.uuid))
+        #expect(asset.format == "EPUB")
+        #expect(asset.sourceProvenance == .unknown)
+        #expect(asset.availability == .available)
+        #expect(EditionsBackfill.run(context: library.context) == 0)
     }
 }

@@ -214,7 +214,7 @@ private struct CardTitleStrip: View {
                         .help("Has highlights")
                         .accessibilityLabel("Has highlights")
                 }
-                if book.drmProtected == true {
+                if book.primaryDRMProtected == true {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(theme.textTertiary)

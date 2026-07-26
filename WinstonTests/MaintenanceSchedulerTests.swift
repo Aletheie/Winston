@@ -235,7 +235,9 @@ struct MaintenanceSchedulerTests {
         #expect(book.fileSizeBytes == asset.sizeBytes)
         #expect(asset.contentHash != nil)
         #expect(book.drmProtected == false)
+        #expect(asset.drmProtected == false)
         #expect(asset.validationStatus == .ok)
+        #expect(asset.availability == .available)
     }
 
     @Test func assetChangedDuringInspectionIsRejectedAndScheduledForRetry() async throws {

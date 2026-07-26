@@ -530,6 +530,8 @@ struct CatalogBookMetadataPreimage {
     let primaryAssetUUID: UUID?
     let fileSizeBytes: Int64
     let coverVersion: Int
+    let coverScopeRaw: String?
+    let coverAssetUUID: UUID?
     let pageCount: Int?
 
     init(_ book: Book) {
@@ -559,6 +561,8 @@ struct CatalogBookMetadataPreimage {
         primaryAssetUUID = book.primaryAssetUUID
         fileSizeBytes = book.fileSizeBytes
         coverVersion = book.coverVersion
+        coverScopeRaw = book.coverScopeRaw
+        coverAssetUUID = book.coverAssetUUID
         pageCount = book.pageCount
     }
 
@@ -588,6 +592,8 @@ struct CatalogBookMetadataPreimage {
         book.primaryAssetUUID = primaryAssetUUID
         book.fileSizeBytes = fileSizeBytes
         book.coverVersion = coverVersion
+        book.coverScopeRaw = coverScopeRaw
+        book.coverAssetUUID = coverAssetUUID
         book.pageCount = pageCount
     }
 }
@@ -595,31 +601,49 @@ struct CatalogBookMetadataPreimage {
 struct CatalogBookAssetPreimage {
     let asset: BookAsset
     let fileName: String
+    let formatRaw: String?
     let contentHash: String?
     let generatedFromContentHash: String?
     let sizeBytes: Int64
+    let drmProtected: Bool?
     let originRaw: String?
+    let sourceProvenanceRaw: String?
+    let sourceIdentifier: String?
     let validationStatusRaw: String?
+    let availabilityRaw: String?
+    let coverVersionRaw: Int?
     let dateAdded: Date
 
     init(_ asset: BookAsset) {
         self.asset = asset
         fileName = asset.fileName
+        formatRaw = asset.formatRaw
         contentHash = asset.contentHash
         generatedFromContentHash = asset.generatedFromContentHash
         sizeBytes = asset.sizeBytes
+        drmProtected = asset.drmProtected
         originRaw = asset.originRaw
+        sourceProvenanceRaw = asset.sourceProvenanceRaw
+        sourceIdentifier = asset.sourceIdentifier
         validationStatusRaw = asset.validationStatusRaw
+        availabilityRaw = asset.availabilityRaw
+        coverVersionRaw = asset.coverVersionRaw
         dateAdded = asset.dateAdded
     }
 
     func restore() {
         asset.fileName = fileName
+        asset.formatRaw = formatRaw
         asset.contentHash = contentHash
         asset.generatedFromContentHash = generatedFromContentHash
         asset.sizeBytes = sizeBytes
+        asset.drmProtected = drmProtected
         asset.originRaw = originRaw
+        asset.sourceProvenanceRaw = sourceProvenanceRaw
+        asset.sourceIdentifier = sourceIdentifier
         asset.validationStatusRaw = validationStatusRaw
+        asset.availabilityRaw = availabilityRaw
+        asset.coverVersionRaw = coverVersionRaw
         asset.dateAdded = dateAdded
     }
 }
@@ -634,6 +658,7 @@ struct CatalogWorkPreimage {
     let openLibraryWorkKey: String?
     let hardcoverBookID: String?
     let preferredEditionUUID: UUID?
+    let coverVersionRaw: Int?
     let notes: String?
 
     init(_ work: Work) {
@@ -646,6 +671,7 @@ struct CatalogWorkPreimage {
         openLibraryWorkKey = work.openLibraryWorkKey
         hardcoverBookID = work.hardcoverBookID
         preferredEditionUUID = work.preferredEditionUUID
+        coverVersionRaw = work.coverVersionRaw
         notes = work.notes
     }
 
@@ -658,6 +684,7 @@ struct CatalogWorkPreimage {
         work.openLibraryWorkKey = openLibraryWorkKey
         work.hardcoverBookID = hardcoverBookID
         work.preferredEditionUUID = preferredEditionUUID
+        work.coverVersionRaw = coverVersionRaw
         work.notes = notes
     }
 }
@@ -1461,15 +1488,15 @@ final class CatalogMutationService {
         affectedWorkIDs: Set<UUID>
     ) {
         var workIDs = affectedWorkIDs
-        if command.changeFields.contains(.assetAvailability)
-            || command.changesBookMembership {
-            for bookID in affectedBookIDs {
-                guard let book = try? book(id: bookID), book.modelContext != nil else {
-                    continue
-                }
-                book.repairPrimaryAssetInvariant()
-                if let workID = book.work?.uuid { workIDs.insert(workID) }
+        // Every catalog write is an opportunity to converge legacy rows. This
+        // keeps compatibility mirrors and explicit cover ownership correct even
+        // when an older caller only updates Book-level fields.
+        for bookID in affectedBookIDs {
+            guard let book = try? book(id: bookID), book.modelContext != nil else {
+                continue
             }
+            CatalogModelInvariantService.repair(book: book)
+            if let workID = book.work?.uuid { workIDs.insert(workID) }
         }
         if command.changeFields.contains(.workMembership)
             || command.changesBookMembership {

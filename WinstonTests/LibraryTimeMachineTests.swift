@@ -123,6 +123,39 @@ struct LibraryTimeMachineTests {
         #expect(snapshot.hasCover)
     }
 
+    @Test func currentSnapshotUsesSelectedWorkCoverAndItsGeneration() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "WinstonScopedCoverSnapshot-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let booksDirectory = root.appending(path: "books", directoryHint: .isDirectory)
+        let coversDirectory = root.appending(path: "covers", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: booksDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: coversDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let work = Work(title: "Shared Work")
+        work.coverVersion = 7
+        let book = Book(fileName: "edition.epub", originalFileName: "Edition.epub")
+        book.work = work
+        #expect(book.selectCoverOwner(.work(work.uuid)))
+        try Data("book".utf8).write(to: booksDirectory.appending(path: book.fileName))
+        let workCover = CoverStore.url(for: .work(work.uuid), in: coversDirectory)
+        try Data("work cover".utf8).write(to: workCover)
+
+        let snapshots = await LibraryTimeMachineDiffBuilder.snapshotCurrentBooks(
+            [book],
+            currentCoversDirectory: coversDirectory,
+            currentBooksDirectory: booksDirectory
+        )
+        let snapshot = try #require(snapshots.first)
+
+        #expect(snapshot.coverOwner == .work(work.uuid))
+        #expect(snapshot.coverVersion == 7)
+        #expect(snapshot.coverURL == workCover)
+        #expect(snapshot.hasCover)
+    }
+
     @Test func technicalLookupStateIsIgnoredButVisibleRatingDataIsCompared() {
         let id = UUID()
         var backup = snapshot(id: id, title: "Book")

@@ -28,7 +28,9 @@ enum EditionsBackfill {
                     uuid: book.uuid,
                     fileName: book.fileName,
                     origin: .original,
+                    sourceProvenance: .legacyMigration,
                     sizeBytes: size,
+                    drmProtected: book.drmProtected,
                     dateAdded: book.dateAdded,
                     book: book
                 )
@@ -47,6 +49,12 @@ enum EditionsBackfill {
                 staged += 1
                 changedBookIDs.insert(book.uuid)
                 changedWorkIDs.insert(work.uuid)
+            }
+
+            if CatalogModelInvariantService.repair(book: book) {
+                staged += 1
+                changedBookIDs.insert(book.uuid)
+                changedAssetIDs.formUnion(book.assets.map(\.uuid))
             }
 
             if staged > 0, (index + 1).isMultiple(of: max(1, batchSize)) {

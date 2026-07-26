@@ -1023,10 +1023,11 @@ private struct DetailFileRow: View {
                 Button("Make Primary") {
                     Task { await viewModel.makePrimary(asset, for: book) }
                 }
-                    .disabled(isPrimary)
+                    .disabled(isPrimary || !asset.isUsable)
                 Button("Send This Format to Kindle") {
                     transferQueue.beginSend(asset: asset, for: book, via: deviceMonitor)
                 }
+                    .disabled(!asset.isUsable)
                 Divider()
                 Button("Remove File…", role: .destructive) { onRemove(asset) }
                     .disabled(!canRemove)
@@ -1042,19 +1043,28 @@ private struct DetailFileRow: View {
     }
 
     private var validationColor: Color {
+        guard asset.availability == .available else { return theme.destructive }
         switch asset.validationStatus {
-        case .ok: theme.success
-        case .missing, .corrupt: theme.destructive
-        case nil: theme.textTertiary
+        case .ok: return theme.success
+        case .missing, .corrupt: return theme.destructive
+        case nil: return theme.textTertiary
         }
     }
 
     private var validationLabel: LocalizedStringResource {
+        switch asset.availability {
+        case .missing:
+            return "File is missing"
+        case .unavailable:
+            return "File is unavailable"
+        case .available:
+            break
+        }
         switch asset.validationStatus {
-        case .ok: "File is valid"
-        case .missing: "File is missing"
-        case .corrupt: "File is corrupt"
-        case nil: "File not validated yet"
+        case .ok: return "File is valid"
+        case .missing: return "File is missing"
+        case .corrupt: return "File is corrupt"
+        case nil: return "File not validated yet"
         }
     }
 }

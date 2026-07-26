@@ -92,32 +92,47 @@ final class ConversionService {
     private struct AssetPreimage {
         let asset: BookAsset
         let fileName: String
+        let formatRaw: String?
         let dateAdded: Date
         let contentHash: String?
         let generatedFromContentHash: String?
         let sizeBytes: Int64
+        let drmProtected: Bool?
         let originRaw: String?
+        let sourceProvenanceRaw: String?
+        let sourceIdentifier: String?
         let validationStatusRaw: String?
+        let availabilityRaw: String?
 
         init(_ asset: BookAsset) {
             self.asset = asset
             fileName = asset.fileName
+            formatRaw = asset.formatRaw
             dateAdded = asset.dateAdded
             contentHash = asset.contentHash
             generatedFromContentHash = asset.generatedFromContentHash
             sizeBytes = asset.sizeBytes
+            drmProtected = asset.drmProtected
             originRaw = asset.originRaw
+            sourceProvenanceRaw = asset.sourceProvenanceRaw
+            sourceIdentifier = asset.sourceIdentifier
             validationStatusRaw = asset.validationStatusRaw
+            availabilityRaw = asset.availabilityRaw
         }
 
         func restore() {
             asset.fileName = fileName
+            asset.formatRaw = formatRaw
             asset.dateAdded = dateAdded
             asset.contentHash = contentHash
             asset.generatedFromContentHash = generatedFromContentHash
             asset.sizeBytes = sizeBytes
+            asset.drmProtected = drmProtected
             asset.originRaw = originRaw
+            asset.sourceProvenanceRaw = sourceProvenanceRaw
+            asset.sourceIdentifier = sourceIdentifier
             asset.validationStatusRaw = validationStatusRaw
+            asset.availabilityRaw = availabilityRaw
         }
     }
 
@@ -126,21 +141,30 @@ final class ConversionService {
         let fileName: String
         let primaryAssetUUID: UUID?
         let fileSizeBytes: Int64
+        let drmProtected: Bool?
         let coverVersion: Int
+        let coverScopeRaw: String?
+        let coverAssetUUID: UUID?
 
         init(_ book: Book) {
             self.book = book
             fileName = book.fileName
             primaryAssetUUID = book.primaryAssetUUID
             fileSizeBytes = book.fileSizeBytes
+            drmProtected = book.drmProtected
             coverVersion = book.coverVersion
+            coverScopeRaw = book.coverScopeRaw
+            coverAssetUUID = book.coverAssetUUID
         }
 
         func restore() {
             book.fileName = fileName
             book.primaryAssetUUID = primaryAssetUUID
             book.fileSizeBytes = fileSizeBytes
+            book.drmProtected = drmProtected
             book.coverVersion = coverVersion
+            book.coverScopeRaw = coverScopeRaw
+            book.coverAssetUUID = coverAssetUUID
         }
     }
 
@@ -177,14 +201,18 @@ final class ConversionService {
     func isConverting(_ book: Book) -> Bool { convertingUUIDs.contains(book.uuid) }
 
     func convert(_ book: Book) {
-        guard book.hasDigitalFile, EbookConverter.needsConversion(format: book.format) else { return }
+        guard book.hasCatalogDigitalFile,
+              book.hasDigitalFile,
+              EbookConverter.needsConversion(format: book.format) else { return }
         convert(book, to: EbookConverter.kindleTarget(forFormat: book.format))
     }
 
     func convert(_ book: Book, to format: EbookConverter.OutputFormat) {
-        guard book.hasDigitalFile, book.format.lowercased() != format.ext,
+        guard book.hasCatalogDigitalFile,
+              book.hasDigitalFile,
+              book.format.lowercased() != format.ext,
               !convertingUUIDs.contains(book.uuid) else { return }
-        if book.drmProtected == true {
+        if book.primaryDRMProtected == true {
             toasts.error(String(localized: "\u{201C}\(book.displayTitle)\u{201D} is DRM\u{2011}protected and can't be converted."))
             return
         }
@@ -205,18 +233,20 @@ final class ConversionService {
 
     func convertBooks(_ books: [Book]) {
         let candidates = books.filter {
-            $0.hasDigitalFile && EbookConverter.needsConversion(format: $0.format)
+            $0.hasCatalogDigitalFile
+                && $0.hasDigitalFile
+                && EbookConverter.needsConversion(format: $0.format)
                 && !convertingUUIDs.contains($0.uuid)
         }
-        let drmCount = candidates.filter { $0.drmProtected == true }.count
+        let drmCount = candidates.filter { $0.primaryDRMProtected == true }.count
         if drmCount > 0 {
             toasts.error(String(localized: "Some DRM\u{2011}protected books were skipped (\(drmCount))."))
         }
         let targets = candidates.filter {
-            $0.drmProtected != true && EbookConverter.canConvertForKindle($0.format)
+            $0.primaryDRMProtected != true && EbookConverter.canConvertForKindle($0.format)
         }
         guard !targets.isEmpty else {
-            if candidates.contains(where: { $0.drmProtected != true }) {
+            if candidates.contains(where: { $0.primaryDRMProtected != true }) {
                 toasts.error(String(localized: "Install calibre to convert books"))
             }
             return
@@ -232,14 +262,16 @@ final class ConversionService {
 
     func convertBooks(_ books: [Book], to format: EbookConverter.OutputFormat) {
         let convertible = books.filter {
-            $0.hasDigitalFile && $0.format.lowercased() != format.ext
+            $0.hasCatalogDigitalFile
+                && $0.hasDigitalFile
+                && $0.format.lowercased() != format.ext
                 && !convertingUUIDs.contains($0.uuid)
         }
-        let drmCount = convertible.filter { $0.drmProtected == true }.count
+        let drmCount = convertible.filter { $0.primaryDRMProtected == true }.count
         if drmCount > 0 {
             toasts.error(String(localized: "Some DRM\u{2011}protected books were skipped (\(drmCount))."))
         }
-        let targets = convertible.filter { $0.drmProtected != true }
+        let targets = convertible.filter { $0.primaryDRMProtected != true }
         guard !targets.isEmpty else { return }
         let needsCalibre = targets.contains { !EbookConverter.canConvertNatively(from: $0.format, to: format) }
         if needsCalibre, !EbookConverter.isCalibreAvailable {
@@ -304,6 +336,7 @@ final class ConversionService {
         for book: Book,
         to format: EbookConverter.OutputFormat
     ) -> Request? {
+        guard book.hasCatalogDigitalFile else { return nil }
         let primaryAsset = primaryAsset(in: book)
         let sourceFileName = primaryAsset?.fileName ?? book.fileName
         let sourceAsset = primaryAsset.map {
@@ -377,7 +410,10 @@ final class ConversionService {
         switch result {
         case .installed:
             if let image = extractedCover?.0 {
-                await CoverCache.shared.replace(image, for: request.sourceURL)
+                await CoverCache.shared.replace(
+                    image,
+                    for: CoverStore.url(for: .edition(request.uuid))
+                )
             }
             toasts.success(String(localized: "Created \(request.format.label) copy."))
         case .conflict(let conflict):
@@ -575,16 +611,23 @@ final class ConversionService {
                     liveTarget.sizeBytes = stagedBook.byteCount
                     liveTarget.contentHash = stagedBook.sha256
                     liveTarget.generatedFromContentHash = sourceHash
+                    liveTarget.sourceProvenance = .conversion
+                    liveTarget.sourceIdentifier = sourceHash
+                    liveTarget.drmProtected = false
                     liveTarget.validationStatus = .ok
+                    liveTarget.availability = .available
                     liveTarget.dateAdded = replacementDate
                 } else {
                     let asset = BookAsset(
                         uuid: request.newAssetUUID,
                         fileName: newFileName,
                         origin: .generated,
+                        sourceProvenance: .conversion,
+                        sourceIdentifier: sourceHash,
                         contentHash: stagedBook.sha256,
                         generatedFromContentHash: sourceHash,
                         sizeBytes: stagedBook.byteCount,
+                        drmProtected: false,
                         validationStatus: .ok,
                         book: liveBook
                     )
@@ -598,6 +641,9 @@ final class ConversionService {
                 }
                 if shouldInstallCover {
                     liveBook.coverVersion = expectedCoverVersion
+                    guard liveBook.selectCoverOwner(.edition(liveBook.uuid)) else {
+                        throw CatalogMutationError.invalidRequest
+                    }
                 }
             }
             return result.isFullyPublished ? .installed : .pendingRecovery

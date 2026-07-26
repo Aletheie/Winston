@@ -56,6 +56,8 @@ final class Book {
     var drmProtected: Bool?
     var fileSizeBytes: Int64 = 0
     var coverVersion: Int = 0
+    var coverScopeRaw: String?
+    var coverAssetUUID: UUID?
     var pageCount: Int?
     var sampleNoticeDismissed: Bool?
     var editionStatement: String?
@@ -72,6 +74,7 @@ final class Book {
         self.originalFileName = originalFileName
         self.tags = []
         self.dateAdded = dateAdded
+        coverScopeRaw = CoverScope.edition.rawValue
     }
 
     // MARK: - Derived
@@ -85,7 +88,7 @@ final class Book {
     }
 
     var coverCacheURL: URL {
-        primaryFileURL ?? AppPaths.coversDirectory.appending(path: "\(uuid.uuidString).jpg")
+        CoverStore.url(for: coverReference.owner)
     }
 
     var hasDigitalFile: Bool {
@@ -101,50 +104,92 @@ final class Book {
             // Legacy rows may predate BookAsset backfill.
             return assets.isEmpty
         }
-        return primaryAsset.validationStatus != .missing
+        return primaryAsset.availability == .available
+            && primaryAsset.validationStatus != .missing
     }
 
-    /// The single authoritative primary relation. `fileName` remains a
-    /// compatibility mirror while existing stores are migrated.
+    /// Strict source-of-truth relation. Unlike `primaryAsset`, this never
+    /// guesses from compatibility fields.
+    var explicitPrimaryAsset: BookAsset? {
+        guard let primaryAssetUUID else { return nil }
+        return assets.first(where: { $0.uuid == primaryAssetUUID })
+    }
+
+    /// Compatibility accessor for stores that have not completed the additive
+    /// BookAsset backfill. Mutations repair and persist `primaryAssetUUID`.
     var primaryAsset: BookAsset? {
-        if let primaryAssetUUID {
-            return assets.first(where: { $0.uuid == primaryAssetUUID })
-        }
+        if primaryAssetUUID != nil { return explicitPrimaryAsset }
         return assets.first(where: { $0.fileName == fileName })
             ?? assets.first(where: { $0.uuid == uuid })
     }
 
+    /// DRM belongs to the selected file. The Book field is only a migration
+    /// mirror for callers that still operate on edition records.
+    var primaryDRMProtected: Bool? {
+        explicitPrimaryAsset?.drmProtected ?? drmProtected
+    }
+
     @discardableResult
+    @MainActor
     func repairPrimaryAssetInvariant() -> Bool {
-        guard !assets.isEmpty else {
-            let changed = primaryAssetUUID != nil
-            primaryAssetUUID = nil
-            return changed
+        CatalogModelInvariantService.repair(book: self)
+    }
+
+    var coverScope: CoverScope {
+        get { coverScopeRaw.flatMap(CoverScope.init(rawValue:)) ?? .edition }
+        set {
+            coverScopeRaw = newValue.rawValue
+            if newValue != .generatedAsset { coverAssetUUID = nil }
         }
-        let selected = primaryAsset
-            ?? assets
-                .filter {
-                    $0.validationStatus != .missing
-                        && $0.validationStatus != .corrupt
-                }
-                .sorted { $0.dateAdded < $1.dateAdded }
-                .first
-            ?? assets.sorted { $0.dateAdded < $1.dateAdded }.first
-        guard let selected else { return false }
-        var changed = false
-        if primaryAssetUUID != selected.uuid {
-            primaryAssetUUID = selected.uuid
-            changed = true
+    }
+
+    var hasValidCoverOwner: Bool {
+        switch coverScope {
+        case .edition:
+            return true
+        case .work:
+            return work != nil
+        case .generatedAsset:
+            guard let coverAssetUUID else { return false }
+            return assets.contains(where: { $0.uuid == coverAssetUUID })
         }
-        if fileName != selected.fileName {
-            fileName = selected.fileName
-            changed = true
+    }
+
+    var coverReference: CoverReference {
+        switch coverScope {
+        case .work:
+            if let work { return work.coverReference }
+        case .generatedAsset:
+            if let coverAssetUUID,
+               let asset = assets.first(where: { $0.uuid == coverAssetUUID }) {
+                return asset.coverReference
+            }
+        case .edition:
+            break
         }
-        if selected.sizeBytes > 0, fileSizeBytes != selected.sizeBytes {
-            fileSizeBytes = selected.sizeBytes
-            changed = true
+        return editionCoverReference
+    }
+
+    var editionCoverReference: CoverReference {
+        CoverReference(owner: .edition(uuid), version: coverVersion)
+    }
+
+    @discardableResult
+    func selectCoverOwner(_ owner: CoverOwner) -> Bool {
+        switch owner {
+        case .edition(let id) where id == uuid:
+            coverScopeRaw = CoverScope.edition.rawValue
+            coverAssetUUID = nil
+        case .work(let id) where work?.uuid == id:
+            coverScopeRaw = CoverScope.work.rawValue
+            coverAssetUUID = nil
+        case .generatedAsset(let id) where assets.contains(where: { $0.uuid == id }):
+            coverScopeRaw = CoverScope.generatedAsset.rawValue
+            coverAssetUUID = id
+        default:
+            return false
         }
-        return changed
+        return true
     }
 
     var hasPhysicalCopy: Bool {

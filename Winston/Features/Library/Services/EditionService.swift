@@ -57,12 +57,15 @@ final class CatalogReconciliationService {
         let sizeBytes: Int64
         let dateAdded: Date
         let validationStatus: AssetValidation?
+        let availability: AssetAvailability
+        let drmProtected: Bool?
     }
 
     private struct BookGeneration: Equatable {
         let candidate: EditionCandidate
         let fileName: String
         let fileSizeBytes: Int64
+        let coverOwner: CoverOwner
         let coverVersion: Int
         let assets: [AssetGeneration]
     }
@@ -722,12 +725,20 @@ final class CatalogReconciliationService {
         }
         guard bookCleanups.count == discardedFileNames.count else { return false }
 
-        let winnerCoverToken = await covers.beginUserMutation(for: winner.uuid)
-        let winnerCoverRollback = await covers.copy(
-            from: loser.uuid,
-            using: winnerCoverToken,
-            onlyIfMissing: true
-        )
+        let winnerCoverOwner = CoverOwner.edition(winner.uuid)
+        let loserCoverOwner = loser.coverReference.owner
+        let winnerCoverToken = await covers.beginUserMutation(for: winnerCoverOwner)
+        let winnerCoverRollback: CoverRollbackTicket? = if CoverStore.exists(
+            for: winner.coverReference.owner
+        ) {
+            nil
+        } else {
+            await covers.copy(
+                from: loserCoverOwner,
+                using: winnerCoverToken,
+                onlyIfMissing: true
+            )
+        }
         let coverVersion = winner.coverVersion + (winnerCoverRollback == nil ? 0 : 1)
         let transaction: ManagedFileTransaction
         do {
@@ -802,7 +813,9 @@ final class CatalogReconciliationService {
                         uuid: storedLoser.uuid,
                         fileName: storedLoser.fileName,
                         origin: .imported,
+                        sourceProvenance: .legacyMigration,
                         sizeBytes: storedLoser.fileSizeBytes,
+                        drmProtected: storedLoser.drmProtected,
                         dateAdded: storedLoser.dateAdded,
                         book: storedWinner
                     )
@@ -829,7 +842,12 @@ final class CatalogReconciliationService {
                     storedWinner.shelfLocation = storedLoser.shelfLocation
                 }
                 mergeReadingHistory(into: storedWinner, from: storedLoser)
-                if winnerCoverRollback != nil { storedWinner.coverVersion = coverVersion }
+                if winnerCoverRollback != nil {
+                    storedWinner.coverVersion = coverVersion
+                    guard storedWinner.selectCoverOwner(winnerCoverOwner) else {
+                        throw CatalogMutationError.invalidRequest
+                    }
+                }
 
                 if storedWinner.work?.preferredEditionUUID == loserID {
                     storedWinner.work?.preferredEditionUUID = winnerID
@@ -846,7 +864,7 @@ final class CatalogReconciliationService {
             return false
         }
 
-        await covers.invalidate(for: loserID)
+        await covers.invalidate(for: loserCoverOwner)
         pendingProposals.removeAll { $0.memberUUIDs.contains(loserID) }
         refreshEditionCounts()
         return true
@@ -1170,7 +1188,8 @@ final class CatalogReconciliationService {
             candidate: candidate(book),
             fileName: primaryAsset?.fileName ?? book.fileName,
             fileSizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
-            coverVersion: book.coverVersion,
+            coverOwner: book.coverReference.owner,
+            coverVersion: book.coverReference.version,
             assets: book.assets.map { asset in
                 AssetGeneration(
                     uuid: asset.uuid,
@@ -1178,7 +1197,9 @@ final class CatalogReconciliationService {
                     contentHash: asset.contentHash,
                     sizeBytes: asset.sizeBytes,
                     dateAdded: asset.dateAdded,
-                    validationStatus: asset.validationStatus
+                    validationStatus: asset.validationStatus,
+                    availability: asset.availability,
+                    drmProtected: asset.drmProtected
                 )
             }.sorted { $0.uuid.uuidString < $1.uuid.uuidString }
         )
