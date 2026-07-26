@@ -24,15 +24,72 @@ nonisolated enum ManagedFileCleanupDisposition: String, Codable, Sendable {
     case trash
 }
 
+nonisolated struct ManagedFileReference: Codable, Sendable, Equatable, Hashable {
+    let kind: ManagedFileKind
+    let relativeName: String
+
+    static func book(_ relativeName: String) -> ManagedFileReference {
+        ManagedFileReference(kind: .book, relativeName: relativeName)
+    }
+
+    static func cover(bookID: UUID) -> ManagedFileReference {
+        ManagedFileReference(kind: .cover, relativeName: "\(bookID.uuidString).jpg")
+    }
+}
+
+/// Physical generation of one managed file. The catalog identity and content
+/// digest alone are insufficient: an atomic replacement can install a different
+/// inode with the same name (and even the same bytes) while a cleanup is queued.
+nonisolated struct ManagedFileGeneration: Codable, Sendable, Equatable, Hashable {
+    let volumeNumber: UInt64?
+    let fileNumber: UInt64?
+    let byteCount: Int64
+    let modificationDate: Date?
+    let sha256: String
+}
+
+/// Immutable evidence captured by ManagedFileCoordinator before a catalog
+/// mutation. A nil generation deliberately records that the path was missing;
+/// a file appearing later is therefore a conflict, not something to delete.
+nonisolated struct ManagedFileIdentitySnapshot: Codable, Sendable, Equatable, Hashable {
+    let reference: ManagedFileReference
+    let generation: ManagedFileGeneration?
+
+    var exists: Bool { generation != nil }
+}
+
+nonisolated enum ManagedBookDestinationIntent: Sendable, Equatable {
+    case newAsset(assetID: UUID)
+    case replacement(assetID: UUID, previous: ManagedFileIdentitySnapshot)
+}
+
 nonisolated struct ManagedFileSource: Sendable {
     let kind: ManagedFileKind
     let sourceURL: URL?
     let data: Data?
     let finalRelativeName: String
     let replacesExisting: Bool
+    let expectedDestinationIdentity: ManagedFileIdentitySnapshot?
 
     static func book(sourceURL: URL, fileID: UUID = UUID()) throws -> ManagedFileSource {
+        try book(sourceURL: sourceURL, destination: .newAsset(assetID: fileID))
+    }
+
+    static func book(
+        sourceURL: URL,
+        destination: ManagedBookDestinationIntent
+    ) throws -> ManagedFileSource {
         let ext = sourceURL.pathExtension.lowercased()
+        let fileID: UUID
+        switch destination {
+        case .newAsset(let assetID):
+            fileID = assetID
+        case .replacement(let assetID, let previous):
+            let preferred = ext.isEmpty ? assetID.uuidString : "\(assetID.uuidString).\(ext)"
+            // Never stage a replacement over the generation being retired.
+            // Publishing a new leaf first keeps rollback and crash recovery lossless.
+            fileID = preferred == previous.reference.relativeName ? UUID() : assetID
+        }
         let name = ext.isEmpty ? fileID.uuidString : "\(fileID.uuidString).\(ext)"
         guard ManagedLeafName(rawValue: name) != nil else {
             throw ManagedFileCoordinatorError.unsafeRelativeName(name)
@@ -42,17 +99,23 @@ nonisolated struct ManagedFileSource: Sendable {
             sourceURL: sourceURL,
             data: nil,
             finalRelativeName: name,
-            replacesExisting: false
+            replacesExisting: false,
+            expectedDestinationIdentity: nil
         )
     }
 
-    static func cover(data: Data, bookID: UUID) -> ManagedFileSource {
+    static func cover(
+        data: Data,
+        bookID: UUID,
+        replacing identity: ManagedFileIdentitySnapshot? = nil
+    ) -> ManagedFileSource {
         ManagedFileSource(
             kind: .cover,
             sourceURL: nil,
             data: data,
             finalRelativeName: "\(bookID.uuidString).jpg",
-            replacesExisting: true
+            replacesExisting: identity != nil,
+            expectedDestinationIdentity: identity
         )
     }
 }
@@ -62,6 +125,9 @@ nonisolated struct ManagedFileCleanup: Identifiable, Codable, Sendable, Hashable
     let kind: ManagedFileKind
     let relativeName: String
     let disposition: ManagedFileCleanupDisposition
+    /// Exact physical generation authorized for deletion. Optional only for
+    /// decoding journals written before file generations were introduced.
+    let expectedIdentity: ManagedFileIdentitySnapshot?
     /// When set, cleanup is permitted only while this file still has the
     /// expected digest. An optional retained equivalent adds the stronger
     /// reconciliation invariant that another managed file has the same bytes.
@@ -69,11 +135,12 @@ nonisolated struct ManagedFileCleanup: Identifiable, Codable, Sendable, Hashable
     let expectedSHA256: String?
     let retainedEquivalentRelativeName: String?
 
-    init(
+    private init(
         id: UUID = UUID(),
         kind: ManagedFileKind,
         relativeName: String,
         disposition: ManagedFileCleanupDisposition = .delete,
+        expectedIdentity: ManagedFileIdentitySnapshot? = nil,
         expectedSHA256: String? = nil,
         retainedEquivalentRelativeName: String? = nil
     ) {
@@ -81,35 +148,26 @@ nonisolated struct ManagedFileCleanup: Identifiable, Codable, Sendable, Hashable
         self.kind = kind
         self.relativeName = relativeName
         self.disposition = disposition
+        self.expectedIdentity = expectedIdentity
         self.expectedSHA256 = expectedSHA256
         self.retainedEquivalentRelativeName = retainedEquivalentRelativeName
     }
 
-    static func book(
-        _ fileName: String,
+    static func file(
+        _ identity: ManagedFileIdentitySnapshot,
         disposition: ManagedFileCleanupDisposition = .delete,
-        expectedSHA256: String? = nil,
         retainedEquivalentFileName: String? = nil
     ) -> ManagedFileCleanup {
         ManagedFileCleanup(
-            kind: .book,
-            relativeName: fileName,
+            kind: identity.reference.kind,
+            relativeName: identity.reference.relativeName,
             disposition: disposition,
-            expectedSHA256: expectedSHA256,
+            expectedIdentity: identity,
+            expectedSHA256: identity.generation?.sha256,
             retainedEquivalentRelativeName: retainedEquivalentFileName
         )
     }
 
-    static func cover(
-        bookID: UUID,
-        disposition: ManagedFileCleanupDisposition = .delete
-    ) -> ManagedFileCleanup {
-        ManagedFileCleanup(
-            kind: .cover,
-            relativeName: "\(bookID.uuidString).jpg",
-            disposition: disposition
-        )
-    }
 }
 
 /// Conditions that must be true in the durable catalog before staged files are
@@ -169,7 +227,9 @@ nonisolated struct StagedManagedFile: Identifiable, Codable, Sendable, Equatable
     let sha256: String
     let byteCount: Int64
     let generation: UUID
+    let physicalGeneration: ManagedFileGeneration?
     let replacesExisting: Bool?
+    let expectedDestinationIdentity: ManagedFileIdentitySnapshot?
     /// Number of sequential source reads used to create this immutable
     /// generation. Optional so journals written by older versions still decode.
     let sourceReadPassCount: Int?
@@ -194,6 +254,7 @@ nonisolated struct ManagedFileRecoveryReport: Sendable, Equatable {
     var abortedTransactionIDs: [UUID] = []
     var failedTransactionIDs: [UUID] = []
     var unreadableJournalURLs: [URL] = []
+    var removedOrphanStagingURLs: [URL] = []
     var failureMessages: [String] = []
 
     var hasPendingWork: Bool {
@@ -220,6 +281,8 @@ nonisolated enum ManagedFileCoordinatorError: Error, Equatable {
     case journalNotFound(UUID)
     case catalogRequirementMismatch(UUID)
     case cleanupContentChanged(String)
+    case fileGenerationChanged(String)
+    case unsupportedManagedFile(String)
     case injectedFailure(ManagedFileFaultPoint)
 }
 
@@ -365,6 +428,26 @@ actor ManagedFileCoordinator {
         self.faultInjector = faultInjector
     }
 
+    func captureIdentity(
+        of reference: ManagedFileReference
+    ) throws -> ManagedFileIdentitySnapshot {
+        try ensureDirectories()
+        return try captureIdentityWithoutCreatingDirectories(of: reference)
+    }
+
+    func captureIdentities(
+        of references: [ManagedFileReference]
+    ) throws -> [ManagedFileIdentitySnapshot] {
+        try ensureDirectories()
+        var identities: [ManagedFileIdentitySnapshot] = []
+        identities.reserveCapacity(references.count)
+        for reference in references {
+            try Task.checkCancellation()
+            identities.append(try captureIdentityWithoutCreatingDirectories(of: reference))
+        }
+        return identities
+    }
+
     func stage(
         intent: ManagedFileIntent,
         sources: [ManagedFileSource],
@@ -456,6 +539,10 @@ actor ManagedFileCoordinator {
             throw ManagedFileCoordinatorError.journalNotFound(transaction.id)
         }
         try faultInjector(.beforeCatalogSave)
+        for file in transaction.files {
+            try verifyStagedGeneration(file)
+            try verifyPublishDestination(for: file)
+        }
         for cleanup in transaction.cleanups {
             try verifyContentGuard(for: cleanup, allowMissingTarget: false)
         }
@@ -573,6 +660,12 @@ actor ManagedFileCoordinator {
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             ).filter { $0.pathExtension == "json" }
+            let journalIDs = Set(journalURLs.compactMap {
+                UUID(uuidString: $0.deletingPathExtension().lastPathComponent)
+            })
+            report.removedOrphanStagingURLs = removeOrphanedStagingDirectories(
+                retaining: journalIDs
+            )
 
             for url in journalURLs.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                 let journal: Journal
@@ -756,6 +849,8 @@ actor ManagedFileCoordinator {
         }
 
         try Task.checkCancellation()
+        try makeReadOnly(stagedURL)
+        let stagedMetadata = try physicalMetadata(at: stagedURL)
         return StagedManagedFile(
             id: UUID(),
             kind: source.kind,
@@ -765,7 +860,15 @@ actor ManagedFileCoordinator {
             sha256: digest,
             byteCount: byteCount,
             generation: transactionID,
+            physicalGeneration: ManagedFileGeneration(
+                volumeNumber: stagedMetadata.volumeNumber,
+                fileNumber: stagedMetadata.fileNumber,
+                byteCount: stagedMetadata.byteCount,
+                modificationDate: stagedMetadata.modificationDate,
+                sha256: digest
+            ),
             replacesExisting: source.replacesExisting,
+            expectedDestinationIdentity: source.expectedDestinationIdentity,
             sourceReadPassCount: sourceReadPassCount
         )
     }
@@ -915,6 +1018,8 @@ actor ManagedFileCoordinator {
                   fileManager.fileExists(atPath: stagedPath) else {
                 throw ManagedFileCoordinatorError.destinationConflict(file.finalRelativeName)
             }
+            try verifyStagedGeneration(file)
+            try verifyPublishDestination(for: file)
             _ = try fileManager.replaceItemAt(
                 destination,
                 withItemAt: stagedURL,
@@ -926,6 +1031,7 @@ actor ManagedFileCoordinator {
         guard fileManager.fileExists(atPath: stagedPath) else {
             throw ManagedFileCoordinatorError.missingStagedFile(file.finalRelativeName)
         }
+        try verifyStagedGeneration(file)
         try fileManager.moveItem(at: stagedURL, to: destination)
     }
 
@@ -962,6 +1068,21 @@ actor ManagedFileCoordinator {
         for cleanup: ManagedFileCleanup,
         allowMissingTarget: Bool
     ) throws {
+        if let expected = cleanup.expectedIdentity {
+            try verifyIdentity(expected)
+            if !expected.exists {
+                return
+            }
+            if let retainedName = cleanup.retainedEquivalentRelativeName,
+               let expectedSHA256 = expected.generation?.sha256 {
+                try verifyRetainedEquivalent(
+                    relativeName: retainedName,
+                    expectedSHA256: expectedSHA256,
+                    removing: cleanup.relativeName
+                )
+            }
+            return
+        }
         guard let expectedSHA256 = cleanup.expectedSHA256?.lowercased() else { return }
         guard cleanup.kind == .book else {
             throw ManagedFileCoordinatorError.cleanupContentChanged(cleanup.relativeName)
@@ -976,14 +1097,57 @@ actor ManagedFileCoordinator {
             throw ManagedFileCoordinatorError.cleanupContentChanged(cleanup.relativeName)
         }
         if let retainedName = cleanup.retainedEquivalentRelativeName {
-            guard retainedName != cleanup.relativeName else {
-                throw ManagedFileCoordinatorError.cleanupContentChanged(cleanup.relativeName)
+            try verifyRetainedEquivalent(
+                relativeName: retainedName,
+                expectedSHA256: expectedSHA256,
+                removing: cleanup.relativeName
+            )
+        }
+    }
+
+    private func verifyIdentity(_ expected: ManagedFileIdentitySnapshot) throws {
+        let url = try destinationURL(
+            kind: expected.reference.kind,
+            relativeName: expected.reference.relativeName
+        )
+        let exists = fileManager.fileExists(atPath: url.path(percentEncoded: false))
+        guard let generation = expected.generation else {
+            guard !exists else {
+                throw ManagedFileCoordinatorError.fileGenerationChanged(
+                    expected.reference.relativeName
+                )
             }
-            let retained = try destinationURL(kind: .book, relativeName: retainedName)
-            guard fileManager.fileExists(atPath: retained.path(percentEncoded: false)),
-                  (try? ContentHasher.sha256(of: retained)) == expectedSHA256 else {
-                throw ManagedFileCoordinatorError.cleanupContentChanged(cleanup.relativeName)
-            }
+            return
+        }
+        guard exists else {
+            throw ManagedFileCoordinatorError.fileGenerationChanged(
+                expected.reference.relativeName
+            )
+        }
+        let metadata = try physicalMetadata(at: url)
+        guard metadata.isRegularFile,
+              metadata.volumeNumber == generation.volumeNumber,
+              metadata.fileNumber == generation.fileNumber,
+              metadata.byteCount == generation.byteCount,
+              metadata.modificationDate == generation.modificationDate else {
+            throw ManagedFileCoordinatorError.fileGenerationChanged(
+                expected.reference.relativeName
+            )
+        }
+    }
+
+    private func verifyRetainedEquivalent(
+        relativeName: String,
+        expectedSHA256: String,
+        removing removedName: String
+    ) throws {
+        guard relativeName != removedName else {
+            throw ManagedFileCoordinatorError.cleanupContentChanged(removedName)
+        }
+        let retained = try destinationURL(kind: .book, relativeName: relativeName)
+        guard fileManager.fileExists(atPath: retained.path(percentEncoded: false)),
+              (try? ContentHasher.sha256(of: retained)) == expectedSHA256 else {
+            throw ManagedFileCoordinatorError.cleanupContentChanged(removedName)
         }
     }
 
@@ -1009,7 +1173,154 @@ actor ManagedFileCoordinator {
         guard let url = leaf.appending(to: directory) else {
             throw ManagedFileCoordinatorError.unsafeRelativeName(relativeName)
         }
+        let resolvedRoot = directory.standardizedFileURL.resolvingSymlinksInPath()
+        let resolvedParent = url.deletingLastPathComponent()
+            .standardizedFileURL.resolvingSymlinksInPath()
+        guard resolvedParent == resolvedRoot else {
+            throw ManagedFileCoordinatorError.unsafeRelativeName(relativeName)
+        }
+        if isSymbolicLink(at: url) {
+            throw ManagedFileCoordinatorError.unsafeRelativeName(relativeName)
+        }
         return url
+    }
+
+    private func captureIdentityWithoutCreatingDirectories(
+        of reference: ManagedFileReference
+    ) throws -> ManagedFileIdentitySnapshot {
+        let url = try destinationURL(
+            kind: reference.kind,
+            relativeName: reference.relativeName
+        )
+        let path = url.path(percentEncoded: false)
+        guard fileManager.fileExists(atPath: path) else {
+            return ManagedFileIdentitySnapshot(reference: reference, generation: nil)
+        }
+        let before = try physicalMetadata(at: url)
+        guard before.isRegularFile else {
+            throw ManagedFileCoordinatorError.unsupportedManagedFile(reference.relativeName)
+        }
+        let digest = try ContentHasher.sha256Cancellable(of: url)
+        try Task.checkCancellation()
+        let after = try physicalMetadata(at: url)
+        guard before == after else {
+            throw ManagedFileCoordinatorError.fileGenerationChanged(reference.relativeName)
+        }
+        return ManagedFileIdentitySnapshot(
+            reference: reference,
+            generation: ManagedFileGeneration(
+                volumeNumber: before.volumeNumber,
+                fileNumber: before.fileNumber,
+                byteCount: before.byteCount,
+                modificationDate: before.modificationDate,
+                sha256: digest
+            )
+        )
+    }
+
+    private struct PhysicalMetadata: Equatable {
+        let volumeNumber: UInt64?
+        let fileNumber: UInt64?
+        let byteCount: Int64
+        let modificationDate: Date?
+        let isRegularFile: Bool
+    }
+
+    private func physicalMetadata(at url: URL) throws -> PhysicalMetadata {
+        guard !isSymbolicLink(at: url) else {
+            throw ManagedFileCoordinatorError.unsafeRelativeName(url.lastPathComponent)
+        }
+        let attributes = try fileManager.attributesOfItem(
+            atPath: url.path(percentEncoded: false)
+        )
+        return PhysicalMetadata(
+            volumeNumber: (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+            fileNumber: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+            byteCount: (attributes[.size] as? NSNumber)?.int64Value ?? 0,
+            modificationDate: attributes[.modificationDate] as? Date,
+            isRegularFile: attributes[.type] as? FileAttributeType == .typeRegular
+        )
+    }
+
+    private func isSymbolicLink(at url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true
+    }
+
+    private func makeReadOnly(_ url: URL) throws {
+        try fileManager.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o444))],
+            ofItemAtPath: url.path(percentEncoded: false)
+        )
+    }
+
+    private func verifyStagedGeneration(_ file: StagedManagedFile) throws {
+        let staged = resolvedStagedURL(for: file)
+        let path = staged.path(percentEncoded: false)
+        guard fileManager.fileExists(atPath: path) else {
+            throw ManagedFileCoordinatorError.missingStagedFile(file.finalRelativeName)
+        }
+        let metadata = try physicalMetadata(at: staged)
+        if let expected = file.physicalGeneration {
+            guard metadata.isRegularFile,
+                  metadata.volumeNumber == expected.volumeNumber,
+                  metadata.fileNumber == expected.fileNumber,
+                  metadata.byteCount == expected.byteCount,
+                  metadata.modificationDate == expected.modificationDate else {
+                throw ManagedFileCoordinatorError.fileGenerationChanged(file.finalRelativeName)
+            }
+        } else {
+            // Compatibility path for journals created before physical
+            // generations were recorded.
+            guard metadata.isRegularFile,
+                  metadata.byteCount == file.byteCount,
+                  try ContentHasher.sha256Cancellable(of: staged) == file.sha256 else {
+                throw ManagedFileCoordinatorError.fileGenerationChanged(file.finalRelativeName)
+            }
+        }
+        guard metadata.byteCount == file.byteCount else {
+            throw ManagedFileCoordinatorError.fileGenerationChanged(file.finalRelativeName)
+        }
+    }
+
+    private func verifyPublishDestination(for file: StagedManagedFile) throws {
+        let destination = try destinationURL(
+            kind: file.kind,
+            relativeName: file.finalRelativeName
+        )
+        guard fileManager.fileExists(
+            atPath: destination.path(percentEncoded: false)
+        ) else { return }
+        if try ContentHasher.sha256Cancellable(of: destination) == file.sha256 {
+            return
+        }
+        guard file.replacesExisting == true else {
+            throw ManagedFileCoordinatorError.destinationConflict(file.finalRelativeName)
+        }
+        if let expected = file.expectedDestinationIdentity {
+            try verifyIdentity(expected)
+        }
+    }
+
+    private func removeOrphanedStagingDirectories(retaining journalIDs: Set<UUID>) -> [URL] {
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: stagingDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        var removed: [URL] = []
+        for entry in entries {
+            guard let id = UUID(uuidString: entry.lastPathComponent),
+                  !journalIDs.contains(id) else { continue }
+            do {
+                try fileManager.removeItem(at: entry)
+                removed.append(entry)
+            } catch {
+                Log.persistence.error(
+                    "Removing orphaned staging directory failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+        return removed
     }
 
     private func ensureDirectories() throws {

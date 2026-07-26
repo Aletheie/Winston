@@ -617,44 +617,33 @@ final class PluginHostAPI {
         guard !expectedFields.isEmpty else {
             return .success(PluginApplyResultDTO(applied: []))
         }
-        var applied: [String] = []
-        let preimage = CatalogBookMetadataPreimage(book)
-        do {
-            try mutations.commit(
-                .pluginUpdate(bookID: bookID, fields: Set(expectedFields)),
-                affectedBookIDs: [bookID],
-                revertingOnFailure: preimage.restore
-            ) {
-                guard sessions.contains(session) else { throw Self.inactiveSessionError }
-                let storedBook = try mutations.book(id: bookID)
-                let expected = Set(expectedFields)
-                var identityFields: Set<EditionIdentityField> = []
-                if expected.contains("title") { identityFields.insert(.title) }
-                if expected.contains("author") { identityFields.insert(.author) }
-                if expected.contains("isbn") { identityFields.insert(.isbn) }
-                if !identityFields.isEmpty {
-                    mutations.editionIdentity.apply(
-                        EditionIdentityPatch(
-                            fields: identityFields,
-                            title: patch.title,
-                            author: patch.author,
-                            isbn: patch.isbn
-                        ),
-                        to: storedBook,
-                        scope: .editionOnly
-                    )
-                    applied.append(contentsOf: expectedFields.filter {
-                        ["title", "author", "isbn"].contains($0)
-                    })
-                }
-                applied.append(contentsOf: applyFields(
-                    in: patch,
-                    to: storedBook,
-                    excluding: identityFields
-                ))
-            }
-            return .success(PluginApplyResultDTO(applied: applied))
-        } catch {
+        let fieldNames = Set(expectedFields)
+        let fields = Set(fieldNames.compactMap(CatalogBookMetadataField.init(rawValue:)))
+        let update = CatalogBookUpdate(
+            bookID: bookID,
+            patch: CatalogBookPatch(
+                fields: fields,
+                title: patch.title,
+                author: patch.author,
+                publisher: patch.publisher,
+                year: patch.year,
+                language: patch.language,
+                translator: patch.translator,
+                isbn: patch.isbn,
+                series: patch.series,
+                seriesIndex: patch.seriesIndex,
+                bookDescription: patch.description,
+                tags: patch.tags ?? []
+            ),
+            policy: .fillEmpty
+        )
+        switch mutations.execute(
+            .updateBook(update, source: .plugin),
+            validatingGeneration: { self.sessions.contains(session) }
+        ) {
+        case .success:
+            return .success(PluginApplyResultDTO(applied: expectedFields))
+        case .failure:
             return .failure(.unavailable("could not persist library changes"))
         }
     }
@@ -677,34 +666,6 @@ final class PluginHostAPI {
         check(\.bookDescription, patch.description, "description")
         if let tags = patch.tags, !tags.isEmpty, book.tags.isEmpty { fields.append("tags") }
         return fields
-    }
-
-    private func applyFields(
-        in patch: PluginMetadataPatch,
-        to book: Book,
-        excluding identityFields: Set<EditionIdentityField> = []
-    ) -> [String] {
-        var applied: [String] = []
-        func fill(_ keyPath: ReferenceWritableKeyPath<Book, String?>, _ value: String?, _ name: String) {
-            guard let value, !value.isEmpty, (book[keyPath: keyPath] ?? "").isEmpty else { return }
-            book[keyPath: keyPath] = value
-            applied.append(name)
-        }
-        if !identityFields.contains(.title) { fill(\.title, patch.title, "title") }
-        if !identityFields.contains(.author) { fill(\.author, patch.author, "author") }
-        fill(\.publisher, patch.publisher, "publisher")
-        fill(\.year, patch.year, "year")
-        fill(\.language, patch.language, "language")
-        fill(\.translator, patch.translator, "translator")
-        if !identityFields.contains(.isbn) { fill(\.isbn, patch.isbn, "isbn") }
-        fill(\.series, patch.series, "series")
-        fill(\.seriesIndex, patch.seriesIndex, "seriesIndex")
-        fill(\.bookDescription, patch.description, "description")
-        if let tags = patch.tags, !tags.isEmpty, book.tags.isEmpty {
-            book.tags = tags
-            applied.append("tags")
-        }
-        return applied
     }
 
     // MARK: - Encoding

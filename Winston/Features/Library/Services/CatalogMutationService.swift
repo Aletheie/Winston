@@ -11,6 +11,18 @@ struct CatalogSaveAdapter {
     }
 }
 
+nonisolated enum CatalogMutationCheckpoint: Equatable, Sendable {
+    case beforeMutation
+    case afterMutation
+}
+
+@MainActor
+struct CatalogMutationHooks {
+    var reach: (CatalogMutationCheckpoint) throws -> Void
+
+    static let live = CatalogMutationHooks { _ in }
+}
+
 enum CatalogMutationCommand {
     case setReadingStatus(bookIDs: [UUID], status: ReadingStatus)
     case setReadingProgress(bookID: UUID, progress: Double)
@@ -36,12 +48,18 @@ enum CatalogMutationCommand {
     case updateCover(bookID: UUID, version: Int)
     case applyAnalysis(bookID: UUID, kind: CatalogAnalysisJobKind)
     case applyAnalysisBatch(bookIDs: [UUID], kind: CatalogAnalysisJobKind)
+    case updateAssetValidation(assetIDs: [UUID], bookIDs: [UUID])
+    case importHighlights(bookIDs: [UUID])
+    case maintenanceCleanup(workIDs: [UUID])
+    case restoreBook(bookID: UUID, fields: CatalogChangeFields, createsBook: Bool)
 
     var changesBookMembership: Bool {
         switch self {
         case .addPhysicalBook, .importBooks, .calibreImport, .removeBooks, .legacyMigration,
              .reconcileEditions:
             true
+        case .restoreBook(_, _, let createsBook):
+            createsBook
         default:
             false
         }
@@ -85,6 +103,18 @@ enum CatalogMutationCommand {
                 [.assetAvailability]
             }
 
+        case .updateAssetValidation:
+            [.assetAvailability, .fullTextSource]
+
+        case .importHighlights:
+            [.displayMetadata]
+
+        case .maintenanceCleanup:
+            [.workMembership]
+
+        case .restoreBook(_, let fields, _):
+            fields
+
         case .addPhysicalBook, .importBooks, .calibreImport, .removeBooks, .legacyMigration,
              .reconcileEditions:
             .all
@@ -103,6 +133,8 @@ enum CatalogMutationCommand {
              .removeFile(_, let assetID),
              .conversionOutput(_, let assetID):
             [assetID]
+        case .updateAssetValidation(let assetIDs, _):
+            Set(assetIDs)
         default:
             []
         }
@@ -155,6 +187,177 @@ struct CatalogChangeSet {
         self.affectedCollectionIDs = affectedCollectionIDs
         self.fields = fields ?? command.changeFields
     }
+}
+
+nonisolated enum CatalogBookMetadataField: String, Hashable, Sendable {
+    case title
+    case author
+    case publisher
+    case year
+    case language
+    case translator
+    case isbn
+    case series
+    case seriesIndex
+    case description
+    case tags
+    case shelfLocation
+    case rating
+    case notes
+    case sampleNoticeDismissed
+}
+
+nonisolated struct CatalogBookPatch: Sendable {
+    var fields: Set<CatalogBookMetadataField>
+    var title: String?
+    var author: String?
+    var publisher: String?
+    var year: String?
+    var language: String?
+    var translator: String?
+    var isbn: String?
+    var series: String?
+    var seriesIndex: String?
+    var bookDescription: String?
+    var tags: [String] = []
+    var shelfLocation: String?
+    var rating: Int?
+    var notes: String?
+    var sampleNoticeDismissed: Bool?
+
+    init(
+        fields: Set<CatalogBookMetadataField>,
+        title: String? = nil,
+        author: String? = nil,
+        publisher: String? = nil,
+        year: String? = nil,
+        language: String? = nil,
+        translator: String? = nil,
+        isbn: String? = nil,
+        series: String? = nil,
+        seriesIndex: String? = nil,
+        bookDescription: String? = nil,
+        tags: [String] = [],
+        shelfLocation: String? = nil,
+        rating: Int? = nil,
+        notes: String? = nil,
+        sampleNoticeDismissed: Bool? = nil
+    ) {
+        self.fields = fields
+        self.title = title
+        self.author = author
+        self.publisher = publisher
+        self.year = year
+        self.language = language
+        self.translator = translator
+        self.isbn = isbn
+        self.series = series
+        self.seriesIndex = seriesIndex
+        self.bookDescription = bookDescription
+        self.tags = tags
+        self.shelfLocation = shelfLocation
+        self.rating = rating
+        self.notes = notes
+        self.sampleNoticeDismissed = sampleNoticeDismissed
+    }
+
+    var commandFields: Set<String> {
+        Set(fields.map(\.rawValue))
+    }
+}
+
+nonisolated enum CatalogBookPatchPolicy: Sendable, Equatable {
+    case replace
+    case fillEmpty
+}
+
+nonisolated enum CatalogTagUpdateMode: Sendable {
+    case replace
+    case add
+}
+
+nonisolated struct CatalogBookUpdate: Sendable {
+    let bookID: UUID
+    let patch: CatalogBookPatch
+    let identityScope: EditionIdentityScope
+    let policy: CatalogBookPatchPolicy
+    let tagMode: CatalogTagUpdateMode
+    let readingStatus: ReadingStatus?
+
+    init(
+        bookID: UUID,
+        patch: CatalogBookPatch,
+        identityScope: EditionIdentityScope = .editionOnly,
+        policy: CatalogBookPatchPolicy = .replace,
+        tagMode: CatalogTagUpdateMode = .replace,
+        readingStatus: ReadingStatus? = nil
+    ) {
+        self.bookID = bookID
+        self.patch = patch
+        self.identityScope = identityScope
+        self.policy = policy
+        self.tagMode = tagMode
+        self.readingStatus = readingStatus
+    }
+}
+
+nonisolated enum CatalogBookUpdateSource: Sendable {
+    case manual
+    case plugin
+}
+
+nonisolated struct CatalogPhysicalBookPayload: Sendable {
+    let bookID: UUID
+    let workID: UUID
+    let title: String
+    let author: String?
+    let publisher: String?
+    let year: String?
+    let isbn: String?
+    let shelfLocation: String?
+    let notes: String?
+    let readingStatus: ReadingStatus
+}
+
+nonisolated struct CatalogCollectionCreation: Sendable {
+    let collectionID: UUID
+    let name: String
+    let savedSearch: String?
+    let smartShelf: SmartShelfDefinition?
+    let bookIDs: Set<UUID>
+}
+
+nonisolated struct CatalogAssetValidationUpdate: Sendable {
+    let assetID: UUID
+    let expectedFileName: String
+    let expectedDateAdded: Date
+    let validation: AssetValidation
+}
+
+nonisolated struct CatalogHighlightInsertion: Sendable {
+    let bookID: UUID
+    let text: String
+    let isNote: Bool
+    let location: String?
+    let addedDate: Date?
+}
+
+nonisolated enum CatalogMutationRequest: Sendable {
+    case updateBook(CatalogBookUpdate, source: CatalogBookUpdateSource)
+    case updateBooks([CatalogBookUpdate], operation: String)
+    case setReadingStatus(bookIDs: Set<UUID>, status: ReadingStatus)
+    case setReadingProgress(bookID: UUID, progress: Double)
+    case addPhysicalBook(CatalogPhysicalBookPayload)
+    case createCollection(CatalogCollectionCreation)
+    case renameCollection(collectionID: UUID, name: String)
+    case updateSmartShelf(collectionID: UUID, name: String, definition: SmartShelfDefinition)
+    case addToCollection(collectionID: UUID, bookIDs: Set<UUID>)
+    case removeFromCollection(collectionID: UUID, bookIDs: Set<UUID>)
+    case deleteCollection(collectionID: UUID)
+    case updateWorkIdentity(workID: UUID, title: String?, author: String?)
+    case setPreferredEdition(workID: UUID, bookID: UUID)
+    case updateAssetValidations([CatalogAssetValidationUpdate])
+    case importHighlights([CatalogHighlightInsertion])
 }
 
 nonisolated enum EditionIdentityScope: String, CaseIterable, Identifiable, Sendable {
@@ -277,10 +480,13 @@ struct EditionIdentityCoordinator {
 
 enum CatalogMutationError: Error, Equatable {
     case dirtyContext
+    case invalidRequest
     case modelNotFound
+    case staleGeneration
     case staleAnalysis
     case staleReconciliation
     case staleConversion
+    case checkpointFailed(String)
     case saveFailed(String)
     case fileTransactionFailed(String)
 }
@@ -386,21 +592,33 @@ struct CatalogBookMetadataPreimage {
 
 struct CatalogBookAssetPreimage {
     let asset: BookAsset
+    let fileName: String
     let contentHash: String?
+    let generatedFromContentHash: String?
     let sizeBytes: Int64
+    let originRaw: String?
     let validationStatusRaw: String?
+    let dateAdded: Date
 
     init(_ asset: BookAsset) {
         self.asset = asset
+        fileName = asset.fileName
         contentHash = asset.contentHash
+        generatedFromContentHash = asset.generatedFromContentHash
         sizeBytes = asset.sizeBytes
+        originRaw = asset.originRaw
         validationStatusRaw = asset.validationStatusRaw
+        dateAdded = asset.dateAdded
     }
 
     func restore() {
+        asset.fileName = fileName
         asset.contentHash = contentHash
+        asset.generatedFromContentHash = generatedFromContentHash
         asset.sizeBytes = sizeBytes
+        asset.originRaw = originRaw
         asset.validationStatusRaw = validationStatusRaw
+        asset.dateAdded = dateAdded
     }
 }
 
@@ -442,11 +660,87 @@ struct CatalogWorkPreimage {
     }
 }
 
+private struct CatalogReadingSessionPreimage {
+    let session: ReadingSession
+    let startedAt: Date
+    let endedAt: Date?
+    let statusRaw: String
+    let progress: Double
+}
+
+private struct CatalogReadingStatePreimage {
+    let book: Book
+    let readingStatusRaw: String?
+    let dateStarted: Date?
+    let dateFinished: Date?
+    let sessions: [CatalogReadingSessionPreimage]
+
+    init(_ book: Book) {
+        self.book = book
+        readingStatusRaw = book.readingStatusRaw
+        dateStarted = book.dateStarted
+        dateFinished = book.dateFinished
+        sessions = book.readingSessions.map {
+            CatalogReadingSessionPreimage(
+                session: $0,
+                startedAt: $0.startedAt,
+                endedAt: $0.endedAt,
+                statusRaw: $0.statusRaw,
+                progress: $0.progress
+            )
+        }
+    }
+
+    func restore(in context: ModelContext) {
+        let originalSessions = Set(sessions.map { ObjectIdentifier($0.session) })
+        for session in book.readingSessions
+        where !originalSessions.contains(ObjectIdentifier(session)) {
+            session.book = nil
+            if session.modelContext != nil { context.delete(session) }
+        }
+        book.readingSessions = sessions.map(\.session)
+        for preimage in sessions {
+            preimage.session.startedAt = preimage.startedAt
+            preimage.session.endedAt = preimage.endedAt
+            preimage.session.statusRaw = preimage.statusRaw
+            preimage.session.progress = preimage.progress
+            preimage.session.book = book
+        }
+        book.readingStatusRaw = readingStatusRaw
+        book.dateStarted = dateStarted
+        book.dateFinished = dateFinished
+    }
+}
+
+private struct CatalogCollectionPreimage {
+    let collection: BookCollection
+    let name: String
+    let savedSearch: String?
+    let smartShelfRulesData: Data?
+    let books: [Book]
+
+    init(_ collection: BookCollection) {
+        self.collection = collection
+        name = collection.name
+        savedSearch = collection.savedSearch
+        smartShelfRulesData = collection.smartShelfRulesData
+        books = collection.books
+    }
+
+    func restore() {
+        collection.name = name
+        collection.savedSearch = savedSearch
+        collection.smartShelfRulesData = smartShelfRulesData
+        collection.books = books
+    }
+}
+
 @MainActor
 final class CatalogMutationService {
     private let modelContext: ModelContext
     private let saveAdapter: CatalogSaveAdapter
     private let managedFiles: ManagedFileCoordinator
+    private let hooks: CatalogMutationHooks
     let analysisCoordinator: CatalogAnalysisCoordinator
     let editionIdentity = EditionIdentityCoordinator()
 
@@ -454,12 +748,510 @@ final class CatalogMutationService {
         modelContext: ModelContext,
         saveAdapter: CatalogSaveAdapter = .live,
         managedFiles: ManagedFileCoordinator = .shared,
-        analysisCoordinator: CatalogAnalysisCoordinator? = nil
+        analysisCoordinator: CatalogAnalysisCoordinator? = nil,
+        hooks: CatalogMutationHooks = .live
     ) {
         self.modelContext = modelContext
         self.saveAdapter = saveAdapter
         self.managedFiles = managedFiles
         self.analysisCoordinator = analysisCoordinator ?? CatalogAnalysisCoordinator()
+        self.hooks = hooks
+    }
+
+    func execute(
+        _ request: CatalogMutationRequest,
+        validatingGeneration generationIsCurrent: () -> Bool = { true }
+    ) -> Result<CatalogChangeSet, CatalogMutationError> {
+        do {
+            return .success(try executeThrowing(
+                request,
+                validatingGeneration: generationIsCurrent
+            ))
+        } catch let error as CatalogMutationError {
+            return .failure(error)
+        } catch {
+            return .failure(.saveFailed(error.localizedDescription))
+        }
+    }
+
+    private func executeThrowing(
+        _ request: CatalogMutationRequest,
+        validatingGeneration generationIsCurrent: () -> Bool
+    ) throws -> CatalogChangeSet {
+        switch request {
+        case .updateBook(let update, let source):
+            return try executeBookUpdates(
+                [update],
+                source: source,
+                operation: nil,
+                validatingGeneration: generationIsCurrent
+            )
+
+        case .updateBooks(let updates, let operation):
+            return try executeBookUpdates(
+                updates,
+                source: .manual,
+                operation: operation,
+                validatingGeneration: generationIsCurrent
+            )
+
+        case .setReadingStatus(let bookIDs, let status):
+            guard !bookIDs.isEmpty else { throw CatalogMutationError.invalidRequest }
+            let storedBooks = try books(ids: bookIDs)
+            let preimages = storedBooks.map(CatalogReadingStatePreimage.init)
+            return try commit(
+                .setReadingStatus(bookIDs: Array(bookIDs), status: status),
+                affectedBookIDs: bookIDs,
+                revertingOnFailure: {
+                    preimages.forEach { $0.restore(in: self.modelContext) }
+                }
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                for book in try self.books(ids: bookIDs) {
+                    book.setStatus(status)
+                }
+            }
+
+        case .setReadingProgress(let bookID, let progress):
+            let storedBook = try book(id: bookID)
+            let preimage = CatalogReadingStatePreimage(storedBook)
+            return try commit(
+                .setReadingProgress(bookID: bookID, progress: progress),
+                affectedBookIDs: [bookID],
+                revertingOnFailure: { preimage.restore(in: self.modelContext) }
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                guard try self.book(id: bookID).updateReadingProgress(progress) else {
+                    throw CatalogMutationError.invalidRequest
+                }
+            }
+
+        case .addPhysicalBook(let payload):
+            return try commit(
+                .addPhysicalBook(bookID: payload.bookID, workID: payload.workID),
+                affectedBookIDs: [payload.bookID],
+                affectedWorkIDs: [payload.workID]
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                let book = Book(
+                    uuid: payload.bookID,
+                    fileName: "",
+                    originalFileName: payload.title
+                )
+                book.title = payload.title
+                book.author = payload.author
+                book.publisher = payload.publisher
+                book.year = payload.year
+                book.isbn = payload.isbn
+                book.shelfLocation = payload.shelfLocation
+                book.notes = payload.notes
+                book.hasPhysicalCopy = true
+                if payload.readingStatus != .unread {
+                    book.setStatus(payload.readingStatus)
+                }
+                let work = Work(
+                    uuid: payload.workID,
+                    title: payload.title,
+                    author: payload.author,
+                    dateCreated: book.dateAdded
+                )
+                work.preferredEditionUUID = book.uuid
+                self.modelContext.insert(work)
+                self.modelContext.insert(book)
+                book.work = work
+            }
+
+        case .createCollection(let creation):
+            var insertedCollection: BookCollection?
+            return try commit(
+                .createCollection(
+                    collectionID: creation.collectionID,
+                    bookIDs: Array(creation.bookIDs)
+                ),
+                affectedBookIDs: creation.bookIDs,
+                affectedCollectionIDs: [creation.collectionID],
+                revertingOnFailure: {
+                    insertedCollection?.books.removeAll()
+                    if let insertedCollection, insertedCollection.modelContext != nil {
+                        self.modelContext.delete(insertedCollection)
+                    }
+                }
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                let collection = BookCollection(
+                    id: creation.collectionID,
+                    name: creation.name,
+                    savedSearch: creation.savedSearch
+                )
+                collection.smartShelfDefinition = creation.smartShelf
+                collection.books = try self.books(ids: creation.bookIDs)
+                insertedCollection = collection
+                self.modelContext.insert(collection)
+            }
+
+        case .renameCollection(let collectionID, let name):
+            return try executeCollectionMutation(
+                collectionID: collectionID,
+                bookIDs: [],
+                validatingGeneration: generationIsCurrent
+            ) {
+                $0.name = name
+            }
+
+        case .updateSmartShelf(let collectionID, let name, let definition):
+            return try executeCollectionMutation(
+                collectionID: collectionID,
+                bookIDs: [],
+                validatingGeneration: generationIsCurrent
+            ) {
+                $0.name = name
+                $0.savedSearch = nil
+                $0.smartShelfDefinition = definition
+            }
+
+        case .addToCollection(let collectionID, let bookIDs):
+            return try executeCollectionMutation(
+                collectionID: collectionID,
+                bookIDs: bookIDs,
+                validatingGeneration: generationIsCurrent
+            ) { collection in
+                for book in try self.books(ids: bookIDs)
+                where !collection.books.contains(where: { $0.uuid == book.uuid }) {
+                    collection.books.append(book)
+                }
+            }
+
+        case .removeFromCollection(let collectionID, let bookIDs):
+            return try executeCollectionMutation(
+                collectionID: collectionID,
+                bookIDs: bookIDs,
+                validatingGeneration: generationIsCurrent
+            ) {
+                $0.books.removeAll { bookIDs.contains($0.uuid) }
+            }
+
+        case .deleteCollection(let collectionID):
+            let storedCollection = try collection(id: collectionID)
+            let bookIDs = Set(storedCollection.books.map(\.uuid))
+            return try commit(
+                .deleteCollection(collectionID: collectionID),
+                affectedBookIDs: bookIDs,
+                affectedCollectionIDs: [collectionID]
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                self.modelContext.delete(try self.collection(id: collectionID))
+            }
+
+        case .updateWorkIdentity(let workID, let title, let author):
+            let storedWork = try work(id: workID)
+            let preimage = CatalogWorkPreimage(storedWork)
+            return try commit(
+                .updateWork(workID: workID, fields: ["title", "author"]),
+                affectedWorkIDs: [workID],
+                revertingOnFailure: preimage.restore
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                let work = try self.work(id: workID)
+                work.title = title
+                work.author = author
+                work.refreshMatchKey()
+            }
+
+        case .setPreferredEdition(let workID, let bookID):
+            let storedWork = try work(id: workID)
+            let preimage = CatalogWorkPreimage(storedWork)
+            return try commit(
+                .updateWork(workID: workID, fields: ["preferredEditionUUID"]),
+                affectedBookIDs: [bookID],
+                affectedWorkIDs: [workID],
+                revertingOnFailure: preimage.restore
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                let book = try self.book(id: bookID)
+                let work = try self.work(id: workID)
+                guard book.work?.uuid == workID else {
+                    throw CatalogMutationError.invalidRequest
+                }
+                work.preferredEditionUUID = book.uuid
+            }
+
+        case .updateAssetValidations(let updates):
+            guard !updates.isEmpty else { throw CatalogMutationError.invalidRequest }
+            let updatesByID = Dictionary(
+                updates.map { ($0.assetID, $0) },
+                uniquingKeysWith: { _, latest in latest }
+            )
+            let storedAssets = try assets(ids: Set(updatesByID.keys))
+            let preimages = storedAssets.map(CatalogBookAssetPreimage.init)
+            let bookIDs = Set(storedAssets.compactMap { $0.book?.uuid })
+            return try commit(
+                .updateAssetValidation(
+                    assetIDs: Array(updatesByID.keys),
+                    bookIDs: Array(bookIDs)
+                ),
+                affectedBookIDs: bookIDs,
+                affectedAssetIDs: Set(updatesByID.keys),
+                revertingOnFailure: { preimages.forEach { $0.restore() } }
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                for asset in try self.assets(ids: Set(updatesByID.keys)) {
+                    guard let update = updatesByID[asset.uuid],
+                          asset.fileName == update.expectedFileName,
+                          asset.dateAdded == update.expectedDateAdded else {
+                        throw CatalogMutationError.staleGeneration
+                    }
+                    asset.validationStatus = update.validation
+                }
+            }
+
+        case .importHighlights(let insertions):
+            guard !insertions.isEmpty else { throw CatalogMutationError.invalidRequest }
+            let bookIDs = Set(insertions.map(\.bookID))
+            _ = try books(ids: bookIDs)
+            var insertedHighlights: [Highlight] = []
+            return try commit(
+                .importHighlights(bookIDs: Array(bookIDs)),
+                affectedBookIDs: bookIDs,
+                revertingOnFailure: {
+                    for highlight in insertedHighlights {
+                        highlight.book = nil
+                        if highlight.modelContext != nil {
+                            self.modelContext.delete(highlight)
+                        }
+                    }
+                }
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                let books = Dictionary(
+                    uniqueKeysWithValues: try self.books(ids: bookIDs).map { ($0.uuid, $0) }
+                )
+                for insertion in insertions {
+                    guard let book = books[insertion.bookID] else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    let highlight = Highlight(
+                        text: insertion.text,
+                        isNote: insertion.isNote,
+                        location: insertion.location,
+                        addedDate: insertion.addedDate
+                    )
+                    highlight.book = book
+                    insertedHighlights.append(highlight)
+                    self.modelContext.insert(highlight)
+                }
+            }
+        }
+    }
+
+    private func executeBookUpdates(
+        _ updates: [CatalogBookUpdate],
+        source: CatalogBookUpdateSource,
+        operation: String?,
+        validatingGeneration generationIsCurrent: () -> Bool
+    ) throws -> CatalogChangeSet {
+        guard !updates.isEmpty else { throw CatalogMutationError.invalidRequest }
+        let targetBookIDs = Set(updates.map(\.bookID))
+        let storedBooks = try books(ids: targetBookIDs)
+        let storedByID = Dictionary(uniqueKeysWithValues: storedBooks.map { ($0.uuid, $0) })
+        var affectedBookIDs = targetBookIDs
+        var affectedWorkIDs: Set<UUID> = []
+        var commandFields: Set<String> = []
+        for update in updates {
+            guard let book = storedByID[update.bookID] else {
+                throw CatalogMutationError.modelNotFound
+            }
+            commandFields.formUnion(update.patch.commandFields)
+            if update.readingStatus != nil { commandFields.insert("readingStatus") }
+            if !update.patch.fields.isDisjoint(with: [.title, .author, .isbn]) {
+                let affected = editionIdentity.affectedModels(
+                    for: book,
+                    scope: update.identityScope
+                )
+                affectedBookIDs.formUnion(affected.affectedBookIDs)
+                affectedWorkIDs.formUnion(affected.affectedWorkIDs)
+            }
+        }
+        let bookPreimages = try books(ids: affectedBookIDs).map(CatalogBookMetadataPreimage.init)
+        let readingBookIDs = Set(updates.compactMap {
+            $0.readingStatus == nil ? nil : $0.bookID
+        })
+        let readingPreimages = try books(ids: readingBookIDs)
+            .map(CatalogReadingStatePreimage.init)
+        let workPreimages = try works(ids: affectedWorkIDs).map(CatalogWorkPreimage.init)
+        let command: CatalogMutationCommand
+        if let operation {
+            command = .updateMetadataBatch(
+                bookIDs: Array(affectedBookIDs),
+                operation: operation,
+                fields: commandFields
+            )
+        } else {
+            guard updates.count == 1, let update = updates.first else {
+                throw CatalogMutationError.invalidRequest
+            }
+            command = switch source {
+            case .manual:
+                .updateMetadata(bookID: update.bookID, fields: commandFields)
+            case .plugin:
+                .pluginUpdate(bookID: update.bookID, fields: commandFields)
+            }
+        }
+        return try commit(
+            command,
+            affectedBookIDs: affectedBookIDs,
+            affectedWorkIDs: affectedWorkIDs,
+            revertingOnFailure: {
+                bookPreimages.forEach { $0.restore() }
+                readingPreimages.forEach { $0.restore(in: self.modelContext) }
+                workPreimages.forEach { $0.restore() }
+            }
+        ) {
+            guard generationIsCurrent() else {
+                throw CatalogMutationError.staleGeneration
+            }
+            for update in updates {
+                let book = try self.book(id: update.bookID)
+                self.apply(
+                    update.patch,
+                    to: book,
+                    scope: update.identityScope,
+                    policy: update.policy,
+                    tagMode: update.tagMode
+                )
+                if let readingStatus = update.readingStatus {
+                    book.setStatus(readingStatus)
+                }
+            }
+        }
+    }
+
+    private func executeCollectionMutation(
+        collectionID: UUID,
+        bookIDs: Set<UUID>,
+        validatingGeneration generationIsCurrent: () -> Bool,
+        applying mutation: (BookCollection) throws -> Void
+    ) throws -> CatalogChangeSet {
+        let storedCollection = try collection(id: collectionID)
+        guard !storedCollection.isSystem else {
+            throw CatalogMutationError.invalidRequest
+        }
+        let preimage = CatalogCollectionPreimage(storedCollection)
+        return try commit(
+            .updateCollection(collectionID: collectionID),
+            affectedBookIDs: bookIDs,
+            affectedCollectionIDs: [collectionID],
+            revertingOnFailure: preimage.restore
+        ) {
+            guard generationIsCurrent() else {
+                throw CatalogMutationError.staleGeneration
+            }
+            try mutation(try self.collection(id: collectionID))
+        }
+    }
+
+    private func apply(
+        _ patch: CatalogBookPatch,
+        to book: Book,
+        scope: EditionIdentityScope,
+        policy: CatalogBookPatchPolicy,
+        tagMode: CatalogTagUpdateMode
+    ) {
+        func stringMayApply(_ current: String?, _ proposed: String?) -> Bool {
+            switch policy {
+            case .replace:
+                true
+            case .fillEmpty:
+                current?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+                    && proposed?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            }
+        }
+
+        var identityFields: Set<EditionIdentityField> = []
+        if patch.fields.contains(.title), stringMayApply(book.title, patch.title) {
+            identityFields.insert(.title)
+        }
+        if patch.fields.contains(.author), stringMayApply(book.author, patch.author) {
+            identityFields.insert(.author)
+        }
+        if patch.fields.contains(.isbn), stringMayApply(book.isbn, patch.isbn) {
+            identityFields.insert(.isbn)
+        }
+        if !identityFields.isEmpty {
+            editionIdentity.apply(
+                EditionIdentityPatch(
+                    fields: identityFields,
+                    title: patch.title,
+                    author: patch.author,
+                    isbn: patch.isbn
+                ),
+                to: book,
+                scope: scope
+            )
+        }
+        if patch.fields.contains(.publisher), stringMayApply(book.publisher, patch.publisher) {
+            book.publisher = patch.publisher
+        }
+        if patch.fields.contains(.year), stringMayApply(book.year, patch.year) {
+            book.year = patch.year
+        }
+        if patch.fields.contains(.language), stringMayApply(book.language, patch.language) {
+            book.language = patch.language
+        }
+        if patch.fields.contains(.translator), stringMayApply(book.translator, patch.translator) {
+            book.translator = patch.translator
+        }
+        if patch.fields.contains(.series), stringMayApply(book.series, patch.series) {
+            book.series = patch.series
+        }
+        if patch.fields.contains(.seriesIndex), stringMayApply(book.seriesIndex, patch.seriesIndex) {
+            book.seriesIndex = patch.seriesIndex
+        }
+        if patch.fields.contains(.description),
+           stringMayApply(book.bookDescription, patch.bookDescription) {
+            book.bookDescription = patch.bookDescription
+        }
+        if patch.fields.contains(.shelfLocation),
+           stringMayApply(book.shelfLocation, patch.shelfLocation) {
+            book.shelfLocation = patch.shelfLocation
+        }
+        if patch.fields.contains(.notes), stringMayApply(book.notes, patch.notes) {
+            book.notes = patch.notes
+        }
+        if patch.fields.contains(.tags),
+           policy == .replace || book.tags.isEmpty {
+            switch tagMode {
+            case .replace:
+                book.tags = patch.tags
+            case .add:
+                book.tags = Array(Set(book.tags + patch.tags)).sorted()
+            }
+        }
+        if patch.fields.contains(.rating),
+           policy == .replace || book.rating == nil {
+            book.rating = patch.rating
+        }
+        if patch.fields.contains(.sampleNoticeDismissed),
+           policy == .replace || book.sampleNoticeDismissed == nil {
+            book.sampleNoticeDismissed = patch.sampleNoticeDismissed
+        }
     }
 
     @discardableResult
@@ -467,6 +1259,7 @@ final class CatalogMutationService {
         _ command: CatalogMutationCommand,
         affectedBookIDs: Set<UUID> = [],
         affectedWorkIDs: Set<UUID> = [],
+        affectedAssetIDs: Set<UUID>? = nil,
         affectedCollectionIDs: Set<UUID> = [],
         catalogChanged: Bool = true,
         revertingOnFailure rollbackMutation: () -> Void = {},
@@ -479,7 +1272,9 @@ final class CatalogMutationService {
         }
 
         do {
+            try reach(.beforeMutation)
             try mutation()
+            try reach(.afterMutation)
             modelContext.processPendingChanges()
             repairInvariants(
                 for: command,
@@ -492,16 +1287,17 @@ final class CatalogMutationService {
                 command: command,
                 affectedBookIDs: affectedBookIDs,
                 affectedWorkIDs: affectedWorkIDs,
+                affectedAssetIDs: affectedAssetIDs,
                 affectedCollectionIDs: affectedCollectionIDs
             ), catalogChanged: catalogChanged)
         } catch let error as CatalogMutationError {
             rollbackMutation()
-            modelContext.rollback()
+            discardPendingChanges()
             Log.persistence.error("Catalog mutation rolled back: \(String(describing: error), privacy: .public)")
             throw error
         } catch {
             rollbackMutation()
-            modelContext.rollback()
+            discardPendingChanges()
             Log.persistence.error("Catalog mutation save failed and rolled back: \(error.localizedDescription, privacy: .public)")
             throw CatalogMutationError.saveFailed(error.localizedDescription)
         }
@@ -514,6 +1310,7 @@ final class CatalogMutationService {
         _ command: CatalogMutationCommand,
         affectedBookIDs: Set<UUID> = [],
         affectedWorkIDs: Set<UUID> = [],
+        affectedAssetIDs: Set<UUID>? = nil,
         affectedCollectionIDs: Set<UUID> = [],
         catalogChanged: Bool = true
     ) throws -> CatalogChangeSet {
@@ -530,10 +1327,11 @@ final class CatalogMutationService {
                 command: command,
                 affectedBookIDs: affectedBookIDs,
                 affectedWorkIDs: affectedWorkIDs,
+                affectedAssetIDs: affectedAssetIDs,
                 affectedCollectionIDs: affectedCollectionIDs
             ), catalogChanged: catalogChanged)
         } catch {
-            modelContext.rollback()
+            discardPendingChanges()
             Log.persistence.error("Staged catalog mutation save failed and rolled back: \(error.localizedDescription, privacy: .public)")
             throw CatalogMutationError.saveFailed(error.localizedDescription)
         }
@@ -565,7 +1363,9 @@ final class CatalogMutationService {
         do {
             try await managedFiles.willCommitCatalog(transaction)
             mutationStarted = true
+            try reach(.beforeMutation)
             try mutation()
+            try reach(.afterMutation)
             modelContext.processPendingChanges()
             repairInvariants(
                 for: command,
@@ -752,6 +1552,14 @@ final class CatalogMutationService {
         if modelContext.hasChanges { modelContext.rollback() }
     }
 
+    private func reach(_ checkpoint: CatalogMutationCheckpoint) throws {
+        do {
+            try hooks.reach(checkpoint)
+        } catch {
+            throw CatalogMutationError.checkpointFailed(error.localizedDescription)
+        }
+    }
+
     private func publish(
         _ changeSet: CatalogChangeSet,
         catalogChanged: Bool
@@ -822,6 +1630,12 @@ final class CatalogMutationService {
         case .addPhysicalBook(let bookID, _):
             bookIDs.insert(bookID)
 
+        case .updateAssetValidation(_, let commandBookIDs):
+            bookIDs.formUnion(commandBookIDs)
+
+        case .restoreBook(let bookID, _, _):
+            bookIDs.insert(bookID)
+
         case .reconcileEditions(let survivorID, let removedID, _):
             bookIDs.formUnion([survivorID, removedID])
 
@@ -835,7 +1649,7 @@ final class CatalogMutationService {
 
         case .setReadingStatus, .setReadingProgress,
              .createCollection, .updateCollection, .deleteCollection,
-             .updateCover:
+             .updateCover, .importHighlights, .maintenanceCleanup:
             break
         }
         return bookIDs
@@ -880,10 +1694,16 @@ final class CatalogMutationService {
         case .removeBooks(let bookIDs):
             invalidatedBookIDs.formUnion(bookIDs)
 
+        case .restoreBook(let bookID, let fields, _):
+            if !fields.intersection([.identity, .assetAvailability, .fullTextSource]).isEmpty {
+                invalidatedBookIDs.insert(bookID)
+            }
+
         case .setReadingStatus, .setReadingProgress,
              .createCollection, .updateCollection, .deleteCollection,
              .addPhysicalBook, .importBooks, .calibreImport, .conversionOutput, .legacyMigration,
-             .updateCover, .applyAnalysis, .applyAnalysisBatch:
+             .updateCover, .applyAnalysis, .applyAnalysisBatch,
+             .updateAssetValidation, .importHighlights, .maintenanceCleanup:
             break
         }
 
@@ -932,6 +1752,19 @@ final class CatalogMutationService {
             throw CatalogMutationError.modelNotFound
         }
         return works
+    }
+
+    func assets(ids: Set<UUID>) throws -> [BookAsset] {
+        guard !ids.isEmpty else { return [] }
+        let requestedIDs = Array(ids)
+        let descriptor = FetchDescriptor<BookAsset>(
+            predicate: #Predicate { requestedIDs.contains($0.uuid) }
+        )
+        let assets = try modelContext.fetch(descriptor)
+        guard assets.count == ids.count else {
+            throw CatalogMutationError.modelNotFound
+        }
+        return assets
     }
 
     func collection(id: UUID) throws -> BookCollection {

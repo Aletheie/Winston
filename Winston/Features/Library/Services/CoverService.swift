@@ -55,12 +55,26 @@ final class CoverService {
             guard let (image, data) = prepared,
                   operationIsCurrent(token, for: book),
                   book.coverVersion == originalVersion else { return }
+            let previousIdentity: ManagedFileIdentitySnapshot
+            do {
+                previousIdentity = try await managedFiles.captureIdentity(
+                    of: .cover(bookID: bookID)
+                )
+            } catch {
+                return
+            }
             let expectedVersion = originalVersion + 1
             let transaction: ManagedFileTransaction
             do {
                 transaction = try await managedFiles.stage(
                     intent: .coverUpdate,
-                    sources: [.cover(data: data, bookID: bookID)],
+                    sources: [
+                        .cover(
+                            data: data,
+                            bookID: bookID,
+                            replacing: previousIdentity
+                        ),
+                    ],
                     requirement: ManagedFileRequirement(
                         presentBookIDs: [bookID],
                         coverVersions: [bookID: expectedVersion]
@@ -118,19 +132,33 @@ final class CoverService {
                 presentBookIDs: [bookID],
                 coverVersions: [bookID: expectedVersion]
             )
+            let previousIdentity: ManagedFileIdentitySnapshot
+            do {
+                previousIdentity = try await managedFiles.captureIdentity(
+                    of: .cover(bookID: bookID)
+                )
+            } catch {
+                return
+            }
             let transaction: ManagedFileTransaction
             do {
                 if let data = prepared?.1 {
                     transaction = try await managedFiles.stage(
                         intent: .coverUpdate,
-                        sources: [.cover(data: data, bookID: bookID)],
+                        sources: [
+                            .cover(
+                                data: data,
+                                bookID: bookID,
+                                replacing: previousIdentity
+                            ),
+                        ],
                         requirement: requirement
                     )
                 } else {
                     transaction = try await managedFiles.prepareCleanup(
                         intent: .coverUpdate,
                         requirement: requirement,
-                        cleanups: [.cover(bookID: bookID)]
+                        cleanups: [.file(previousIdentity)]
                     )
                 }
             } catch {

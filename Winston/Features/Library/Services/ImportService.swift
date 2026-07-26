@@ -820,7 +820,7 @@ final class ImportService {
             try Task.checkCancellation()
             let source = try ManagedFileSource.book(
                 sourceURL: request.source,
-                fileID: request.uuid
+                destination: .newAsset(assetID: request.uuid)
             )
             let fileTransaction = try await managedFiles.stage(
                 intent: .importBook,

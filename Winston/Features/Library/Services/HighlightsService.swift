@@ -24,12 +24,17 @@ final class HighlightsService {
     }
 
     private let modelContext: ModelContext
+    private let mutations: CatalogMutationService
 
     private(set) var isImportingHighlights = false
     private(set) var highlightImportSummary: String?
 
-    init(modelContext: ModelContext) {
+    init(
+        modelContext: ModelContext,
+        mutations: CatalogMutationService? = nil
+    ) {
         self.modelContext = modelContext
+        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
     }
 
     func importHighlights(via monitor: DeviceMonitor) {
@@ -53,26 +58,22 @@ final class HighlightsService {
                 )
             }
             let matches = await Self.match(clippings: clippings, books: snapshots)
-            let currentBooks = Dictionary(
-                libraryBooks.map { ($0.uuid, $0) },
-                uniquingKeysWith: { first, _ in first }
-            )
-            var added = 0
-            var affectedBookIDs: Set<UUID> = []
-            for match in matches {
-                guard let book = currentBooks[match.bookUUID], book.modelContext != nil else { continue }
-                let highlight = Highlight(text: match.text, isNote: match.isNote,
-                                          location: match.location, addedDate: match.addedDate)
-                highlight.book = book
-                modelContext.insert(highlight)
-                added += 1
-                affectedBookIDs.insert(book.uuid)
-            }
-            if !affectedBookIDs.isEmpty {
-                modelContext.saveQuietly(
-                    affectedBookIDs: affectedBookIDs,
-                    fields: [.displayMetadata]
+            let insertions = matches.map {
+                CatalogHighlightInsertion(
+                    bookID: $0.bookUUID,
+                    text: $0.text,
+                    isNote: $0.isNote,
+                    location: $0.location,
+                    addedDate: $0.addedDate
                 )
+            }
+            let added: Int
+            if insertions.isEmpty {
+                added = 0
+            } else if case .success = mutations.execute(.importHighlights(insertions)) {
+                added = insertions.count
+            } else {
+                added = 0
             }
             highlightImportSummary = added > 0
                 ? String(localized: "Imported \(added) highlight(s).")

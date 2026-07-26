@@ -230,19 +230,15 @@ final class CatalogReconciliationService {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedAuthor = author.trimmingCharacters(in: .whitespacesAndNewlines)
         let workID = work.uuid
-        do {
-            try mutations.commit(
-                .updateWork(workID: workID, fields: ["title", "author"]),
-                affectedWorkIDs: [workID]
-            ) {
-                let storedWork = try mutations.work(id: workID)
-                storedWork.title = trimmedTitle.isEmpty ? nil : trimmedTitle
-                storedWork.author = trimmedAuthor.isEmpty ? nil : trimmedAuthor
-                storedWork.refreshMatchKey()
-            }
+        switch mutations.execute(.updateWorkIdentity(
+            workID: workID,
+            title: trimmedTitle.isEmpty ? nil : trimmedTitle,
+            author: trimmedAuthor.isEmpty ? nil : trimmedAuthor
+        )) {
+        case .success:
             evaluate(work.editions)
             return true
-        } catch {
+        case .failure:
             return reportMutationFailure()
         }
     }
@@ -251,22 +247,11 @@ final class CatalogReconciliationService {
     func setPreferred(_ book: Book, in work: Work) -> Bool {
         let bookID = book.uuid
         let workID = work.uuid
-        do {
-            try mutations.commit(
-                .updateWork(workID: workID, fields: ["preferredEditionUUID"]),
-                affectedBookIDs: [bookID],
-                affectedWorkIDs: [workID]
-            ) {
-                let storedBook = try mutations.book(id: bookID)
-                let storedWork = try mutations.work(id: workID)
-                guard storedBook.work?.uuid == storedWork.uuid else {
-                    throw CatalogMutationError.modelNotFound
-                }
-                storedWork.preferredEditionUUID = storedBook.uuid
-            }
+        switch mutations.execute(.setPreferredEdition(workID: workID, bookID: bookID)) {
+        case .success:
             refreshEditionCounts()
             return true
-        } catch {
+        case .failure:
             return reportMutationFailure()
         }
     }
@@ -509,7 +494,7 @@ final class CatalogReconciliationService {
                 storedBook.work = storedWork
                 fillEmptyWorkMetadata(storedWork, from: storedBook)
                 storedWork.preferredEditionUUID = WorkService.preferredEdition(in: storedWork)?.uuid ?? storedBook.uuid
-                WorkService.pruneIfOrphaned(previous, context: modelContext, save: false)
+                WorkService.pruneIfOrphaned(previous, context: modelContext)
             }
         } catch {
             _ = reportMutationFailure()
@@ -563,7 +548,7 @@ final class CatalogReconciliationService {
                 }
                 storedTarget.preferredEditionUUID = WorkService.preferredEdition(in: storedTarget)?.uuid ?? storedWinner.uuid
                 for previous in previousWorks {
-                    WorkService.pruneIfOrphaned(previous, context: modelContext, save: false)
+                    WorkService.pruneIfOrphaned(previous, context: modelContext)
                 }
                 target = storedTarget
             }
@@ -595,7 +580,7 @@ final class CatalogReconciliationService {
                 fillEmptyWorkMetadata(storedDestination, from: storedSource)
                 for book in storedSource.editions { book.work = storedDestination }
                 storedDestination.preferredEditionUUID = WorkService.preferredEdition(in: storedDestination)?.uuid
-                WorkService.pruneIfOrphaned(storedSource, context: modelContext, save: false)
+                WorkService.pruneIfOrphaned(storedSource, context: modelContext)
             }
         } catch {
             _ = reportMutationFailure()
@@ -624,7 +609,7 @@ final class CatalogReconciliationService {
                 let previous = storedBook.work
                 modelContext.insert(work)
                 storedBook.work = work
-                WorkService.pruneIfOrphaned(previous, context: modelContext, save: false)
+                WorkService.pruneIfOrphaned(previous, context: modelContext)
             }
         } catch {
             _ = reportMutationFailure()
@@ -718,11 +703,20 @@ final class CatalogReconciliationService {
             exactEvidence.map { ($0.discardedFileName, $0) },
             uniquingKeysWith: { first, _ in first }
         )
-        let bookCleanups = discardedFileNames.compactMap { fileName -> ManagedFileCleanup? in
-            guard let evidence = evidenceByDiscardedFile[fileName] else { return nil }
-            return .book(
-                fileName,
-                expectedSHA256: evidence.sha256,
+        let discardedIdentities: [ManagedFileIdentitySnapshot]
+        do {
+            discardedIdentities = try await managedFiles.captureIdentities(
+                of: discardedFileNames.sorted().map(ManagedFileReference.book)
+            )
+        } catch {
+            return false
+        }
+        let bookCleanups = discardedIdentities.compactMap {
+            identity -> ManagedFileCleanup? in
+            guard let evidence = evidenceByDiscardedFile[identity.reference.relativeName],
+                  identity.generation?.sha256 == evidence.sha256 else { return nil }
+            return .file(
+                identity,
                 retainedEquivalentFileName: evidence.retainedFileName
             )
         }
@@ -842,7 +836,7 @@ final class CatalogReconciliationService {
                 }
                 storedLoser.work = nil
                 modelContext.delete(storedLoser)
-                WorkService.pruneIfOrphaned(losingWork, context: modelContext, save: false)
+                WorkService.pruneIfOrphaned(losingWork, context: modelContext)
             }
             if !result.isFullyPublished {
                 toasts?.info(String(localized: "Edition merge completed; file cleanup will resume automatically."))

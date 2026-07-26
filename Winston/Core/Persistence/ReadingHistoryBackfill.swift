@@ -3,7 +3,10 @@ import SwiftData
 
 enum ReadingHistoryBackfill {
     @discardableResult
-    static func run(context: ModelContext) -> Int {
+    static func run(
+        context: ModelContext,
+        mutations: CatalogMutationService? = nil
+    ) -> Int {
         var inserted = 0
         var affectedBookIDs: Set<UUID> = []
         var descriptor = FetchDescriptor<Book>()
@@ -50,10 +53,19 @@ enum ReadingHistoryBackfill {
         }
 
         if inserted > 0 {
-            context.saveQuietly(
-                affectedBookIDs: affectedBookIDs,
-                fields: [.readingState]
-            )
+            let writer = mutations ?? CatalogMutationService(modelContext: context)
+            do {
+                try writer.commitStaged(
+                    .updateMetadataBatch(
+                        bookIDs: Array(affectedBookIDs),
+                        operation: "readingHistoryBackfill",
+                        fields: ["readingStatus", "readingProgress"]
+                    ),
+                    affectedBookIDs: affectedBookIDs
+                )
+            } catch {
+                return 0
+            }
         }
         return inserted
     }

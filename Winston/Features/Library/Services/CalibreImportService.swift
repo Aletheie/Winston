@@ -397,7 +397,7 @@ final class CalibreImportService {
                 for source in inspection.sources {
                     let managedSource = try ManagedFileSource.book(
                         sourceURL: source.url,
-                        fileID: source.assetID
+                        destination: .newAsset(assetID: source.assetID)
                     )
                     let transaction = try await managedFiles.stage(
                         intent: .calibreImport,

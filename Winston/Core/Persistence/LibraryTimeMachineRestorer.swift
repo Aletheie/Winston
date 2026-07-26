@@ -79,6 +79,86 @@ enum LibraryTimeMachineRestoreError: LocalizedError {
 }
 
 @MainActor
+private struct LibraryTimeMachineBookPreimage {
+    private struct Session {
+        let model: ReadingSession
+        let startedAt: Date
+        let endedAt: Date?
+        let statusRaw: String
+        let progress: Double
+    }
+
+    let book: Book
+    let metadata: CatalogBookMetadataPreimage
+    let readingStatusRaw: String?
+    let dateStarted: Date?
+    let dateFinished: Date?
+    let editionStatement: String?
+    let editionTypeRaw: String?
+    let hasPhysicalCopyRaw: Bool?
+    let collections: [BookCollection]
+    let highlights: [Highlight]
+    private let sessions: [Session]
+
+    init(_ book: Book) {
+        self.book = book
+        metadata = CatalogBookMetadataPreimage(book)
+        readingStatusRaw = book.readingStatusRaw
+        dateStarted = book.dateStarted
+        dateFinished = book.dateFinished
+        editionStatement = book.editionStatement
+        editionTypeRaw = book.editionTypeRaw
+        hasPhysicalCopyRaw = book.hasPhysicalCopyRaw
+        collections = book.collections
+        highlights = book.highlights
+        sessions = book.readingSessions.map {
+            Session(
+                model: $0,
+                startedAt: $0.startedAt,
+                endedAt: $0.endedAt,
+                statusRaw: $0.statusRaw,
+                progress: $0.progress
+            )
+        }
+    }
+
+    func restore(in context: ModelContext) {
+        metadata.restore()
+        book.readingStatusRaw = readingStatusRaw
+        book.dateStarted = dateStarted
+        book.dateFinished = dateFinished
+        book.editionStatement = editionStatement
+        book.editionTypeRaw = editionTypeRaw
+        book.hasPhysicalCopyRaw = hasPhysicalCopyRaw
+        book.collections = collections
+
+        let originalHighlights = Set(highlights.map(ObjectIdentifier.init))
+        for highlight in book.highlights
+        where !originalHighlights.contains(ObjectIdentifier(highlight)) {
+            highlight.book = nil
+            if highlight.modelContext != nil { context.delete(highlight) }
+        }
+        book.highlights = highlights
+        highlights.forEach { $0.book = book }
+
+        let originalSessions = Set(sessions.map { ObjectIdentifier($0.model) })
+        for session in book.readingSessions
+        where !originalSessions.contains(ObjectIdentifier(session)) {
+            session.book = nil
+            if session.modelContext != nil { context.delete(session) }
+        }
+        book.readingSessions = sessions.map(\.model)
+        for session in sessions {
+            session.model.startedAt = session.startedAt
+            session.model.endedAt = session.endedAt
+            session.model.statusRaw = session.statusRaw
+            session.model.progress = session.progress
+            session.model.book = book
+        }
+    }
+}
+
+@MainActor
 struct LibraryTimeMachineRestorer {
     typealias SafetyBackupAction = @Sendable (URL) async throws -> URL
 
@@ -146,15 +226,12 @@ struct LibraryTimeMachineRestorer {
             throw LibraryTimeMachineRestoreError.bookUnavailable
         }
 
-        let restoredCoverData = try await coverData(for: snapshot, scope: scope)
-        do {
-            if modelContext.hasChanges {
-                try modelContext.saveAndPublish(fullTextAffectedBookIDs: nil)
-            }
-        } catch {
-            modelContext.rollback()
-            throw LibraryTimeMachineRestoreError.saveFailed(error.localizedDescription)
+        guard !modelContext.hasChanges else {
+            throw LibraryTimeMachineRestoreError.saveFailed(
+                "The catalog contains unrelated unsaved changes."
+            )
         }
+        let restoredCoverData = try await coverData(for: snapshot, scope: scope)
 
         let safetyBackup: URL
         do {
@@ -171,50 +248,27 @@ struct LibraryTimeMachineRestorer {
             : nil
         var coverRollback: CoverRollbackTicket?
         var restoredBook: Book?
-        var createdBook = false
+        let createdBook = scope == .book && existing == nil
         var skippedCollections = 0
+        var insertedWork: Work?
+        let preimage = existing.map(LibraryTimeMachineBookPreimage.init)
+        let fields: CatalogChangeFields = switch scope {
+        case .metadata: [.identity, .displayMetadata, .fullTextSource]
+        case .cover: [.cover]
+        case .book: .all
+        }
+        let affectedWorkIDs = Set([
+            existing?.work?.uuid,
+            createdBook ? snapshot.work?.id : nil,
+        ].compactMap { $0 })
+        let affectedAssetIDs = createdBook
+            ? Set(snapshot.assets.map(\.id))
+            : Set(existing?.assets.map(\.uuid) ?? [])
+        let affectedCollectionIDs = scope == .book
+            ? Set(snapshot.collections.map(\.id))
+            : []
 
         do {
-            switch scope {
-            case .metadata:
-                guard let existing else { throw LibraryTimeMachineRestoreError.bookUnavailable }
-                applyMetadata(snapshot.metadata, to: existing)
-                restoredBook = existing
-
-            case .cover:
-                guard let existing else { throw LibraryTimeMachineRestoreError.bookUnavailable }
-                restoredBook = existing
-
-            case .book:
-                let book: Book
-                if let existing {
-                    book = existing
-                } else {
-                    book = makeBook(from: snapshot)
-                    modelContext.insert(book)
-                    createdBook = true
-                }
-                applyMetadata(snapshot.metadata, to: book)
-                book.readingStatusRaw = snapshot.reading.statusRaw
-                book.dateStarted = snapshot.reading.dateStarted
-                book.dateFinished = snapshot.reading.dateFinished
-                replaceReadingSessions(on: book, with: snapshot.reading.sessions)
-                replaceHighlights(on: book, with: snapshot.highlights)
-                skippedCollections = try restoreCollectionMemberships(
-                    on: book,
-                    from: snapshot.collections
-                )
-                if createdBook {
-                    restoreAssets(
-                        on: book,
-                        from: snapshot.assets,
-                        primaryAssetID: snapshot.primaryAssetID
-                    )
-                    try restoreWork(on: book, from: snapshot.work)
-                }
-                restoredBook = book
-            }
-
             if let coverToken {
                 coverRollback = if let restoredCoverData {
                     await covers.install(restoredCoverData, using: coverToken)
@@ -224,31 +278,87 @@ struct LibraryTimeMachineRestorer {
                 guard coverRollback != nil else {
                     throw LibraryTimeMachineRestoreError.coverWriteFailed
                 }
-                restoredBook?.coverVersion = max(
-                    (restoredBook?.coverVersion ?? 0) + 1,
-                    snapshot.coverVersion + 1
-                )
             }
 
             do {
-                let fields: CatalogChangeFields = switch scope {
-                case .metadata: [.identity, .displayMetadata, .fullTextSource]
-                case .cover: [.cover]
-                case .book: .all
-                }
-                try modelContext.saveAndPublish(
+                try mutations.commit(
+                    .restoreBook(
+                        bookID: snapshot.id,
+                        fields: fields,
+                        createsBook: createdBook
+                    ),
                     affectedBookIDs: [snapshot.id],
-                    affectedWorkIDs: Set([restoredBook?.work?.uuid].compactMap { $0 }),
-                    affectedAssetIDs: Set(restoredBook?.assets.map(\.uuid) ?? []),
-                    fields: fields,
-                    changesBookMembership: createdBook,
-                    fullTextAffectedBookIDs: scope == .cover ? [] : [snapshot.id]
-                )
+                    affectedWorkIDs: affectedWorkIDs,
+                    affectedAssetIDs: affectedAssetIDs,
+                    affectedCollectionIDs: affectedCollectionIDs,
+                    revertingOnFailure: {
+                        if let preimage {
+                            preimage.restore(in: self.modelContext)
+                        } else if let restoredBook {
+                            self.discardInsertedBook(
+                                restoredBook,
+                                insertedWork: insertedWork
+                            )
+                        }
+                    }
+                ) {
+                    switch scope {
+                    case .metadata:
+                        guard let existing else {
+                            throw CatalogMutationError.modelNotFound
+                        }
+                        restoredBook = existing
+                        applyMetadata(snapshot.metadata, to: existing)
+
+                    case .cover:
+                        guard let existing else {
+                            throw CatalogMutationError.modelNotFound
+                        }
+                        restoredBook = existing
+
+                    case .book:
+                        let book: Book
+                        if let existing {
+                            book = existing
+                        } else {
+                            book = makeBook(from: snapshot)
+                            self.modelContext.insert(book)
+                        }
+                        restoredBook = book
+                        applyMetadata(snapshot.metadata, to: book)
+                        book.readingStatusRaw = snapshot.reading.statusRaw
+                        book.dateStarted = snapshot.reading.dateStarted
+                        book.dateFinished = snapshot.reading.dateFinished
+                        replaceReadingSessions(on: book, with: snapshot.reading.sessions)
+                        replaceHighlights(on: book, with: snapshot.highlights)
+                        skippedCollections = try restoreCollectionMemberships(
+                            on: book,
+                            from: snapshot.collections
+                        )
+                        if createdBook {
+                            restoreAssets(
+                                on: book,
+                                from: snapshot.assets,
+                                primaryAssetID: snapshot.primaryAssetID
+                            )
+                            insertedWork = try restoreWork(
+                                on: book,
+                                from: snapshot.work
+                            )
+                        }
+                    }
+
+                    if coverToken != nil {
+                        restoredBook?.coverVersion = max(
+                            (restoredBook?.coverVersion ?? 0) + 1,
+                            snapshot.coverVersion + 1
+                        )
+                    }
+                }
             } catch {
                 throw LibraryTimeMachineRestoreError.saveFailed(error.localizedDescription)
             }
         } catch {
-            modelContext.rollback()
             if let coverRollback {
                 _ = await covers.rollback(coverRollback)
             }
@@ -435,8 +545,8 @@ struct LibraryTimeMachineRestorer {
     private func restoreWork(
         on book: Book,
         from snapshot: LibraryTimeMachineWorkSnapshot?
-    ) throws {
-        guard let snapshot else { return }
+    ) throws -> Work? {
+        guard let snapshot else { return nil }
         let works = try modelContext.fetch(FetchDescriptor<Work>())
         if let existing = works.first(where: { $0.uuid == snapshot.id }) {
             book.work = existing
@@ -447,7 +557,7 @@ struct LibraryTimeMachineRestorer {
             } else if existing.preferredEditionUUID == nil {
                 existing.preferredEditionUUID = book.uuid
             }
-            return
+            return nil
         }
         let work = Work(
             uuid: snapshot.id,
@@ -464,6 +574,34 @@ struct LibraryTimeMachineRestorer {
         work.preferredEditionUUID = book.uuid
         modelContext.insert(work)
         book.work = work
+        return work
+    }
+
+    private func discardInsertedBook(
+        _ book: Book,
+        insertedWork: Work?
+    ) {
+        book.collections.removeAll()
+        for highlight in book.highlights {
+            highlight.book = nil
+            if highlight.modelContext != nil { modelContext.delete(highlight) }
+        }
+        book.highlights.removeAll()
+        for session in book.readingSessions {
+            session.book = nil
+            if session.modelContext != nil { modelContext.delete(session) }
+        }
+        book.readingSessions.removeAll()
+        for asset in book.assets {
+            asset.book = nil
+            if asset.modelContext != nil { modelContext.delete(asset) }
+        }
+        book.assets.removeAll()
+        book.work = nil
+        if book.modelContext != nil { modelContext.delete(book) }
+        if let insertedWork, insertedWork.modelContext != nil {
+            modelContext.delete(insertedWork)
+        }
     }
 
 }

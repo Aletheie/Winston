@@ -424,9 +424,39 @@ final class ConversionService {
         }
         let installedAssetUUID = replacement?.uuid ?? request.newAssetUUID
 
+        let replacementIdentity: ManagedFileIdentitySnapshot?
+        if let replacement, let expectedTargetHash {
+            do {
+                let identity = try await managedFiles.captureIdentity(
+                    of: .book(replacement.fileName)
+                )
+                guard identity.generation?.sha256 == expectedTargetHash else {
+                    return .conflict(.targetChanged)
+                }
+                replacementIdentity = identity
+            } catch {
+                return .conflict(.targetChanged)
+            }
+        } else {
+            replacementIdentity = nil
+        }
+
         let bookSource: ManagedFileSource
         do {
-            bookSource = try .book(sourceURL: artifactURL)
+            if let replacementIdentity {
+                bookSource = try .book(
+                    sourceURL: artifactURL,
+                    destination: .replacement(
+                        assetID: installedAssetUUID,
+                        previous: replacementIdentity
+                    )
+                )
+            } else {
+                bookSource = try .book(
+                    sourceURL: artifactURL,
+                    destination: .newAsset(assetID: installedAssetUUID)
+                )
+            }
         } catch {
             return .failed
         }
@@ -450,8 +480,8 @@ final class ConversionService {
             sources.append(.cover(data: coverData, bookID: request.uuid))
         }
         let cleanups: [ManagedFileCleanup]
-        if let oldFileName, let expectedTargetHash {
-            cleanups = [.book(oldFileName, expectedSHA256: expectedTargetHash)]
+        if let replacementIdentity {
+            cleanups = [.file(replacementIdentity)]
         } else {
             cleanups = []
         }

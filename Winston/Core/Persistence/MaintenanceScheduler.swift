@@ -416,6 +416,7 @@ enum CatalogStructureBackfill {
 
     static func processChunk(
         context: ModelContext,
+        mutations: CatalogMutationService? = nil,
         offset: Int,
         limit: Int
     ) throws -> ChunkResult {
@@ -437,7 +438,6 @@ enum CatalogStructureBackfill {
         var changedBookIDs: Set<UUID> = []
         var changedWorkIDs: Set<UUID> = []
         var changedAssetIDs: Set<UUID> = []
-        var fullTextBookIDs: Set<UUID> = []
 
         for book in books {
             if book.repairPrimaryAssetInvariant() {
@@ -445,7 +445,6 @@ enum CatalogStructureBackfill {
                 if let primaryAssetID = book.primaryAssetUUID {
                     changedAssetIDs.insert(primaryAssetID)
                 }
-                fullTextBookIDs.insert(book.uuid)
             }
 
             if book.assets.isEmpty,
@@ -463,7 +462,6 @@ enum CatalogStructureBackfill {
                 book.primaryAssetUUID = asset.uuid
                 changedBookIDs.insert(book.uuid)
                 changedAssetIDs.insert(asset.uuid)
-                fullTextBookIDs.insert(book.uuid)
             }
 
             if book.work == nil {
@@ -493,18 +491,13 @@ enum CatalogStructureBackfill {
         }
 
         if !changedBookIDs.isEmpty {
-            try context.saveAndPublish(
+            let writer = mutations ?? CatalogMutationService(modelContext: context)
+            try writer.commitStaged(
+                .legacyMigration(bookIDs: Array(changedBookIDs)),
                 affectedBookIDs: changedBookIDs,
                 affectedWorkIDs: changedWorkIDs,
                 affectedAssetIDs: changedAssetIDs,
-                fields: [
-                    .assetAvailability,
-                    .displayMetadata,
-                    .fullTextSource,
-                    .readingState,
-                    .workMembership,
-                ],
-                fullTextAffectedBookIDs: fullTextBookIDs
+                catalogChanged: true
             )
         }
         return ChunkResult(
@@ -516,6 +509,7 @@ enum CatalogStructureBackfill {
 
     static func pruneOrphanWorksChunk(
         context: ModelContext,
+        mutations: CatalogMutationService? = nil,
         offset: Int,
         limit: Int
     ) throws -> CleanupChunkResult {
@@ -530,7 +524,12 @@ enum CatalogStructureBackfill {
         let orphaned = works.filter(\.editions.isEmpty)
         orphaned.forEach(context.delete)
         if !orphaned.isEmpty {
-            try context.save()
+            let workIDs = Set(orphaned.map(\.uuid))
+            let writer = mutations ?? CatalogMutationService(modelContext: context)
+            try writer.commitStaged(
+                .maintenanceCleanup(workIDs: Array(workIDs)),
+                affectedWorkIDs: workIDs
+            )
         }
         return CleanupChunkResult(
             visited: works.count,
@@ -935,6 +934,7 @@ final class MaintenanceScheduler {
             try await waitUntilRunnable(progress)
             let result = try CatalogStructureBackfill.processChunk(
                 context: context,
+                mutations: mutations,
                 offset: offset,
                 limit: Self.chunkSize
             )
@@ -963,6 +963,7 @@ final class MaintenanceScheduler {
             try await waitUntilRunnable(progress)
             let result = try CatalogStructureBackfill.pruneOrphanWorksChunk(
                 context: context,
+                mutations: mutations,
                 offset: offset,
                 limit: Self.chunkSize
             )

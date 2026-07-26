@@ -144,7 +144,10 @@ enum LegacyLibraryMigrator {
 
         let source: ManagedFileSource
         do {
-            source = try .book(sourceURL: sourceURL, fileID: legacy.id)
+            source = try .book(
+                sourceURL: sourceURL,
+                destination: .newAsset(assetID: legacy.id)
+            )
         } catch {
             return false
         }

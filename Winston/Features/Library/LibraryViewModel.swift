@@ -99,7 +99,10 @@ final class LibraryViewModel {
             mutations: mutations,
             managedFiles: managedFiles
         )
-        self.highlights = HighlightsService(modelContext: modelContext)
+        self.highlights = HighlightsService(
+            modelContext: modelContext,
+            mutations: mutations
+        )
         self.exporter = ExportService(modelContext: modelContext)
         self.covers = CoverService(
             modelContext: modelContext,
@@ -108,7 +111,9 @@ final class LibraryViewModel {
         )
         self.health = LibraryHealthService(
             modelContext: modelContext,
-            analysisCoordinator: mutations.analysisCoordinator
+            analysisCoordinator: mutations.analysisCoordinator,
+            mutations: mutations,
+            managedFiles: managedFiles
         )
         self.maintenance = MaintenanceScheduler(
             context: modelContext,
@@ -181,45 +186,24 @@ final class LibraryViewModel {
         let author = optional(draft.author)
         let bookID = UUID()
         let workID = UUID()
-        var insertedBook: Book?
-        do {
-            try mutations.commit(
-                .addPhysicalBook(bookID: bookID, workID: workID),
-                affectedBookIDs: [bookID],
-                affectedWorkIDs: [workID]
-            ) {
-                let book = Book(
-                    uuid: bookID,
-                    fileName: "",
-                    originalFileName: title
-                )
-                book.title = title
-                book.author = author
-                book.publisher = optional(draft.publisher)
-                book.year = optional(draft.year)
-                book.isbn = optional(draft.isbn)
-                book.shelfLocation = optional(draft.shelfLocation)
-                book.notes = optional(draft.notes)
-                book.hasPhysicalCopy = true
-                if draft.readingStatus != .unread {
-                    book.setStatus(draft.readingStatus)
-                }
-                let work = Work(
-                    uuid: workID,
-                    title: title,
-                    author: author,
-                    dateCreated: book.dateAdded
-                )
-                work.preferredEditionUUID = book.uuid
-                modelContext.insert(work)
-                modelContext.insert(book)
-                book.work = work
-                insertedBook = book
-            }
+        let payload = CatalogPhysicalBookPayload(
+            bookID: bookID,
+            workID: workID,
+            title: title,
+            author: author,
+            publisher: optional(draft.publisher),
+            year: optional(draft.year),
+            isbn: optional(draft.isbn),
+            shelfLocation: optional(draft.shelfLocation),
+            notes: optional(draft.notes),
+            readingStatus: draft.readingStatus
+        )
+        switch mutations.execute(.addPhysicalBook(payload)) {
+        case .success:
             editions.refreshEditionCounts()
             toasts.success(String(localized: "Added physical book “\(title)”"))
-            return insertedBook
-        } catch {
+            return try? mutations.book(id: bookID)
+        case .failure:
             toasts.error(String(localized: "Couldn’t add the physical book."))
             return nil
         }
@@ -250,9 +234,20 @@ final class LibraryViewModel {
 
         let fileNames = Set(removals.flatMap(\.fileNames))
         let bookIDs = Set(removals.map(\.uuid))
-        let cleanup = fileNames.map {
-            ManagedFileCleanup.book($0, disposition: .trash)
-        } + removals.map { ManagedFileCleanup.cover(bookID: $0.uuid) }
+        let cleanup: [ManagedFileCleanup]
+        do {
+            let references = fileNames.sorted().map(ManagedFileReference.book)
+                + removals
+                    .map(\.uuid)
+                    .sorted { $0.uuidString < $1.uuidString }
+                    .map { .cover(bookID: $0) }
+            cleanup = try await managedFiles.captureIdentities(of: references).map {
+                .file($0, disposition: $0.reference.kind == .book ? .trash : .delete)
+            }
+        } catch {
+            toasts.error(String(localized: "Couldn’t remove the selected books."))
+            return
+        }
         let transaction: ManagedFileTransaction
         do {
             transaction = try await managedFiles.prepareCleanup(
@@ -340,7 +335,7 @@ final class LibraryViewModel {
         let work = book.work
         book.work = nil
         modelContext.delete(book)
-        WorkService.pruneIfOrphaned(work, context: modelContext, save: false)
+        WorkService.pruneIfOrphaned(work, context: modelContext)
     }
 
     private func finishRemoval(_ removed: RemovedBook) {
@@ -482,7 +477,10 @@ final class LibraryViewModel {
         let originalDRMProtected = book.drmProtected
         let originalCoverVersion = book.coverVersion
         let assetID = UUID()
-        guard let source = try? ManagedFileSource.book(sourceURL: url, fileID: assetID) else { return nil }
+        guard let source = try? ManagedFileSource.book(
+            sourceURL: url,
+            destination: .newAsset(assetID: assetID)
+        ) else { return nil }
         let fileName = source.finalRelativeName
         let expectedCoverVersion = shouldBecomePrimary ? originalCoverVersion + 1 : originalCoverVersion
         let operationID = UUID()
@@ -588,7 +586,18 @@ final class LibraryViewModel {
         let originalBookFileSize = book.fileSizeBytes
         let originalDRMProtected = book.drmProtected
         let wasPrimary = book.primaryAsset?.uuid == assetID
-        guard let source = try? ManagedFileSource.book(sourceURL: url) else { return }
+        let previousIdentity: ManagedFileIdentitySnapshot
+        do {
+            previousIdentity = try await managedFiles.captureIdentity(
+                of: .book(oldName)
+            )
+        } catch {
+            return
+        }
+        guard let source = try? ManagedFileSource.book(
+            sourceURL: url,
+            destination: .replacement(assetID: assetID, previous: previousIdentity)
+        ) else { return }
         let fileName = source.finalRelativeName
         let expectedCoverVersion = wasPrimary ? originalCoverVersion + 1 : originalCoverVersion
         let operationID = UUID()
@@ -605,7 +614,7 @@ final class LibraryViewModel {
                     unreferencedBookFileNames: [oldName],
                     coverVersions: wasPrimary ? [bookID: expectedCoverVersion] : [:]
                 ),
-                cleanups: [.book(oldName)],
+                cleanups: [.file(previousIdentity)],
                 operationID: operationID,
                 progress: progress
             )
@@ -749,6 +758,12 @@ final class LibraryViewModel {
         let operationID = UUID()
         let progress = beginManagedFileOperation(id: operationID, intent: .deleteBookFile)
         defer { endManagedFileOperation(id: operationID) }
+        let identity: ManagedFileIdentitySnapshot
+        do {
+            identity = try await managedFiles.captureIdentity(of: .book(fileName))
+        } catch {
+            return false
+        }
         let transaction: ManagedFileTransaction
         do {
             transaction = try await managedFiles.prepareCleanup(
@@ -757,7 +772,7 @@ final class LibraryViewModel {
                     presentBookIDs: [bookID],
                     unreferencedBookFileNames: [fileName]
                 ),
-                cleanups: [.book(fileName)],
+                cleanups: [.file(identity)],
                 operationID: operationID,
                 progress: progress
             )
@@ -816,72 +831,17 @@ final class LibraryViewModel {
         guard asset.modelContext != nil,
               asset.fileName == fileName,
               asset.dateAdded == dateAdded else { return }
-        asset.validationStatus = status
-        if let bookID = asset.book?.uuid {
-            modelContext.saveQuietly(
-                affectedBookIDs: [bookID],
-                affectedAssetIDs: [asset.uuid],
-                fields: [.assetAvailability, .fullTextSource],
-                fullTextAffectedBookIDs: [bookID]
-            )
-        } else {
-            modelContext.saveQuietly(catalogChanged: false)
-        }
+        _ = mutations.execute(.updateAssetValidations([
+            CatalogAssetValidationUpdate(
+                assetID: asset.uuid,
+                expectedFileName: fileName,
+                expectedDateAdded: dateAdded,
+                validation: status
+            ),
+        ]))
     }
 
     // MARK: - Reading status
-
-    private struct ReadingSessionPreimage {
-        let session: ReadingSession
-        let startedAt: Date
-        let endedAt: Date?
-        let statusRaw: String
-        let progress: Double
-    }
-
-    private struct ReadingStatePreimage {
-        let book: Book
-        let readingStatusRaw: String?
-        let dateStarted: Date?
-        let dateFinished: Date?
-        let sessions: [ReadingSessionPreimage]
-
-        init(_ book: Book) {
-            self.book = book
-            readingStatusRaw = book.readingStatusRaw
-            dateStarted = book.dateStarted
-            dateFinished = book.dateFinished
-            sessions = book.readingSessions.map {
-                ReadingSessionPreimage(
-                    session: $0,
-                    startedAt: $0.startedAt,
-                    endedAt: $0.endedAt,
-                    statusRaw: $0.statusRaw,
-                    progress: $0.progress
-                )
-            }
-        }
-
-        func restore(in context: ModelContext) {
-            let originalSessions = Set(sessions.map { ObjectIdentifier($0.session) })
-            for session in book.readingSessions
-            where !originalSessions.contains(ObjectIdentifier(session)) {
-                session.book = nil
-                if session.modelContext != nil { context.delete(session) }
-            }
-            book.readingSessions = sessions.map(\.session)
-            for preimage in sessions {
-                preimage.session.startedAt = preimage.startedAt
-                preimage.session.endedAt = preimage.endedAt
-                preimage.session.statusRaw = preimage.statusRaw
-                preimage.session.progress = preimage.progress
-                preimage.session.book = book
-            }
-            book.readingStatusRaw = readingStatusRaw
-            book.dateStarted = dateStarted
-            book.dateFinished = dateFinished
-        }
-    }
 
     @discardableResult
     func setReadingStatus(_ status: ReadingStatus, for books: [Book]) -> Bool {
@@ -890,21 +850,12 @@ final class LibraryViewModel {
         let newlyFinishedIDs = status == .finished
             ? Set(books.filter { $0.readingStatus != .finished }.map(\.uuid))
             : []
-        let preimages = books.filter { ids.contains($0.uuid) }.map(ReadingStatePreimage.init)
-        do {
-            try mutations.commit(
-                .setReadingStatus(bookIDs: Array(ids), status: status),
-                affectedBookIDs: ids,
-                revertingOnFailure: {
-                    preimages.forEach { $0.restore(in: modelContext) }
-                }
-            ) {
-                for book in try mutations.books(ids: ids) { book.setStatus(status) }
-            }
+        switch mutations.execute(.setReadingStatus(bookIDs: ids, status: status)) {
+        case .success:
             let newlyFinished = books.filter { newlyFinishedIDs.contains($0.uuid) }
             notices.booksDidFinish(newlyFinished)
             return true
-        } catch {
+        case .failure:
             return reportMutationResult(false)
         }
     }
@@ -913,20 +864,10 @@ final class LibraryViewModel {
     func updateReadingProgress(_ progress: Double, for book: Book) -> Bool {
         guard book.activeReadingSession != nil else { return false }
         let bookID = book.uuid
-        let preimage = ReadingStatePreimage(book)
-        do {
-            try mutations.commit(
-                .setReadingProgress(bookID: bookID, progress: progress),
-                affectedBookIDs: [bookID],
-                revertingOnFailure: { preimage.restore(in: modelContext) }
-            ) {
-                let storedBook = try mutations.book(id: bookID)
-                guard storedBook.updateReadingProgress(progress) else {
-                    throw CatalogMutationError.modelNotFound
-                }
-            }
+        switch mutations.execute(.setReadingProgress(bookID: bookID, progress: progress)) {
+        case .success:
             return true
-        } catch {
+        case .failure:
             return reportMutationResult(false)
         }
     }
@@ -939,26 +880,19 @@ final class LibraryViewModel {
         adding books: [Book] = [],
         savedSearch: String? = nil
     ) -> BookCollection? {
-        let collection = BookCollection(name: name, savedSearch: savedSearch)
+        let collectionID = UUID()
         let bookIDs = Set(books.map(\.uuid))
-        do {
-            try mutations.commit(
-                .createCollection(collectionID: collection.id, bookIDs: Array(bookIDs)),
-                affectedBookIDs: bookIDs,
-                affectedCollectionIDs: [collection.id],
-                revertingOnFailure: {
-                    for book in collection.books {
-                        book.collections.removeAll { $0 === collection }
-                    }
-                    collection.books.removeAll()
-                    if collection.modelContext != nil { modelContext.delete(collection) }
-                }
-            ) {
-                collection.books = try mutations.books(ids: bookIDs)
-                modelContext.insert(collection)
-            }
-            return collection
-        } catch {
+        let request = CatalogCollectionCreation(
+            collectionID: collectionID,
+            name: name,
+            savedSearch: savedSearch,
+            smartShelf: nil,
+            bookIDs: bookIDs
+        )
+        switch mutations.execute(.createCollection(request)) {
+        case .success:
+            return try? mutations.collection(id: collectionID)
+        case .failure:
             _ = reportMutationResult(false)
             return nil
         }
@@ -966,17 +900,18 @@ final class LibraryViewModel {
 
     @discardableResult
     func createSmartShelf(named name: String, definition: SmartShelfDefinition) -> BookCollection? {
-        let collection = BookCollection(name: name)
-        do {
-            try mutations.commit(
-                .createCollection(collectionID: collection.id, bookIDs: []),
-                affectedCollectionIDs: [collection.id]
-            ) {
-                collection.smartShelfDefinition = definition
-                modelContext.insert(collection)
-            }
-            return collection
-        } catch {
+        let collectionID = UUID()
+        let request = CatalogCollectionCreation(
+            collectionID: collectionID,
+            name: name,
+            savedSearch: nil,
+            smartShelf: definition,
+            bookIDs: []
+        )
+        switch mutations.execute(.createCollection(request)) {
+        case .success:
+            return try? mutations.collection(id: collectionID)
+        case .failure:
             _ = reportMutationResult(false)
             return nil
         }
@@ -989,75 +924,47 @@ final class LibraryViewModel {
         definition: SmartShelfDefinition
     ) -> Bool {
         guard !collection.isSystem else { return false }
-        let collectionID = collection.id
-        return commitCollectionMutation(collectionID: collectionID) { storedCollection in
-            storedCollection.name = name
-            storedCollection.savedSearch = nil
-            storedCollection.smartShelfDefinition = definition
-        }
+        return reportMutationResult(mutations.execute(.updateSmartShelf(
+            collectionID: collection.id,
+            name: name,
+            definition: definition
+        )))
     }
 
     @discardableResult
     func renameCollection(_ collection: BookCollection, to name: String) -> Bool {
         guard !collection.isSystem else { return false }
-        return commitCollectionMutation(collectionID: collection.id) { $0.name = name }
+        return reportMutationResult(mutations.execute(.renameCollection(
+            collectionID: collection.id,
+            name: name
+        )))
     }
 
     @discardableResult
     func deleteCollection(_ collection: BookCollection) -> Bool {
         guard !collection.isSystem else { return false }
         let collectionID = collection.id
-        let bookIDs = Set(collection.books.map(\.uuid))
-        do {
-            try mutations.commit(
-                .deleteCollection(collectionID: collectionID),
-                affectedBookIDs: bookIDs,
-                affectedCollectionIDs: [collectionID]
-            ) {
-                modelContext.delete(try mutations.collection(id: collectionID))
-            }
-            return true
-        } catch {
-            return reportMutationResult(false)
-        }
+        return reportMutationResult(mutations.execute(.deleteCollection(
+            collectionID: collectionID
+        )))
     }
 
     @discardableResult
     func add(_ books: [Book], to collection: BookCollection) -> Bool {
         let bookIDs = Set(books.map(\.uuid))
-        return commitCollectionMutation(collectionID: collection.id, bookIDs: bookIDs) { storedCollection in
-            for book in try mutations.books(ids: bookIDs)
-            where !storedCollection.books.contains(where: { $0.uuid == book.uuid }) {
-                storedCollection.books.append(book)
-            }
-        }
+        return reportMutationResult(mutations.execute(.addToCollection(
+            collectionID: collection.id,
+            bookIDs: bookIDs
+        )))
     }
 
     @discardableResult
     func remove(_ books: [Book], from collection: BookCollection) -> Bool {
         let bookIDs = Set(books.map(\.uuid))
-        return commitCollectionMutation(collectionID: collection.id, bookIDs: bookIDs) { storedCollection in
-            storedCollection.books.removeAll { bookIDs.contains($0.uuid) }
-        }
-    }
-
-    private func commitCollectionMutation(
-        collectionID: UUID,
-        bookIDs: Set<UUID> = [],
-        applying mutation: (BookCollection) throws -> Void
-    ) -> Bool {
-        do {
-            try mutations.commit(
-                .updateCollection(collectionID: collectionID),
-                affectedBookIDs: bookIDs,
-                affectedCollectionIDs: [collectionID]
-            ) {
-                try mutation(mutations.collection(id: collectionID))
-            }
-            return true
-        } catch {
-            return reportMutationResult(false)
-        }
+        return reportMutationResult(mutations.execute(.removeFromCollection(
+            collectionID: collection.id,
+            bookIDs: bookIDs
+        )))
     }
 
     @discardableResult
@@ -1066,6 +973,18 @@ final class LibraryViewModel {
             toasts.error(String(localized: "Couldn’t save library changes."))
         }
         return succeeded
+    }
+
+    @discardableResult
+    private func reportMutationResult(
+        _ result: Result<CatalogChangeSet, CatalogMutationError>
+    ) -> Bool {
+        switch result {
+        case .success:
+            true
+        case .failure:
+            reportMutationResult(false)
+        }
     }
 
     private func beginManagedFileOperation(

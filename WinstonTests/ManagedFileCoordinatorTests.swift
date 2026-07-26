@@ -559,6 +559,7 @@ struct ManagedFileCoordinatorTests {
                 break
             }
         }
+        let oldIdentity = try await coordinator.captureIdentity(of: .book(oldName))
 
         let transaction = try await coordinator.stage(
             intent: .replaceBookFile,
@@ -568,7 +569,7 @@ struct ManagedFileCoordinatorTests {
                 referencedBookFileNames: [managedSource.finalRelativeName],
                 unreferencedBookFileNames: [oldName]
             ),
-            cleanups: [.book(oldName)],
+            cleanups: [.file(oldIdentity)],
             progress: progress.record
         )
         #expect(transaction.files.first?.sourceReadPassCount == 1)
@@ -644,17 +645,183 @@ struct ManagedFileCoordinatorTests {
         #expect(stagedEntries.isEmpty)
     }
 
+    @Test func cleanupRefusesAReplacementGenerationWithTheSameName() async throws {
+        let library = try await TestLibrary()
+        _ = library
+        let fileName = "generation.epub"
+        let url = BookFileStore.url(for: fileName)
+        try Data("first".utf8).write(to: url)
+        let coordinator = makeCoordinator()
+        let identity = try await coordinator.captureIdentity(of: .book(fileName))
+        let transaction = try await coordinator.prepareCleanup(
+            intent: .deleteBookFile,
+            requirement: ManagedFileRequirement(
+                unreferencedBookFileNames: [fileName]
+            ),
+            cleanups: [.file(identity)]
+        )
+        try await coordinator.willCommitCatalog(transaction)
+        try await coordinator.catalogDidCommit(transaction)
+
+        try Data("second generation".utf8).write(to: url, options: .atomic)
+
+        await #expect(
+            throws: ManagedFileCoordinatorError.fileGenerationChanged(fileName)
+        ) {
+            _ = try await coordinator.reconcile(transaction, against: emptySnapshot)
+        }
+        #expect(try Data(contentsOf: url) == Data("second generation".utf8))
+    }
+
+    @Test func aFileAppearingAfterAMissingSnapshotIsNotDeleted() async throws {
+        let library = try await TestLibrary()
+        _ = library
+        let fileName = "appeared.epub"
+        let url = BookFileStore.url(for: fileName)
+        let coordinator = makeCoordinator()
+        let identity = try await coordinator.captureIdentity(of: .book(fileName))
+        #expect(!identity.exists)
+        let transaction = try await coordinator.prepareCleanup(
+            intent: .deleteBookFile,
+            requirement: ManagedFileRequirement(
+                unreferencedBookFileNames: [fileName]
+            ),
+            cleanups: [.file(identity)]
+        )
+        try await coordinator.willCommitCatalog(transaction)
+        try await coordinator.catalogDidCommit(transaction)
+
+        try Data("late".utf8).write(to: url)
+
+        await #expect(
+            throws: ManagedFileCoordinatorError.fileGenerationChanged(fileName)
+        ) {
+            _ = try await coordinator.reconcile(transaction, against: emptySnapshot)
+        }
+        #expect(try Data(contentsOf: url) == Data("late".utf8))
+    }
+
+    @Test func stagedArtifactIsReadOnlyAndGenerationValidatedBeforeCommit() async throws {
+        let library = try await TestLibrary()
+        let source = try sourceFile(in: library.root, contents: "immutable")
+        let managedSource = try ManagedFileSource.book(sourceURL: source)
+        let coordinator = makeCoordinator()
+        let transaction = try await coordinator.stage(
+            intent: .importBook,
+            sources: [managedSource],
+            requirement: ManagedFileRequirement(
+                presentBookIDs: [UUID()],
+                referencedBookFileNames: [managedSource.finalRelativeName]
+            )
+        )
+        let staged = try #require(transaction.files.first)
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: staged.stagedURL.path(percentEncoded: false)
+        )
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
+        #expect(permissions == 0o444)
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o644))],
+            ofItemAtPath: staged.stagedURL.path(percentEncoded: false)
+        )
+        try Data("tampered".utf8).write(to: staged.stagedURL, options: .atomic)
+
+        await #expect(
+            throws: ManagedFileCoordinatorError.fileGenerationChanged(
+                managedSource.finalRelativeName
+            )
+        ) {
+            try await coordinator.willCommitCatalog(transaction)
+        }
+        await coordinator.abort(transaction)
+    }
+
+    @Test func symlinkedManagedLeafIsRejectedWithoutReadingItsTarget() async throws {
+        let library = try await TestLibrary()
+        let outside = library.root.appending(path: "outside.epub")
+        let linkName = "linked-generation.epub"
+        let link = BookFileStore.catalogURL(for: linkName)!
+        try Data("outside".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        let coordinator = makeCoordinator()
+
+        await #expect(
+            throws: ManagedFileCoordinatorError.unsafeRelativeName(linkName)
+        ) {
+            _ = try await coordinator.captureIdentity(of: .book(linkName))
+        }
+        #expect(try Data(contentsOf: outside) == Data("outside".utf8))
+    }
+
+    @Test func recoveryRemovesStagingDirectoriesWithoutAJournal() async throws {
+        let library = try await TestLibrary()
+        _ = library
+        let coordinator = makeCoordinator()
+        _ = try await coordinator.captureIdentity(of: .book("missing.epub"))
+        let orphan = AppPaths.managedFilesDirectory
+            .appending(path: "Staging", directoryHint: .isDirectory)
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(
+            at: orphan,
+            withIntermediateDirectories: true
+        )
+        try Data("partial".utf8).write(to: orphan.appending(path: "partial"))
+
+        let report = await coordinator.recover(against: emptySnapshot)
+
+        #expect(report.removedOrphanStagingURLs == [orphan])
+        #expect(!FileManager.default.fileExists(
+            atPath: orphan.path(percentEncoded: false)
+        ))
+    }
+
+    @Test func destinationCollisionIsRejectedBeforeCatalogSave() async throws {
+        let library = try await TestLibrary()
+        let source = try sourceFile(in: library.root, contents: "incoming")
+        let assetID = UUID()
+        let managedSource = try ManagedFileSource.book(
+            sourceURL: source,
+            destination: .newAsset(assetID: assetID)
+        )
+        try Data("existing".utf8).write(
+            to: BookFileStore.url(for: managedSource.finalRelativeName)
+        )
+        let coordinator = makeCoordinator()
+        let transaction = try await coordinator.stage(
+            intent: .importBook,
+            sources: [managedSource],
+            requirement: ManagedFileRequirement(
+                presentBookIDs: [UUID()],
+                referencedBookFileNames: [managedSource.finalRelativeName]
+            )
+        )
+
+        await #expect(
+            throws: ManagedFileCoordinatorError.destinationConflict(
+                managedSource.finalRelativeName
+            )
+        ) {
+            try await coordinator.willCommitCatalog(transaction)
+        }
+        await coordinator.abort(transaction)
+    }
+
     @Test func oneThousandFileCleanupIsSerializedAndProgressIsThrottled() async throws {
         let library = try await TestLibrary()
         _ = library
         var cleanups: [ManagedFileCleanup] = []
-        cleanups.reserveCapacity(1_000)
+        var references: [ManagedFileReference] = []
+        references.reserveCapacity(1_000)
         for index in 0..<1_000 {
             let fileName = "bulk-\(index).epub"
             try Data([UInt8(index % 251)]).write(to: BookFileStore.url(for: fileName))
-            cleanups.append(.book(fileName))
+            references.append(.book(fileName))
         }
         let coordinator = makeCoordinator()
+        cleanups = try await coordinator.captureIdentities(of: references).map {
+            .file($0)
+        }
         let progress = ManagedProgressRecorder()
         let transaction = try await coordinator.prepareCleanup(
             intent: .deleteBook,

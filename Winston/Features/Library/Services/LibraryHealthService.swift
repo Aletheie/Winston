@@ -7,6 +7,8 @@ import SwiftData
 final class LibraryHealthService {
     private let modelContext: ModelContext
     private let analysisCoordinator: CatalogAnalysisCoordinator
+    private let mutations: CatalogMutationService
+    private let managedFiles: ManagedFileCoordinator
     private(set) var missingFileUUIDs: Set<UUID> = []
     private var cachedMetadataAnalysis: MetadataFixAnalysis?
     private var cachedMetadataAnalysisRevision = -1
@@ -14,10 +16,19 @@ final class LibraryHealthService {
 
     init(
         modelContext: ModelContext,
-        analysisCoordinator: CatalogAnalysisCoordinator = CatalogAnalysisCoordinator()
+        analysisCoordinator: CatalogAnalysisCoordinator = CatalogAnalysisCoordinator(),
+        mutations: CatalogMutationService? = nil,
+        managedFiles: ManagedFileCoordinator = .shared
     ) {
         self.modelContext = modelContext
-        self.analysisCoordinator = analysisCoordinator
+        let resolvedMutations = mutations ?? CatalogMutationService(
+            modelContext: modelContext,
+            managedFiles: managedFiles,
+            analysisCoordinator: analysisCoordinator
+        )
+        self.analysisCoordinator = resolvedMutations.analysisCoordinator
+        self.mutations = resolvedMutations
+        self.managedFiles = managedFiles
     }
 
     func isMissing(_ book: Book) -> Bool { missingFileUUIDs.contains(book.uuid) }
@@ -120,27 +131,31 @@ final class LibraryHealthService {
             return (missingBooks, assetStatus)
         }.value
         missingFileUUIDs = result.0
-        var changedBookIDs: Set<UUID> = []
+        var updates: [CatalogAssetValidationUpdate] = []
+        updates.reserveCapacity(assets.count)
         for (index, asset) in assets.enumerated() {
             // The yields below let deletions interleave; a removed asset must not be written to.
             guard asset.modelContext != nil, let status = result.1[asset.uuid] else { continue }
+            let updatedStatus: AssetValidation?
             if status == .missing {
-                if asset.validationStatus != .missing {
-                    asset.validationStatus = .missing
-                    if let bookID = asset.book?.uuid { changedBookIDs.insert(bookID) }
-                }
+                updatedStatus = asset.validationStatus == .missing ? nil : .missing
             } else if asset.validationStatus == nil || asset.validationStatus == .missing {
-                asset.validationStatus = .ok
-                if let bookID = asset.book?.uuid { changedBookIDs.insert(bookID) }
+                updatedStatus = .ok
+            } else {
+                updatedStatus = nil
+            }
+            if let updatedStatus {
+                updates.append(CatalogAssetValidationUpdate(
+                    assetID: asset.uuid,
+                    expectedFileName: asset.fileName,
+                    expectedDateAdded: asset.dateAdded,
+                    validation: updatedStatus
+                ))
             }
             if index > 0, index.isMultiple(of: 256) { await Task.yield() }
         }
-        if !changedBookIDs.isEmpty {
-            modelContext.saveQuietly(
-                affectedBookIDs: changedBookIDs,
-                fields: [.assetAvailability, .displayMetadata, .fullTextSource],
-                fullTextAffectedBookIDs: changedBookIDs
-            )
+        if !updates.isEmpty {
+            _ = mutations.execute(.updateAssetValidations(updates))
         }
         return result.0.count
     }
@@ -148,22 +163,52 @@ final class LibraryHealthService {
     func relink(_ book: Book, from url: URL) async {
         guard book.modelContext != nil else { return }
         let asset = book.primaryAsset
+        let bookID = book.uuid
         let primaryAssetID = asset?.uuid
         let primaryAssetDateAdded = asset?.dateAdded
         let oldFileName = asset?.fileName ?? book.fileName
-        let replacementUUID = asset?.uuid ?? book.uuid
-        let replacement: (fileName: String, size: Int64)? = await Task.detached(priority: .userInitiated) {
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-            guard let fileName = try? BookFileStore.replacementCopy(
-                of: url,
-                replacing: oldFileName,
-                uuid: replacementUUID
-            ) else { return nil }
-            return (fileName, BookFileStore.size(of: fileName))
-        }.value
-        guard let replacement else { return }
-        let fileName = replacement.fileName
+        let replacementUUID = asset?.uuid ?? bookID
+        let originalCoverVersion = book.coverVersion
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+        let previousIdentity: ManagedFileIdentitySnapshot
+        let source: ManagedFileSource
+        do {
+            previousIdentity = try await managedFiles.captureIdentity(
+                of: .book(oldFileName)
+            )
+            source = try .book(
+                sourceURL: url,
+                destination: .replacement(
+                    assetID: replacementUUID,
+                    previous: previousIdentity
+                )
+            )
+        } catch {
+            return
+        }
+        let fileName = source.finalRelativeName
+        let transaction: ManagedFileTransaction
+        do {
+            transaction = try await managedFiles.stage(
+                intent: .replaceBookFile,
+                sources: [source],
+                requirement: ManagedFileRequirement(
+                    presentBookIDs: [bookID],
+                    referencedBookFileNames: [fileName],
+                    unreferencedBookFileNames: [oldFileName],
+                    coverVersions: [bookID: originalCoverVersion + 1]
+                ),
+                cleanups: [.file(previousIdentity)]
+            )
+        } catch {
+            return
+        }
+        guard let staged = transaction.files.first else {
+            await managedFiles.abort(transaction)
+            return
+        }
         let primaryIsCurrent = if let primaryAssetID {
             book.primaryAsset?.uuid == primaryAssetID
                 && book.primaryAsset?.fileName == oldFileName
@@ -171,83 +216,86 @@ final class LibraryHealthService {
         } else {
             book.assets.isEmpty && book.fileName == oldFileName
         }
-        guard book.modelContext != nil, primaryIsCurrent else {
-            Task.detached(priority: .utility) {
-                BookFileStore.delete(fileName: fileName)
-            }
-            return
-        }
-        let replacementDate = Date()
-        book.fileName = fileName
-        book.fileSizeBytes = replacement.size
-        book.drmProtected = nil
-        book.coverVersion += 1
-
-        let updatedAsset: BookAsset
-        if let asset {
-            asset.fileName = fileName
-            asset.sizeBytes = book.fileSizeBytes
-            asset.contentHash = nil
-            asset.generatedFromContentHash = nil
-            asset.origin = .imported
-            asset.validationStatus = .ok
-            asset.dateAdded = replacementDate
-            updatedAsset = asset
-        } else {
-            let asset = BookAsset(
-                uuid: book.uuid,
-                fileName: fileName,
-                origin: .original,
-                sizeBytes: book.fileSizeBytes,
-                dateAdded: replacementDate,
-                validationStatus: .ok,
-                book: book
-            )
-            modelContext.insert(asset)
-            updatedAsset = asset
-        }
-        book.primaryAssetUUID = updatedAsset.uuid
-        guard modelContext.saveQuietly(
-            rollbackOnFailure: true,
-            affectedBookIDs: [book.uuid],
-            affectedAssetIDs: [updatedAsset.uuid],
-            fields: [.assetAvailability, .displayMetadata, .cover],
-            fullTextAffectedBookIDs: [book.uuid]
-        ) else {
-            Task.detached(priority: .utility) {
-                BookFileStore.delete(fileName: fileName)
-            }
-            return
-        }
-        analysisCoordinator.cancelAll(for: book.uuid)
-        missingFileUUIDs.remove(book.uuid)
-        if fileName != oldFileName, BookFileStore.validatedURL(for: oldFileName) != nil {
-            Task.detached(priority: .utility) {
-                BookFileStore.delete(fileName: oldFileName)
-            }
-        }
-
-        let managedURL = BookFileStore.url(for: fileName)
-        let analysis = await Task.detached(priority: .utility) {
-            (
-                try? ContentHasher.sha256(of: managedURL),
-                DRMDetector.isProtected(url: managedURL)
-            )
-        }.value
         guard book.modelContext != nil,
-              updatedAsset.modelContext != nil,
-              updatedAsset.fileName == fileName,
-              updatedAsset.dateAdded == replacementDate else { return }
-        updatedAsset.contentHash = analysis.0
-        if book.primaryAsset?.uuid == updatedAsset.uuid {
-            book.drmProtected = analysis.1
+              book.coverVersion == originalCoverVersion,
+              primaryIsCurrent else {
+            await managedFiles.abort(transaction)
+            return
         }
-        modelContext.saveQuietly(
-            affectedBookIDs: [book.uuid],
-            affectedAssetIDs: [updatedAsset.uuid],
-            fields: [.assetAvailability, .fullTextSource],
-            fullTextAffectedBookIDs: [book.uuid]
-        )
+        let drmProtected = await Task.detached(priority: .utility) {
+            DRMDetector.isProtected(url: staged.stagedURL)
+        }.value
+        let replacementDate = Date()
+        let updatedAssetID = primaryAssetID ?? bookID
+        let bookPreimage = CatalogBookMetadataPreimage(book)
+        let assetPreimage = asset.map(CatalogBookAssetPreimage.init)
+        var insertedAsset: BookAsset?
+        do {
+            _ = try await mutations.commitFileMutation(
+                primaryAssetID == nil
+                    ? .addFile(bookID: bookID, assetID: updatedAssetID)
+                    : .replaceFile(bookID: bookID, assetID: updatedAssetID),
+                transaction: transaction,
+                affectedBookIDs: [bookID],
+                revertingOnFailure: {
+                    bookPreimage.restore()
+                    assetPreimage?.restore()
+                    if let insertedAsset, insertedAsset.modelContext != nil {
+                        self.modelContext.delete(insertedAsset)
+                    }
+                }
+            ) {
+                let storedBook = try self.mutations.book(id: bookID)
+                let sourceIsCurrent = if let primaryAssetID {
+                    storedBook.primaryAsset?.uuid == primaryAssetID
+                        && storedBook.primaryAsset?.fileName == oldFileName
+                        && storedBook.primaryAsset?.dateAdded == primaryAssetDateAdded
+                } else {
+                    storedBook.assets.isEmpty && storedBook.fileName == oldFileName
+                }
+                guard sourceIsCurrent,
+                      storedBook.coverVersion == originalCoverVersion else {
+                    throw CatalogMutationError.staleGeneration
+                }
+
+                storedBook.fileName = fileName
+                storedBook.fileSizeBytes = staged.byteCount
+                storedBook.drmProtected = drmProtected
+                storedBook.coverVersion = originalCoverVersion + 1
+
+                let updatedAsset: BookAsset
+                if let primaryAssetID,
+                   let storedAsset = storedBook.assets.first(where: { $0.uuid == primaryAssetID }) {
+                    storedAsset.fileName = fileName
+                    storedAsset.sizeBytes = staged.byteCount
+                    storedAsset.contentHash = staged.sha256
+                    storedAsset.generatedFromContentHash = nil
+                    storedAsset.origin = .imported
+                    storedAsset.validationStatus = .ok
+                    storedAsset.dateAdded = replacementDate
+                    updatedAsset = storedAsset
+                } else {
+                    let storedAsset = BookAsset(
+                        uuid: updatedAssetID,
+                        fileName: fileName,
+                        origin: .original,
+                        contentHash: staged.sha256,
+                        sizeBytes: staged.byteCount,
+                        dateAdded: replacementDate,
+                        validationStatus: .ok,
+                        book: storedBook
+                    )
+                    self.modelContext.insert(storedAsset)
+                    insertedAsset = storedAsset
+                    updatedAsset = storedAsset
+                }
+                storedBook.primaryAssetUUID = updatedAsset.uuid
+            }
+        } catch {
+            return
+        }
+        analysisCoordinator.cancelAll(for: bookID)
+        missingFileUUIDs.remove(bookID)
     }
 
 }

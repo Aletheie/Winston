@@ -7,9 +7,71 @@ import Testing
 @MainActor
 struct CatalogMutationFailureTests {
     private struct InjectedSaveFailure: Error {}
+    private struct InjectedCheckpointFailure: Error {}
 
     private var failingSaveAdapter: CatalogSaveAdapter {
         CatalogSaveAdapter { _ in throw InjectedSaveFailure() }
+    }
+
+    @Test func beforeMutationFailpointLeavesTheContextClean() async throws {
+        try await assertCheckpointFailure(at: .beforeMutation)
+    }
+
+    @Test func afterMutationFailpointRestoresThePreimageAndDoesNotPublish() async throws {
+        try await assertCheckpointFailure(at: .afterMutation)
+    }
+
+    @Test func staleGenerationRejectsTheCommandWithoutLeakingChanges() async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library, title: "Original")
+        let revision = LibraryMutationLog.shared.catalogRevision
+        let mutations = CatalogMutationService(modelContext: library.context)
+        let request = CatalogMutationRequest.updateBook(
+            CatalogBookUpdate(
+                bookID: book.uuid,
+                patch: CatalogBookPatch(fields: [.title], title: "Changed")
+            ),
+            source: .manual
+        )
+
+        let result = mutations.execute(request, validatingGeneration: { false })
+
+        guard case .failure(.staleGeneration) = result else {
+            Issue.record("Expected a stale generation failure")
+            return
+        }
+        #expect(book.title == "Original")
+        #expect(!library.context.hasChanges)
+        #expect(LibraryMutationLog.shared.catalogRevision == revision)
+    }
+
+    @Test func typedCommandReturnsOnlyAChangeSetAfterDurableSave() async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library, title: "Original")
+        let mutations = CatalogMutationService(modelContext: library.context)
+
+        let result = mutations.execute(.updateBook(
+            CatalogBookUpdate(
+                bookID: book.uuid,
+                patch: CatalogBookPatch(fields: [.title], title: "Changed")
+            ),
+            source: .manual
+        ))
+
+        let changeSet: CatalogChangeSet
+        switch result {
+        case .success(let committed):
+            changeSet = committed
+        case .failure(let error):
+            Issue.record("Expected a successful typed mutation, got \(error)")
+            return
+        }
+        #expect(changeSet.affectedBookIDs == [book.uuid])
+        #expect(changeSet.fields.contains(.identity))
+        #expect(changeSet.fields.contains(.displayMetadata))
+        #expect(changeSet.fields.contains(.fullTextSource))
+        #expect(book.title == "Changed")
+        #expect(!library.context.hasChanges)
     }
 
     @Test func failedReadingStatusRollsBackAndDoesNotPublishSuccess() async throws {
@@ -122,6 +184,38 @@ struct CatalogMutationFailureTests {
         try library.context.save()
         let stored = try #require(try fetchBook(book.uuid, from: library.container))
         #expect(stored.title == "Original")
+        #expect(stored.notes == "unrelated")
+    }
+
+    @Test func failedHighlightImportLeavesNoPendingRelationshipInsert() async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library, title: "Original")
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            saveAdapter: failingSaveAdapter
+        )
+
+        let result = mutations.execute(.importHighlights([
+            CatalogHighlightInsertion(
+                bookID: book.uuid,
+                text: "A quote",
+                isNote: false,
+                location: "12",
+                addedDate: .now
+            ),
+        ]))
+
+        guard case .failure(.saveFailed) = result else {
+            Issue.record("Expected highlight import persistence to fail")
+            return
+        }
+        #expect(book.highlights.isEmpty)
+        #expect(!library.context.hasChanges)
+
+        book.notes = "unrelated"
+        try library.context.save()
+        let stored = try #require(try fetchBook(book.uuid, from: library.container))
+        #expect(stored.highlights.isEmpty)
         #expect(stored.notes == "unrelated")
     }
 
@@ -268,6 +362,42 @@ struct CatalogMutationFailureTests {
         library.context.insert(book)
         try library.context.save()
         return book
+    }
+
+    private func assertCheckpointFailure(
+        at checkpoint: CatalogMutationCheckpoint
+    ) async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library, title: "Original")
+        let revision = LibraryMutationLog.shared.catalogRevision
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            hooks: CatalogMutationHooks { reached in
+                if reached == checkpoint { throw InjectedCheckpointFailure() }
+            }
+        )
+
+        let result = mutations.execute(.updateBook(
+            CatalogBookUpdate(
+                bookID: book.uuid,
+                patch: CatalogBookPatch(fields: [.title], title: "Changed")
+            ),
+            source: .manual
+        ))
+
+        guard case .failure(.checkpointFailed) = result else {
+            Issue.record("Expected the injected checkpoint to fail the command")
+            return
+        }
+        #expect(book.title == "Original")
+        #expect(!library.context.hasChanges)
+        #expect(LibraryMutationLog.shared.catalogRevision == revision)
+
+        book.notes = "unrelated"
+        try library.context.save()
+        let stored = try #require(try fetchBook(book.uuid, from: library.container))
+        #expect(stored.title == "Original")
+        #expect(stored.notes == "unrelated")
     }
 
     private func seedEdition(in library: TestLibrary, title: String) -> Book {

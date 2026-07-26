@@ -454,6 +454,95 @@ struct LibraryTimeMachineTests {
         #expect(book.title == "Current")
     }
 
+    @Test func failedRestoreSaveRestoresLiveModelsAndLeavesNoDirtyContext() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "WinstonFailedRestore-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let covers = root.appending(path: "covers", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: covers, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let container = PersistenceController.inMemory()
+        let context = container.mainContext
+        let id = UUID()
+        let book = Book(uuid: id, fileName: "book.epub", originalFileName: "Book.epub")
+        book.title = "Current"
+        let currentSession = ReadingSession(
+            startedAt: Date(timeIntervalSince1970: 100),
+            status: .reading,
+            progress: 0.4,
+            book: book
+        )
+        let currentHighlight = Highlight(
+            text: "Current quote",
+            isNote: false,
+            location: "10",
+            addedDate: nil
+        )
+        currentHighlight.book = book
+        context.insert(book)
+        context.insert(currentSession)
+        context.insert(currentHighlight)
+        try context.save()
+
+        var backup = snapshot(id: id, title: "Backup")
+        backup.reading = LibraryTimeMachineReadingSnapshot(
+            statusRaw: ReadingStatus.finished.rawValue,
+            sessions: [
+                LibraryTimeMachineReadingSessionSnapshot(
+                    id: UUID(),
+                    startedAt: Date(timeIntervalSince1970: 200),
+                    endedAt: Date(timeIntervalSince1970: 300),
+                    statusRaw: ReadingSessionStatus.finished.rawValue,
+                    progress: 1
+                ),
+            ]
+        )
+        backup.highlights = [
+            LibraryTimeMachineHighlightSnapshot(
+                text: "Backup quote",
+                kindRaw: "highlight",
+                location: "20",
+                addedDate: nil,
+                dateImported: .now
+            ),
+        ]
+        let mutations = CatalogMutationService(
+            modelContext: context,
+            saveAdapter: CatalogSaveAdapter { _ in throw TimeMachineTestError.expected }
+        )
+        let restorer = LibraryTimeMachineRestorer(
+            modelContext: context,
+            coversDirectory: covers,
+            createSafetyBackup: { source in source },
+            mutationService: mutations
+        )
+
+        await #expect(throws: LibraryTimeMachineRestoreError.self) {
+            try await restorer.restore(
+                backup,
+                scope: .book,
+                from: root.appending(path: "source")
+            )
+        }
+        await Task.yield()
+        #expect(book.title == "Current")
+        #expect(book.readingSessions.map(\.uuid) == [currentSession.uuid])
+        #expect(book.highlights.map(\.text) == ["Current quote"])
+        #expect(!context.hasChanges)
+
+        book.notes = "unrelated"
+        try context.save()
+        let verification = ModelContext(container)
+        let stored = try #require(try verification.fetch(
+            FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == id })
+        ).first)
+        #expect(stored.title == "Current")
+        #expect(stored.notes == "unrelated")
+        #expect(stored.highlights.map(\.text) == ["Current quote"])
+    }
+
     private func snapshot(
         id: UUID,
         title: String,

@@ -688,14 +688,17 @@ final class ReadingHistoryImporter {
     }
 
     private let modelContext: ModelContext
-    private let save: @MainActor () throws -> Void
+    private let mutations: CatalogMutationService
+    private let injectedSave: (@MainActor () throws -> Void)?
 
     init(
         modelContext: ModelContext,
+        mutations: CatalogMutationService? = nil,
         save: (@MainActor () throws -> Void)? = nil
     ) {
         self.modelContext = modelContext
-        self.save = save ?? { try modelContext.save() }
+        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
+        injectedSave = save
     }
 
     func apply(_ rows: [ReadingHistoryImportPreviewRow]) throws -> ReadingHistoryImportResult {
@@ -755,9 +758,23 @@ final class ReadingHistoryImporter {
         }
 
         do {
-            try save()
-            if !touched.isEmpty {
-                LibraryMutationLog.shared.bump(affectedBookIDs: touched)
+            if let injectedSave {
+                try injectedSave()
+                if !touched.isEmpty {
+                    LibraryMutationLog.shared.bump(
+                        affectedBookIDs: touched,
+                        fields: [.readingState, .displayMetadata]
+                    )
+                }
+            } else if !touched.isEmpty {
+                try mutations.commitStaged(
+                    .updateMetadataBatch(
+                        bookIDs: Array(touched),
+                        operation: "readingHistoryImport",
+                        fields: ["readingStatus", "readingProgress", "rating"]
+                    ),
+                    affectedBookIDs: touched
+                )
             }
         } catch {
             let insertedIDs = Set(insertedSessions.map(\.uuid))
