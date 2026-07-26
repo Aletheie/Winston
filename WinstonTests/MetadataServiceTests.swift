@@ -736,6 +736,106 @@ struct MetadataServiceTests {
         #expect(asset.validationStatus == .ok)
     }
 
+    @Test func standardImportUsesUnifiedDuplicateAndFormatReconciliation() async throws {
+        let lib = try await TestLibrary()
+        let settings = AppSettings()
+        let oldOnline = settings.onlineMetadataEnabled
+        settings.onlineMetadataEnabled = false
+        defer { settings.onlineMetadataEnabled = oldOnline }
+
+        let epub = lib.root.appending(path: "unified.epub")
+        let exactCopy = lib.root.appending(path: "unified-copy.epub")
+        let pdf = lib.root.appending(path: "unified.pdf")
+        try Data("same-edition-epub".utf8).write(to: epub)
+        try Data("same-edition-epub".utf8).write(to: exactCopy)
+        try Data("same-edition-pdf".utf8).write(to: pdf)
+
+        let inspected: BookMetadata = {
+            var value = BookMetadata()
+            value.title = "Unified Pipeline"
+            value.author = "Ada Author"
+            value.isbn = "9781234567890"
+            value.language = "eng"
+            return value
+        }()
+        let toasts = ToastCenter()
+        let importer = ImportService(
+            modelContext: lib.context,
+            settings: settings,
+            metadata: MetadataService(
+                modelContext: lib.context,
+                settings: settings,
+                online: FakeOnlineClient()
+            ),
+            wishlist: WishlistService(modelContext: lib.context, toasts: toasts),
+            toasts: toasts,
+            analyzeBook: { _ in
+                ImportBookAnalysis(
+                    metadata: inspected,
+                    drmProtected: false,
+                    validation: .ok
+                )
+            }
+        )
+
+        func importFiles(_ urls: [URL]) async -> [UUID] {
+            await withCheckedContinuation { continuation in
+                importer.addBooks(from: urls) {
+                    continuation.resume(returning: $0.map(\.uuid))
+                }
+            }
+        }
+
+        let first = await importFiles([epub])
+        #expect(first.count == 1)
+        let originalBookID = try #require(first.first)
+
+        let duplicate = await importFiles([exactCopy])
+        #expect(duplicate.isEmpty)
+        #expect(lib.context.allBooks().count == 1)
+        #expect(lib.context.allBooks().first?.assets.count == 1)
+
+        let merged = await importFiles([pdf])
+        #expect(merged == [originalBookID])
+        let book = try #require(lib.context.allBooks().first)
+        #expect(book.uuid == originalBookID)
+        #expect(book.assets.count == 2)
+        #expect(Set(book.assets.map { $0.format.lowercased() }) == ["epub", "pdf"])
+        #expect(try lib.context.fetch(FetchDescriptor<Work>()).count == 1)
+        #expect(!lib.context.hasChanges)
+    }
+
+    @Test func standardImportRejectsASymbolicLinkDuringSourceDiscovery() async throws {
+        let lib = try await TestLibrary()
+        let target = lib.root.appending(path: "real.epub")
+        let link = lib.root.appending(path: "linked.epub")
+        try Data("book".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let settings = AppSettings()
+        let oldOnline = settings.onlineMetadataEnabled
+        settings.onlineMetadataEnabled = false
+        defer { settings.onlineMetadataEnabled = oldOnline }
+        let toasts = ToastCenter()
+        let importer = ImportService(
+            modelContext: lib.context,
+            settings: settings,
+            metadata: MetadataService(modelContext: lib.context, settings: settings),
+            wishlist: WishlistService(modelContext: lib.context, toasts: toasts),
+            toasts: toasts
+        )
+
+        let importedCount: Int = await withCheckedContinuation { continuation in
+            importer.addBooks(from: [link]) { books in
+                continuation.resume(returning: books.count)
+            }
+        }
+
+        #expect(importedCount == 0)
+        #expect(lib.context.allBooks().isEmpty)
+        #expect(try lib.context.fetch(FetchDescriptor<BookAsset>()).isEmpty)
+        #expect(!lib.context.hasChanges)
+    }
+
     @Test func importRefreshesWorkIdentityAfterOnlineEnrichment() async throws {
         let lib = try await TestLibrary()
         let settings = AppSettings()

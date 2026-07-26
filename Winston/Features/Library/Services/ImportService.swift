@@ -45,6 +45,23 @@ nonisolated struct FileInspectionResult: Sendable, Equatable {
         sourceReadPassCount + analysisOpenCount
     }
 
+    var fingerprint: ImportFingerprint {
+        ImportFingerprint(contentHash: sha256, format: format)
+    }
+
+    func identity(fallbackTitle: String) -> ImportIdentityRecord {
+        let extractedTitle = metadata.title?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return ImportIdentityRecord(
+            title: extractedTitle.flatMap { $0.isEmpty ? nil : $0 } ?? fallbackTitle,
+            author: metadata.author,
+            isbn: metadata.isbn,
+            language: metadata.language,
+            publisher: metadata.publisher,
+            year: metadata.year
+        )
+    }
+
     init(
         assetID: UUID,
         stagedFile: StagedManagedFile,
@@ -203,29 +220,117 @@ nonisolated enum ImportFileInspectionPipeline {
     }
 }
 
+nonisolated enum ImportSessionSource: String, Sendable, Equatable {
+    case standard
+    case calibre
+}
+
+nonisolated enum ImportSessionStep: String, Sendable, Equatable {
+    case sourceDiscovery
+    case staging
+    case inspection
+    case reconciliation
+    case modelProposal
+    case chunkCommit
+    case publishing
+    case derivedJobs
+    case completed
+    case cancelling
+    case cancelled
+    case failed
+}
+
+nonisolated enum ImportSourceDiscoveryError: Error, Sendable, Equatable {
+    case invalidURL
+    case unsupportedFormat
+    case symbolicLink
+    case notRegularFile
+    case unreadable
+}
+
+nonisolated struct ImportDiscoveredSource: Sendable, Equatable {
+    let url: URL
+    let format: String
+}
+
+nonisolated enum ImportSourceDiscovery {
+    static func discover(_ sourceURL: URL) throws -> ImportDiscoveredSource {
+        guard sourceURL.isFileURL else {
+            throw ImportSourceDiscoveryError.invalidURL
+        }
+        let url = sourceURL.standardizedFileURL
+        let format = url.pathExtension.lowercased()
+        guard libraryEbookExtensions.contains(format) else {
+            throw ImportSourceDiscoveryError.unsupportedFormat
+        }
+        let values: URLResourceValues
+        do {
+            values = try url.resourceValues(forKeys: [
+                .isSymbolicLinkKey,
+                .isRegularFileKey,
+                .isReadableKey
+            ])
+        } catch {
+            throw ImportSourceDiscoveryError.unreadable
+        }
+        guard values.isSymbolicLink != true else {
+            throw ImportSourceDiscoveryError.symbolicLink
+        }
+        guard values.isRegularFile == true else {
+            throw ImportSourceDiscoveryError.notRegularFile
+        }
+        guard values.isReadable != false else {
+            throw ImportSourceDiscoveryError.unreadable
+        }
+        return ImportDiscoveredSource(url: url, format: format)
+    }
+}
+
 @MainActor
 final class ImportSession {
     let id = UUID()
     let generation = UUID()
-    let requestedBookIDs: Set<UUID>
+    let source: ImportSessionSource
+    private(set) var requestedBookIDs: Set<UUID>
+    private(set) var step: ImportSessionStep = .sourceDiscovery
     private var task: Task<Void, Never>?
 
-    init(requestedBookIDs: Set<UUID>) {
+    init(
+        source: ImportSessionSource = .standard,
+        requestedBookIDs: Set<UUID> = []
+    ) {
+        self.source = source
         self.requestedBookIDs = requestedBookIDs
     }
 
     var isCancelled: Bool { task?.isCancelled ?? false }
 
     func cancel() {
+        step = .cancelling
         task?.cancel()
     }
 
-    fileprivate func start(_ task: Task<Void, Never>) {
+    func discover(_ bookIDs: Set<UUID>) {
+        requestedBookIDs = bookIDs
+        step = .staging
+    }
+
+    func advance(to step: ImportSessionStep) {
+        guard self.step != .cancelled, self.step != .failed else { return }
+        self.step = step
+    }
+
+    func start(_ task: Task<Void, Never>) {
         precondition(self.task == nil)
         self.task = task
     }
 
-    fileprivate func finish() {
+    func finish(as finalStep: ImportSessionStep? = nil) {
+        if let finalStep {
+            step = finalStep
+        } else if step == .cancelling {
+            step = .cancelled
+        }
         task = nil
     }
 }
@@ -250,6 +355,7 @@ final class ImportService {
     nonisolated private struct CopyRequest: Sendable {
         let source: URL
         let uuid: UUID
+        let workID: UUID
         let originalName: String
     }
 
@@ -257,11 +363,46 @@ final class ImportService {
         let request: CopyRequest
         let inspection: FileInspectionResult
         let fileTransaction: ManagedFileTransaction
+
+        var transactions: [ManagedFileTransaction] {
+            [fileTransaction]
+        }
+
+        var reconciliationCandidate: ImportReconciliationCandidate {
+            ImportReconciliationCandidate(
+                itemID: "standard:\(request.uuid.uuidString)",
+                proposedBookID: request.uuid,
+                proposedWorkID: request.workID,
+                fingerprint: inspection.fingerprint,
+                identity: inspection.identity(
+                    fallbackTitle: URL(filePath: request.originalName)
+                        .deletingPathExtension()
+                        .lastPathComponent
+                )
+            )
+        }
+    }
+
+    private struct ResolvedPreparedImport {
+        let prepared: PreparedImport
+        let proposal: ImportModelProposal
         let coverTransaction: ManagedFileTransaction?
 
         var transactions: [ManagedFileTransaction] {
-            [fileTransaction] + [coverTransaction].compactMap { $0 }
+            prepared.transactions + [coverTransaction].compactMap { $0 }
         }
+    }
+
+    private struct ImportedBookPreimage {
+        let book: Book
+        let assets: [BookAsset]
+        let coverVersion: Int
+    }
+
+    private struct ImportedWorkPreimage {
+        let work: Work
+        let editions: [Book]
+        let preferredEditionUUID: UUID?
     }
 
     nonisolated private enum PreparationOutcome: Sendable {
@@ -272,9 +413,8 @@ final class ImportService {
 
     private struct ImportChunkResult {
         var importedBookIDs: [UUID] = []
+        var reviewBookIDs: [UUID] = []
         var pendingContentHashes: [String] = []
-        var acceptedContentHashes: Set<String> = []
-        var duplicateBookIDs: [UUID] = []
         var failedBookIDs: [UUID] = []
         var targetUnavailable = false
     }
@@ -377,7 +517,12 @@ final class ImportService {
             let originalName = url.lastPathComponent
             let sourcePath = url.standardizedFileURL.path(percentEncoded: false)
             guard pendingSourcePaths.insert(sourcePath).inserted else { continue }
-            requests.append(CopyRequest(source: url, uuid: UUID(), originalName: originalName))
+            requests.append(CopyRequest(
+                source: url,
+                uuid: UUID(),
+                workID: UUID(),
+                originalName: originalName
+            ))
         }
 
         guard !requests.isEmpty else {
@@ -387,17 +532,13 @@ final class ImportService {
         }
 
         let targetWorkID = targetWork?.uuid
-        var knownHashes = Set(
-            targetWork?.editions
-                .flatMap(\.assets)
-                .compactMap(\.contentHash) ?? []
-        )
         let validationFailures = failed
         let requestIDs = Set(requests.map(\.uuid))
         pendingMetadataUUIDs.formUnion(requestIDs)
         preparingImportUUIDs.formUnion(requestIDs)
         activeImportOperationCount += 1
         let session = ImportSession(requestedBookIDs: requestIDs)
+        session.discover(requestIDs)
         activeImportSessions[session.id] = session
         let task = Task { [weak self, requests, session] in
             guard let self else {
@@ -406,13 +547,14 @@ final class ImportService {
             }
             defer {
                 activeImportOperationCount -= 1
-                session.finish()
+                session.finish(as: Task.isCancelled ? .cancelled : .completed)
                 if activeImportSessions[session.id] === session {
                     activeImportSessions.removeValue(forKey: session.id)
                 }
             }
 
             var importedBookIDs: [UUID] = []
+            var reviewBookIDs: Set<UUID> = []
             var failureCount = validationFailures
             var pendingRecoveryCount = 0
             var nextIndex = 0
@@ -421,7 +563,9 @@ final class ImportService {
                   activeImportSessions[session.id] === session {
                 let end = min(nextIndex + importCommitChunkSize, requests.count)
                 let requestChunk = Array(requests[nextIndex..<end])
+                session.advance(to: .staging)
                 let outcomes = await prepareImports(requestChunk)
+                session.advance(to: .inspection)
                 var prepared: [PreparedImport] = []
                 for outcome in outcomes {
                     switch outcome {
@@ -448,22 +592,14 @@ final class ImportService {
                 let chunkResult = await commitPreparedImports(
                     prepared,
                     assigningTo: targetWorkID,
-                    knownHashes: knownHashes
+                    session: session
                 )
                 importedBookIDs.append(contentsOf: chunkResult.importedBookIDs)
+                reviewBookIDs.formUnion(chunkResult.reviewBookIDs)
                 preparingImportUUIDs.subtract(prepared.map(\.request.uuid))
-                knownHashes.formUnion(chunkResult.acceptedContentHashes)
                 pendingRecoveryCount += chunkResult.pendingContentHashes.count
                 failureCount += chunkResult.failedBookIDs.count
-                pendingMetadataUUIDs.subtract(
-                    chunkResult.duplicateBookIDs
-                        + chunkResult.failedBookIDs
-                        + prepared.compactMap {
-                            chunkResult.pendingContentHashes.contains($0.inspection.sha256)
-                                ? $0.request.uuid
-                                : nil
-                        }
-                )
+                pendingMetadataUUIDs.subtract(prepared.map(\.request.uuid))
 
                 for request in requestChunk {
                     pendingSourcePaths.remove(
@@ -504,26 +640,28 @@ final class ImportService {
                 completion?([])
                 return
             }
-            if targetWorkID != nil, !importedBookIDs.isEmpty {
+            let uniqueImportedBookIDs = Array(Set(importedBookIDs))
+            session.advance(to: .derivedJobs)
+            if targetWorkID != nil, !uniqueImportedBookIDs.isEmpty {
                 editions?.refreshEditionCounts()
             }
             let batchID: UUID?
-            if targetWorkID == nil, editions != nil, !importedBookIDs.isEmpty {
+            if targetWorkID == nil, editions != nil, !reviewBookIDs.isEmpty {
                 let id = UUID()
                 matchBatches[id] = MatchBatch(
-                    bookIDs: importedBookIDs,
-                    remaining: Set(importedBookIDs)
+                    bookIDs: Array(reviewBookIDs),
+                    remaining: reviewBookIDs
                 )
                 batchID = id
             } else {
                 batchID = nil
             }
-            for bookID in importedBookIDs {
+            for bookID in uniqueImportedBookIDs {
                 enqueueMetadataJob(
                     bookID: bookID,
                     requiresLocalAnalysis: false,
-                    evaluateMatch: targetWorkID == nil && batchID == nil,
-                    matchBatchID: batchID
+                    evaluateMatch: reviewBookIDs.contains(bookID) && batchID == nil,
+                    matchBatchID: reviewBookIDs.contains(bookID) ? batchID : nil
                 )
             }
 
@@ -533,7 +671,7 @@ final class ImportService {
                     localized: "Some imported files are waiting for recovery (\(pendingRecoveryCount))."
                 ))
             }
-            let imported = importedBookIDs.compactMap { try? mutations.book(id: $0) }
+            let imported = uniqueImportedBookIDs.compactMap { try? mutations.book(id: $0) }
             completion?(imported)
         }
         session.start(task)
@@ -818,15 +956,15 @@ final class ImportService {
         var transactions: [ManagedFileTransaction] = []
         do {
             try Task.checkCancellation()
+            let discovered = try ImportSourceDiscovery.discover(request.source)
             let source = try ManagedFileSource.book(
-                sourceURL: request.source,
+                sourceURL: discovered.url,
                 destination: .newAsset(assetID: request.uuid)
             )
             let fileTransaction = try await managedFiles.stage(
                 intent: .importBook,
                 sources: [source],
                 requirement: ManagedFileRequirement(
-                    presentBookIDs: [request.uuid],
                     referencedBookFileNames: [source.finalRelativeName]
                 )
             )
@@ -843,24 +981,10 @@ final class ImportService {
                 analysis: analysis
             )
 
-            var coverTransaction: ManagedFileTransaction?
-            if let coverData = inspection.coverJPEGData {
-                let transaction = try await managedFiles.stage(
-                    intent: .importBook,
-                    sources: [.cover(data: coverData, bookID: request.uuid)],
-                    requirement: ManagedFileRequirement(
-                        presentBookIDs: [request.uuid],
-                        coverVersions: [request.uuid: 1]
-                    )
-                )
-                coverTransaction = transaction
-                transactions.append(transaction)
-            }
             return .prepared(PreparedImport(
                 request: request,
                 inspection: inspection,
-                fileTransaction: fileTransaction,
-                coverTransaction: coverTransaction
+                fileTransaction: fileTransaction
             ))
         } catch is CancellationError {
             for transaction in transactions { await managedFiles.abort(transaction) }
@@ -874,7 +998,7 @@ final class ImportService {
     private func commitPreparedImports(
         _ prepared: [PreparedImport],
         assigningTo targetWorkID: UUID?,
-        knownHashes: Set<String>
+        session: ImportSession
     ) async -> ImportChunkResult {
         guard !prepared.isEmpty else { return ImportChunkResult() }
         guard !modelContext.hasChanges else {
@@ -883,7 +1007,6 @@ final class ImportService {
             return ImportChunkResult(failedBookIDs: prepared.map(\.request.uuid))
         }
 
-        let targetWork: Work?
         if let targetWorkID {
             guard let work = try? mutations.work(id: targetWorkID),
                   work.modelContext != nil else {
@@ -893,43 +1016,151 @@ final class ImportService {
                     targetUnavailable: true
                 )
             }
-            targetWork = work
-        } else {
-            targetWork = nil
         }
 
-        var seenHashes = knownHashes
-        var accepted: [PreparedImport] = []
+        session.advance(to: .reconciliation)
+        var reconciler = makeImportReconciler()
+        var proposals: [(PreparedImport, ImportModelProposal)] = []
         var result = ImportChunkResult()
         for candidate in prepared {
-            let hash = candidate.inspection.sha256
-            if targetWork != nil, !seenHashes.insert(hash).inserted {
+            let reconciliationCandidate = candidate.reconciliationCandidate
+            let proposal = await ImportProposalBuilder.build(
+                candidate: reconciliationCandidate,
+                using: reconciler,
+                assigningTo: targetWorkID
+            )
+            if case .exactDuplicate = proposal.reconciliation {
                 await abort(candidate.transactions)
-                result.duplicateBookIDs.append(candidate.request.uuid)
             } else {
-                accepted.append(candidate)
+                proposals.append((candidate, proposal))
+                reconciler.record(
+                    reconciliationCandidate,
+                    reconciliation: proposal.reconciliation
+                )
             }
         }
-        guard !accepted.isEmpty else { return result }
+        guard !proposals.isEmpty else { return result }
 
-        let previousPreferredEdition = targetWork?.preferredEditionUUID
-        var insertedBooks: [Book] = []
-        var affectedWorkIDs: Set<UUID> = []
-        for candidate in accepted {
-            let inspection = candidate.inspection
-            let book = Book(
-                uuid: candidate.request.uuid,
-                fileName: inspection.managedFileName,
-                originalFileName: candidate.request.originalName
+        session.advance(to: .modelProposal)
+        var resolved: [ResolvedPreparedImport] = []
+        do {
+            for (candidate, proposal) in proposals {
+                let existingCoverVersion: Int = switch proposal.reconciliation {
+                case .addFormatToEdition(let existingBookID, _):
+                    (try? mutations.book(id: existingBookID).coverVersion) ?? 0
+                case .createAnotherEdition, .createNewWork, .ambiguousReview:
+                    0
+                case .exactDuplicate:
+                    0
+                }
+                let shouldPublishCover = candidate.inspection.coverJPEGData != nil
+                    && existingCoverVersion == 0
+                let coverTransaction: ManagedFileTransaction?
+                if shouldPublishCover, let coverData = candidate.inspection.coverJPEGData {
+                    coverTransaction = try await managedFiles.stage(
+                        intent: .importBook,
+                        sources: [.cover(data: coverData, bookID: proposal.targetBookID)],
+                        requirement: ManagedFileRequirement(
+                            presentBookIDs: [proposal.targetBookID],
+                            coverVersions: [proposal.targetBookID: existingCoverVersion + 1]
+                        )
+                    )
+                } else {
+                    coverTransaction = nil
+                }
+                resolved.append(ResolvedPreparedImport(
+                    prepared: candidate,
+                    proposal: proposal,
+                    coverTransaction: coverTransaction
+                ))
+            }
+        } catch {
+            await abort(
+                prepared.flatMap(\.transactions)
+                    + resolved.compactMap(\.coverTransaction)
             )
-            book.fileSizeBytes = inspection.sizeBytes
-            book.drmProtected = inspection.drmProtected
-            book.apply(inspection.metadata)
-            if candidate.coverTransaction != nil { book.coverVersion = 1 }
+            result.failedBookIDs.append(contentsOf: proposals.map(\.0.request.uuid))
+            return result
+        }
 
-            let work = targetWork ?? Work(dateCreated: book.dateAdded)
-            if targetWork == nil { modelContext.insert(work) }
-            modelContext.insert(book)
+        let requiredBookIDs = Set(resolved.compactMap { candidate -> UUID? in
+            guard case .addFormatToEdition(let existingBookID, _) =
+                candidate.proposal.reconciliation else { return nil }
+            return existingBookID
+        })
+        let requiredWorkIDs = Set(resolved.compactMap { candidate -> UUID? in
+            guard case .createAnotherEdition(let workID) =
+                candidate.proposal.reconciliation else { return nil }
+            return workID
+        })
+        let booksByID: [UUID: Book]
+        let worksByID: [UUID: Work]
+        do {
+            booksByID = Dictionary(
+                uniqueKeysWithValues: try requiredBookIDs.map {
+                    let book = try mutations.book(id: $0)
+                    return (book.uuid, book)
+                }
+            )
+            worksByID = Dictionary(
+                uniqueKeysWithValues: try requiredWorkIDs.map {
+                    let work = try mutations.work(id: $0)
+                    return (work.uuid, work)
+                }
+            )
+        } catch {
+            await abort(resolved.flatMap(\.transactions))
+            result.failedBookIDs.append(contentsOf: proposals.map(\.0.request.uuid))
+            return result
+        }
+
+        var bookPreimages: [UUID: ImportedBookPreimage] = [:]
+        var workPreimages: [UUID: ImportedWorkPreimage] = [:]
+        var targetBooksByRequestID: [UUID: Book] = [:]
+        var affectedBookIDs: Set<UUID> = []
+        var affectedWorkIDs: Set<UUID> = []
+        for candidate in resolved {
+            let prepared = candidate.prepared
+            let proposal = candidate.proposal
+            let inspection = prepared.inspection
+            let book: Book
+            switch proposal.reconciliation {
+            case .exactDuplicate:
+                continue
+
+            case .addFormatToEdition(let existingBookID, let workID):
+                guard let existing = booksByID[existingBookID] else { continue }
+                if bookPreimages[existingBookID] == nil {
+                    bookPreimages[existingBookID] = ImportedBookPreimage(
+                        book: existing,
+                        assets: existing.assets,
+                        coverVersion: existing.coverVersion
+                    )
+                }
+                book = existing
+                if let workID { affectedWorkIDs.insert(workID) }
+
+            case .createAnotherEdition(let workID):
+                guard let work = worksByID[workID] else { continue }
+                if workPreimages[workID] == nil {
+                    workPreimages[workID] = ImportedWorkPreimage(
+                        work: work,
+                        editions: work.editions,
+                        preferredEditionUUID: work.preferredEditionUUID
+                    )
+                }
+                book = makeImportedBook(from: prepared, work: work)
+
+            case .createNewWork, .ambiguousReview:
+                let work = Work(
+                    uuid: proposal.candidate.proposedWorkID,
+                    title: inspection.metadata.title,
+                    author: inspection.metadata.author
+                )
+                modelContext.insert(work)
+                book = makeImportedBook(from: prepared, work: work)
+            }
+
             let asset = BookAsset(
                 uuid: inspection.assetID,
                 fileName: inspection.managedFileName,
@@ -941,46 +1172,109 @@ final class ImportService {
                 book: book
             )
             modelContext.insert(asset)
-            book.work = work
-            if work.preferredEditionUUID == nil { work.preferredEditionUUID = book.uuid }
-            refreshWorkIdentity(
-                for: book,
-                allowDisplayTitleFallback: !settings.onlineMetadataEnabled
-            )
-            insertedBooks.append(book)
-            affectedWorkIDs.insert(work.uuid)
+            if candidate.coverTransaction != nil {
+                book.coverVersion += 1
+            }
+            targetBooksByRequestID[prepared.request.uuid] = book
+            affectedBookIDs.insert(book.uuid)
+            if let workID = book.work?.uuid { affectedWorkIDs.insert(workID) }
+        }
+
+        guard targetBooksByRequestID.count == resolved.count else {
+            modelContext.rollback()
+            await abort(resolved.flatMap(\.transactions))
+            result.failedBookIDs.append(contentsOf: proposals.map(\.0.request.uuid))
+            return result
         }
 
         do {
+            session.advance(to: .chunkCommit)
             let commit = try await mutations.commitStagedFiles(
-                .importBooks(bookIDs: accepted.map(\.request.uuid)),
-                transactions: accepted.flatMap(\.transactions),
-                affectedBookIDs: Set(accepted.map(\.request.uuid)),
+                .importBooks(bookIDs: Array(affectedBookIDs)),
+                transactions: resolved.flatMap(\.transactions),
+                affectedBookIDs: affectedBookIDs,
                 affectedWorkIDs: affectedWorkIDs,
                 revertingOnFailure: {
-                    guard let targetWork else { return }
-                    for book in insertedBooks {
-                        book.assets.removeAll()
-                        targetWork.editions.removeAll { $0 === book }
-                        book.work = nil
+                    for preimage in bookPreimages.values {
+                        preimage.book.assets = preimage.assets
+                        preimage.book.coverVersion = preimage.coverVersion
                     }
-                    targetWork.preferredEditionUUID = previousPreferredEdition
+                    for preimage in workPreimages.values {
+                        preimage.work.editions = preimage.editions
+                        preimage.work.preferredEditionUUID = preimage.preferredEditionUUID
+                    }
                 }
             )
+            session.advance(to: .publishing)
             let pending = Set(commit.pendingTransactionIDs)
-            for candidate in accepted {
-                result.acceptedContentHashes.insert(candidate.inspection.sha256)
+            for candidate in resolved {
+                let prepared = candidate.prepared
                 if candidate.transactions.contains(where: { pending.contains($0.id) }) {
-                    result.pendingContentHashes.append(candidate.inspection.sha256)
-                } else {
-                    result.importedBookIDs.append(candidate.request.uuid)
+                    result.pendingContentHashes.append(prepared.inspection.sha256)
+                    continue
+                }
+                guard let book = targetBooksByRequestID[prepared.request.uuid] else { continue }
+                result.importedBookIDs.append(book.uuid)
+                if case .ambiguousReview = candidate.proposal.reconciliation {
+                    result.reviewBookIDs.append(book.uuid)
+                }
+                if let coverData = prepared.inspection.coverJPEGData,
+                   candidate.coverTransaction != nil,
+                   let image = NSImage(data: coverData),
+                   let fileURL = book.primaryFileURL {
+                    await CoverCache.shared.replace(image, for: fileURL)
                 }
             }
             return result
         } catch {
-            result.failedBookIDs.append(contentsOf: accepted.map(\.request.uuid))
+            result.failedBookIDs.append(contentsOf: resolved.map(\.prepared.request.uuid))
             return result
         }
+    }
+
+    private func makeImportedBook(
+        from candidate: PreparedImport,
+        work: Work
+    ) -> Book {
+        let inspection = candidate.inspection
+        let book = Book(
+            uuid: candidate.request.uuid,
+            fileName: inspection.managedFileName,
+            originalFileName: candidate.request.originalName
+        )
+        book.fileSizeBytes = inspection.sizeBytes
+        book.drmProtected = inspection.drmProtected
+        book.apply(inspection.metadata)
+        modelContext.insert(book)
+        book.work = work
+        if work.preferredEditionUUID == nil { work.preferredEditionUUID = book.uuid }
+        refreshWorkIdentity(
+            for: book,
+            allowDisplayTitleFallback: !settings.onlineMetadataEnabled
+        )
+        return book
+    }
+
+    private func makeImportReconciler() -> ImportReconciler {
+        let books = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
+        return ImportReconciler(records: books.map { book in
+            ImportCatalogRecord(
+                bookID: book.uuid,
+                workID: book.work?.uuid,
+                fingerprint: ImportFingerprint(
+                    contentHashes: Set(book.assets.compactMap(\.contentHash)),
+                    formats: Set(book.assets.map(\.format) + [book.format])
+                ),
+                identity: ImportIdentityRecord(
+                    title: book.displayTitle,
+                    author: book.displayAuthor,
+                    isbn: book.isbn,
+                    language: book.language,
+                    publisher: book.publisher,
+                    year: book.year
+                )
+            )
+        })
     }
 
     private func abort(_ transactions: [ManagedFileTransaction]) async {

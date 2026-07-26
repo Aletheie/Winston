@@ -518,69 +518,168 @@ struct CalibreLibraryReaderTests {
 
 // MARK: - Reconciliation policy
 
-struct CalibreImportReconcilerTests {
+struct ImportReconcilerTests {
     private let existingBookID = UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
     private let existingWorkID = UUID(uuidString: "20000000-0000-0000-0000-000000000001")!
 
-    @Test func onlyAnExactContentHashCanSkipAnItem() {
-        let reconciler = CalibreImportReconciler(books: [existing(hash: "same", isbn: "111")])
+    @Test func unifiedReconcilerProducesEveryModelProposalWithoutWriting() async {
+        let record = ImportCatalogRecord(
+            bookID: existingBookID,
+            workID: existingWorkID,
+            fingerprint: ImportFingerprint(contentHash: "epub-bytes", format: "epub"),
+            identity: ImportIdentityRecord(
+                title: "The Book",
+                author: "Ada Author",
+                isbn: "111",
+                language: "eng",
+                publisher: "Press",
+                year: "2024"
+            )
+        )
+        let reconciler = ImportReconciler(records: [record])
 
-        #expect(reconciler.decision(for: candidate(hash: "same", isbn: "999"))
-            == .skipExact(existingBookID: existingBookID))
-        #expect(reconciler.decision(for: candidate(hash: "different", isbn: "111"))
-            == .merge(existingBookID: existingBookID, workID: existingWorkID))
+        #expect(reconciler.reconcile(
+            fingerprint: ImportFingerprint(contentHash: "epub-bytes", format: "epub"),
+            identity: identity(isbn: "999")
+        ) == .exactDuplicate(existingBookID: existingBookID))
+        #expect(reconciler.reconcile(
+            fingerprint: ImportFingerprint(contentHash: "pdf-bytes", format: "pdf"),
+            identity: identity(isbn: "111")
+        ) == .addFormatToEdition(
+            existingBookID: existingBookID,
+            workID: existingWorkID
+        ))
+        #expect(reconciler.reconcile(
+            fingerprint: ImportFingerprint(contentHash: "second-edition", format: "epub"),
+            identity: identity(isbn: "222")
+        ) == .createAnotherEdition(workID: existingWorkID))
+        #expect(reconciler.reconcile(
+            fingerprint: ImportFingerprint(contentHash: "uncertain", format: "pdf"),
+            identity: identity(isbn: nil)
+        ) == .ambiguousReview(candidateWorkIDs: [existingWorkID]))
+        #expect(reconciler.reconcile(
+            fingerprint: ImportFingerprint(contentHash: "new", format: "epub"),
+            identity: ImportIdentityRecord(
+                title: "A New Work",
+                author: "Other Author",
+                isbn: nil,
+                language: nil,
+                publisher: nil,
+                year: nil
+            )
+        ) == .createNewWork)
+
+        let forcedWorkID = UUID()
+        let candidate = ImportReconciliationCandidate(
+            itemID: "standard:test",
+            proposedBookID: UUID(),
+            proposedWorkID: UUID(),
+            fingerprint: ImportFingerprint(contentHash: "forced", format: "pdf"),
+            identity: ImportIdentityRecord(
+                title: "Unrelated",
+                author: "Author",
+                isbn: nil,
+                language: nil,
+                publisher: nil,
+                year: nil
+            )
+        )
+        let proposal = await ImportProposalBuilder.build(
+            candidate: candidate,
+            using: reconciler,
+            assigningTo: forcedWorkID
+        )
+        #expect(proposal.reconciliation == .createAnotherEdition(workID: forcedWorkID))
+    }
+
+    @Test @MainActor
+    func commonImportSessionTracksTheSharedPipelineForBothSources() {
+        for source in [ImportSessionSource.standard, .calibre] {
+            let bookID = UUID()
+            let session = ImportSession(source: source)
+            #expect(session.step == .sourceDiscovery)
+            session.discover([bookID])
+            #expect(session.requestedBookIDs == [bookID])
+            for step in [
+                ImportSessionStep.inspection,
+                .reconciliation,
+                .modelProposal,
+                .chunkCommit,
+                .publishing,
+                .derivedJobs
+            ] {
+                session.advance(to: step)
+                #expect(session.step == step)
+            }
+            session.finish(as: .completed)
+            #expect(session.step == .completed)
+        }
+    }
+
+    @Test func onlyAnExactContentHashCanSkipAnItem() {
+        let reconciler = ImportReconciler(records: [existing(hash: "same", isbn: "111")])
+
+        #expect(decision(of: candidate(hash: "same", isbn: "999"), using: reconciler)
+            == .exactDuplicate(existingBookID: existingBookID))
+        #expect(decision(of: candidate(hash: "different", isbn: "111"), using: reconciler)
+            == .addFormatToEdition(
+                existingBookID: existingBookID,
+                workID: existingWorkID
+            ))
     }
 
     @Test func titleAndAuthorNeverSilentlySkipAnotherEdition() {
-        let reconciler = CalibreImportReconciler(books: [existing(hash: "old", isbn: "111")])
+        let reconciler = ImportReconciler(records: [existing(hash: "old", isbn: "111")])
 
-        #expect(reconciler.decision(for: candidate(hash: "new", isbn: "222"))
-            == .addEdition(workID: existingWorkID))
+        #expect(decision(of: candidate(hash: "new", isbn: "222"), using: reconciler)
+            == .createAnotherEdition(workID: existingWorkID))
     }
 
     @Test func weakTitleAuthorIdentityRequiresReviewInsteadOfSkipping() {
-        let reconciler = CalibreImportReconciler(books: [existing(hash: "old", isbn: nil)])
+        let reconciler = ImportReconciler(records: [existing(hash: "old", isbn: nil)])
 
-        #expect(reconciler.decision(for: candidate(hash: "new", isbn: nil))
-            == .needsReview(candidateWorkIDs: [existingWorkID]))
+        #expect(decision(of: candidate(hash: "new", isbn: nil), using: reconciler)
+            == .ambiguousReview(candidateWorkIDs: [existingWorkID]))
     }
 
     @Test(arguments: [1_000, 10_000])
     func indexedReconciliationBenchmark(_ count: Int) {
         let catalog = (0..<count).map { index in
-            CalibreImportCatalogBook(
+            ImportCatalogRecord(
                 bookID: UUID(),
                 workID: UUID(),
-                title: "Book \(index)",
-                author: "Author \(index)",
-                isbn: "978\(index)",
-                language: "eng",
-                publisher: "Press",
-                year: "2024",
-                contentHashes: ["hash-\(index)"],
-                formats: ["epub"]
+                fingerprint: ImportFingerprint(
+                    contentHash: "hash-\(index)",
+                    format: "epub"
+                ),
+                identity: ImportIdentityRecord(
+                    title: "Book \(index)",
+                    author: "Author \(index)",
+                    isbn: "978\(index)",
+                    language: "eng",
+                    publisher: "Press",
+                    year: "2024"
+                )
             )
         }
         let candidates = catalog.map { book in
-            CalibreImportCandidate(
-                bookID: UUID(),
-                workID: UUID(),
-                title: book.title,
-                author: book.author,
-                isbn: book.isbn,
-                language: book.language,
-                publisher: book.publisher,
-                year: book.year,
-                contentHashes: book.contentHashes,
-                formats: ["pdf"]
+            ImportReconciliationCandidate(
+                itemID: UUID().uuidString,
+                proposedBookID: UUID(),
+                proposedWorkID: UUID(),
+                fingerprint: ImportFingerprint(
+                    contentHashes: book.fingerprint.contentHashes,
+                    formats: ["pdf"]
+                ),
+                identity: book.identity
             )
         }
 
         let clock = ContinuousClock()
         let startedAt = clock.now
-        let reconciler = CalibreImportReconciler(books: catalog)
+        let reconciler = ImportReconciler(records: catalog)
         let exactMatches = candidates.count {
-            if case .skipExact = reconciler.decision(for: $0) { return true }
+            if case .exactDuplicate = decision(of: $0, using: reconciler) { return true }
             return false
         }
         let elapsed = startedAt.duration(to: clock.now)
@@ -590,33 +689,43 @@ struct CalibreImportReconcilerTests {
         #expect(elapsed < .seconds(5))
     }
 
-    private func existing(hash: String, isbn: String?) -> CalibreImportCatalogBook {
-        CalibreImportCatalogBook(
+    private func existing(hash: String, isbn: String?) -> ImportCatalogRecord {
+        ImportCatalogRecord(
             bookID: existingBookID,
             workID: existingWorkID,
-            title: "The Book",
-            author: "Ada Author",
-            isbn: isbn,
-            language: "eng",
-            publisher: "Press",
-            year: "2024",
-            contentHashes: [hash],
-            formats: ["epub"]
+            fingerprint: ImportFingerprint(contentHash: hash, format: "epub"),
+            identity: identity(isbn: isbn)
         )
     }
 
-    private func candidate(hash: String, isbn: String?) -> CalibreImportCandidate {
-        CalibreImportCandidate(
-            bookID: UUID(),
-            workID: UUID(),
+    private func candidate(hash: String, isbn: String?) -> ImportReconciliationCandidate {
+        ImportReconciliationCandidate(
+            itemID: UUID().uuidString,
+            proposedBookID: UUID(),
+            proposedWorkID: UUID(),
+            fingerprint: ImportFingerprint(contentHash: hash, format: "pdf"),
+            identity: identity(isbn: isbn)
+        )
+    }
+
+    private func decision(
+        of candidate: ImportReconciliationCandidate,
+        using reconciler: ImportReconciler
+    ) -> ImportReconciliation {
+        reconciler.reconcile(
+            fingerprint: candidate.fingerprint,
+            identity: candidate.identity
+        )
+    }
+
+    private func identity(isbn: String?) -> ImportIdentityRecord {
+        ImportIdentityRecord(
             title: "The Book",
             author: "Ada Author",
             isbn: isbn,
             language: "eng",
             publisher: "Press",
-            year: "2024",
-            contentHashes: [hash],
-            formats: ["pdf"]
+            year: "2024"
         )
     }
 }

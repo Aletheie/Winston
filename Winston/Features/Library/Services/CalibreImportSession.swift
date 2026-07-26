@@ -22,6 +22,36 @@ nonisolated enum CalibreImportDecision: Codable, Sendable, Equatable {
     case addEdition(workID: UUID)
     case newWork
     case needsReview(candidateWorkIDs: [UUID])
+
+    init(_ reconciliation: ImportReconciliation) {
+        self = switch reconciliation {
+        case .exactDuplicate(let existingBookID):
+            .skipExact(existingBookID: existingBookID)
+        case .addFormatToEdition(let existingBookID, let workID):
+            .merge(existingBookID: existingBookID, workID: workID)
+        case .createAnotherEdition(let workID):
+            .addEdition(workID: workID)
+        case .createNewWork:
+            .newWork
+        case .ambiguousReview(let candidateWorkIDs):
+            .needsReview(candidateWorkIDs: candidateWorkIDs)
+        }
+    }
+
+    var reconciliation: ImportReconciliation {
+        switch self {
+        case .skipExact(let existingBookID):
+            .exactDuplicate(existingBookID: existingBookID)
+        case .merge(let existingBookID, let workID):
+            .addFormatToEdition(existingBookID: existingBookID, workID: workID)
+        case .addEdition(let workID):
+            .createAnotherEdition(workID: workID)
+        case .newWork:
+            .createNewWork
+        case .needsReview(let candidateWorkIDs):
+            .ambiguousReview(candidateWorkIDs: candidateWorkIDs)
+        }
+    }
 }
 
 nonisolated enum CalibreImportOutcomeCategory: String, Codable, Sendable, Equatable {

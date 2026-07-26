@@ -13,10 +13,8 @@ nonisolated enum CalibreImportSummaryStyle: Sendable, Equatable {
 @Observable
 final class CalibreImportService {
     private struct PreparedSource {
-        let assetID: UUID
-        let format: String
         let transaction: ManagedFileTransaction
-        let file: StagedManagedFile
+        let inspection: FileInspectionResult
     }
 
     private struct PreparedCandidate {
@@ -57,7 +55,8 @@ final class CalibreImportService {
 
     @ObservationIgnored private var importTask: Task<Void, Never>?
     @ObservationIgnored private var activeSession: CalibreImportSession?
-    @ObservationIgnored private var activeReconciler: CalibreImportReconciler?
+    @ObservationIgnored private var activePipelineSession: ImportSession?
+    @ObservationIgnored private var activeReconciler: ImportReconciler?
 
     nonisolated static let kindlePreference = ["azw3", "mobi", "azw", "epub", "pdf", "txt"]
 
@@ -128,14 +127,20 @@ final class CalibreImportService {
         summary = nil
         summaryStyle = .success
 
-        importTask = Task { [weak self] in
-            await self?.performImport(at: root)
+        let pipelineSession = ImportSession(source: .calibre)
+        activePipelineSession = pipelineSession
+        let task: Task<Void, Never> = Task { [weak self, pipelineSession] in
+            guard let self else { return }
+            await self.performImport(at: root, pipelineSession: pipelineSession)
         }
+        pipelineSession.start(task)
+        importTask = task
     }
 
     func cancelImport() {
         guard isImporting, !isCancelling else { return }
         isCancelling = true
+        activePipelineSession?.cancel()
         importTask?.cancel()
         if let activeSession {
             Task { await activeSession.requestCancellation() }
@@ -151,7 +156,11 @@ final class CalibreImportService {
         zeroBasedIndex + 1
     }
 
-    private func performImport(at root: URL) async {
+    private func performImport(
+        at root: URL,
+        pipelineSession: ImportSession
+    ) async {
+        var finalPipelineStep: ImportSessionStep = .failed
         let accessing = root.startAccessingSecurityScopedResource()
         defer {
             if accessing { root.stopAccessingSecurityScopedResource() }
@@ -159,8 +168,12 @@ final class CalibreImportService {
             isCancelling = false
             isResuming = false
             activeSession = nil
+            activePipelineSession = nil
             activeReconciler = nil
             importTask = nil
+            pipelineSession.finish(
+                as: Task.isCancelled ? .cancelled : finalPipelineStep
+            )
         }
 
         let session: CalibreImportSession
@@ -197,6 +210,8 @@ final class CalibreImportService {
         }
 
         activeSession = session
+        let manifest = await session.snapshot()
+        pipelineSession.discover(Set(manifest.items.map(\.bookID)))
         do {
             let canContinue = try await reconcileInterruptedWork(in: session)
             guard canContinue else {
@@ -227,14 +242,29 @@ final class CalibreImportService {
                         preservePreparedItems: false
                     ))
                 }
-                return await self.process(items, in: session)
+                return await self.process(
+                    items,
+                    in: session,
+                    pipelineSession: pipelineSession
+                )
             }
         )
         progress = nil
         result = finalSummary
 
         if finalSummary.isComplete {
+            pipelineSession.advance(to: .derivedJobs)
             await performPostImportActions(for: session)
+        }
+        finalPipelineStep = switch finalSummary.phase {
+        case .completed:
+            .completed
+        case .cancelled, .cancelling:
+            .cancelled
+        case .failed:
+            .failed
+        case .prepared, .running:
+            .failed
         }
         present(finalSummary)
     }
@@ -324,26 +354,31 @@ final class CalibreImportService {
         }
     }
 
-    private func makeReconciler() -> CalibreImportReconciler {
-        CalibreImportReconciler(books: ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []).map { book in
-            CalibreImportCatalogBook(
+    private func makeReconciler() -> ImportReconciler {
+        ImportReconciler(records: ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []).map { book in
+            ImportCatalogRecord(
                 bookID: book.uuid,
                 workID: book.work?.uuid,
-                title: book.displayTitle,
-                author: book.displayAuthor,
-                isbn: book.isbn,
-                language: book.language,
-                publisher: book.publisher,
-                year: book.year,
-                contentHashes: Set(book.assets.compactMap(\.contentHash)),
-                formats: Set(book.assets.map(\.format) + [book.format])
+                fingerprint: ImportFingerprint(
+                    contentHashes: Set(book.assets.compactMap(\.contentHash)),
+                    formats: Set(book.assets.map(\.format) + [book.format])
+                ),
+                identity: ImportIdentityRecord(
+                    title: book.displayTitle,
+                    author: book.displayAuthor,
+                    isbn: book.isbn,
+                    language: book.language,
+                    publisher: book.publisher,
+                    year: book.year
+                )
             )
         })
     }
 
     private func process(
         _ items: [CalibreImportManifest.Item],
-        in session: CalibreImportSession
+        in session: CalibreImportSession,
+        pipelineSession: ImportSession
     ) async -> CalibreImportChunkResult {
         guard !modelContext.hasChanges else {
             return failureResult(
@@ -358,10 +393,12 @@ final class CalibreImportService {
             )
         }
 
+        pipelineSession.advance(to: .staging)
         let inspections = await CalibreImportInspector.inspect(
             items,
             maximumConcurrentTasks: maximumConcurrentInspections
         )
+        pipelineSession.advance(to: .inspection)
         var result = CalibreImportChunkResult(
             unsafeRejectedSourcesByItem: inspections.mapValues(\.unsafeRejectedSources)
         )
@@ -412,10 +449,17 @@ final class CalibreImportService {
                     }
                     stagedTransactions.append(transaction)
                     stagedSources.append(PreparedSource(
-                        assetID: source.assetID,
-                        format: source.format,
                         transaction: transaction,
-                        file: file
+                        inspection: FileInspectionResult(
+                            assetID: source.assetID,
+                            stagedFile: file,
+                            analysis: ImportBookAnalysis(
+                                metadata: Self.metadata(from: item.book),
+                                drmProtected: false,
+                                validation: .ok,
+                                fileOpenCount: 0
+                            )
+                        )
                     ))
                 }
             } catch {
@@ -429,8 +473,14 @@ final class CalibreImportService {
                 return result
             }
 
+            pipelineSession.advance(to: .reconciliation)
             let candidate = Self.candidate(for: item, stagedSources: stagedSources)
-            let decision = tentativeReconciler.decision(for: candidate)
+            let proposal = await ImportProposalBuilder.build(
+                candidate: candidate,
+                using: tentativeReconciler
+            )
+            pipelineSession.advance(to: .modelProposal)
+            let decision = CalibreImportDecision(proposal.reconciliation)
             if case .skipExact = decision {
                 await abort(stagedSources.map(\.transaction))
                 let abortedIDs = Set(stagedSources.map { $0.transaction.id })
@@ -442,8 +492,8 @@ final class CalibreImportService {
             var seenIncomingHashes: Set<String> = []
             var keptSources: [PreparedSource] = []
             for source in stagedSources {
-                let hash = source.file.sha256.lowercased()
-                if tentativeReconciler.contains(hash: hash)
+                let hash = source.inspection.sha256.lowercased()
+                if tentativeReconciler.contains(contentHash: hash)
                     || !seenIncomingHashes.insert(hash).inserted {
                     await managedFiles.abort(source.transaction)
                     stagedTransactions.removeAll { $0.id == source.transaction.id }
@@ -500,7 +550,10 @@ final class CalibreImportService {
                 coverData: coverData,
                 coverTransaction: coverTransaction
             ))
-            tentativeReconciler.record(candidate, decision: decision)
+            tentativeReconciler.record(
+                candidate,
+                reconciliation: proposal.reconciliation
+            )
         }
 
         guard !preparedCandidates.isEmpty else { return result }
@@ -535,10 +588,12 @@ final class CalibreImportService {
         }
 
         do {
+            pipelineSession.advance(to: .chunkCommit)
             let commitResult = try await commit(
                 preparedCandidates,
                 manifest: await session.snapshot()
             )
+            pipelineSession.advance(to: .publishing)
             activeReconciler = tentativeReconciler
             if !commitResult.pendingTransactionIDs.isEmpty {
                 let pending = Set(commitResult.pendingTransactionIDs)
@@ -695,11 +750,11 @@ final class CalibreImportService {
 
             for source in candidate.sources {
                 let asset = BookAsset(
-                    uuid: source.assetID,
-                    fileName: source.file.finalRelativeName,
+                    uuid: source.inspection.assetID,
+                    fileName: source.inspection.managedFileName,
                     origin: .imported,
-                    contentHash: source.file.sha256,
-                    sizeBytes: source.file.byteCount,
+                    contentHash: source.inspection.sha256,
+                    sizeBytes: source.inspection.sizeBytes,
                     dateAdded: targetBook.dateAdded,
                     validationStatus: .ok,
                     book: targetBook
@@ -744,14 +799,14 @@ final class CalibreImportService {
         let calibreBook = candidate.item.book
         let book = Book(
             uuid: candidate.item.bookID,
-            fileName: primary.file.finalRelativeName,
-            originalFileName: primary.file.originalSourceURL?.lastPathComponent
-                ?? primary.file.finalRelativeName,
+            fileName: primary.inspection.managedFileName,
+            originalFileName: primary.inspection.originalSourceURL?.lastPathComponent
+                ?? primary.inspection.managedFileName,
             dateAdded: calibreBook.dateAdded ?? .now
         )
         book.apply(Self.metadata(from: calibreBook))
         book.rating = calibreBook.rating
-        book.fileSizeBytes = primary.file.byteCount
+        book.fileSizeBytes = primary.inspection.sizeBytes
         modelContext.insert(book)
         book.work = work
         if work.preferredEditionUUID == nil { work.preferredEditionUUID = book.uuid }
@@ -815,7 +870,7 @@ final class CalibreImportService {
 
         if let editions {
             let previousKeys = Set(editions.pendingProposals.map(\.pairKey))
-            await editions.scanLibrary()
+            editions.evaluate(imported)
             if editions.pendingProposals.contains(where: {
                 !previousKeys.contains($0.pairKey)
                     && !$0.memberUUIDs.allSatisfy { !importedIDs.contains($0) }
@@ -867,18 +922,23 @@ final class CalibreImportService {
     private static func candidate(
         for item: CalibreImportManifest.Item,
         stagedSources: [PreparedSource]
-    ) -> CalibreImportCandidate {
-        CalibreImportCandidate(
-            bookID: item.bookID,
-            workID: item.workID,
-            title: item.book.title,
-            author: author(for: item.book),
-            isbn: item.book.isbn,
-            language: item.book.language,
-            publisher: item.book.publisher,
-            year: item.book.year,
-            contentHashes: Set(stagedSources.map { $0.file.sha256 }),
-            formats: Set(stagedSources.map(\.format))
+    ) -> ImportReconciliationCandidate {
+        ImportReconciliationCandidate(
+            itemID: "calibre:\(item.calibreID)",
+            proposedBookID: item.bookID,
+            proposedWorkID: item.workID,
+            fingerprint: ImportFingerprint(
+                contentHashes: Set(stagedSources.map(\.inspection.sha256)),
+                formats: Set(stagedSources.map(\.inspection.format))
+            ),
+            identity: ImportIdentityRecord(
+                title: item.book.title,
+                author: author(for: item.book),
+                isbn: item.book.isbn,
+                language: item.book.language,
+                publisher: item.book.publisher,
+                year: item.book.year
+            )
         )
     }
 

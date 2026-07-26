@@ -58,10 +58,12 @@ nonisolated enum CalibreImportInspector {
         for (index, source) in sourceFiles.enumerated() {
             guard !Task.isCancelled, item.assetIDs.indices.contains(index) else { break }
             do {
+                let revalidatedURL = try source.revalidatedURL()
+                let discovered = try ImportSourceDiscovery.discover(revalidatedURL)
                 sources.append(CalibreImportInspectedSource(
                     assetID: item.assetIDs[index],
-                    url: try source.revalidatedURL(),
-                    format: source.declaredFormat
+                    url: discovered.url,
+                    format: discovered.format
                 ))
             } catch let error as CalibrePathError {
                 if error.isSecurityViolation { unsafeRejectedSources += 1 }
