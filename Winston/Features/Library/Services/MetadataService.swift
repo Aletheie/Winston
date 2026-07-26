@@ -492,7 +492,8 @@ final class MetadataService {
         let shouldDownloadCover = replaceCover || !hasCover
         let job: CatalogAnalysisJob<OnlineEnrichmentProposal> = analysisCoordinator.start(
             snapshot: snapshot,
-            kind: .onlineEnrichment
+            kind: .onlineEnrichment,
+            requestGeneration: configuration
         ) { snapshot in
             let outcome = await online.fetch(
                 isbn: snapshot.lookupISBN,

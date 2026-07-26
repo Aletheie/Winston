@@ -2,9 +2,81 @@ import Foundation
 import OSLog
 import SwiftData
 
+/// Cancellation-aware bounded executor shared by catalog and cover analysis
+/// lanes. Waiting tasks do not consume a permit and are resumed exactly once.
+actor AsyncPermitPool {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    private let limit: Int
+    private var activeCount = 0
+    private var peakActiveCount = 0
+    private var waiters: [Waiter] = []
+
+    init(limit: Int) {
+        self.limit = max(1, limit)
+    }
+
+    func run<Value: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        try await acquire()
+        defer { release() }
+        try Task.checkCancellation()
+        return try await operation()
+    }
+
+    func usage() -> (active: Int, peak: Int) {
+        (activeCount, peakActiveCount)
+    }
+
+    private func acquire() async throws {
+        try Task.checkCancellation()
+        if activeCount < limit {
+            activeCount += 1
+            peakActiveCount = max(peakActiveCount, activeCount)
+            return
+        }
+
+        let id = UUID()
+        let granted = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(returning: false)
+                } else {
+                    waiters.append(Waiter(id: id, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+        guard granted else { throw CancellationError() }
+        if Task.isCancelled {
+            release()
+            throw CancellationError()
+        }
+    }
+
+    private func release() {
+        if !waiters.isEmpty {
+            waiters.removeFirst().continuation.resume(returning: true)
+        } else {
+            activeCount = max(0, activeCount - 1)
+        }
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume(returning: false)
+    }
+}
+
 nonisolated enum CatalogAnalysisJobKind: Hashable, Sendable {
     case metadataExtraction
     case onlineEnrichment
+    case coverExtraction
     case pageCount
     case fileSize
     case drmInspection
@@ -15,11 +87,22 @@ nonisolated enum CatalogAnalysisJobKind: Hashable, Sendable {
         switch self {
         case .metadataExtraction: "metadata-extraction"
         case .onlineEnrichment: "online-enrichment"
+        case .coverExtraction: "cover-extraction"
         case .pageCount: "page-count"
         case .fileSize: "file-size"
         case .drmInspection: "drm-inspection"
         case .assetHash: "asset-hash"
         case .assetInspection: "asset-inspection"
+        }
+    }
+
+    fileprivate var lane: CatalogAnalysisLane {
+        switch self {
+        case .onlineEnrichment:
+            .network
+        case .metadataExtraction, .coverExtraction, .pageCount, .fileSize,
+             .drmInspection, .assetHash, .assetInspection:
+            .local
         }
     }
 }
@@ -91,6 +174,15 @@ nonisolated struct BookAssetRevision: Hashable, Sendable {
     }
 }
 
+/// Generation of the concrete managed source selected for an analysis. It is a
+/// value token rather than a live file/model lease, so it can safely cross
+/// suspension points and be compared again during the catalog commit.
+nonisolated struct BookAnalysisSourceGeneration: Hashable, Sendable {
+    let primaryFileName: String
+    let primaryAsset: BookAssetRevision?
+    let sourceAsset: BookAssetRevision?
+}
+
 /// Immutable input authority for every long-running catalog analysis. A
 /// proposal may be committed only while every value still matches the catalog.
 nonisolated struct BookAnalysisSnapshot: Hashable, Sendable {
@@ -108,6 +200,14 @@ nonisolated struct BookAnalysisSnapshot: Hashable, Sendable {
     var assetDateAdded: Date? { sourceAsset?.dateAdded }
     var contentHash: String? { sourceAsset?.contentHash }
     var fileURL: URL? { BookFileStore.validatedURL(for: fileName) }
+    var sourceGeneration: BookAnalysisSourceGeneration {
+        BookAnalysisSourceGeneration(
+            primaryFileName: primaryFileName,
+            primaryAsset: primaryAsset,
+            sourceAsset: sourceAsset
+        )
+    }
+    var identityGeneration: BookIdentityRevision { identityRevision }
 
     @MainActor
     init?(book: Book) {
@@ -215,6 +315,7 @@ nonisolated struct CatalogAnalysisTicket: Hashable, Sendable {
     let bookID: UUID
     let kind: CatalogAnalysisJobKind
     fileprivate let generation: UUID
+    fileprivate let leaseID: UUID
 }
 
 nonisolated struct CatalogAnalysisJob<Proposal: Sendable>: Sendable {
@@ -223,9 +324,79 @@ nonisolated struct CatalogAnalysisJob<Proposal: Sendable>: Sendable {
     fileprivate let task: Task<Proposal?, Never>
 }
 
-/// Owns one cancellable worker per `(bookID, jobKind)`. Superseded tasks may
-/// finish if an injected/system API ignores cancellation, but their ticket can
-/// no longer authorize a catalog commit.
+nonisolated struct CatalogAnalysisSchedulerDiagnostics: Equatable, Sendable {
+    let activeLocalJobs: Int
+    let peakLocalJobs: Int
+    let activeNetworkJobs: Int
+    let peakNetworkJobs: Int
+}
+
+private nonisolated enum CatalogAnalysisLane: Sendable {
+    case local
+    case network
+}
+
+/// Bounded execution owner shared by import, maintenance, detail and explicit
+/// refresh analysis. Cover decoding keeps its finer I/O/CPU permit split, while
+/// catalog-level cover jobs still enter through the local lane here.
+private actor CatalogAnalysisScheduler {
+    private let localPermits: AsyncPermitPool
+    private let networkPermits: AsyncPermitPool
+
+    init(maximumConcurrentLocalJobs: Int, maximumConcurrentNetworkJobs: Int) {
+        localPermits = AsyncPermitPool(limit: maximumConcurrentLocalJobs)
+        networkPermits = AsyncPermitPool(limit: maximumConcurrentNetworkJobs)
+    }
+
+    func run<Proposal: Sendable>(
+        kind: CatalogAnalysisJobKind,
+        operation: @escaping @Sendable () async -> Proposal?
+    ) async -> Proposal? {
+        do {
+            switch kind.lane {
+            case .local:
+                return try await localPermits.run(operation)
+            case .network:
+                return try await networkPermits.run(operation)
+            }
+        } catch {
+            return nil
+        }
+    }
+
+    func diagnostics() async -> CatalogAnalysisSchedulerDiagnostics {
+        let local = await localPermits.usage()
+        let network = await networkPermits.usage()
+        return CatalogAnalysisSchedulerDiagnostics(
+            activeLocalJobs: local.active,
+            peakLocalJobs: local.peak,
+            activeNetworkJobs: network.active,
+            peakNetworkJobs: network.peak
+        )
+    }
+}
+
+private protocol CatalogAnalysisTaskBox: AnyObject {
+    func cancel()
+}
+
+private final class TypedCatalogAnalysisTaskBox<Proposal: Sendable>: CatalogAnalysisTaskBox {
+    let task: Task<Proposal?, Never>
+
+    init(task: Task<Proposal?, Never>) {
+        self.task = task
+    }
+
+    func cancel() {
+        task.cancel()
+    }
+}
+
+/// Owns one versioned worker per `(bookID, jobKind)`. Equal requests share the
+/// same worker and hold independent leases; a changed source/identity/request
+/// generation supersedes and cancels the old worker. A late task may still
+/// finish if an injected/system API ignores cancellation, but its ticket can no
+/// longer authorize a catalog commit.
 @MainActor
 final class CatalogAnalysisCoordinator {
     private struct Key: Hashable {
@@ -234,28 +405,73 @@ final class CatalogAnalysisCoordinator {
     }
 
     private struct Entry {
-        let ticket: CatalogAnalysisTicket
-        let cancel: @Sendable () -> Void
+        let generation: UUID
+        let snapshot: BookAnalysisSnapshot
+        let requestGeneration: String?
+        let taskBox: any CatalogAnalysisTaskBox
+        var leases: Set<UUID>
     }
 
     private var entries: [Key: Entry] = [:]
+    private let scheduler: CatalogAnalysisScheduler
+
+    init(
+        maximumConcurrentLocalJobs: Int = 4,
+        maximumConcurrentNetworkJobs: Int = 4
+    ) {
+        scheduler = CatalogAnalysisScheduler(
+            maximumConcurrentLocalJobs: max(1, maximumConcurrentLocalJobs),
+            maximumConcurrentNetworkJobs: max(1, maximumConcurrentNetworkJobs)
+        )
+    }
 
     var activeJobCount: Int { entries.count }
+    var activeLeaseCount: Int {
+        entries.values.reduce(0) { $0 + $1.leases.count }
+    }
 
     func start<Proposal: Sendable>(
         snapshot: BookAnalysisSnapshot,
         kind: CatalogAnalysisJobKind,
+        requestGeneration: String? = nil,
         operation: @escaping @Sendable (BookAnalysisSnapshot) async -> Proposal?
     ) -> CatalogAnalysisJob<Proposal> {
         let key = Key(bookID: snapshot.bookID, kind: kind)
+        let leaseID = UUID()
+        if var existing = entries[key],
+           existing.snapshot == snapshot,
+           existing.requestGeneration == requestGeneration,
+           let typedBox = existing.taskBox as? TypedCatalogAnalysisTaskBox<Proposal> {
+            existing.leases.insert(leaseID)
+            entries[key] = existing
+            let ticket = CatalogAnalysisTicket(
+                bookID: snapshot.bookID,
+                kind: kind,
+                generation: existing.generation,
+                leaseID: leaseID
+            )
+            Log.metadataSignposter.emitEvent(
+                "CatalogAnalysisCoalesced",
+                id: Log.metadataSignposter.makeSignpostID(),
+                "\(kind.label, privacy: .public) \(snapshot.bookID.uuidString, privacy: .public)"
+            )
+            return CatalogAnalysisJob(
+                ticket: ticket,
+                snapshot: snapshot,
+                task: typedBox.task
+            )
+        }
         cancelEntry(for: key, reason: "superseded")
 
+        let generation = UUID()
         let ticket = CatalogAnalysisTicket(
             bookID: snapshot.bookID,
             kind: kind,
-            generation: UUID()
+            generation: generation,
+            leaseID: leaseID
         )
-        let task = Task {
+        let scheduler = scheduler
+        let task: Task<Proposal?, Never> = Task {
             let signposter = Log.metadataSignposter
             let interval = signposter.beginInterval(
                 "CatalogAnalysis",
@@ -263,9 +479,19 @@ final class CatalogAnalysisCoordinator {
                 "\(kind.label, privacy: .public) \(snapshot.bookID.uuidString, privacy: .public)"
             )
             defer { signposter.endInterval("CatalogAnalysis", interval) }
-            return await operation(snapshot)
+            let proposal: Proposal? = await scheduler.run(kind: kind) {
+                guard !Task.isCancelled else { return nil }
+                return await operation(snapshot)
+            }
+            return proposal
         }
-        entries[key] = Entry(ticket: ticket, cancel: { task.cancel() })
+        entries[key] = Entry(
+            generation: generation,
+            snapshot: snapshot,
+            requestGeneration: requestGeneration,
+            taskBox: TypedCatalogAnalysisTaskBox<Proposal>(task: task),
+            leases: [leaseID]
+        )
         return CatalogAnalysisJob(ticket: ticket, snapshot: snapshot, task: task)
     }
 
@@ -273,9 +499,12 @@ final class CatalogAnalysisCoordinator {
         let proposal = await withTaskCancellationHandler {
             await job.task.value
         } onCancel: {
-            job.task.cancel()
+            Task { @MainActor [weak self] in
+                self?.cancel(job.ticket, reason: "consumer-cancelled")
+            }
         }
         guard let proposal,
+              !Task.isCancelled,
               !job.task.isCancelled,
               isCurrent(job.ticket) else {
             Log.metadataSignposter.emitEvent(
@@ -289,18 +518,34 @@ final class CatalogAnalysisCoordinator {
     }
 
     func isCurrent(_ ticket: CatalogAnalysisTicket) -> Bool {
-        entries[Key(bookID: ticket.bookID, kind: ticket.kind)]?.ticket == ticket
+        guard let entry = entries[Key(bookID: ticket.bookID, kind: ticket.kind)] else {
+            return false
+        }
+        return entry.generation == ticket.generation
+            && entry.leases.contains(ticket.leaseID)
     }
 
     func finish(_ ticket: CatalogAnalysisTicket) {
-        let key = Key(bookID: ticket.bookID, kind: ticket.kind)
-        guard entries[key]?.ticket == ticket else { return }
-        entries.removeValue(forKey: key)
+        // Cancelling an already-completed Task is harmless. Doing this
+        // unconditionally also stops queued/running work when an owner exits
+        // before ever awaiting all of the jobs it started.
+        release(
+            ticket,
+            emitCancellation: false,
+            reason: "finished"
+        )
     }
 
     func cancelAll(for bookID: UUID) {
         let keys = entries.keys.filter { $0.bookID == bookID }
         for key in keys { cancelEntry(for: key, reason: "catalog-changed") }
+    }
+
+    func cancel(bookID: UUID, kind: CatalogAnalysisJobKind) {
+        cancelEntry(
+            for: Key(bookID: bookID, kind: kind),
+            reason: "owner-cancelled"
+        )
     }
 
     func cancelAll(for bookIDs: Set<UUID>) {
@@ -309,13 +554,49 @@ final class CatalogAnalysisCoordinator {
         for key in keys { cancelEntry(for: key, reason: "catalog-changed") }
     }
 
+    func schedulerDiagnostics() async -> CatalogAnalysisSchedulerDiagnostics {
+        await scheduler.diagnostics()
+    }
+
+    private func cancel(_ ticket: CatalogAnalysisTicket, reason: String) {
+        release(
+            ticket,
+            emitCancellation: true,
+            reason: reason
+        )
+    }
+
+    private func release(
+        _ ticket: CatalogAnalysisTicket,
+        emitCancellation: Bool,
+        reason: String
+    ) {
+        let key = Key(bookID: ticket.bookID, kind: ticket.kind)
+        guard var entry = entries[key],
+              entry.generation == ticket.generation,
+              entry.leases.remove(ticket.leaseID) != nil else { return }
+        guard entry.leases.isEmpty else {
+            entries[key] = entry
+            return
+        }
+        entries.removeValue(forKey: key)
+        entry.taskBox.cancel()
+        if emitCancellation {
+            Log.metadataSignposter.emitEvent(
+                "CatalogAnalysisCancelled",
+                id: Log.metadataSignposter.makeSignpostID(),
+                "\(ticket.kind.label, privacy: .public) \(reason, privacy: .public)"
+            )
+        }
+    }
+
     private func cancelEntry(for key: Key, reason: String) {
         guard let entry = entries.removeValue(forKey: key) else { return }
-        entry.cancel()
+        entry.taskBox.cancel()
         Log.metadataSignposter.emitEvent(
             "CatalogAnalysisCancelled",
             id: Log.metadataSignposter.makeSignpostID(),
-            "\(entry.ticket.kind.label, privacy: .public) \(reason, privacy: .public)"
+            "\(key.kind.label, privacy: .public) \(reason, privacy: .public)"
         )
     }
 }

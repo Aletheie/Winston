@@ -618,50 +618,66 @@ enum AssetInspectionMaintenance {
         descriptor.fetchOffset = max(0, offset)
         descriptor.fetchLimit = max(1, limit)
         let assets = try context.fetch(descriptor)
-        let inputs = assets.compactMap { asset in
-            asset.book.flatMap { AssetInspectionInput(asset: asset, book: $0) }
-        }.filter { !$0.requirements.isEmpty }
-
-        var proposals: [AssetInspectionProposal] = []
-        for start in stride(from: 0, to: inputs.count, by: 2) {
-            try Task.checkCancellation()
-            let pair = Array(inputs[start ..< min(start + 2, inputs.count)])
-            let completed = await withTaskGroup(
-                of: AssetInspectionProposal?.self,
-                returning: [AssetInspectionProposal].self
-            ) { group in
-                for input in pair {
-                    group.addTask { await inspect(input) }
+        let inputs: [(snapshot: BookAnalysisSnapshot, input: AssetInspectionInput)] =
+            assets.compactMap { asset in
+                guard let book = asset.book,
+                      let input = AssetInspectionInput(asset: asset, book: book),
+                      !input.requirements.isEmpty,
+                      let snapshot = BookAnalysisSnapshot(book: book, sourceAsset: asset) else {
+                    return nil
                 }
-                var output: [AssetInspectionProposal] = []
-                for await proposal in group {
-                    if let proposal { output.append(proposal) }
-                }
-                return output
+                return (snapshot, input)
             }
-            proposals.append(contentsOf: completed)
+        let coordinator = mutations.analysisCoordinator
+        let jobs: [CatalogAnalysisJob<AssetInspectionProposal>] = inputs.map { item in
+            coordinator.start(
+                snapshot: item.snapshot,
+                kind: .assetInspection(assetID: item.input.assetID)
+            ) { _ in
+                await inspect(item.input)
+            }
+        }
+        defer { jobs.forEach { coordinator.finish($0.ticket) } }
+
+        var proposals: [(
+            job: CatalogAnalysisJob<AssetInspectionProposal>,
+            proposal: AssetInspectionProposal
+        )] = []
+        for job in jobs {
+            try Task.checkCancellation()
+            if let proposal = await coordinator.value(for: job) {
+                proposals.append((job, proposal))
+            }
         }
         try Task.checkCancellation()
 
-        var valid: [(AssetInspectionProposal, Book, BookAsset)] = []
-        for proposal in proposals {
-            guard proposal.sourceIsCurrent,
+        var valid: [(
+            job: CatalogAnalysisJob<AssetInspectionProposal>,
+            proposal: AssetInspectionProposal,
+            book: Book,
+            asset: BookAsset
+        )] = []
+        for completed in proposals {
+            let proposal = completed.proposal
+            guard coordinator.isCurrent(completed.job.ticket),
+                  proposal.sourceIsCurrent,
                   let book = try? mutations.book(id: proposal.input.bookID),
+                  completed.job.snapshot.matches(book),
                   let asset = book.assets.first(where: { $0.uuid == proposal.input.assetID }),
                   proposal.input.matches(book: book, asset: asset) else {
                 continue
             }
-            valid.append((proposal, book, asset))
+            valid.append((completed.job, proposal, book, asset))
         }
 
         if !valid.isEmpty {
-            let bookPreimages = valid.map { CatalogBookMetadataPreimage($0.1) }
-            let assetPreimages = valid.map { CatalogBookAssetPreimage($0.2) }
-            let bookIDs = Set(valid.map { $0.0.input.bookID })
+            let bookPreimages = valid.map { CatalogBookMetadataPreimage($0.book) }
+            let assetPreimages = valid.map { CatalogBookAssetPreimage($0.asset) }
+            let bookIDs = Set(valid.map { $0.proposal.input.bookID })
             try mutations.commit(
                 .applyAnalysisBatch(
                     bookIDs: Array(bookIDs),
-                    kind: .assetInspection(assetID: valid[0].0.input.assetID)
+                    kind: .assetInspection(assetID: valid[0].proposal.input.assetID)
                 ),
                 affectedBookIDs: bookIDs,
                 revertingOnFailure: {
@@ -669,11 +685,13 @@ enum AssetInspectionMaintenance {
                     assetPreimages.forEach { $0.restore() }
                 }
             ) {
-                for (proposal, _, _) in valid {
+                for (job, proposal, _, _) in valid {
                     let input = proposal.input
                     let output = proposal.output
                     let book = try mutations.book(id: input.bookID)
-                    guard let asset = book.assets.first(where: { $0.uuid == input.assetID }),
+                    guard coordinator.isCurrent(job.ticket),
+                          job.snapshot.matches(book),
+                          let asset = book.assets.first(where: { $0.uuid == input.assetID }),
                           input.sourceMatches(book: book, asset: asset),
                           proposal.sourceIsCurrent else {
                         throw CatalogMutationError.staleAnalysis
@@ -704,13 +722,13 @@ enum AssetInspectionMaintenance {
             }
         }
 
-        let missing = valid.count { $0.0.output.validation == .missing }
-        let opens = proposals.reduce(0) { $0 + $1.output.fileOpenCount }
+        let missing = valid.count { $0.proposal.output.validation == .missing }
+        let opens = proposals.reduce(0) { $0 + $1.proposal.output.fileOpenCount }
         measuredVisited = assets.count
         measuredInspected = valid.count
         measuredOpens = opens
         measuredBytes = proposals.reduce(Int64(0)) {
-            $0 + max(0, $1.output.sizeBytes)
+            $0 + max(0, $1.proposal.output.sizeBytes)
         }
         return ChunkResult(
             visited: assets.count,

@@ -960,3 +960,187 @@ private actor ImportAnalysisGate {
         continuation = nil
     }
 }
+
+@MainActor
+@Suite(.serialized)
+struct CatalogAnalysisCoordinatorTests {
+    @Test func identicalRequestsShareOneWorkerUntilEveryLeaseFinishes() async throws {
+        let library = try await TestLibrary()
+        let book = Book(fileName: "coalesced.epub", originalFileName: "Coalesced.epub")
+        library.context.insert(book)
+        try library.context.save()
+        let snapshot = try #require(BookAnalysisSnapshot(book: book))
+        let gate = CatalogCoordinatorGate()
+        let coordinator = CatalogAnalysisCoordinator()
+
+        let first: CatalogAnalysisJob<Int> = coordinator.start(
+            snapshot: snapshot,
+            kind: .pageCount
+        ) { _ in
+            await gate.run(value: 42)
+        }
+        let second: CatalogAnalysisJob<Int> = coordinator.start(
+            snapshot: snapshot,
+            kind: .pageCount
+        ) { _ in
+            await gate.run(value: 999)
+        }
+
+        await gate.waitUntilStarted(1)
+        #expect(await gate.startedCount == 1)
+        #expect(coordinator.activeJobCount == 1)
+        #expect(coordinator.activeLeaseCount == 2)
+
+        await gate.resumeAll()
+        #expect(await coordinator.value(for: first) == 42)
+        #expect(await coordinator.value(for: second) == 42)
+
+        coordinator.finish(first.ticket)
+        #expect(coordinator.activeJobCount == 1)
+        #expect(coordinator.activeLeaseCount == 1)
+        coordinator.finish(second.ticket)
+        #expect(coordinator.activeJobCount == 0)
+        #expect(coordinator.activeLeaseCount == 0)
+    }
+
+    @Test func localWorkerConcurrencyIsBoundedAcrossBooks() async throws {
+        let library = try await TestLibrary()
+        var snapshots: [BookAnalysisSnapshot] = []
+        for index in 0 ..< 3 {
+            let book = Book(
+                fileName: "bounded-\(index).epub",
+                originalFileName: "Bounded \(index).epub"
+            )
+            library.context.insert(book)
+            snapshots.append(try #require(BookAnalysisSnapshot(book: book)))
+        }
+        try library.context.save()
+
+        let gate = CatalogCoordinatorGate()
+        let coordinator = CatalogAnalysisCoordinator(
+            maximumConcurrentLocalJobs: 2,
+            maximumConcurrentNetworkJobs: 1
+        )
+        let jobs: [CatalogAnalysisJob<Int>] = snapshots.enumerated().map { index, snapshot in
+            coordinator.start(snapshot: snapshot, kind: .metadataExtraction) { _ in
+                await gate.run(value: index)
+            }
+        }
+
+        await gate.waitUntilStarted(2)
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(await gate.startedCount == 2)
+        let saturated = await coordinator.schedulerDiagnostics()
+        #expect(saturated.activeLocalJobs == 2)
+        #expect(saturated.peakLocalJobs == 2)
+
+        await gate.resumeOne()
+        await gate.waitUntilStarted(3)
+        #expect((await coordinator.schedulerDiagnostics()).peakLocalJobs == 2)
+        await gate.resumeAll()
+
+        for job in jobs {
+            _ = await coordinator.value(for: job)
+            coordinator.finish(job.ticket)
+        }
+        #expect(coordinator.activeJobCount == 0)
+    }
+
+    @Test func changedRequestGenerationSupersedesAndCancelsTheOldWorker() async throws {
+        let library = try await TestLibrary()
+        let book = Book(fileName: "generation.epub", originalFileName: "Generation.epub")
+        library.context.insert(book)
+        try library.context.save()
+        let snapshot = try #require(BookAnalysisSnapshot(book: book))
+        let oldGate = CatalogCoordinatorCancellationGate()
+        let coordinator = CatalogAnalysisCoordinator()
+
+        let old: CatalogAnalysisJob<Int> = coordinator.start(
+            snapshot: snapshot,
+            kind: .onlineEnrichment,
+            requestGeneration: "provider-config-v1"
+        ) { _ in
+            await oldGate.run()
+        }
+        await oldGate.waitUntilStarted()
+
+        let replacement: CatalogAnalysisJob<Int> = coordinator.start(
+            snapshot: snapshot,
+            kind: .onlineEnrichment,
+            requestGeneration: "provider-config-v2"
+        ) { _ in
+            2
+        }
+
+        #expect(await coordinator.value(for: old) == nil)
+        #expect(await oldGate.wasCancelled)
+        #expect(await coordinator.value(for: replacement) == 2)
+        #expect(!coordinator.isCurrent(old.ticket))
+        #expect(coordinator.isCurrent(replacement.ticket))
+        coordinator.finish(replacement.ticket)
+        #expect(coordinator.activeJobCount == 0)
+    }
+}
+
+private actor CatalogCoordinatorGate {
+    private var started = 0
+    private var startWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var resumeContinuations: [CheckedContinuation<Void, Never>] = []
+
+    var startedCount: Int { started }
+
+    func run(value: Int) async -> Int {
+        started += 1
+        let ready = startWaiters.filter { started >= $0.count }
+        startWaiters.removeAll { started >= $0.count }
+        ready.forEach { $0.continuation.resume() }
+        await withCheckedContinuation { continuation in
+            resumeContinuations.append(continuation)
+        }
+        return value
+    }
+
+    func waitUntilStarted(_ count: Int) async {
+        guard started < count else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append((count, continuation))
+        }
+    }
+
+    func resumeOne() {
+        guard !resumeContinuations.isEmpty else { return }
+        resumeContinuations.removeFirst().resume()
+    }
+
+    func resumeAll() {
+        let pending = resumeContinuations
+        resumeContinuations.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
+private actor CatalogCoordinatorCancellationGate {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var wasCancelled = false
+
+    func run() async -> Int? {
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        do {
+            try await Task.sleep(for: .seconds(30))
+            return 1
+        } catch {
+            wasCancelled = true
+            return nil
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+}

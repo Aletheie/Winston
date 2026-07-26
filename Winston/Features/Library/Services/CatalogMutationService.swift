@@ -95,6 +95,8 @@ enum CatalogMutationCommand {
             switch kind {
             case .metadataExtraction, .onlineEnrichment:
                 [.identity, .displayMetadata, .fullTextSource]
+            case .coverExtraction:
+                [.cover]
             case .assetHash, .assetInspection:
                 [.assetAvailability, .fullTextSource]
             case .pageCount:

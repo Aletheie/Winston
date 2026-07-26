@@ -2,12 +2,36 @@ import Foundation
 import SwiftData
 import AppKit
 
+nonisolated struct CoverAnalysisProposal: @unchecked Sendable {
+    let image: NSImage
+    let jpegData: Data
+}
+
+nonisolated enum CoverAnalysisWorker {
+    @concurrent
+    static func prepare(
+        _ loadImage: @escaping @Sendable () -> NSImage?
+    ) async -> CoverAnalysisProposal? {
+        guard !Task.isCancelled,
+              let image = loadImage(),
+              !Task.isCancelled,
+              let data = ImageTranscoder.jpegData(from: image),
+              !Task.isCancelled else { return nil }
+        return CoverAnalysisProposal(image: image, jpegData: data)
+    }
+
+    @concurrent
+    static func extract(from url: URL) async -> CoverAnalysisProposal? {
+        await prepare { CoverExtractor.extractCover(from: url) }
+    }
+}
+
 @MainActor
 @Observable
 final class CoverService {
-    private let modelContext: ModelContext
     private let mutations: CatalogMutationService
     private let managedFiles: ManagedFileCoordinator
+    private let analysisCoordinator: CatalogAnalysisCoordinator
     private var operationTokens: [UUID: UUID] = [:]
 
     init(
@@ -15,12 +39,13 @@ final class CoverService {
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared
     ) {
-        self.modelContext = modelContext
-        self.mutations = mutations ?? CatalogMutationService(
+        let resolvedMutations = mutations ?? CatalogMutationService(
             modelContext: modelContext,
             managedFiles: managedFiles
         )
+        self.mutations = resolvedMutations
         self.managedFiles = managedFiles
+        analysisCoordinator = resolvedMutations.analysisCoordinator
     }
 
     // MARK: - Custom covers
@@ -44,17 +69,27 @@ final class CoverService {
         let bookID = book.uuid
         let originalVersion = book.coverVersion
         let cacheURL = book.coverCacheURL
+        guard let snapshot = BookAnalysisSnapshot(book: book) else { return }
         let token = beginOperation(for: bookID)
-        Task {
-            defer { finishOperation(token, for: bookID) }
-            let prepared = await Task.detached(priority: .userInitiated) { () -> (NSImage, Data)? in
-                guard let image = loadImage(),
-                      let data = ImageTranscoder.jpegData(from: image) else { return nil }
-                return (image, data)
-            }.value
-            guard let (image, data) = prepared,
-                  operationIsCurrent(token, for: book),
-                  book.coverVersion == originalVersion else { return }
+        let job = analysisCoordinator.start(
+            snapshot: snapshot,
+            kind: .coverExtraction,
+            requestGeneration: "custom:\(originalVersion):\(token.uuidString)"
+        ) { _ in
+            await CoverAnalysisWorker.prepare(loadImage)
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                analysisCoordinator.finish(job.ticket)
+                finishOperation(token, for: bookID)
+            }
+            guard let prepared = await analysisCoordinator.value(for: job),
+                  analysisCoordinator.isCurrent(job.ticket),
+                  operationIsCurrent(token, for: bookID),
+                  let currentBook = try? mutations.book(id: bookID),
+                  snapshot.matches(currentBook),
+                  currentBook.coverVersion == originalVersion else { return }
             let previousIdentity: ManagedFileIdentitySnapshot
             do {
                 previousIdentity = try await managedFiles.captureIdentity(
@@ -70,7 +105,7 @@ final class CoverService {
                     intent: .coverUpdate,
                     sources: [
                         .cover(
-                            data: data,
+                            data: prepared.jpegData,
                             bookID: bookID,
                             replacing: previousIdentity
                         ),
@@ -83,8 +118,11 @@ final class CoverService {
             } catch {
                 return
             }
-            guard operationIsCurrent(token, for: book),
-                  book.coverVersion == originalVersion else {
+            guard analysisCoordinator.isCurrent(job.ticket),
+                  operationIsCurrent(token, for: bookID),
+                  let stagedBook = try? mutations.book(id: bookID),
+                  snapshot.matches(stagedBook),
+                  stagedBook.coverVersion == originalVersion else {
                 await managedFiles.abort(transaction)
                 return
             }
@@ -94,17 +132,22 @@ final class CoverService {
                     transaction: transaction,
                     affectedBookIDs: [bookID],
                     revertingOnFailure: {
-                        book.coverVersion = originalVersion
+                        if let rollbackBook = try? self.mutations.book(id: bookID) {
+                            rollbackBook.coverVersion = originalVersion
+                        }
                     }
                 ) {
                     let liveBook = try mutations.book(id: bookID)
-                    guard liveBook.coverVersion == originalVersion else {
-                        throw CatalogMutationError.modelNotFound
+                    guard analysisCoordinator.isCurrent(job.ticket),
+                          operationIsCurrent(token, for: bookID),
+                          snapshot.matches(liveBook),
+                          liveBook.coverVersion == originalVersion else {
+                        throw CatalogMutationError.staleAnalysis
                     }
                     liveBook.coverVersion = expectedVersion
                 }
                 guard result.isFullyPublished else { return }
-                await CoverCache.shared.replace(image, for: cacheURL)
+                await CoverCache.shared.replace(prepared.image, for: cacheURL)
             } catch {
                 return
             }
@@ -115,17 +158,33 @@ final class CoverService {
         let bookID = book.uuid
         let originalVersion = book.coverVersion
         let fileURL = book.coverCacheURL
+        guard let snapshot = BookAnalysisSnapshot(book: book),
+              snapshot.fileURL != nil else { return }
         let token = beginOperation(for: bookID)
-        Task {
-            defer { finishOperation(token, for: bookID) }
-            let prepared = await Task.detached(priority: .userInitiated) { () -> (NSImage, Data)? in
-                guard let image = CoverExtractor.extractCover(from: fileURL),
-                      let data = ImageTranscoder.jpegData(from: image) else { return nil }
-                return (image, data)
-            }.value
-            guard operationIsCurrent(token, for: book),
-                  book.coverVersion == originalVersion,
-                  book.coverCacheURL == fileURL else { return }
+        let job = analysisCoordinator.start(
+            snapshot: snapshot,
+            kind: .coverExtraction,
+            requestGeneration: "reset:\(originalVersion):\(token.uuidString)"
+        ) { snapshot in
+            await CatalogAnalysisWorker.inspect(snapshot: snapshot) { url in
+                await CoverAnalysisWorker.extract(from: url)
+            }
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                analysisCoordinator.finish(job.ticket)
+                finishOperation(token, for: bookID)
+            }
+            let inspected = await analysisCoordinator.value(for: job)
+            guard analysisCoordinator.isCurrent(job.ticket),
+                  operationIsCurrent(token, for: bookID),
+                  let currentBook = try? mutations.book(id: bookID),
+                  snapshot.matches(currentBook),
+                  currentBook.coverVersion == originalVersion,
+                  currentBook.coverCacheURL == fileURL,
+                  inspected?.sourceIsCurrent(for: snapshot) != false else { return }
+            let prepared = inspected?.value
 
             let expectedVersion = originalVersion + 1
             let requirement = ManagedFileRequirement(
@@ -142,7 +201,7 @@ final class CoverService {
             }
             let transaction: ManagedFileTransaction
             do {
-                if let data = prepared?.1 {
+                if let data = prepared?.jpegData {
                     transaction = try await managedFiles.stage(
                         intent: .coverUpdate,
                         sources: [
@@ -164,9 +223,13 @@ final class CoverService {
             } catch {
                 return
             }
-            guard operationIsCurrent(token, for: book),
-                  book.coverVersion == originalVersion,
-                  book.coverCacheURL == fileURL else {
+            guard analysisCoordinator.isCurrent(job.ticket),
+                  operationIsCurrent(token, for: bookID),
+                  let stagedBook = try? mutations.book(id: bookID),
+                  snapshot.matches(stagedBook),
+                  stagedBook.coverVersion == originalVersion,
+                  stagedBook.coverCacheURL == fileURL,
+                  inspected?.sourceIsCurrent(for: snapshot) != false else {
                 await managedFiles.abort(transaction)
                 return
             }
@@ -176,18 +239,23 @@ final class CoverService {
                     transaction: transaction,
                     affectedBookIDs: [bookID],
                     revertingOnFailure: {
-                        book.coverVersion = originalVersion
+                        if let rollbackBook = try? self.mutations.book(id: bookID) {
+                            rollbackBook.coverVersion = originalVersion
+                        }
                     }
                 ) {
                     let liveBook = try mutations.book(id: bookID)
-                    guard liveBook.coverVersion == originalVersion,
+                    guard analysisCoordinator.isCurrent(job.ticket),
+                          operationIsCurrent(token, for: bookID),
+                          snapshot.matches(liveBook),
+                          liveBook.coverVersion == originalVersion,
                           liveBook.coverCacheURL == fileURL else {
-                        throw CatalogMutationError.modelNotFound
+                        throw CatalogMutationError.staleAnalysis
                     }
                     liveBook.coverVersion = expectedVersion
                 }
                 guard result.isFullyPublished else { return }
-                await CoverCache.shared.replace(prepared?.0, for: fileURL)
+                await CoverCache.shared.replace(prepared?.image, for: fileURL)
             } catch {
                 return
             }
@@ -196,6 +264,7 @@ final class CoverService {
 
     func cancelPending(for uuid: UUID) {
         operationTokens.removeValue(forKey: uuid)
+        analysisCoordinator.cancel(bookID: uuid, kind: .coverExtraction)
     }
 
     private func beginOperation(for uuid: UUID) -> UUID {
@@ -204,8 +273,8 @@ final class CoverService {
         return token
     }
 
-    private func operationIsCurrent(_ token: UUID, for book: Book) -> Bool {
-        operationTokens[book.uuid] == token && book.modelContext != nil
+    private func operationIsCurrent(_ token: UUID, for bookID: UUID) -> Bool {
+        operationTokens[bookID] == token
     }
 
     private func finishOperation(_ token: UUID, for uuid: UUID) {
