@@ -145,6 +145,9 @@ final class LibraryViewModel {
     var highlightImportSummary: String? { highlights.highlightImportSummary }
     var isExporting: Bool { exporter.isExporting }
     var metadataFetchSummary: String? { metadata.metadataFetchSummary }
+    private(set) var activeBulkOperationPlan: BulkOperationPlan?
+    private(set) var lastBulkOperationResult: BulkOperationResult?
+    @ObservationIgnored private var activeBulkOperationSession: BulkOperationSession?
     private var managedFileProgressByID: [UUID: ManagedFileProgress] = [:]
     private var managedFileOperationOrder: [UUID] = []
 
@@ -217,17 +220,80 @@ final class LibraryViewModel {
     func scanForMissingFiles() async -> Int { await health.scanForMissingFiles() }
     func relink(_ book: Book, from url: URL) async { await health.relink(book, from: url) }
 
-    func remove(_ book: Book) async {
-        await removeBooks([book])
+    @discardableResult
+    func remove(_ book: Book) async -> BulkOperationResult {
+        await removeBooks(bookIDs: [book.uuid])
     }
 
-    func removeBooks(_ books: [Book]) async {
-        var seen: Set<UUID> = []
-        let removals = books.compactMap { book -> RemovedBook? in
-            guard seen.insert(book.uuid).inserted else { return nil }
-            return removalSnapshot(for: book)
+    func planRemoval(bookIDs: Set<UUID>) async -> BulkOperationPlan {
+        let orderedIDs = bookIDs.sorted { $0.uuidString < $1.uuidString }
+        let candidates = orderedIDs.map { bookID -> BulkOperationCandidate in
+            let targetID = BulkOperationTargetID.catalogBook(bookID)
+            guard let book = try? mutations.book(id: bookID),
+                  removalSnapshot(for: book) != nil else {
+                return .conflict(targetID, reason: .missingTarget)
+            }
+            return .change(targetID)
         }
-        guard !removals.isEmpty else { return }
+        return await BulkOperationPlanner.shared.makePlan(
+            operation: .catalogDelete,
+            requestedTargetIDs: orderedIDs.map(BulkOperationTargetID.catalogBook),
+            candidates: candidates,
+            chunkSize: 25
+        )
+    }
+
+    @discardableResult
+    func removeBooks(_ books: [Book]) async -> BulkOperationResult {
+        await removeBooks(bookIDs: Set(books.map(\.uuid)))
+    }
+
+    @discardableResult
+    func removeBooks(bookIDs: Set<UUID>) async -> BulkOperationResult {
+        let plan = await planRemoval(bookIDs: bookIDs)
+        let result = await runBulkOperation(plan: plan) { [weak self] chunk in
+            guard let self else {
+                throw BulkOperationDurableError(.executionFailed)
+            }
+            return try await self.applyRemovalChunk(chunk)
+        }
+        if result.appliedTargetCount > 0 {
+            editions.refreshEditionCounts()
+        }
+        if !result.warnings.isEmpty {
+            toasts.error(String(localized: "Book removal is waiting for file cleanup."))
+        }
+        reportBulkOperationResult(result)
+        return result
+    }
+
+    private func applyRemovalChunk(
+        _ chunk: BulkOperationChunk
+    ) async throws -> BulkOperationChunkOutcome {
+        var removals: [RemovedBook] = []
+        var conflicts: [BulkOperationConflict] = []
+        for targetID in chunk.targetIDs {
+            guard let bookID = targetID.catalogBookID else {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .invalidTarget
+                ))
+                continue
+            }
+            guard let book = try? mutations.book(id: bookID),
+                  let removal = removalSnapshot(for: book) else {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .missingTarget
+                ))
+                continue
+            }
+            removals.append(removal)
+        }
+        guard !removals.isEmpty else {
+            return BulkOperationChunkOutcome(conflicts: conflicts)
+        }
+
         let operationID = UUID()
         let progress = beginManagedFileOperation(id: operationID, intent: .deleteBook)
         defer { endManagedFileOperation(id: operationID) }
@@ -245,8 +311,10 @@ final class LibraryViewModel {
                 .file($0, disposition: $0.reference.kind == .book ? .trash : .delete)
             }
         } catch {
-            toasts.error(String(localized: "Couldn’t remove the selected books."))
-            return
+            throw BulkOperationDurableError(
+                .fileTransaction,
+                detail: error.localizedDescription
+            )
         }
         let transaction: ManagedFileTransaction
         do {
@@ -261,17 +329,39 @@ final class LibraryViewModel {
                 progress: progress
             )
         } catch {
-            toasts.error(String(localized: "Couldn’t remove the selected books."))
-            return
+            throw BulkOperationDurableError(
+                .fileTransaction,
+                detail: error.localizedDescription
+            )
         }
 
+        if Task.isCancelled {
+            await managedFiles.abort(transaction)
+            throw CancellationError()
+        }
         guard removals.allSatisfy(removalSnapshotIsCurrent) else {
             await managedFiles.abort(transaction)
-            return
+            conflicts.append(contentsOf: removals.map {
+                BulkOperationConflict(
+                    targetID: .catalogBook($0.uuid),
+                    reason: .sourceChanged
+                )
+            })
+            return BulkOperationChunkOutcome(conflicts: conflicts)
         }
         let removalPreimages = removals.compactMap { removal -> (Book, Work?, UUID?)? in
             guard let book = try? mutations.book(id: removal.uuid) else { return nil }
             return (book, book.work, book.work?.preferredEditionUUID)
+        }
+        guard removalPreimages.count == removals.count else {
+            await managedFiles.abort(transaction)
+            conflicts.append(contentsOf: removals.map {
+                BulkOperationConflict(
+                    targetID: .catalogBook($0.uuid),
+                    reason: .sourceChanged
+                )
+            })
+            return BulkOperationChunkOutcome(conflicts: conflicts)
         }
         let affectedWorkIDs = Set(removalPreimages.compactMap { $0.1?.uuid })
         do {
@@ -304,14 +394,23 @@ final class LibraryViewModel {
                 }
             }
             removals.forEach(finishRemoval)
-            if !result.isFullyPublished {
-                toasts.error(String(localized: "Book removal is waiting for file cleanup."))
-            }
+            let warnings = result.isFullyPublished
+                ? []
+                : [BulkOperationWarning(
+                    targetIDs: removals.map { .catalogBook($0.uuid) },
+                    reason: .publicationPending
+                )]
+            return BulkOperationChunkOutcome(
+                appliedTargetIDs: Set(removals.map { .catalogBook($0.uuid) }),
+                conflicts: conflicts,
+                warnings: warnings
+            )
         } catch {
-            toasts.error(String(localized: "Couldn’t remove the selected books."))
-            return
+            throw BulkOperationDurableError(
+                .catalogSave,
+                detail: error.localizedDescription
+            )
         }
-        editions.refreshEditionCounts()
     }
 
     private struct RemovedBook: Equatable {
@@ -380,9 +479,32 @@ final class LibraryViewModel {
     func updateNotes(_ notes: String, for book: Book) -> Bool {
         reportMutationResult(metadata.updateNotes(notes, for: book))
     }
+    func planBulkUpdate(
+        bookIDs: Set<UUID>,
+        edit: BulkEdit
+    ) async -> BulkOperationPlan {
+        await metadata.planBulkUpdate(bookIDs: bookIDs, edit: edit)
+    }
+
     @discardableResult
-    func bulkUpdate(_ books: [Book], _ edit: BulkEdit) -> Bool {
-        reportMutationResult(metadata.bulkUpdate(books, edit))
+    func bulkUpdate(
+        bookIDs: Set<UUID>,
+        edit: BulkEdit
+    ) async -> BulkOperationResult {
+        let plan = await metadata.planBulkUpdate(bookIDs: bookIDs, edit: edit)
+        let result = await runBulkOperation(plan: plan) { [metadata] chunk in
+            try metadata.applyBulkUpdateChunk(chunk, edit: edit)
+        }
+        reportBulkOperationResult(result)
+        return result
+    }
+
+    @discardableResult
+    func bulkUpdate(
+        _ books: [Book],
+        _ edit: BulkEdit
+    ) async -> BulkOperationResult {
+        await bulkUpdate(bookIDs: Set(books.map(\.uuid)), edit: edit)
     }
     @discardableResult
     func renameTag(_ old: String, to new: String) -> Bool {
@@ -420,6 +542,7 @@ final class LibraryViewModel {
     func cancelLongRunningSessions() {
         importer.cancelAllSessions()
         metadata.cancelOnlineMetadataJobs()
+        cancelBulkOperation()
     }
 
     // MARK: - Convert (forwarded)
@@ -860,6 +983,96 @@ final class LibraryViewModel {
 
     // MARK: - Reading status
 
+    func planReadingStatus(
+        _ status: ReadingStatus,
+        bookIDs: Set<UUID>
+    ) async -> BulkOperationPlan {
+        let orderedIDs = bookIDs.sorted { $0.uuidString < $1.uuidString }
+        let candidates = orderedIDs.map { bookID -> BulkOperationCandidate in
+            let targetID = BulkOperationTargetID.catalogBook(bookID)
+            guard let book = try? mutations.book(id: bookID) else {
+                return .conflict(targetID, reason: .missingTarget)
+            }
+            return book.readingStatus == status
+                ? .unchanged(targetID)
+                : .change(targetID)
+        }
+        return await BulkOperationPlanner.shared.makePlan(
+            operation: .metadataEdit,
+            requestedTargetIDs: orderedIDs.map(BulkOperationTargetID.catalogBook),
+            candidates: candidates,
+            chunkSize: 200
+        )
+    }
+
+    @discardableResult
+    func setReadingStatus(
+        _ status: ReadingStatus,
+        bookIDs: Set<UUID>
+    ) async -> BulkOperationResult {
+        let plan = await planReadingStatus(status, bookIDs: bookIDs)
+        let result = await runBulkOperation(plan: plan) { [weak self] chunk in
+            guard let self else {
+                throw BulkOperationDurableError(.executionFailed)
+            }
+            var applicable: Set<UUID> = []
+            var unchanged: Set<BulkOperationTargetID> = []
+            var conflicts: [BulkOperationConflict] = []
+            for targetID in chunk.targetIDs {
+                guard let bookID = targetID.catalogBookID else {
+                    conflicts.append(BulkOperationConflict(
+                        targetID: targetID,
+                        reason: .invalidTarget
+                    ))
+                    continue
+                }
+                guard let book = try? self.mutations.book(id: bookID) else {
+                    conflicts.append(BulkOperationConflict(
+                        targetID: targetID,
+                        reason: .missingTarget
+                    ))
+                    continue
+                }
+                if book.readingStatus == status {
+                    unchanged.insert(targetID)
+                } else {
+                    applicable.insert(bookID)
+                }
+            }
+            guard !applicable.isEmpty else {
+                return BulkOperationChunkOutcome(
+                    unchangedTargetIDs: unchanged,
+                    conflicts: conflicts
+                )
+            }
+            switch self.mutations.execute(
+                .setReadingStatus(bookIDs: applicable, status: status)
+            ) {
+            case .success:
+                return BulkOperationChunkOutcome(
+                    appliedTargetIDs: Set(applicable.map {
+                        BulkOperationTargetID.catalogBook($0)
+                    }),
+                    unchangedTargetIDs: unchanged,
+                    conflicts: conflicts
+                )
+            case .failure(let error):
+                throw BulkOperationDurableError(
+                    .catalogSave,
+                    detail: String(describing: error)
+                )
+            }
+        }
+        if status == .finished {
+            let newlyFinished = result.appliedTargetIDs.compactMap {
+                $0.catalogBookID.flatMap { try? mutations.book(id: $0) }
+            }
+            notices.booksDidFinish(newlyFinished)
+        }
+        reportBulkOperationResult(result)
+        return result
+    }
+
     @discardableResult
     func setReadingStatus(_ status: ReadingStatus, for books: [Book]) -> Bool {
         let ids = Set(books.map(\.uuid))
@@ -966,22 +1179,209 @@ final class LibraryViewModel {
         )))
     }
 
-    @discardableResult
-    func add(_ books: [Book], to collection: BookCollection) -> Bool {
-        let bookIDs = Set(books.map(\.uuid))
-        return reportMutationResult(mutations.execute(.addToCollection(
-            collectionID: collection.id,
-            bookIDs: bookIDs
-        )))
+    func planCollectionChange(
+        bookIDs: Set<UUID>,
+        collectionID: UUID,
+        adding: Bool
+    ) async -> BulkOperationPlan {
+        let orderedIDs = bookIDs.sorted { $0.uuidString < $1.uuidString }
+        let collection = try? mutations.collection(id: collectionID)
+        let collectionIsValid = collection?.isSystem == false && collection?.isSmart == false
+        let memberIDs = Set(collection?.books.map(\.uuid) ?? [])
+        let candidates = orderedIDs.map { bookID -> BulkOperationCandidate in
+            let targetID = BulkOperationTargetID.catalogBook(bookID)
+            guard collectionIsValid else {
+                return .conflict(targetID, reason: .invalidTarget)
+            }
+            guard (try? mutations.book(id: bookID)) != nil else {
+                return .conflict(targetID, reason: .missingTarget)
+            }
+            let isMember = memberIDs.contains(bookID)
+            return adding == isMember ? .unchanged(targetID) : .change(targetID)
+        }
+        return await BulkOperationPlanner.shared.makePlan(
+            operation: adding ? .collectionAdd : .collectionRemove,
+            requestedTargetIDs: orderedIDs.map(BulkOperationTargetID.catalogBook),
+            candidates: candidates,
+            chunkSize: 200
+        )
     }
 
     @discardableResult
-    func remove(_ books: [Book], from collection: BookCollection) -> Bool {
-        let bookIDs = Set(books.map(\.uuid))
-        return reportMutationResult(mutations.execute(.removeFromCollection(
+    func add(
+        _ books: [Book],
+        to collection: BookCollection
+    ) async -> BulkOperationResult {
+        await add(bookIDs: Set(books.map(\.uuid)), to: collection)
+    }
+
+    @discardableResult
+    func add(
+        bookIDs: Set<UUID>,
+        to collection: BookCollection
+    ) async -> BulkOperationResult {
+        await changeCollection(
+            bookIDs: bookIDs,
             collectionID: collection.id,
-            bookIDs: bookIDs
-        )))
+            adding: true
+        )
+    }
+
+    @discardableResult
+    func remove(
+        _ books: [Book],
+        from collection: BookCollection
+    ) async -> BulkOperationResult {
+        await remove(bookIDs: Set(books.map(\.uuid)), from: collection)
+    }
+
+    @discardableResult
+    func remove(
+        bookIDs: Set<UUID>,
+        from collection: BookCollection
+    ) async -> BulkOperationResult {
+        await changeCollection(
+            bookIDs: bookIDs,
+            collectionID: collection.id,
+            adding: false
+        )
+    }
+
+    private func changeCollection(
+        bookIDs: Set<UUID>,
+        collectionID: UUID,
+        adding: Bool
+    ) async -> BulkOperationResult {
+        let plan = await planCollectionChange(
+            bookIDs: bookIDs,
+            collectionID: collectionID,
+            adding: adding
+        )
+        let result = await runBulkOperation(plan: plan) { [weak self] chunk in
+            guard let self else {
+                throw BulkOperationDurableError(.executionFailed)
+            }
+            return try self.applyCollectionChunk(
+                chunk,
+                collectionID: collectionID,
+                adding: adding
+            )
+        }
+        reportBulkOperationResult(result)
+        return result
+    }
+
+    private func applyCollectionChunk(
+        _ chunk: BulkOperationChunk,
+        collectionID: UUID,
+        adding: Bool
+    ) throws -> BulkOperationChunkOutcome {
+        guard let collection = try? mutations.collection(id: collectionID),
+              !collection.isSystem,
+              !collection.isSmart else {
+            throw BulkOperationDurableError(
+                .executionFailed,
+                detail: "Collection is unavailable"
+            )
+        }
+
+        let memberIDs = Set(collection.books.map(\.uuid))
+        var applicableBookIDs: Set<UUID> = []
+        var unchanged: Set<BulkOperationTargetID> = []
+        var conflicts: [BulkOperationConflict] = []
+        for targetID in chunk.targetIDs {
+            guard let bookID = targetID.catalogBookID else {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .invalidTarget
+                ))
+                continue
+            }
+            guard (try? mutations.book(id: bookID)) != nil else {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .missingTarget
+                ))
+                continue
+            }
+            if adding == memberIDs.contains(bookID) {
+                unchanged.insert(targetID)
+            } else {
+                applicableBookIDs.insert(bookID)
+            }
+        }
+
+        guard !applicableBookIDs.isEmpty else {
+            return BulkOperationChunkOutcome(
+                unchangedTargetIDs: unchanged,
+                conflicts: conflicts
+            )
+        }
+        let request: CatalogMutationRequest = adding
+            ? .addToCollection(collectionID: collectionID, bookIDs: applicableBookIDs)
+            : .removeFromCollection(collectionID: collectionID, bookIDs: applicableBookIDs)
+        switch mutations.execute(request) {
+        case .success:
+            return BulkOperationChunkOutcome(
+                appliedTargetIDs: Set(applicableBookIDs.map {
+                    BulkOperationTargetID.catalogBook($0)
+                }),
+                unchangedTargetIDs: unchanged,
+                conflicts: conflicts
+            )
+        case .failure(let error):
+            throw BulkOperationDurableError(
+                .catalogSave,
+                detail: String(describing: error)
+            )
+        }
+    }
+
+    private func runBulkOperation(
+        plan: BulkOperationPlan,
+        applying applyChunk: @escaping @MainActor @Sendable (
+            BulkOperationChunk
+        ) async throws -> BulkOperationChunkOutcome
+    ) async -> BulkOperationResult {
+        guard activeBulkOperationSession == nil else {
+            let rejected = BulkOperationSession(plan: plan)
+            let result = await rejected.execute { _ in
+                throw BulkOperationDurableError(.operationInProgress)
+            }
+            lastBulkOperationResult = result
+            return result
+        }
+
+        let session = BulkOperationSession(plan: plan)
+        activeBulkOperationSession = session
+        activeBulkOperationPlan = plan
+        let result = await session.execute(applying: applyChunk)
+        if activeBulkOperationPlan?.id == plan.id {
+            activeBulkOperationSession = nil
+            activeBulkOperationPlan = nil
+        }
+        lastBulkOperationResult = result
+        return result
+    }
+
+    func cancelBulkOperation() {
+        guard let session = activeBulkOperationSession else { return }
+        Task { await session.cancel() }
+    }
+
+    private func reportBulkOperationResult(_ result: BulkOperationResult) {
+        switch result.completion {
+        case .failed:
+            toasts.error(String(localized: "Couldn’t save all library changes."))
+        case .cancelled:
+            toasts.info(String(localized: "Bulk operation cancelled."))
+        case .completed:
+            if result.conflictCount > 0 {
+                toasts.info(String(
+                    localized: "Bulk operation finished with \(result.conflictCount) conflicts."
+                ))
+            }
+        }
     }
 
     @discardableResult

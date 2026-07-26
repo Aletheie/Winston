@@ -6,7 +6,7 @@ extension Array where Element == String {
     }
 }
 
-enum TagMode: String, CaseIterable, Identifiable {
+nonisolated enum TagMode: String, CaseIterable, Identifiable, Hashable, Sendable {
     case add, replace
     var id: Self { self }
     var label: String {
@@ -15,7 +15,7 @@ enum TagMode: String, CaseIterable, Identifiable {
     }
 }
 
-struct BulkEdit {
+nonisolated struct BulkEdit: Hashable, Sendable {
     var author: String?
     var authorIdentityScope: EditionIdentityScope = .editionOnly
     var publisher: String?
@@ -29,12 +29,13 @@ struct BulkEdit {
 }
 
 struct BulkEditSheet: View {
-    let bookCount: Int
+    let bookIDs: Set<UUID>
     let viewModel: LibraryViewModel
     let onApply: (BulkEdit) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
+    @State private var plan: BulkOperationPlan?
     @State private var applyAuthor = false
     @State private var author = ""
     @State private var authorIdentityScope: EditionIdentityScope = .editionOnly
@@ -57,11 +58,11 @@ struct BulkEditSheet: View {
 
     var body: some View {
         Form {
-            Section {
-                Text("Changes apply to \(bookCount) selected books. Only switched-on fields are changed.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            BulkOperationPlanSummary(
+                selectedCount: bookIDs.count,
+                hasChanges: hasChanges,
+                plan: plan
+            )
 
             Section("Fields") {
                 bulkRow("Author", isOn: $applyAuthor) { TextField("Author", text: $author) }
@@ -117,7 +118,7 @@ struct BulkEditSheet: View {
                 Button("Apply") { apply() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled(!hasChanges)
+                    .disabled(!hasChanges || (plan?.affectedTargetCount ?? 0) == 0)
             }
             .padding()
             .background(.bar)
@@ -126,6 +127,19 @@ struct BulkEditSheet: View {
             let suggestions = await viewModel.seriesSuggestions()
             guard !Task.isCancelled else { return }
             seriesSuggestions = suggestions
+        }
+        .task(id: previewEdit) {
+            guard let edit = previewEdit else {
+                plan = nil
+                return
+            }
+            plan = nil
+            let proposedPlan = await viewModel.planBulkUpdate(
+                bookIDs: bookIDs,
+                edit: edit
+            )
+            guard !Task.isCancelled, previewEdit == edit else { return }
+            plan = proposedPlan
         }
     }
 
@@ -144,7 +158,11 @@ struct BulkEditSheet: View {
         applyAuthor || applyPublisher || applyYear || applySeries || applyLanguage || applyTranslator || applyStatus || applyTags
     }
 
-    private func apply() {
+    private var previewEdit: BulkEdit? {
+        hasChanges ? makeEdit() : nil
+    }
+
+    private func makeEdit() -> BulkEdit {
         var edit = BulkEdit()
         if applyAuthor {
             edit.author = author
@@ -160,7 +178,47 @@ struct BulkEditSheet: View {
             edit.tags = tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             edit.tagMode = tagMode
         }
+        return edit
+    }
+
+    private func apply() {
+        let edit = makeEdit()
         onApply(edit)
         dismiss()
+    }
+}
+
+private struct BulkOperationPlanSummary: View {
+    let selectedCount: Int
+    let hasChanges: Bool
+    let plan: BulkOperationPlan?
+
+    var body: some View {
+        Section {
+            if !hasChanges {
+                Text("Select the fields to change for \(selectedCount) books.")
+                    .foregroundStyle(.secondary)
+            } else if let plan {
+                Text("\(plan.affectedTargetCount) books will change.")
+                if plan.conflictCount > 0 || plan.unchangedTargetCount > 0 {
+                    Text(
+                        "\(plan.conflictCount) conflicts, \(plan.unchangedTargetCount) unchanged."
+                    )
+                    .foregroundStyle(
+                        plan.conflictCount > 0 ? Color.orange : Color.secondary
+                    )
+                }
+            } else {
+                HStack {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Validating selected books\u{2026}")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text("Only switched-on fields are changed.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }

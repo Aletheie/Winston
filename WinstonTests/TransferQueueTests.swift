@@ -369,6 +369,33 @@ struct TransferQueueTests {
         #expect(queue.lastError == "DRM-protected")
     }
 
+    @Test func sendPlanReportsUnavailableBooksWithoutHidingValidTransfers() async throws {
+        let lib = try await TestLibrary()
+        let unavailable = Book(fileName: "", originalFileName: "Physical")
+        unavailable.title = "Physical"
+        unavailable.hasPhysicalCopy = true
+        let available = try makeMOBIBook(in: lib, title: "Available")
+        let fake = FakeKindleConnection()
+        let queue = TransferQueue(toasts: ToastCenter())
+
+        await queue.send(
+            books: [unavailable, available],
+            via: makeMonitor(fake)
+        )
+
+        let result = try #require(queue.lastBulkOperationResult)
+        #expect(result.plan.affectedTargetCount == 1)
+        #expect(result.plan.conflicts == [
+            BulkOperationConflict(
+                targetID: .catalogBook(unavailable.uuid),
+                reason: .unavailable
+            ),
+        ])
+        #expect(result.appliedTargetIDs == [.catalogBook(available.uuid)])
+        #expect(queue.items.map(\.stage) == [.failed, .done])
+        #expect(await fake.sentFiles.count == 1)
+    }
+
     @Test func deviceVanishingFailsRemainderAndDisconnects() async throws {
         let lib = try await TestLibrary()
         let books = [try makeMOBIBook(in: lib, title: "One"),

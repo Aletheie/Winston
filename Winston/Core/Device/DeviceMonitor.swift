@@ -22,8 +22,10 @@ final class DeviceMonitor {
     private(set) var booksRevision = 0
     private(set) var connection: (any KindleDeviceConnection)?
     private(set) var lastError: String?
+    private(set) var lastBulkOperationResult: BulkOperationResult?
 
     private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var deviceDeleteSession: BulkOperationSession?
     private var suspended = false
     private var manuallyDisconnected = false
 
@@ -174,22 +176,101 @@ final class DeviceMonitor {
 
     @discardableResult
     func removeFromDevice(matching keys: Set<String>) async -> Int {
-        guard let connection, !keys.isEmpty else { return 0 }
-        let targets = books.filter { keys.contains($0.matchKey) }
-        guard !targets.isEmpty else { return 0 }
+        let ids = Set(books.lazy.filter { keys.contains($0.matchKey) }.map(\.id))
+        return await removeFromDevice(ids: ids).appliedTargetCount
+    }
 
-        var removed: Set<DeviceBook.ID> = []
-        for book in targets {
+    func planDeviceRemoval(ids: Set<DeviceBook.ID>) async -> BulkOperationPlan {
+        let orderedIDs = ids.sorted()
+        let liveIDs = Set(books.map(\.id))
+        let candidates = orderedIDs.map { id -> BulkOperationCandidate in
+            let targetID = BulkOperationTargetID.deviceBook(id)
+            return liveIDs.contains(id)
+                ? .change(targetID)
+                : .conflict(targetID, reason: .missingTarget)
+        }
+        return await BulkOperationPlanner.shared.makePlan(
+            operation: .deviceDelete,
+            requestedTargetIDs: orderedIDs.map(BulkOperationTargetID.deviceBook),
+            candidates: candidates,
+            chunkSize: 1
+        )
+    }
+
+    @discardableResult
+    func removeFromDevice(
+        ids: Set<DeviceBook.ID>
+    ) async -> BulkOperationResult {
+        let plan = await planDeviceRemoval(ids: ids)
+        if deviceDeleteSession != nil {
+            let rejected = BulkOperationSession(plan: plan)
+            let result = await rejected.execute { _ in
+                throw BulkOperationDurableError(.operationInProgress)
+            }
+            lastBulkOperationResult = result
+            return result
+        }
+        let session = BulkOperationSession(plan: plan)
+        deviceDeleteSession = session
+        let result = await session.execute { [weak self] chunk in
+            guard let self else {
+                throw BulkOperationDurableError(.executionFailed)
+            }
+            guard let targetID = chunk.targetIDs.first,
+                  let id = targetID.deviceBookID else {
+                return BulkOperationChunkOutcome(conflicts: chunk.targetIDs.map {
+                    BulkOperationConflict(targetID: $0, reason: .invalidTarget)
+                })
+            }
+            guard let book = self.books.first(where: { $0.id == id }) else {
+                return BulkOperationChunkOutcome(conflicts: [
+                    BulkOperationConflict(targetID: targetID, reason: .missingTarget),
+                ])
+            }
+            guard let connection = self.connection,
+                  await connection.isAlive() else {
+                await self.disconnect()
+                throw BulkOperationDurableError(.deviceDisconnected)
+            }
             do {
                 try await connection.delete(book)
-                removed.insert(book.id)
+                self.removeBooksLocally([book.id])
+                return .applied([targetID])
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
-                Log.device.error("Delete from device failed for \(book.fileName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                Log.device.error(
+                    "Delete from device failed for \(book.fileName, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+                if await !connection.isAlive() {
+                    await self.disconnect()
+                    throw BulkOperationDurableError(
+                        .deviceDisconnected,
+                        detail: error.localizedDescription
+                    )
+                }
+                return BulkOperationChunkOutcome(conflicts: [
+                    BulkOperationConflict(
+                        targetID: targetID,
+                        reason: .itemFailed,
+                        detail: error.localizedDescription
+                    ),
+                ])
             }
         }
-        removeBooksLocally(removed)
-        await refreshInfo()
-        Log.device.info("Removed \(removed.count) book(s) from device")
-        return removed.count
+        if deviceDeleteSession === session {
+            deviceDeleteSession = nil
+        }
+        lastBulkOperationResult = result
+        if isConnected { await refreshInfo() }
+        Log.device.info(
+            "Removed \(result.appliedTargetCount) book(s) from device; \(result.conflictCount) conflict(s)"
+        )
+        return result
+    }
+
+    func cancelDeviceDelete() {
+        guard let session = deviceDeleteSession else { return }
+        Task { await session.cancel() }
     }
 }

@@ -7,7 +7,7 @@ import OSLog
 enum LibrarySheet: Identifiable {
     case addPhysicalBook
     case edit(Book)
-    case bulkEdit
+    case bulkEdit(Set<UUID>)
     case metadataFixes
     case statistics
     case highlights
@@ -24,7 +24,7 @@ enum LibrarySheet: Identifiable {
         switch self {
         case .addPhysicalBook: "addPhysicalBook"
         case .edit(let book): "edit-\(book.uuid.uuidString)"
-        case .bulkEdit:       "bulkEdit"
+        case .bulkEdit(let ids): "bulkEdit-\(ids.count)-\(ids.hashValue)"
         case .metadataFixes:  "metadataFixes"
         case .statistics:     "statistics"
         case .highlights:     "highlights"
@@ -77,6 +77,7 @@ struct LibraryView: View {
     @State private var sortOrder: [KeyPathComparator<Book>] = [BookSort.dateAdded.comparator(ascending: false)]
     @State private var showDeleteConfirm = false
     @State private var pendingDeletion: [Book] = []
+    @State private var pendingDeletionPlan: BulkOperationPlan?
     @State private var quickLookURL: URL?
     @State private var showNewCollectionAlert = false
     @State private var newCollectionName = ""
@@ -159,12 +160,20 @@ struct LibraryView: View {
             quickLook: { quickLookURL = $0.primaryFileURL },
             showInFinder: { LibraryExternalActions.showInFinder($0) },
             edit: { activeSheet = .edit($0) },
-            editSelection: { activeSheet = .bulkEdit },
+            editSelection: {
+                activeSheet = .bulkEdit(Set(selectedBooks.map(\.uuid)))
+            },
             fetchMetadata: { book in viewModel.fetchOnlineMetadata(for: book) },
             fetchMetadataSelection: { viewModel.fetchOnlineMetadata(for: selectedBooks) },
-            setStatus: { book, status in viewModel.setReadingStatus(status, for: targetBooks(for: book)) },
+            setStatus: { book, status in
+                let ids = Set(targetBooks(for: book).map(\.uuid))
+                Task { await viewModel.setReadingStatus(status, bookIDs: ids) }
+            },
             readingHistory: { activeSheet = .readingHistory($0) },
-            addToCollection: { book, collection in viewModel.add(targetBooks(for: book), to: collection) },
+            addToCollection: { book, collection in
+                let ids = Set(targetBooks(for: book).map(\.uuid))
+                Task { await viewModel.add(bookIDs: ids, to: collection) }
+            },
             newCollection: { book in
                 newCollectionTargets = targetBooks(for: book)
                 newCollectionName = ""
@@ -180,12 +189,10 @@ struct LibraryView: View {
             convertSelection: convertSelectedBooks,
             convertSelectionTo: { format in viewModel.convertBooks(selectedBooks, to: format) },
             delete: { book in
-                pendingDeletion = [book]
-                showDeleteConfirm = true
+                prepareDeletion([book])
             },
             deleteSelection: {
-                pendingDeletion = selectedBooks
-                showDeleteConfirm = true
+                prepareDeletion(selectedBooks)
             },
             removeFromDevice: { book in deleteFromDevice(targetBooks(for: book)) },
             removeSelectionFromDevice: { deleteFromDevice(selectedBooks) }
@@ -254,12 +261,14 @@ struct LibraryView: View {
                     AddPhysicalBookSheet(viewModel: viewModel)
                 case .edit(let book):
                     EditMetadataSheet(book: book, viewModel: viewModel)
-                case .bulkEdit:
+                case .bulkEdit(let bookIDs):
                     BulkEditSheet(
-                        bookCount: selectedBooks.count,
+                        bookIDs: bookIDs,
                         viewModel: viewModel
                     ) { edit in
-                        viewModel.bulkUpdate(selectedBooks, edit)
+                        Task {
+                            await viewModel.bulkUpdate(bookIDs: bookIDs, edit: edit)
+                        }
                     }
                 case .metadataFixes:
                     MetadataFixesSheet(viewModel: viewModel)
@@ -300,12 +309,16 @@ struct LibraryView: View {
                     ReadingHistoryImportSheet(fileURL: url)
                 }
             }
-            .alert("Delete \(pendingDeletion.count) books?",
+            .alert("Delete \(pendingDeletionPlan?.affectedTargetCount ?? pendingDeletion.count) books?",
                    isPresented: $showDeleteConfirm) {
                 Button("Delete", role: .destructive) { deletePending() }
-                Button("Cancel", role: .cancel) { pendingDeletion = [] }
+                    .disabled(pendingDeletionPlan?.affectedTargetCount == 0)
+                Button("Cancel", role: .cancel) {
+                    pendingDeletion = []
+                    pendingDeletionPlan = nil
+                }
             } message: {
-                Text("Deleted books are moved to the Trash.")
+                DeleteBooksPlanMessage(plan: pendingDeletionPlan)
             }
             .alert("New Collection", isPresented: $showNewCollectionAlert) {
                 TextField("Name", text: $newCollectionName)
@@ -478,12 +491,13 @@ struct LibraryView: View {
         case .showInFinder:
             if let book = primarySelectedBook { LibraryExternalActions.showInFinder(book) }
         case .editMetadata:
-            if selection.count > 1 { activeSheet = .bulkEdit }
+            if selection.count > 1 {
+                activeSheet = .bulkEdit(Set(selectedBooks.map(\.uuid)))
+            }
             else if let book = primarySelectedBook { activeSheet = .edit(book) }
         case .deleteSelected:
             if selection.hasSelection {
-                pendingDeletion = selectedBooks
-                showDeleteConfirm = true
+                prepareDeletion(selectedBooks)
             }
         case .selectAll:
             selection.selectAll(displayed)
@@ -523,7 +537,8 @@ struct LibraryView: View {
         case .recommendReading:
             activeSheet = .readingRecommendation
         case .markSelection(let status):
-            viewModel.setReadingStatus(status, for: selectedBooks)
+            let ids = Set(selectedBooks.map(\.uuid))
+            Task { await viewModel.setReadingStatus(status, bookIDs: ids) }
         case .replaceSelected:
             if let book = primarySelectedBook {
                 Task { await LibraryExternalActions.relink(book, via: viewModel) }
@@ -553,7 +568,7 @@ struct LibraryView: View {
     }
 
     private func transmitSelected() {
-        let toSend = selectedBooks.filter(\.hasDigitalFile)
+        let toSend = selectedBooks
         guard !toSend.isEmpty else { return }
         if settings.inspectBeforeKindleTransfer {
             presentBookDoctor(for: toSend, purpose: .sendToKindle)
@@ -586,12 +601,29 @@ struct LibraryView: View {
     }
 
     private func deletePending() {
-        let toDelete = pendingDeletion.filter { $0.modelContext != nil }
+        let toDelete = pendingDeletion
+        let bookIDs = Set(toDelete.map(\.uuid))
         pendingDeletion = []
-        guard !toDelete.isEmpty else { return }
+        pendingDeletionPlan = nil
+        guard !bookIDs.isEmpty else { return }
         animateNextDisplayChange = viewMode == .grid
-        Task { await viewModel.removeBooks(toDelete) }
+        Task { await viewModel.removeBooks(bookIDs: bookIDs) }
         toDelete.forEach { selection.remove($0.id) }
+    }
+
+    private func prepareDeletion(_ books: [Book]) {
+        var seen: Set<UUID> = []
+        let stableBooks = books.filter { seen.insert($0.uuid).inserted }
+        let bookIDs = Set(stableBooks.map(\.uuid))
+        guard !bookIDs.isEmpty else { return }
+        pendingDeletion = stableBooks
+        pendingDeletionPlan = nil
+        Task {
+            let plan = await viewModel.planRemoval(bookIDs: bookIDs)
+            guard Set(pendingDeletion.map(\.uuid)) == bookIDs else { return }
+            pendingDeletionPlan = plan
+            showDeleteConfirm = true
+        }
     }
 
     private func refreshDisplayed(for revision: DisplayRevision) async {
@@ -651,9 +683,35 @@ struct LibraryView: View {
         let keys = Set(booksToRemove.flatMap(\.deviceMatchKeys))
             .intersection(deviceMonitor.deviceFileNames)
         guard !keys.isEmpty else { return }
+        let deviceBookIDs = Set(deviceMonitor.books.lazy
+            .filter { keys.contains($0.matchKey) }
+            .map(\.id))
+        guard !deviceBookIDs.isEmpty else { return }
         Task {
-            let count = await deviceMonitor.removeFromDevice(matching: keys)
-            if count > 0 { toasts.success(String(localized: "Removed \(count) from Kindle.")) }
+            let result = await deviceMonitor.removeFromDevice(ids: deviceBookIDs)
+            if result.appliedTargetCount > 0 {
+                toasts.success(String(
+                    localized: "Removed \(result.appliedTargetCount) from Kindle."
+                ))
+            }
+            if result.completion == .failed || result.conflictCount > 0 {
+                toasts.error(String(
+                    localized: "Some books couldn’t be deleted from the Kindle (\(result.conflictCount + result.pendingTargetIDs.count))."
+                ))
+            }
+        }
+    }
+}
+
+private struct DeleteBooksPlanMessage: View {
+    let plan: BulkOperationPlan?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Deleted books are moved to the Trash.")
+            if let plan, plan.conflictCount > 0 {
+                Text("\(plan.conflictCount) selected books can’t be deleted.")
+            }
         }
     }
 }

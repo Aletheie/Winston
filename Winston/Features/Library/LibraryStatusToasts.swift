@@ -59,6 +59,11 @@ struct LibraryStatusToasts: View {
         if transferQueue.activeItem?.stage == .converting {
             return String(localized: "Converting\u{2026}")
         }
+        if let plan = transferQueue.activePlan, plan.conflictCount > 0 {
+            return String(
+                localized: "Sending \(plan.affectedTargetCount) changes to Kindle (\(plan.conflictCount) conflicts)\u{2026}"
+            )
+        }
         let base = String(localized: "Sending to Kindle\u{2026}")
         let total = transferQueue.items.count
         guard total > 1 else { return base }
@@ -68,6 +73,16 @@ struct LibraryStatusToasts: View {
 
     private var activeToasts: [Toast] {
         var toasts: [Toast] = []
+
+        if let plan = viewModel.activeBulkOperationPlan {
+            toasts.append(Toast(
+                id: "bulk-operation",
+                style: .progress,
+                message: String(
+                    localized: "Applying \(plan.changeCount) changes (\(plan.conflictCount) conflicts)\u{2026}"
+                )
+            ))
+        }
 
         if let progress = viewModel.managedFileProgress {
             toasts.append(Toast(

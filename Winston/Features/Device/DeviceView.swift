@@ -184,26 +184,15 @@ struct DeviceView: View {
     }
 
     private func deleteFromDevice(_ ids: Set<DeviceBook.ID>) {
-        let books = monitor.books.filter { ids.contains($0.id) }
         Task {
-            guard let connection = monitor.connection else { return }
-            var deleted: Set<DeviceBook.ID> = []
-            var failed = 0
-            for book in books {
-                do {
-                    try await connection.delete(book)
-                    deleted.insert(book.id)
-                } catch {
-                    failed += 1
-                    Log.device.error("Delete from device failed for \(book.fileName, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                }
-            }
-            if failed > 0 {
-                toasts.error(String(localized: "Some books couldn\u{2019}t be deleted from the Kindle (\(failed))."))
+            let result = await monitor.removeFromDevice(ids: ids)
+            let deleted = Set(result.appliedTargetIDs.compactMap(\.deviceBookID))
+            if result.completion == .failed || result.conflictCount > 0 {
+                toasts.error(String(
+                    localized: "Some books couldn\u{2019}t be deleted from the Kindle (\(result.conflictCount + result.pendingTargetIDs.count))."
+                ))
             }
             selectedDeviceBooks.subtract(deleted)
-            monitor.removeBooksLocally(deleted)
-            await monitor.refreshInfo()
         }
     }
 }

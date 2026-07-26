@@ -119,6 +119,10 @@ struct SidebarView: View {
     private var facets: LibraryFacetSnapshot { readModel.facets }
 
     var body: some View {
+        sidebarDeletionAlerts
+    }
+
+    private var sidebarBase: some View {
         List(selection: $selection) {
             Section {
                 SidebarRow(title: theme.styledText(terminal: "ALL BOOKS", native: "All Books"),
@@ -186,12 +190,7 @@ struct SidebarView: View {
                 onEditSmartShelf: { smartShelfRequest = SmartShelfEditorRequest.edit($0) },
                 onRename: { renameText = $0.name; renameTarget = $0 },
                 onDelete: { deleteCollectionTarget = $0 },
-                onDropBooks: { bookIDs, collection in
-                    guard !collection.isSystem, !collection.isSmart else { return }
-                    let draggedBooks = readModel.books(for: Array(bookIDs))
-                    guard !draggedBooks.isEmpty else { return }
-                    viewModel.add(draggedBooks, to: collection)
-                }
+                onDropBooks: addBooksToCollection
             )
 
             if !facets.formatKeys.isEmpty || !facets.authorKeys.isEmpty || !facets.seriesKeys.isEmpty || !facets.tagKeys.isEmpty {
@@ -293,6 +292,10 @@ struct SidebarView: View {
             }
             .background(.ultraThinMaterial)
         }
+    }
+
+    private var sidebarPresentation: some View {
+        sidebarBase
         .sheet(item: $smartShelfRequest) { request in
             SmartShelfEditorSheet(
                 request: request,
@@ -312,6 +315,10 @@ struct SidebarView: View {
             }
             Button("Cancel", role: .cancel) { }
         }
+    }
+
+    private var sidebarRenameAlerts: some View {
+        sidebarPresentation
         .alert("Rename Collection", isPresented: Binding(
             get: { renameTarget != nil },
             set: { if !$0 { renameTarget = nil } }
@@ -341,6 +348,10 @@ struct SidebarView: View {
             }
             Button("Cancel", role: .cancel) { browseRename = nil }
         }
+    }
+
+    private var sidebarDeletionAlerts: some View {
+        sidebarRenameAlerts
         .alert("Delete Collection \u{201C}\(deleteCollectionTarget?.name ?? "")\u{201D}?", isPresented: Binding(
             get: { deleteCollectionTarget != nil },
             set: { if !$0 { deleteCollectionTarget = nil } }
@@ -376,6 +387,16 @@ struct SidebarView: View {
                 )
             }
         }
+    }
+
+    private func addBooksToCollection(
+        _ bookIDs: [UUID],
+        _ collection: BookCollection
+    ) {
+        guard !collection.isSystem, !collection.isSmart, !bookIDs.isEmpty else {
+            return
+        }
+        Task { await viewModel.add(bookIDs: Set(bookIDs), to: collection) }
     }
 
     private func header(terminal: String, native: LocalizedStringKey) -> Text {

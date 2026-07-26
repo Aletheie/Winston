@@ -183,10 +183,85 @@ final class MetadataService {
         )))
     }
 
-    @discardableResult
-    func bulkUpdate(_ books: [Book], _ edit: BulkEdit) -> Bool {
-        let selectedIDs = Set(books.map(\.uuid))
-        guard !selectedIDs.isEmpty else { return true }
+    func planBulkUpdate(
+        bookIDs: Set<UUID>,
+        edit: BulkEdit
+    ) async -> BulkOperationPlan {
+        let orderedIDs = bookIDs.sorted { $0.uuidString < $1.uuidString }
+        let candidates = orderedIDs.map { bookID -> BulkOperationCandidate in
+            let targetID = BulkOperationTargetID.catalogBook(bookID)
+            guard let book = try? mutations.book(id: bookID) else {
+                return .conflict(targetID, reason: .missingTarget)
+            }
+            return bulkEditChanges(book, edit: edit)
+                ? .change(targetID)
+                : .unchanged(targetID)
+        }
+        return await BulkOperationPlanner.shared.makePlan(
+            operation: .metadataEdit,
+            requestedTargetIDs: orderedIDs.map(BulkOperationTargetID.catalogBook),
+            candidates: candidates,
+            chunkSize: 100
+        )
+    }
+
+    func applyBulkUpdateChunk(
+        _ chunk: BulkOperationChunk,
+        edit: BulkEdit
+    ) throws -> BulkOperationChunkOutcome {
+        var updates: [CatalogBookUpdate] = []
+        var unchanged: Set<BulkOperationTargetID> = []
+        var conflicts: [BulkOperationConflict] = []
+
+        for targetID in chunk.targetIDs {
+            guard let bookID = targetID.catalogBookID else {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .invalidTarget
+                ))
+                continue
+            }
+            guard let book = try? mutations.book(id: bookID) else {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .missingTarget
+                ))
+                continue
+            }
+            guard bulkEditChanges(book, edit: edit) else {
+                unchanged.insert(targetID)
+                continue
+            }
+            updates.append(makeBulkUpdate(bookID: bookID, edit: edit))
+        }
+
+        guard !updates.isEmpty else {
+            return BulkOperationChunkOutcome(
+                unchangedTargetIDs: unchanged,
+                conflicts: conflicts
+            )
+        }
+        switch mutations.execute(.updateBooks(updates, operation: "bulkEdit")) {
+        case .success:
+            return BulkOperationChunkOutcome(
+                appliedTargetIDs: Set(updates.map {
+                    BulkOperationTargetID.catalogBook($0.bookID)
+                }),
+                unchangedTargetIDs: unchanged,
+                conflicts: conflicts
+            )
+        case .failure(let error):
+            throw BulkOperationDurableError(
+                .catalogSave,
+                detail: String(describing: error)
+            )
+        }
+    }
+
+    private func makeBulkUpdate(
+        bookID: UUID,
+        edit: BulkEdit
+    ) -> CatalogBookUpdate {
         var fields: Set<CatalogBookMetadataField> = []
         if edit.author != nil { fields.insert(.author) }
         if edit.publisher != nil { fields.insert(.publisher) }
@@ -203,19 +278,60 @@ final class MetadataService {
             language: edit.language.flatMap(Self.nilIfEmpty),
             translator: edit.translator.flatMap(Self.nilIfEmpty),
             series: edit.series.flatMap(Self.nilIfEmpty),
-            tags: edit.tags ?? []
+            tags: Array(Set(edit.tags ?? [])).sorted()
         )
         let tagMode: CatalogTagUpdateMode = edit.tagMode == .replace ? .replace : .add
-        let updates = selectedIDs.map {
-            CatalogBookUpdate(
-                bookID: $0,
-                patch: patch,
-                identityScope: edit.authorIdentityScope,
-                tagMode: tagMode,
-                readingStatus: edit.status
-            )
+        return CatalogBookUpdate(
+            bookID: bookID,
+            patch: patch,
+            identityScope: edit.authorIdentityScope,
+            tagMode: tagMode,
+            readingStatus: edit.status
+        )
+    }
+
+    private func bulkEditChanges(_ book: Book, edit: BulkEdit) -> Bool {
+        if let author = edit.author {
+            let proposed = Self.nilIfEmpty(author)
+            if book.author != proposed { return true }
+            if edit.authorIdentityScope != .editionOnly,
+               book.work?.author != proposed {
+                return true
+            }
+            if edit.authorIdentityScope == .allEditions,
+               book.work?.editions.contains(where: { $0.author != proposed }) == true {
+                return true
+            }
         }
-        return succeeded(mutations.execute(.updateBooks(updates, operation: "bulkEdit")))
+        if let publisher = edit.publisher,
+           book.publisher != Self.nilIfEmpty(publisher) {
+            return true
+        }
+        if let year = edit.year, book.year != Self.nilIfEmpty(year) {
+            return true
+        }
+        if let series = edit.series, book.series != Self.nilIfEmpty(series) {
+            return true
+        }
+        if let language = edit.language,
+           book.language != Self.nilIfEmpty(language) {
+            return true
+        }
+        if let translator = edit.translator,
+           book.translator != Self.nilIfEmpty(translator) {
+            return true
+        }
+        if let tags = edit.tags {
+            let normalized = Array(Set(tags)).sorted()
+            let proposed = edit.tagMode == .replace
+                ? normalized
+                : Array(Set(book.tags + normalized)).sorted()
+            if book.tags != proposed { return true }
+        }
+        if let status = edit.status, book.readingStatus != status {
+            return true
+        }
+        return false
     }
 
     // MARK: - Tag / series / author management
