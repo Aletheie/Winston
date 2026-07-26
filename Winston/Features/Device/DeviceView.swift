@@ -3,6 +3,7 @@ import OSLog
 
 struct DeviceView: View {
     var books: [Book]
+    let readModel: LibraryReadModel
     var viewModel: LibraryViewModel
 
     @Environment(\.theme) private var theme
@@ -22,6 +23,7 @@ struct DeviceView: View {
 
     private struct RowsRevision: Hashable {
         let catalog: Int
+        let readModelIsReady: Bool
         let device: Int
     }
 
@@ -36,17 +38,18 @@ struct DeviceView: View {
         .background { ThemedBackground() }
         .navigationTitle(monitor.info.map { "On \($0.name)" } ?? "Device")
         .task(id: RowsRevision(
-            catalog: LibraryMutationLog.shared.catalogRevision,
+            catalog: readModel.generation,
+            readModelIsReady: readModel.isReady,
             device: monitor.booksRevision
         )) {
             if hasBuiltRows {
                 try? await Task.sleep(for: .milliseconds(80))
                 guard !Task.isCancelled else { return }
             }
-            rebuildRows()
+            await rebuildRows()
         }
         .sheet(isPresented: $showsSyncPlan) {
-            KindleSyncPlanSheet(books: books)
+            KindleSyncPlanSheet(books: books, readModel: readModel)
         }
         .onChange(of: monitor.info?.identifier) {
             cancelSidecarCleanup()
@@ -56,7 +59,7 @@ struct DeviceView: View {
         }
     }
 
-    private func rebuildRows() {
+    private func rebuildRows() async {
         guard !monitor.books.isEmpty else {
             authorByDeviceKey = [:]
             deviceOnlyBooks = []
@@ -65,7 +68,9 @@ struct DeviceView: View {
             hasBuiltRows = true
             return
         }
-        let authorMap = Dictionary(
+        let metadata = await readModel.deviceMetadata()
+        guard !Task.isCancelled else { return }
+        let authorMap = metadata?.authorByDeviceKey ?? Dictionary(
             books.flatMap { book in
                 book.displayAuthor.map { author in
                     book.deviceMatchKeys.map { ($0, author) }
@@ -73,7 +78,7 @@ struct DeviceView: View {
             },
             uniquingKeysWith: { first, _ in first }
         )
-        let libraryKeys = Set(books.flatMap(\.deviceMatchKeys))
+        let libraryKeys = metadata?.libraryKeys ?? Set(books.flatMap(\.deviceMatchKeys))
         let rows = DeviceTableQuery.rows(books: monitor.books, authorByMatchKey: authorMap)
         authorByDeviceKey = authorMap
         deviceOnlyBooks = monitor.books.filter { !libraryKeys.contains($0.matchKey) }

@@ -84,7 +84,11 @@ struct ContentView: View {
                     )
                 }
             case .device:
-                DeviceView(books: books, viewModel: viewModel)
+                DeviceView(
+                    books: books,
+                    readModel: libraryReadModel,
+                    viewModel: viewModel
+                )
             case .discover:
                 DiscoveryView(wishlist: viewModel.wishlist)
             case .catalogs:
@@ -288,7 +292,7 @@ private struct LibraryReadModelSyncView: View {
             .accessibilityHidden(true)
             .task(id: revision) {
                 let delta = LibraryMutationLog.shared.catalogDelta(
-                    since: readModel.catalogRevision
+                    since: readModel.generation
                 )
                 await readModel.synchronize(
                     books: books,

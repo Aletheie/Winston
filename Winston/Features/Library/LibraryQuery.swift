@@ -1,5 +1,82 @@
 import Foundation
 
+nonisolated struct LibraryNormalizedStrings: Equatable, Sendable {
+    let title: String
+    let author: String
+    let tags: [String]
+    let series: String
+    let notes: String
+    let translator: String
+    let language: String
+    let format: String
+    let shelf: String
+    let year: Int?
+
+    init(
+        title: String,
+        author: String,
+        tags: [String] = [],
+        series: String? = nil,
+        notes: String? = nil,
+        translator: String? = nil,
+        language: String? = nil,
+        format: String,
+        shelf: String? = nil,
+        year: Int? = nil
+    ) {
+        self.title = Self.normalize(title)
+        self.author = Self.normalize(author)
+        self.tags = tags.map(Self.normalize)
+        self.series = Self.normalize(series)
+        self.notes = Self.normalize(notes)
+        self.translator = Self.normalize(translator)
+        self.language = Self.normalize(language)
+        self.format = Self.normalize(format)
+        self.shelf = Self.normalize(shelf)
+        self.year = year
+    }
+
+    func matches(_ query: LibraryQuery.NormalizedQuery) -> Bool {
+        if !query.freeText.isEmpty {
+            let value = query.freeText
+            let hit = title.contains(value)
+                || author.contains(value)
+                || tags.contains(where: { $0.contains(value) })
+                || series.contains(value)
+                || notes.contains(value)
+                || translator.contains(value)
+                || shelf.contains(value)
+            if !hit { return false }
+        }
+        if !query.authors.allSatisfy(author.contains) { return false }
+        if !query.tags.allSatisfy({ requested in
+            tags.contains { $0.contains(requested) }
+        }) { return false }
+        if !query.series.allSatisfy(series.contains) { return false }
+        if !query.titles.allSatisfy(title.contains) { return false }
+        if !query.formats.allSatisfy({ format == Self.normalize($0) }) { return false }
+        if !query.languages.allSatisfy({ language == Self.normalize($0) }) { return false }
+        if !query.translators.allSatisfy(translator.contains) { return false }
+        if let constraint = query.year {
+            guard let year else { return false }
+            switch constraint.op {
+            case .equal: if year != constraint.value { return false }
+            case .lessThan: if year >= constraint.value { return false }
+            case .greaterThan: if year <= constraint.value { return false }
+            }
+        }
+        return true
+    }
+
+    static func normalize(_ value: String?) -> String {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: Locale(identifier: "en_US_POSIX")
+            ) ?? ""
+    }
+}
+
 nonisolated struct SmartShelfPreviewResult: Equatable, Sendable {
     let matchCount: Int
     let leadingBookIDs: [UUID]
@@ -20,7 +97,7 @@ nonisolated struct LibraryDisplaySort: Hashable, Sendable {
     static let sourceOrder = LibraryDisplaySort(field: .source, ascending: true)
 }
 
-nonisolated struct LibraryDisplayQuery: Hashable, Sendable {
+nonisolated struct LibraryQuerySpec: Hashable, Sendable {
     let filter: LibraryFilter
     let searchText: String
     let sort: LibraryDisplaySort
@@ -31,54 +108,100 @@ nonisolated struct LibraryDisplayQuery: Hashable, Sendable {
     let kindlePresenceFilter: KindlePresenceFilter
 }
 
-/// Immutable data used by interactive library filtering. SwiftData models remain on the
-/// main actor while the O(n) filtering and O(n log n) sorting work can run concurrently.
-nonisolated struct LibraryDisplaySnapshot: Equatable, Sendable {
+/// The rebuildable, immutable library projection shared by display, search, facets,
+/// smart shelves, plugins, and Kindle planning. SwiftData models never leave MainActor.
+nonisolated struct LibraryBookRecord: Equatable, Sendable {
     let id: UUID
+    /// Capture-time hint for standalone reference queries. The live read model owns
+    /// source order separately, so membership changes do not rewrite every record.
     let sourceOrdinal: Int
     let displayTitle: String
     let displayAuthor: String
+    let title: String?
+    let author: String?
+    let publisher: String?
+    let language: String?
+    let translator: String?
     let dateAdded: Date
     let rating: Int
+    let userRating: Int?
     let readingStatus: ReadingStatus
     let format: String
     let tags: [String]
     let series: String?
     let seriesIndex: Double
+    let pageCount: Int?
     let collectionIDs: [UUID]
-    let search: LibraryQuery.SearchSnapshot
-    let smartShelf: SmartShelfBookSnapshot
+    let normalized: LibraryNormalizedStrings
+    let hasHighlights: Bool
+    let drmProtected: Bool
+    let deviceMatchKeys: Set<String>
+    let hasMissingMetadata: Bool
+    let pluginBook: PluginBookDTO?
+    let kindleCandidate: KindleSyncCandidate?
 
     init(
         id: UUID,
         sourceOrdinal: Int,
         displayTitle: String,
         displayAuthor: String,
+        title: String? = nil,
+        author: String? = nil,
+        publisher: String? = nil,
+        language: String? = nil,
+        translator: String? = nil,
         dateAdded: Date,
         rating: Int,
+        userRating: Int? = nil,
         readingStatus: ReadingStatus,
         format: String,
         tags: [String],
         series: String?,
         seriesIndex: Double,
+        pageCount: Int? = nil,
         collectionIDs: [UUID],
-        search: LibraryQuery.SearchSnapshot,
-        smartShelf: SmartShelfBookSnapshot
+        normalized: LibraryNormalizedStrings? = nil,
+        hasHighlights: Bool = false,
+        drmProtected: Bool = false,
+        deviceMatchKeys: Set<String> = [],
+        hasMissingMetadata: Bool = false,
+        pluginBook: PluginBookDTO? = nil,
+        kindleCandidate: KindleSyncCandidate? = nil
     ) {
         self.id = id
         self.sourceOrdinal = sourceOrdinal
         self.displayTitle = displayTitle
         self.displayAuthor = displayAuthor
+        self.title = title
+        self.author = author
+        self.publisher = publisher
+        self.language = language
+        self.translator = translator
         self.dateAdded = dateAdded
         self.rating = rating
+        self.userRating = userRating
         self.readingStatus = readingStatus
         self.format = format
         self.tags = tags
         self.series = series
         self.seriesIndex = seriesIndex
+        self.pageCount = pageCount
         self.collectionIDs = collectionIDs
-        self.search = search
-        self.smartShelf = smartShelf
+        self.normalized = normalized ?? LibraryNormalizedStrings(
+            title: displayTitle,
+            author: author ?? displayAuthor,
+            tags: tags,
+            series: series,
+            translator: translator,
+            language: language,
+            format: format
+        )
+        self.hasHighlights = hasHighlights
+        self.drmProtected = drmProtected
+        self.deviceMatchKeys = deviceMatchKeys
+        self.hasMissingMetadata = hasMissingMetadata
+        self.pluginBook = pluginBook
+        self.kindleCandidate = kindleCandidate
     }
 
     @MainActor init(
@@ -109,23 +232,75 @@ nonisolated struct LibraryDisplaySnapshot: Equatable, Sendable {
         self.sourceOrdinal = sourceOrdinal
         displayTitle = book.displayTitle
         displayAuthor = book.sortAuthor
+        title = book.title
+        author = book.displayAuthor
+        publisher = book.publisher
+        language = book.language
+        translator = book.translator
         dateAdded = book.dateAdded
         rating = book.sortRating
+        userRating = book.rating
         readingStatus = book.readingStatus
         format = catalogFormat
         tags = book.tags
         series = book.series
         seriesIndex = book.seriesIndex.flatMap(Double.init) ?? .greatestFiniteMagnitude
+        pageCount = book.pageCount
         collectionIDs = includeCollections
             ? book.collections.map(\.id).sorted { $0.uuidString < $1.uuidString }
             : []
-        search = LibraryQuery.SearchSnapshot(book, format: catalogFormat)
-        smartShelf = SmartShelfBookSnapshot(
-            book,
-            includeHighlights: includeHighlights,
+        normalized = LibraryNormalizedStrings(
+            title: book.displayTitle,
+            author: book.displayAuthor ?? "",
+            tags: book.tags,
+            series: book.series,
+            notes: book.notes,
+            translator: book.translator,
+            language: book.language,
             format: catalogFormat,
-            deviceMatchKeys: deviceMatchKeys
+            shelf: book.shelfLocation,
+            year: book.year.flatMap { Int($0.prefix(4)) }
         )
+        hasHighlights = includeHighlights && !book.highlights.isEmpty
+        drmProtected = book.drmProtected == true
+        self.deviceMatchKeys = deviceMatchKeys
+        hasMissingMetadata = Self.isBlank(book.title)
+            || Self.isBlank(book.author)
+            || Self.isBlank(book.language)
+        pluginBook = PluginBookDTO(book)
+        kindleCandidate = KindleSendPreparation.candidate(for: book)
+    }
+
+    private static func isBlank(_ value: String?) -> Bool {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id
+            && lhs.displayTitle == rhs.displayTitle
+            && lhs.displayAuthor == rhs.displayAuthor
+            && lhs.title == rhs.title
+            && lhs.author == rhs.author
+            && lhs.publisher == rhs.publisher
+            && lhs.language == rhs.language
+            && lhs.translator == rhs.translator
+            && lhs.dateAdded == rhs.dateAdded
+            && lhs.rating == rhs.rating
+            && lhs.userRating == rhs.userRating
+            && lhs.readingStatus == rhs.readingStatus
+            && lhs.format == rhs.format
+            && lhs.tags == rhs.tags
+            && lhs.series == rhs.series
+            && lhs.seriesIndex == rhs.seriesIndex
+            && lhs.pageCount == rhs.pageCount
+            && lhs.collectionIDs == rhs.collectionIDs
+            && lhs.normalized == rhs.normalized
+            && lhs.hasHighlights == rhs.hasHighlights
+            && lhs.drmProtected == rhs.drmProtected
+            && lhs.deviceMatchKeys == rhs.deviceMatchKeys
+            && lhs.hasMissingMetadata == rhs.hasMissingMetadata
+            && lhs.pluginBook == rhs.pluginBook
+            && lhs.kindleCandidate == rhs.kindleCandidate
     }
 }
 
@@ -214,7 +389,7 @@ enum LibraryQuery {
     }
 
     nonisolated static func displayIDs(
-        for books: [LibraryDisplaySnapshot],
+        for books: [LibraryBookRecord],
         filter: LibraryFilter,
         searchText: String,
         sort: LibraryDisplaySort,
@@ -227,7 +402,7 @@ enum LibraryQuery {
         let savedQuery = savedSearch.map { NormalizedQuery(SearchQuery.parse($0)) }
         let visibleQuery = NormalizedQuery(SearchQuery.parse(searchText))
         let recentCutoff = Date.now.addingTimeInterval(-14 * 24 * 3600)
-        var matching: [LibraryDisplaySnapshot] = []
+        var matching: [LibraryBookRecord] = []
         matching.reserveCapacity(books.count)
 
         for book in books {
@@ -235,20 +410,20 @@ enum LibraryQuery {
             let belongs: Bool
             if let smartShelf {
                 belongs = smartShelf.matches(
-                    book.smartShelf,
+                    book,
                     deviceFileNames: deviceFileNames,
                     deviceIsConnected: deviceIsConnected
                 )
             } else if let savedQuery {
-                belongs = book.search.matches(savedQuery)
+                belongs = book.normalized.matches(savedQuery)
             } else {
                 belongs = matches(book, filter: filter, recentCutoff: recentCutoff)
             }
 
             guard belongs,
-                  book.search.matches(visibleQuery),
+                  book.normalized.matches(visibleQuery),
                   kindlePresenceFilter.includes(
-                    deviceMatchKeys: book.smartShelf.deviceMatchKeys,
+                    deviceMatchKeys: book.deviceMatchKeys,
                     deviceFileNames: deviceFileNames,
                     deviceIsConnected: deviceIsConnected
                   ) else { continue }
@@ -270,8 +445,8 @@ enum LibraryQuery {
     }
 
     nonisolated static func displayIDs(
-        for books: [LibraryDisplaySnapshot],
-        query: LibraryDisplayQuery
+        for books: [LibraryBookRecord],
+        query: LibraryQuerySpec
     ) -> [UUID] {
         displayIDs(
             for: books,
@@ -288,7 +463,7 @@ enum LibraryQuery {
 
     @concurrent
     static func displayIDsConcurrently(
-        for books: [LibraryDisplaySnapshot],
+        for books: [LibraryBookRecord],
         filter: LibraryFilter,
         searchText: String,
         sort: LibraryDisplaySort,
@@ -312,19 +487,19 @@ enum LibraryQuery {
     }
 
     nonisolated static func displayMatches(
-        _ book: LibraryDisplaySnapshot,
-        query: LibraryDisplayQuery,
+        _ book: LibraryBookRecord,
+        query: LibraryQuerySpec,
         now: Date = .now
     ) -> Bool {
         let belongs: Bool
         if let smartShelf = query.smartShelf {
             belongs = smartShelf.matches(
-                book.smartShelf,
+                book,
                 deviceFileNames: query.deviceFileNames,
                 deviceIsConnected: query.deviceIsConnected
             )
         } else if let savedSearch = query.savedSearch {
-            belongs = book.search.matches(
+            belongs = book.normalized.matches(
                 NormalizedQuery(SearchQuery.parse(savedSearch))
             )
         } else {
@@ -335,18 +510,18 @@ enum LibraryQuery {
             )
         }
         return belongs
-            && book.search.matches(NormalizedQuery(SearchQuery.parse(query.searchText)))
+            && book.normalized.matches(NormalizedQuery(SearchQuery.parse(query.searchText)))
             && query.kindlePresenceFilter.includes(
-                deviceMatchKeys: book.smartShelf.deviceMatchKeys,
+                deviceMatchKeys: book.deviceMatchKeys,
                 deviceFileNames: query.deviceFileNames,
                 deviceIsConnected: query.deviceIsConnected
             )
     }
 
     nonisolated static func displayOrderingChanged(
-        from old: LibraryDisplaySnapshot,
-        to new: LibraryDisplaySnapshot,
-        query: LibraryDisplayQuery
+        from old: LibraryBookRecord,
+        to new: LibraryBookRecord,
+        query: LibraryQuerySpec
     ) -> Bool {
         if case .series = query.filter {
             return old.seriesIndex != new.seriesIndex
@@ -371,9 +546,9 @@ enum LibraryQuery {
     }
 
     nonisolated static func displayOrdered(
-        _ lhs: LibraryDisplaySnapshot,
-        before rhs: LibraryDisplaySnapshot,
-        query: LibraryDisplayQuery
+        _ lhs: LibraryBookRecord,
+        before rhs: LibraryBookRecord,
+        query: LibraryQuerySpec
     ) -> Bool {
         if case .series = query.filter {
             if lhs.seriesIndex == rhs.seriesIndex {
@@ -388,7 +563,7 @@ enum LibraryQuery {
     }
 
     private nonisolated static func matches(
-        _ book: LibraryDisplaySnapshot,
+        _ book: LibraryBookRecord,
         filter: LibraryFilter,
         recentCutoff: Date
     ) -> Bool {
@@ -415,8 +590,8 @@ enum LibraryQuery {
     }
 
     private nonisolated static func ordered(
-        _ lhs: LibraryDisplaySnapshot,
-        before rhs: LibraryDisplaySnapshot,
+        _ lhs: LibraryBookRecord,
+        before rhs: LibraryBookRecord,
         by sort: LibraryDisplaySort
     ) -> Bool {
         let comparison: ComparisonResult
@@ -561,14 +736,14 @@ enum LibraryQuery {
         let year: SearchQuery.YearConstraint?
 
         init(_ query: SearchQuery) {
-            freeText = query.freeText.lowercased()
-            authors = query.authors.map { $0.lowercased() }
-            tags = query.tags.map { $0.lowercased() }
-            series = query.series.map { $0.lowercased() }
-            titles = query.titles.map { $0.lowercased() }
-            formats = query.formats
-            languages = query.languages
-            translators = query.translators.map { $0.lowercased() }
+            freeText = LibraryNormalizedStrings.normalize(query.freeText)
+            authors = query.authors.map(LibraryNormalizedStrings.normalize)
+            tags = query.tags.map(LibraryNormalizedStrings.normalize)
+            series = query.series.map(LibraryNormalizedStrings.normalize)
+            titles = query.titles.map(LibraryNormalizedStrings.normalize)
+            formats = query.formats.map(LibraryNormalizedStrings.normalize)
+            languages = query.languages.map(LibraryNormalizedStrings.normalize)
+            translators = query.translators.map(LibraryNormalizedStrings.normalize)
             year = query.year
         }
     }
@@ -597,15 +772,15 @@ enum LibraryQuery {
             shelf: String = "",
             year: Int? = nil
         ) {
-            self.title = title
-            self.author = author
-            self.tags = tags
-            self.series = series
-            self.notes = notes
-            self.translator = translator
-            self.language = language
-            self.format = format
-            self.shelf = shelf
+            self.title = LibraryNormalizedStrings.normalize(title)
+            self.author = LibraryNormalizedStrings.normalize(author)
+            self.tags = tags.map(LibraryNormalizedStrings.normalize)
+            self.series = LibraryNormalizedStrings.normalize(series)
+            self.notes = LibraryNormalizedStrings.normalize(notes)
+            self.translator = LibraryNormalizedStrings.normalize(translator)
+            self.language = LibraryNormalizedStrings.normalize(language)
+            self.format = LibraryNormalizedStrings.normalize(format)
+            self.shelf = LibraryNormalizedStrings.normalize(shelf)
             self.year = year
         }
 
@@ -614,15 +789,15 @@ enum LibraryQuery {
         }
 
         @MainActor init(_ book: Book, format: String) {
-            title = book.displayTitle.lowercased()
-            author = book.displayAuthor?.lowercased() ?? ""
-            tags = book.tags.map { $0.lowercased() }
-            series = book.series?.lowercased() ?? ""
-            notes = book.notes?.lowercased() ?? ""
-            translator = book.translator?.lowercased() ?? ""
-            language = book.language?.lowercased() ?? ""
-            self.format = format.lowercased()
-            shelf = book.shelfLocation?.lowercased() ?? ""
+            title = LibraryNormalizedStrings.normalize(book.displayTitle)
+            author = LibraryNormalizedStrings.normalize(book.displayAuthor)
+            tags = book.tags.map(LibraryNormalizedStrings.normalize)
+            series = LibraryNormalizedStrings.normalize(book.series)
+            notes = LibraryNormalizedStrings.normalize(book.notes)
+            translator = LibraryNormalizedStrings.normalize(book.translator)
+            language = LibraryNormalizedStrings.normalize(book.language)
+            self.format = LibraryNormalizedStrings.normalize(format)
+            shelf = LibraryNormalizedStrings.normalize(book.shelfLocation)
             year = book.year.flatMap { Int($0.prefix(4)) }
         }
 
@@ -654,29 +829,38 @@ enum LibraryQuery {
     }
 
     private static func matches(_ book: Book, _ query: NormalizedQuery) -> Bool {
+        let title = LibraryNormalizedStrings.normalize(book.displayTitle)
+        let author = LibraryNormalizedStrings.normalize(book.displayAuthor)
+        let tags = book.tags.map(LibraryNormalizedStrings.normalize)
+        let series = LibraryNormalizedStrings.normalize(book.series)
+        let notes = LibraryNormalizedStrings.normalize(book.notes)
+        let translator = LibraryNormalizedStrings.normalize(book.translator)
+        let language = LibraryNormalizedStrings.normalize(book.language)
+        let shelf = LibraryNormalizedStrings.normalize(book.shelfLocation)
         if !query.freeText.isEmpty {
             let q = query.freeText
-            let hit = book.displayTitle.lowercased().contains(q)
-                || (book.displayAuthor?.lowercased().contains(q) ?? false)
-                || book.tags.contains { $0.lowercased().contains(q) }
-                || (book.series?.lowercased().contains(q) ?? false)
-                || (book.notes?.lowercased().contains(q) ?? false)
-                || (book.translator?.lowercased().contains(q) ?? false)
-                || (book.language?.lowercased().contains(q) ?? false)
-                || (book.shelfLocation?.lowercased().contains(q) ?? false)
+            let hit = title.contains(q)
+                || author.contains(q)
+                || tags.contains { $0.contains(q) }
+                || series.contains(q)
+                || notes.contains(q)
+                || translator.contains(q)
+                || language.contains(q)
+                || shelf.contains(q)
             if !hit { return false }
         }
         for value in query.authors
-        where !(book.displayAuthor?.lowercased().contains(value) ?? false) { return false }
+        where !author.contains(value) { return false }
         for value in query.tags
-        where !book.tags.contains(where: { $0.lowercased().contains(value) }) { return false }
+        where !tags.contains(where: { $0.contains(value) }) { return false }
         for value in query.series
-        where !(book.series?.lowercased().contains(value) ?? false) { return false }
-        for value in query.titles where !book.displayTitle.lowercased().contains(value) { return false }
-        for value in query.formats where book.format.lowercased() != value { return false }
-        for value in query.languages where book.language?.lowercased() != value { return false }
+        where !series.contains(value) { return false }
+        for value in query.titles where !title.contains(value) { return false }
+        for value in query.formats
+        where LibraryNormalizedStrings.normalize(book.format) != value { return false }
+        for value in query.languages where language != value { return false }
         for value in query.translators
-        where !(book.translator?.lowercased().contains(value) ?? false) { return false }
+        where !translator.contains(value) { return false }
         if let constraint = query.year {
             guard let year = book.year.flatMap({ Int($0.prefix(4)) }) else { return false }
             switch constraint.op {

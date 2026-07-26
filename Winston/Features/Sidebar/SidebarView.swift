@@ -296,7 +296,7 @@ struct SidebarView: View {
         .sheet(item: $smartShelfRequest) { request in
             SmartShelfEditorSheet(
                 request: request,
-                books: books,
+                readModel: readModel,
                 formats: facets.formatKeys,
                 deviceFileNames: deviceMonitor.deviceFileNames,
                 deviceIsConnected: deviceMonitor.isConnected

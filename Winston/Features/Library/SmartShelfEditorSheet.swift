@@ -61,25 +61,32 @@ private final class SmartShelfEditorModel {
     }
 
     func refreshPreview(
-        books: [Book],
+        readModel: LibraryReadModel,
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
-    ) {
-        let matching = LibraryQuery.applySmartShelf(
-            to: books,
-            definition: definition,
+    ) async {
+        let previewDefinition = definition
+        let result = await readModel.query(LibraryQuerySpec(
+            filter: .all,
+            searchText: "",
+            sort: .sourceOrder,
+            savedSearch: nil,
+            smartShelf: previewDefinition,
             deviceFileNames: deviceFileNames,
             deviceIsConnected: deviceIsConnected,
-            sort: []
-        )
-        previewCount = matching.count
-        previewBooks = Array(matching.prefix(10))
+            kindlePresenceFilter: .all
+        ))
+        guard !Task.isCancelled,
+              definition == previewDefinition,
+              result.generation == readModel.generation else { return }
+        previewCount = result.ids.count
+        previewBooks = readModel.books(for: Array(result.ids.prefix(10)))
     }
 }
 
 struct SmartShelfEditorSheet: View {
     let request: SmartShelfEditorRequest
-    let books: [Book]
+    let readModel: LibraryReadModel
     let formats: [String]
     let deviceFileNames: Set<String>
     let deviceIsConnected: Bool
@@ -90,14 +97,14 @@ struct SmartShelfEditorSheet: View {
 
     init(
         request: SmartShelfEditorRequest,
-        books: [Book],
+        readModel: LibraryReadModel,
         formats: [String],
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool,
         onSave: @escaping (String, SmartShelfDefinition) -> Bool
     ) {
         self.request = request
-        self.books = books
+        self.readModel = readModel
         self.formats = formats
         self.deviceFileNames = deviceFileNames
         self.deviceIsConnected = deviceIsConnected
@@ -143,8 +150,8 @@ struct SmartShelfEditorSheet: View {
         .task(id: previewRevision) {
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
-            model.refreshPreview(
-                books: books,
+            await model.refreshPreview(
+                readModel: readModel,
                 deviceFileNames: deviceFileNames,
                 deviceIsConnected: deviceIsConnected
             )
@@ -154,8 +161,8 @@ struct SmartShelfEditorSheet: View {
     private var previewRevision: SmartShelfPreviewRevision {
         SmartShelfPreviewRevision(
             definition: model.definition,
-            libraryRevision: LibraryMutationLog.shared.revision,
-            bookCount: books.count,
+            libraryGeneration: readModel.generation,
+            readModelIsReady: readModel.isReady,
             deviceFileNames: deviceFileNames,
             deviceIsConnected: deviceIsConnected
         )
@@ -173,8 +180,8 @@ struct SmartShelfEditorSheet: View {
 
 private struct SmartShelfPreviewRevision: Hashable {
     let definition: SmartShelfDefinition
-    let libraryRevision: Int
-    let bookCount: Int
+    let libraryGeneration: Int
+    let readModelIsReady: Bool
     let deviceFileNames: Set<String>
     let deviceIsConnected: Bool
 }
@@ -566,20 +573,11 @@ private struct SmartShelfEditorFooter: View {
 
 #Preview("Smart Shelf Builder") {
     let container = PersistenceController.inMemory()
-    let first = Book(fileName: "duna.epub", originalFileName: "Duna.epub")
-    first.title = "Duna"
-    first.author = "Frank Herbert"
-    first.language = "cs"
-    first.pageCount = 280
-    let second = Book(fileName: "solaris.epub", originalFileName: "Solaris.epub")
-    second.title = "Solaris"
-    second.author = "Stanisław Lem"
-    second.language = "cs"
-    second.pageCount = 204
+    let readModel = LibraryReadModel()
 
-    return SmartShelfEditorSheet(
+    SmartShelfEditorSheet(
         request: .create(),
-        books: [first, second],
+        readModel: readModel,
         formats: ["EPUB"],
         deviceFileNames: [],
         deviceIsConnected: false,

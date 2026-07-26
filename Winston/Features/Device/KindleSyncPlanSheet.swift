@@ -33,6 +33,7 @@ private enum KindleProfileEditorMode {
 
 struct KindleSyncPlanSheet: View {
     let books: [Book]
+    let readModel: LibraryReadModel
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
@@ -103,6 +104,8 @@ struct KindleSyncPlanSheet: View {
         .background(theme.background)
         .interactiveDismissDisabled(isApplying)
         .task { rebuildPlan(resetSelection: true) }
+        .onChange(of: readModel.generation) { rebuildPlan(resetSelection: false) }
+        .onChange(of: readModel.isReady) { rebuildPlan(resetSelection: false) }
         .onChange(of: monitor.booksRevision) { rebuildPlan(resetSelection: false) }
         .onChange(of: monitor.info) { rebuildPlan(resetSelection: true) }
         .onDisappear { planBuildTask?.cancel() }
@@ -168,21 +171,31 @@ struct KindleSyncPlanSheet: View {
                 if planBuildGeneration == generation { planBuildTask = nil }
             }
 
-            var snapshots: [KindleSendBookSnapshot] = []
-            snapshots.reserveCapacity(sourceBooks.count)
-            for (index, book) in sourceBooks.enumerated() {
-                guard !Task.isCancelled else { return }
-                snapshots.append(KindleSendPreparation.snapshot(for: book))
-                if index > 0, index.isMultiple(of: 128) {
-                    await Task.yield()
+            let newPlan: KindleSyncPlan?
+            if let candidates = await readModel.kindleCandidates() {
+                newPlan = await Self.buildPlan(
+                    candidates: candidates,
+                    deviceBooks: deviceBooks,
+                    profile: profile
+                )
+            } else {
+                var snapshots: [KindleSendBookSnapshot] = []
+                snapshots.reserveCapacity(sourceBooks.count)
+                for (index, book) in sourceBooks.enumerated() {
+                    guard !Task.isCancelled else { return }
+                    snapshots.append(KindleSendPreparation.snapshot(for: book))
+                    if index > 0, index.isMultiple(of: 128) {
+                        await Task.yield()
+                    }
                 }
+                newPlan = await Self.buildPlan(
+                    snapshots: snapshots,
+                    deviceBooks: deviceBooks,
+                    profile: profile
+                )
             }
 
-            guard let newPlan = await Self.buildPlan(
-                snapshots: snapshots,
-                deviceBooks: deviceBooks,
-                profile: profile
-            ), !Task.isCancelled,
+            guard let newPlan, !Task.isCancelled,
                planBuildGeneration == generation,
                monitor.info?.identifier == info.identifier,
                profileStore.profile(for: info)?.id == profile.id else { return }
@@ -211,6 +224,20 @@ struct KindleSyncPlanSheet: View {
             guard !Task.isCancelled else { return nil }
             candidates.append(KindleSendPreparation.candidate(for: snapshot))
         }
+        guard !Task.isCancelled else { return nil }
+        return KindleSyncPlanner.makePlan(
+            candidates: candidates,
+            deviceBooks: deviceBooks,
+            profile: profile
+        )
+    }
+
+    @concurrent
+    private static func buildPlan(
+        candidates: [KindleSyncCandidate],
+        deviceBooks: [DeviceBook],
+        profile: KindleSyncProfile
+    ) async -> KindleSyncPlan? {
         guard !Task.isCancelled else { return nil }
         return KindleSyncPlanner.makePlan(
             candidates: candidates,

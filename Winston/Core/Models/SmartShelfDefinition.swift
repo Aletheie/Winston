@@ -1,5 +1,23 @@
 import Foundation
 
+nonisolated protocol SmartShelfBookValues: Sendable {
+    var smartShelfTitle: String? { get }
+    var smartShelfAuthor: String? { get }
+    var smartShelfPublisher: String? { get }
+    var smartShelfLanguage: String? { get }
+    var smartShelfTranslator: String? { get }
+    var smartShelfTags: [String] { get }
+    var smartShelfSeries: String? { get }
+    var smartShelfPageCount: Int? { get }
+    var smartShelfFormat: String { get }
+    var smartShelfRating: Int? { get }
+    var smartShelfReadingStatusRaw: String { get }
+    var smartShelfHasHighlights: Bool { get }
+    var smartShelfIsDRMProtected: Bool { get }
+    var smartShelfDeviceMatchKeys: Set<String> { get }
+    var smartShelfHasMissingMetadata: Bool { get }
+}
+
 nonisolated struct SmartShelfDefinition: Codable, Hashable, Sendable {
     enum MatchMode: String, Codable, CaseIterable, Identifiable, Sendable {
         case all
@@ -32,7 +50,7 @@ nonisolated struct SmartShelfDefinition: Codable, Hashable, Sendable {
     }
 
     func matches(
-        _ book: SmartShelfBookSnapshot,
+        _ book: some SmartShelfBookValues,
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) -> Bool {
@@ -236,45 +254,45 @@ nonisolated struct SmartShelfRule: Codable, Hashable, Identifiable, Sendable {
     }
 
     func matches(
-        _ book: SmartShelfBookSnapshot,
+        _ book: some SmartShelfBookValues,
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) -> Bool {
         switch field {
         case .readingStatus:
-            return stringMatches(book.readingStatusRaw)
+            return stringMatches(book.smartShelfReadingStatusRaw)
         case .language:
-            return stringMatches(book.language)
+            return stringMatches(book.smartShelfLanguage)
         case .pageCount:
-            return numberMatches(book.pageCount)
+            return numberMatches(book.smartShelfPageCount)
         case .format:
-            return stringMatches(book.format)
+            return stringMatches(book.smartShelfFormat)
         case .rating:
-            return numberMatches(book.rating)
+            return numberMatches(book.smartShelfRating)
         case .translator:
-            return stringMatches(book.translator)
+            return stringMatches(book.smartShelfTranslator)
         case .tag:
-            return stringsMatch(book.tags)
+            return stringsMatch(book.smartShelfTags)
         case .author:
-            return stringMatches(book.author)
+            return stringMatches(book.smartShelfAuthor)
         case .title:
-            return stringMatches(book.title)
+            return stringMatches(book.smartShelfTitle)
         case .series:
-            return stringMatches(book.series)
+            return stringMatches(book.smartShelfSeries)
         case .publisher:
-            return stringMatches(book.publisher)
+            return stringMatches(book.smartShelfPublisher)
         case .highlights:
-            return booleanMatches(book.hasHighlights)
+            return booleanMatches(book.smartShelfHasHighlights)
         case .drmProtected:
-            return booleanMatches(book.drmProtected)
+            return booleanMatches(book.smartShelfIsDRMProtected)
         case .onDevice:
             return booleanMatches(
                 deviceIsConnected
-                    ? !book.deviceMatchKeys.isDisjoint(with: deviceFileNames)
+                    ? !book.smartShelfDeviceMatchKeys.isDisjoint(with: deviceFileNames)
                     : nil
             )
         case .missingMetadata:
-            return booleanMatches(book.hasMissingMetadata)
+            return booleanMatches(book.smartShelfHasMissingMetadata)
         }
     }
 
@@ -441,6 +459,42 @@ nonisolated struct SmartShelfBookSnapshot: Equatable, Sendable {
     private static func isBlank(_ value: String?) -> Bool {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
     }
+}
+
+nonisolated extension SmartShelfBookSnapshot: SmartShelfBookValues {
+    var smartShelfTitle: String? { title }
+    var smartShelfAuthor: String? { author }
+    var smartShelfPublisher: String? { publisher }
+    var smartShelfLanguage: String? { language }
+    var smartShelfTranslator: String? { translator }
+    var smartShelfTags: [String] { tags }
+    var smartShelfSeries: String? { series }
+    var smartShelfPageCount: Int? { pageCount }
+    var smartShelfFormat: String { format }
+    var smartShelfRating: Int? { rating }
+    var smartShelfReadingStatusRaw: String { readingStatusRaw }
+    var smartShelfHasHighlights: Bool { hasHighlights }
+    var smartShelfIsDRMProtected: Bool { drmProtected }
+    var smartShelfDeviceMatchKeys: Set<String> { deviceMatchKeys }
+    var smartShelfHasMissingMetadata: Bool { hasMissingMetadata }
+}
+
+nonisolated extension LibraryBookRecord: SmartShelfBookValues {
+    var smartShelfTitle: String? { title }
+    var smartShelfAuthor: String? { author }
+    var smartShelfPublisher: String? { publisher }
+    var smartShelfLanguage: String? { language }
+    var smartShelfTranslator: String? { translator }
+    var smartShelfTags: [String] { tags }
+    var smartShelfSeries: String? { series }
+    var smartShelfPageCount: Int? { pageCount }
+    var smartShelfFormat: String { format }
+    var smartShelfRating: Int? { userRating }
+    var smartShelfReadingStatusRaw: String { readingStatus.rawValue }
+    var smartShelfHasHighlights: Bool { hasHighlights }
+    var smartShelfIsDRMProtected: Bool { drmProtected }
+    var smartShelfDeviceMatchKeys: Set<String> { deviceMatchKeys }
+    var smartShelfHasMissingMetadata: Bool { hasMissingMetadata }
 }
 
 nonisolated enum SmartShelfPreset: String, CaseIterable, Identifiable, Sendable {

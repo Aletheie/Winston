@@ -176,7 +176,7 @@ struct LibraryQueryTests {
         let emma = makeBook("Emma", author: "Jane Austen", tags: ["classic"], status: .reading)
         let books = [dispossessed, emma, dune]
         let snapshots = books.enumerated().map {
-            LibraryDisplaySnapshot(
+            LibraryBookRecord(
                 $0.element,
                 sourceOrdinal: $0.offset,
                 includeCollections: false,
@@ -216,7 +216,7 @@ struct LibraryQueryTests {
             sort: sort
         ).map(\.uuid)
         let snapshots = books.enumerated().map {
-            LibraryDisplaySnapshot(
+            LibraryBookRecord(
                 $0.element,
                 sourceOrdinal: $0.offset,
                 includeCollections: true,
@@ -244,7 +244,7 @@ struct LibraryQueryTests {
         let emma = makeBook("Emma", tags: ["classic"])
         let books = [foundation, emma, dune]
         let snapshots = books.enumerated().map {
-            LibraryDisplaySnapshot(
+            LibraryBookRecord(
                 $0.element,
                 sourceOrdinal: $0.offset,
                 includeCollections: false,
@@ -287,7 +287,7 @@ struct LibraryQueryTests {
         notOnKindle.originalFileName = "not-on-kindle.epub"
         let books = [onKindle, notOnKindle]
         let snapshots = books.enumerated().map {
-            LibraryDisplaySnapshot(
+            LibraryBookRecord(
                 $0.element,
                 sourceOrdinal: $0.offset,
                 includeCollections: false,
@@ -345,7 +345,7 @@ struct LibraryQueryTests {
             )
         }
         let snapshots = books.enumerated().map {
-            LibraryDisplaySnapshot(
+            LibraryBookRecord(
                 $0.element,
                 sourceOrdinal: $0.offset,
                 includeCollections: false,

@@ -72,7 +72,7 @@ struct LibraryView: View {
     @State private var displayed: [Book] = []
     @State private var displayedIDs: [UUID] = []
     @State private var displayedReadModelGeneration = 0
-    @State private var displayedQuery: LibraryDisplayQuery?
+    @State private var displayedQuery: LibraryQuerySpec?
     @State private var animateNextDisplayChange = false
     @State private var sortOrder: [KeyPathComparator<Book>] = [BookSort.dateAdded.comparator(ascending: false)]
     @State private var showDeleteConfirm = false
@@ -113,7 +113,8 @@ struct LibraryView: View {
 
     private struct DisplayRevision: Hashable {
         let readModelGeneration: Int
-        let query: LibraryDisplayQuery
+        let readModelIsReady: Bool
+        let query: LibraryQuerySpec
         let hasInvalidSmartShelf: Bool
     }
 
@@ -132,7 +133,8 @@ struct LibraryView: View {
         let smartShelf = smartShelfDisplayConfiguration
         return DisplayRevision(
             readModelGeneration: readModel.generation,
-            query: LibraryDisplayQuery(
+            readModelIsReady: readModel.isReady,
+            query: LibraryQuerySpec(
                 filter: filter,
                 searchText: debouncedSearch,
                 sort: LibraryQuery.displaySort(for: sortOrder),
@@ -605,6 +607,7 @@ struct LibraryView: View {
         let delta = readModel.displayDelta(since: displayedReadModelGeneration)
         let ids: [UUID]
         let requiresBookResolution: Bool
+        let resultGeneration: Int
         if displayedQuery == revision.query,
            let incremental = readModel.incrementallyUpdatingDisplayIDs(
                displayedIDs,
@@ -614,14 +617,19 @@ struct LibraryView: View {
             let interval = signposter.beginInterval("LibraryFilterAndSortIncremental")
             ids = incremental.ids
             requiresBookResolution = incremental.changed
+            resultGeneration = revision.readModelGeneration
             signposter.endInterval("LibraryFilterAndSortIncremental", interval)
         } else {
             let interval = signposter.beginInterval("LibraryFilterAndSort")
-            ids = await readModel.displayIDs(query: revision.query)
+            let result = await readModel.query(revision.query)
+            ids = result.ids
+            resultGeneration = result.generation
             requiresBookResolution = true
             signposter.endInterval("LibraryFilterAndSort", interval)
         }
-        guard !Task.isCancelled, displayRevision == revision else { return }
+        guard !Task.isCancelled,
+              resultGeneration == revision.readModelGeneration,
+              displayRevision == revision else { return }
 
         displayedIDs = ids
         displayedReadModelGeneration = revision.readModelGeneration

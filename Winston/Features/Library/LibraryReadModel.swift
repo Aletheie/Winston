@@ -25,7 +25,7 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
     var seriesTips: [LibraryFacetTip] = []
 
     static func build(
-        records: [LibraryDisplaySnapshot],
+        records: [LibraryBookRecord],
         smartCollections: [LibrarySmartCollectionSnapshot],
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool,
@@ -34,7 +34,6 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
         var facets = LibraryFacetSnapshot()
         let recentCutoff = now.addingTimeInterval(-14 * 24 * 3600)
         for record in records {
-            guard !Task.isCancelled else { return facets }
             facets.add(record, recentCutoff: recentCutoff)
         }
         facets.refreshKeysAndTips()
@@ -97,7 +96,7 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
     }
 
     private mutating func add(
-        _ record: LibraryDisplaySnapshot,
+        _ record: LibraryBookRecord,
         recentCutoff: Date
     ) {
         formats[record.format, default: 0] += 1
@@ -116,7 +115,7 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
     }
 
     private mutating func remove(
-        _ record: LibraryDisplaySnapshot,
+        _ record: LibraryBookRecord,
         recentCutoff: Date
     ) {
         Self.decrement(&formats, key: record.format)
@@ -152,7 +151,7 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
     }
 
     private static func makeSmartCounts(
-        records: [LibraryDisplaySnapshot],
+        records: [LibraryBookRecord],
         smartCollections: [LibrarySmartCollectionSnapshot],
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
@@ -160,7 +159,6 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
         guard !smartCollections.isEmpty else { return [:] }
         var counts: [UUID: Int] = [:]
         for record in records {
-            guard !Task.isCancelled else { return counts }
             for collection in smartCollections
             where collection.matches(
                 record,
@@ -192,19 +190,19 @@ nonisolated struct LibrarySmartCollectionSnapshot: Equatable, Sendable {
     let definition: SmartShelfDefinition?
 
     func matches(
-        _ record: LibraryDisplaySnapshot,
+        _ record: LibraryBookRecord,
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) -> Bool {
         if let definition {
             return definition.matches(
-                record.smartShelf,
+                record,
                 deviceFileNames: deviceFileNames,
                 deviceIsConnected: deviceIsConnected
             )
         }
         if let savedSearch {
-            return record.search.matches(savedSearch)
+            return record.normalized.matches(savedSearch)
         }
         return false
     }
@@ -212,8 +210,8 @@ nonisolated struct LibrarySmartCollectionSnapshot: Equatable, Sendable {
 
 nonisolated struct LibraryReadModelRecordChange: Equatable, Sendable {
     let id: UUID
-    let old: LibraryDisplaySnapshot?
-    let new: LibraryDisplaySnapshot?
+    let old: LibraryBookRecord?
+    let new: LibraryBookRecord?
 }
 
 nonisolated struct LibraryReadModelDisplayDelta: Equatable, Sendable {
@@ -239,52 +237,325 @@ nonisolated struct LibraryReadModelDiagnostics: Equatable, Sendable {
 }
 
 private nonisolated struct LibraryReadModelUpdate: Sendable {
-    let generation: Int
+    let fromGeneration: Int
+    let toGeneration: Int
     let changes: [LibraryReadModelRecordChange]
     let requiresFullDisplayRebuild: Bool
 }
 
+nonisolated struct LibraryReadModelQueryResult: Equatable, Sendable {
+    let generation: Int
+    let ids: [UUID]
+}
+
+nonisolated struct LibraryReadModelRecordQueryResult: Equatable, Sendable {
+    let generation: Int
+    let records: [LibraryBookRecord]
+}
+
+private nonisolated struct LibraryReadModelIndexes: Sendable {
+    var all: Set<UUID> = []
+    var collections: [UUID: Set<UUID>] = [:]
+    var statuses: [ReadingStatus: Set<UUID>] = [:]
+    var formats: [String: Set<UUID>] = [:]
+    var authors: [String: Set<UUID>] = [:]
+    var series: [String: Set<UUID>] = [:]
+    var tags: [String: Set<UUID>] = [:]
+    var deviceKeys: [String: Set<UUID>] = [:]
+    var rated: Set<UUID> = []
+
+    mutating func add(_ record: LibraryBookRecord) {
+        all.insert(record.id)
+        Self.insert(record.id, for: record.readingStatus, into: &statuses)
+        Self.insert(record.id, for: record.format, into: &formats)
+        if !record.displayAuthor.isEmpty {
+            Self.insert(record.id, for: record.displayAuthor, into: &authors)
+        }
+        if let series = record.series, !series.isEmpty {
+            Self.insert(record.id, for: series, into: &self.series)
+        }
+        for id in record.collectionIDs {
+            Self.insert(record.id, for: id, into: &collections)
+        }
+        for tag in record.tags {
+            Self.insert(record.id, for: tag, into: &tags)
+        }
+        for key in record.deviceMatchKeys {
+            Self.insert(record.id, for: key, into: &deviceKeys)
+        }
+        if record.rating > 0 { rated.insert(record.id) }
+    }
+
+    mutating func remove(_ record: LibraryBookRecord) {
+        all.remove(record.id)
+        Self.remove(record.id, for: record.readingStatus, from: &statuses)
+        Self.remove(record.id, for: record.format, from: &formats)
+        if !record.displayAuthor.isEmpty {
+            Self.remove(record.id, for: record.displayAuthor, from: &authors)
+        }
+        if let series = record.series, !series.isEmpty {
+            Self.remove(record.id, for: series, from: &self.series)
+        }
+        for id in record.collectionIDs {
+            Self.remove(record.id, for: id, from: &collections)
+        }
+        for tag in record.tags {
+            Self.remove(record.id, for: tag, from: &tags)
+        }
+        for key in record.deviceMatchKeys {
+            Self.remove(record.id, for: key, from: &deviceKeys)
+        }
+        rated.remove(record.id)
+    }
+
+    func candidates(for filter: LibraryFilter) -> Set<UUID> {
+        switch filter {
+        case .all, .recentlyAdded:
+            all
+        case .status(let status):
+            statuses[status] ?? []
+        case .collection(let id):
+            collections[id] ?? []
+        case .format(let format):
+            formats[format] ?? []
+        case .author(let author):
+            authors[author] ?? []
+        case .series(let series):
+            self.series[series] ?? []
+        case .tag(let tag):
+            tags[tag] ?? []
+        case .rated:
+            rated
+        }
+    }
+
+    func onDevice(fileNames: Set<String>) -> Set<UUID> {
+        fileNames.reduce(into: Set<UUID>()) { result, fileName in
+            result.formUnion(deviceKeys[fileName] ?? [])
+        }
+    }
+
+    private static func insert<Key: Hashable>(
+        _ id: UUID,
+        for key: Key,
+        into index: inout [Key: Set<UUID>]
+    ) {
+        index[key, default: []].insert(id)
+    }
+
+    private static func remove<Key: Hashable>(
+        _ id: UUID,
+        for key: Key,
+        from index: inout [Key: Set<UUID>]
+    ) {
+        guard var ids = index[key] else { return }
+        ids.remove(id)
+        if ids.isEmpty {
+            index.removeValue(forKey: key)
+        } else {
+            index[key] = ids
+        }
+    }
+}
+
+private nonisolated struct LibraryReadModelSnapshot: Sendable {
+    var generation = 0
+    var recordsByID: [UUID: LibraryBookRecord] = [:]
+    var sourceOrder: [UUID] = []
+    var sourceRank: [UUID: Int] = [:]
+    var pluginOrder: [UUID] = []
+    var indexes = LibraryReadModelIndexes()
+
+    init(
+        generation: Int = 0,
+        records: [LibraryBookRecord] = [],
+        sourceOrder: [UUID] = []
+    ) {
+        self.generation = generation
+        self.recordsByID = Dictionary(
+            uniqueKeysWithValues: records.map { ($0.id, $0) }
+        )
+        self.sourceOrder = sourceOrder
+        sourceRank = Dictionary(
+            uniqueKeysWithValues: sourceOrder.enumerated().map { ($0.element, $0.offset) }
+        )
+        for record in records {
+            indexes.add(record)
+        }
+        pluginOrder = records.compactMap { $0.pluginBook == nil ? nil : $0.id }
+            .sorted { lhs, rhs in
+                guard let left = recordsByID[lhs]?.pluginBook,
+                      let right = recordsByID[rhs]?.pluginBook else {
+                    return lhs.uuidString < rhs.uuidString
+                }
+                return PluginBookDTO.precedes(left, right)
+            }
+    }
+
+    mutating func apply(
+        changes: [LibraryReadModelRecordChange],
+        sourceOrder nextSourceOrder: [UUID]?,
+        generation: Int
+    ) {
+        for change in changes {
+            if let old = change.old {
+                indexes.remove(old)
+                recordsByID.removeValue(forKey: old.id)
+                pluginOrder.removeAll { $0 == old.id }
+            }
+            if let new = change.new {
+                recordsByID[new.id] = new
+                indexes.add(new)
+                if new.pluginBook != nil {
+                    insertIntoPluginOrder(new.id)
+                }
+            }
+        }
+        if let nextSourceOrder {
+            sourceOrder = nextSourceOrder
+            sourceRank = Dictionary(
+                uniqueKeysWithValues: nextSourceOrder.enumerated().map {
+                    ($0.element, $0.offset)
+                }
+            )
+        }
+        self.generation = generation
+    }
+
+    func orderedRecords() -> [LibraryBookRecord] {
+        sourceOrder.compactMap { recordsByID[$0] }
+    }
+
+    private mutating func insertIntoPluginOrder(_ id: UUID) {
+        guard let candidate = recordsByID[id]?.pluginBook else { return }
+        var lowerBound = 0
+        var upperBound = pluginOrder.count
+        while lowerBound < upperBound {
+            let middle = lowerBound + (upperBound - lowerBound) / 2
+            guard let existing = recordsByID[pluginOrder[middle]]?.pluginBook else {
+                lowerBound = middle + 1
+                continue
+            }
+            if PluginBookDTO.precedes(existing, candidate) {
+                lowerBound = middle + 1
+            } else {
+                upperBound = middle
+            }
+        }
+        pluginOrder.insert(id, at: lowerBound)
+    }
+}
+
 private actor LibraryReadModelWorker {
-    private var pluginRecords: [PluginBookDTO] = []
+    private var snapshot = LibraryReadModelSnapshot()
+
+    func rebuild(
+        records: [LibraryBookRecord],
+        sourceOrder: [UUID],
+        generation: Int
+    ) {
+        snapshot = LibraryReadModelSnapshot(
+            generation: generation,
+            records: records,
+            sourceOrder: sourceOrder
+        )
+    }
+
+    func apply(
+        changes: [LibraryReadModelRecordChange],
+        sourceOrder: [UUID]?,
+        generation: Int
+    ) {
+        snapshot.apply(
+            changes: changes,
+            sourceOrder: sourceOrder,
+            generation: generation
+        )
+    }
 
     func makeFacets(
-        records: [LibraryDisplaySnapshot],
         smartCollections: [LibrarySmartCollectionSnapshot],
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) -> LibraryFacetSnapshot {
         LibraryFacetSnapshot.build(
-            records: records,
+            records: snapshot.orderedRecords(),
             smartCollections: smartCollections,
             deviceFileNames: deviceFileNames,
             deviceIsConnected: deviceIsConnected
         )
     }
 
-    func displayIDs(
-        records: [LibraryDisplaySnapshot],
-        query: LibraryDisplayQuery
-    ) -> [UUID] {
-        LibraryQuery.displayIDs(for: records, query: query)
-    }
-
-    func replacePluginRecords(_ records: [PluginBookDTO]) {
-        pluginRecords = records.sorted(by: PluginBookDTO.precedes)
-    }
-
-    func upsertPluginRecords(_ records: [PluginBookDTO]) {
-        guard !records.isEmpty else { return }
-        let replacements = Dictionary(
-            records.compactMap { record in
-                record.stableID.map { ($0, record) }
-            },
-            uniquingKeysWith: { _, rhs in rhs }
-        )
-        pluginRecords.removeAll { record in
-            record.stableID.map(replacements.keys.contains) == true
+    func query(_ spec: LibraryQuerySpec) -> LibraryReadModelQueryResult {
+        var candidates = spec.smartShelf != nil || spec.savedSearch != nil
+            ? snapshot.indexes.all
+            : snapshot.indexes.candidates(for: spec.filter)
+        if spec.deviceIsConnected, spec.kindlePresenceFilter != .all {
+            let onDevice = snapshot.indexes.onDevice(fileNames: spec.deviceFileNames)
+            switch spec.kindlePresenceFilter {
+            case .all:
+                break
+            case .onKindle:
+                candidates.formIntersection(onDevice)
+            case .notOnKindle:
+                candidates.subtract(onDevice)
+            }
         }
-        pluginRecords.append(contentsOf: replacements.values)
-        pluginRecords.sort(by: PluginBookDTO.precedes)
+
+        let visibleQuery = LibraryQuery.NormalizedQuery(
+            SearchQuery.parse(spec.searchText)
+        )
+        let savedQuery = spec.savedSearch.map {
+            LibraryQuery.NormalizedQuery(SearchQuery.parse($0))
+        }
+        let recentCutoff = Date.now.addingTimeInterval(-14 * 24 * 3600)
+        candidates = candidates.filter { id in
+            guard !Task.isCancelled, let record = snapshot.recordsByID[id] else {
+                return false
+            }
+            let belongs: Bool
+            if let smartShelf = spec.smartShelf {
+                belongs = smartShelf.matches(
+                    record,
+                    deviceFileNames: spec.deviceFileNames,
+                    deviceIsConnected: spec.deviceIsConnected
+                )
+            } else if let savedQuery {
+                belongs = record.normalized.matches(savedQuery)
+            } else if case .recentlyAdded = spec.filter {
+                belongs = record.dateAdded > recentCutoff
+            } else {
+                belongs = true
+            }
+            return belongs && record.normalized.matches(visibleQuery)
+        }
+
+        let ids: [UUID]
+        if case .series = spec.filter {
+            ids = candidates.sorted {
+                ordered($0, before: $1, spec: spec, forceSeriesOrder: true)
+            }
+        } else if spec.sort.field == .source {
+            ids = snapshot.sourceOrder.filter(candidates.contains)
+        } else {
+            ids = candidates.sorted {
+                ordered($0, before: $1, spec: spec, forceSeriesOrder: false)
+            }
+        }
+        return LibraryReadModelQueryResult(
+            generation: snapshot.generation,
+            ids: Task.isCancelled ? [] : ids
+        )
+    }
+
+    func records(
+        matching spec: LibraryQuerySpec
+    ) -> LibraryReadModelRecordQueryResult {
+        let result = query(spec)
+        return LibraryReadModelRecordQueryResult(
+            generation: result.generation,
+            records: result.ids.compactMap { snapshot.recordsByID[$0] }
+        )
     }
 
     func pluginBooks(
@@ -294,41 +565,122 @@ private actor LibraryReadModelWorker {
         scanLimit: Int,
         maximumOffset: Int
     ) -> PluginBookReadPage {
-        guard offset < pluginRecords.count else {
+        guard offset < snapshot.pluginOrder.count else {
             return PluginBookReadPage(items: [], nextOffset: nil)
         }
-        let upperBound = min(pluginRecords.count, offset + scanLimit)
+        let upperBound = min(snapshot.pluginOrder.count, offset + scanLimit)
+        let normalizedSearch = LibraryNormalizedStrings.normalize(searchText)
         var items: [PluginBookDTO] = []
         items.reserveCapacity(limit)
         var consumed = 0
-        for record in pluginRecords[offset ..< upperBound] {
+        for id in snapshot.pluginOrder[offset ..< upperBound] {
             guard !Task.isCancelled else { break }
             consumed += 1
-            if record.matches(searchText) {
-                items.append(record)
-                if items.count == limit { break }
-            }
+            guard let libraryRecord = snapshot.recordsByID[id],
+                  let pluginBook = libraryRecord.pluginBook,
+                  normalizedSearch.isEmpty
+                    || libraryRecord.normalized.title.contains(normalizedSearch)
+                    || libraryRecord.normalized.author.contains(normalizedSearch)
+            else { continue }
+            items.append(pluginBook)
+            if items.count == limit { break }
         }
         let nextOffset = offset + consumed
         return PluginBookReadPage(
             items: items,
-            nextOffset: nextOffset < pluginRecords.count
+            nextOffset: nextOffset < snapshot.pluginOrder.count
                 && nextOffset <= maximumOffset ? nextOffset : nil
         )
     }
+
+    func kindleCandidates() -> [KindleSyncCandidate] {
+        snapshot.sourceOrder.compactMap {
+            snapshot.recordsByID[$0]?.kindleCandidate
+        }
+    }
+
+    func deviceMetadata() -> LibraryDeviceMetadataSnapshot {
+        var authors: [String: String] = [:]
+        for record in snapshot.recordsByID.values {
+            guard let author = record.author else { continue }
+            for key in record.deviceMatchKeys where authors[key] == nil {
+                authors[key] = author
+            }
+        }
+        return LibraryDeviceMetadataSnapshot(
+            generation: snapshot.generation,
+            libraryKeys: Set(snapshot.indexes.deviceKeys.keys),
+            authorByDeviceKey: authors
+        )
+    }
+
+    private func ordered(
+        _ lhsID: UUID,
+        before rhsID: UUID,
+        spec: LibraryQuerySpec,
+        forceSeriesOrder: Bool
+    ) -> Bool {
+        guard let lhs = snapshot.recordsByID[lhsID],
+              let rhs = snapshot.recordsByID[rhsID] else {
+            return lhsID.uuidString < rhsID.uuidString
+        }
+        if forceSeriesOrder {
+            if lhs.seriesIndex != rhs.seriesIndex {
+                return lhs.seriesIndex < rhs.seriesIndex
+            }
+            return sourcePrecedes(lhsID, rhsID)
+        }
+
+        let comparison: ComparisonResult
+        switch spec.sort.field {
+        case .source:
+            return sourcePrecedes(lhsID, rhsID)
+        case .title:
+            comparison = lhs.displayTitle.compare(rhs.displayTitle)
+        case .author:
+            comparison = lhs.displayAuthor.compare(rhs.displayAuthor)
+        case .dateAdded:
+            comparison = lhs.dateAdded == rhs.dateAdded
+                ? .orderedSame
+                : (lhs.dateAdded < rhs.dateAdded ? .orderedAscending : .orderedDescending)
+        case .rating:
+            comparison = lhs.rating == rhs.rating
+                ? .orderedSame
+                : (lhs.rating < rhs.rating ? .orderedAscending : .orderedDescending)
+        }
+        if comparison == .orderedSame {
+            return sourcePrecedes(lhsID, rhsID)
+        }
+        return spec.sort.ascending
+            ? comparison == .orderedAscending
+            : comparison == .orderedDescending
+    }
+
+    private func sourcePrecedes(_ lhs: UUID, _ rhs: UUID) -> Bool {
+        let left = snapshot.sourceRank[lhs] ?? .max
+        let right = snapshot.sourceRank[rhs] ?? .max
+        if left != right { return left < right }
+        return lhs.uuidString < rhs.uuidString
+    }
+}
+
+nonisolated struct LibraryDeviceMetadataSnapshot: Equatable, Sendable {
+    let generation: Int
+    let libraryKeys: Set<String>
+    let authorByDeviceKey: [String: String]
 }
 
 @MainActor
 @Observable
 final class LibraryReadModel {
     private(set) var generation = 0
-    private(set) var catalogRevision = 0
+    private(set) var isReady = false
     private(set) var bookCount = 0
     private(set) var facets = LibraryFacetSnapshot()
 
     @ObservationIgnored private var didBootstrap = false
-    @ObservationIgnored private var orderedRecords: [LibraryDisplaySnapshot] = []
-    @ObservationIgnored private var recordsByID: [UUID: LibraryDisplaySnapshot] = [:]
+    @ObservationIgnored private var orderedRecords: [LibraryBookRecord] = []
+    @ObservationIgnored private var recordsByID: [UUID: LibraryBookRecord] = [:]
     @ObservationIgnored private var booksByID: [UUID: Book] = [:]
     @ObservationIgnored private var booksByPersistentID: [Book.ID: Book] = [:]
     @ObservationIgnored private var sourceIndexByID: [UUID: Int] = [:]
@@ -340,6 +692,36 @@ final class LibraryReadModel {
     @ObservationIgnored private let worker = LibraryReadModelWorker()
     @ObservationIgnored private(set) var diagnostics = LibraryReadModelDiagnostics()
 
+    /// Applies the semantic change set returned by `CatalogMutationService`.
+    /// The journal-backed synchronization path below remains the recovery mechanism
+    /// when a consumer misses one or more individual mutations.
+    func apply(
+        _ changeSet: CatalogChangeSet,
+        catalogGeneration: Int,
+        books: [Book],
+        collections: [BookCollection],
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool
+    ) async {
+        await synchronize(
+            books: books,
+            collections: collections,
+            delta: LibraryCatalogDelta(
+                fromRevision: generation,
+                toRevision: catalogGeneration,
+                affectedBookIDs: changeSet.affectedBookIDs,
+                affectedWorkIDs: changeSet.affectedWorkIDs,
+                affectedAssetIDs: changeSet.affectedAssetIDs,
+                affectedCollectionIDs: changeSet.affectedCollectionIDs,
+                fields: changeSet.fields,
+                requiresFullRebuild: catalogGeneration != generation + 1,
+                changesBookMembership: changeSet.command.changesBookMembership
+            ),
+            deviceFileNames: deviceFileNames,
+            deviceIsConnected: deviceIsConnected
+        )
+    }
+
     func synchronize(
         books: [Book],
         collections: [BookCollection],
@@ -347,27 +729,19 @@ final class LibraryReadModel {
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) async {
+        guard delta.toRevision >= generation else { return }
         let nextSmartCollections = Self.smartCollectionSnapshots(collections)
         let configurationChanged = nextSmartCollections != smartCollections
             || deviceFileNames != self.deviceFileNames
             || deviceIsConnected != self.deviceIsConnected
 
-        if !didBootstrap || delta.requiresFullRebuild {
+        if !didBootstrap
+            || delta.requiresFullRebuild
+            || delta.fromRevision != generation {
             await rebuild(
                 books: books,
                 smartCollections: nextSmartCollections,
-                catalogRevision: delta.toRevision,
-                deviceFileNames: deviceFileNames,
-                deviceIsConnected: deviceIsConnected
-            )
-            return
-        }
-
-        if delta.changesBookMembership || books.count != bookCount {
-            await rebuild(
-                books: books,
-                smartCollections: nextSmartCollections,
-                catalogRevision: delta.toRevision,
+                catalogGeneration: delta.toRevision,
                 deviceFileNames: deviceFileNames,
                 deviceIsConnected: deviceIsConnected
             )
@@ -380,63 +754,152 @@ final class LibraryReadModel {
             .assetAvailability,
             .collectionMembership,
             .readingState,
+            .cover,
             .workMembership,
         ]
         if !configurationChanged,
+           !delta.changesBookMembership,
            delta.fields.isDisjoint(with: recordRelevantFields) {
-            catalogRevision = delta.toRevision
             diagnostics.lastCapturedRecordCount = 0
+            await worker.apply(
+                changes: [],
+                sourceOrder: nil,
+                generation: delta.toRevision
+            )
+            publish(
+                fromGeneration: generation,
+                toGeneration: delta.toRevision,
+                changes: [],
+                requiresFullDisplayRebuild: false
+            )
             return
         }
 
+        let currentSourceOrder = books.map(\.uuid)
+        let currentSourceIndex = Dictionary(
+            uniqueKeysWithValues: currentSourceOrder.enumerated().map {
+                ($0.element, $0.offset)
+            }
+        )
+        let currentBooksByID: [UUID: Book]
+        if delta.changesBookMembership || books.count != bookCount {
+            currentBooksByID = Dictionary(
+                uniqueKeysWithValues: books.map { ($0.uuid, $0) }
+            )
+        } else {
+            currentBooksByID = booksByID
+        }
+
+        var affectedIDs = delta.affectedBookIDs
+        if delta.changesBookMembership || books.count != bookCount {
+            let previousIDs = Set(recordsByID.keys)
+            let currentIDs = Set(currentBooksByID.keys)
+            affectedIDs.formUnion(previousIDs.symmetricDifference(currentIDs))
+        }
+
         var recordChanges: [LibraryReadModelRecordChange] = []
-        var pluginRecordChanges: [PluginBookDTO] = []
-        recordChanges.reserveCapacity(delta.affectedBookIDs.count)
-        pluginRecordChanges.reserveCapacity(delta.affectedBookIDs.count)
-        for id in delta.affectedBookIDs {
-            guard let book = booksByID[id],
-                  let old = recordsByID[id],
-                  let index = sourceIndexByID[id] else {
+        recordChanges.reserveCapacity(affectedIDs.count)
+        for id in affectedIDs {
+            let old = recordsByID[id]
+            guard let book = currentBooksByID[id] else {
+                guard let old else {
+                    await rebuild(
+                        books: books,
+                        smartCollections: nextSmartCollections,
+                        catalogGeneration: delta.toRevision,
+                        deviceFileNames: deviceFileNames,
+                        deviceIsConnected: deviceIsConnected
+                    )
+                    return
+                }
+                recordsByID.removeValue(forKey: id)
+                booksByID.removeValue(forKey: id)
+                if let persistentID = booksByPersistentID.first(where: {
+                    $0.value.uuid == id
+                })?.key {
+                    booksByPersistentID.removeValue(forKey: persistentID)
+                }
+                recordChanges.append(
+                    LibraryReadModelRecordChange(id: id, old: old, new: nil)
+                )
+                continue
+            }
+            guard let index = currentSourceIndex[id] else {
                 await rebuild(
                     books: books,
                     smartCollections: nextSmartCollections,
-                    catalogRevision: delta.toRevision,
+                    catalogGeneration: delta.toRevision,
                     deviceFileNames: deviceFileNames,
                     deviceIsConnected: deviceIsConnected
                 )
                 return
             }
-            let updated = LibraryDisplaySnapshot(
+            let updated = LibraryBookRecord(
                 book,
                 sourceOrdinal: index,
                 includeCollections: true,
                 includeHighlights: true
             )
-            pluginRecordChanges.append(PluginBookDTO(book))
             guard old != updated else { continue }
-            orderedRecords[index] = updated
             recordsByID[id] = updated
+            booksByID[id] = book
+            booksByPersistentID[book.id] = book
             recordChanges.append(
                 LibraryReadModelRecordChange(id: id, old: old, new: updated)
             )
         }
 
-        diagnostics.lastCapturedRecordCount = delta.affectedBookIDs.count
-        diagnostics.incrementallyCapturedRecordCount += delta.affectedBookIDs.count
-        catalogRevision = delta.toRevision
-        await worker.upsertPluginRecords(pluginRecordChanges)
-        guard !Task.isCancelled else { return }
+        let membershipChanged = delta.changesBookMembership || books.count != bookCount
+        let sourceOrderChanged = membershipChanged
+            || currentSourceOrder != orderedRecords.map(\.id)
+        if sourceOrderChanged {
+            guard recordsByID.count == books.count else {
+                await rebuild(
+                    books: books,
+                    smartCollections: nextSmartCollections,
+                    catalogGeneration: delta.toRevision,
+                    deviceFileNames: deviceFileNames,
+                    deviceIsConnected: deviceIsConnected
+                )
+                return
+            }
+            orderedRecords = currentSourceOrder.compactMap { recordsByID[$0] }
+            booksByID = currentBooksByID
+            booksByPersistentID = Dictionary(
+                uniqueKeysWithValues: books.map { ($0.id, $0) }
+            )
+            sourceIndexByID = currentSourceIndex
+            sourceIndexByPersistentID = Dictionary(
+                uniqueKeysWithValues: books.enumerated().map {
+                    ($0.element.id, $0.offset)
+                }
+            )
+            bookCount = books.count
+        } else if !recordChanges.isEmpty {
+            for change in recordChanges {
+                guard let new = change.new,
+                      let index = sourceIndexByID[change.id] else { continue }
+                orderedRecords[index] = new
+            }
+        }
+
+        diagnostics.lastCapturedRecordCount = affectedIDs.count
+        diagnostics.incrementallyCapturedRecordCount += affectedIDs.count
+        let sourceOrderUpdate = sourceOrderChanged ? currentSourceOrder : nil
+        await worker.apply(
+            changes: recordChanges,
+            sourceOrder: sourceOrderUpdate,
+            generation: delta.toRevision
+        )
 
         if configurationChanged {
             let interval = Log.librarySignposter.beginInterval("SidebarFacets")
             let rebuiltFacets = await worker.makeFacets(
-                records: orderedRecords,
                 smartCollections: nextSmartCollections,
                 deviceFileNames: deviceFileNames,
                 deviceIsConnected: deviceIsConnected
             )
             Log.librarySignposter.endInterval("SidebarFacets", interval)
-            guard !Task.isCancelled else { return }
             facets = rebuiltFacets
         } else if !recordChanges.isEmpty {
             var updatedFacets = facets
@@ -452,19 +915,28 @@ final class LibraryReadModel {
         smartCollections = nextSmartCollections
         self.deviceFileNames = deviceFileNames
         self.deviceIsConnected = deviceIsConnected
-        guard !recordChanges.isEmpty || configurationChanged else { return }
         publish(
+            fromGeneration: generation,
+            toGeneration: delta.toRevision,
             changes: recordChanges,
-            requiresFullDisplayRebuild: configurationChanged
+            requiresFullDisplayRebuild: configurationChanged || sourceOrderChanged
         )
     }
 
-    func recordSnapshot() -> [LibraryDisplaySnapshot] {
+    func recordSnapshot() -> [LibraryBookRecord] {
         orderedRecords
     }
 
-    func displayIDs(query: LibraryDisplayQuery) async -> [UUID] {
-        await worker.displayIDs(records: orderedRecords, query: query)
+    func query(_ spec: LibraryQuerySpec) async -> LibraryReadModelQueryResult {
+        await worker.query(spec)
+    }
+
+    func records(matching spec: LibraryQuerySpec) async -> LibraryReadModelRecordQueryResult {
+        await worker.records(matching: spec)
+    }
+
+    func displayIDs(query: LibraryQuerySpec) async -> [UUID] {
+        await worker.query(query).ids
     }
 
     func pluginBooks(
@@ -484,7 +956,21 @@ final class LibraryReadModel {
         )
     }
 
-    func record(for id: UUID) -> LibraryDisplaySnapshot? {
+    func pluginBook(uuid: UUID) -> PluginBookDTO? {
+        recordsByID[uuid]?.pluginBook
+    }
+
+    func kindleCandidates() async -> [KindleSyncCandidate]? {
+        guard didBootstrap else { return nil }
+        return await worker.kindleCandidates()
+    }
+
+    func deviceMetadata() async -> LibraryDeviceMetadataSnapshot? {
+        guard didBootstrap else { return nil }
+        return await worker.deviceMetadata()
+    }
+
+    func record(for id: UUID) -> LibraryBookRecord? {
         recordsByID[id]
     }
 
@@ -525,9 +1011,13 @@ final class LibraryReadModel {
             )
         }
 
-        let pending = updates.filter { $0.generation > generation }
-        guard pending.first?.generation == generation + 1,
-              pending.last?.generation == self.generation else {
+        let pending = updates.filter { $0.toGeneration > generation }
+        let isContiguous = zip(pending, pending.dropFirst()).allSatisfy {
+            $0.toGeneration == $1.fromGeneration
+        }
+        guard pending.first?.fromGeneration == generation,
+              pending.last?.toGeneration == self.generation,
+              isContiguous else {
             return fullDisplayDelta(since: generation)
         }
         if pending.contains(where: \.requiresFullDisplayRebuild) {
@@ -561,7 +1051,7 @@ final class LibraryReadModel {
     func incrementallyUpdatingDisplayIDs(
         _ currentIDs: [UUID],
         with delta: LibraryReadModelDisplayDelta,
-        query: LibraryDisplayQuery
+        query: LibraryQuerySpec
     ) -> LibraryIncrementalDisplayUpdate? {
         guard !delta.requiresFullRebuild else { return nil }
         var updated = currentIDs
@@ -618,34 +1108,31 @@ final class LibraryReadModel {
     private func rebuild(
         books: [Book],
         smartCollections: [LibrarySmartCollectionSnapshot],
-        catalogRevision: Int,
+        catalogGeneration: Int,
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) async {
         let interval = Log.librarySignposter.beginInterval("LibrarySnapshot")
-        var records: [LibraryDisplaySnapshot] = []
-        var pluginRecords: [PluginBookDTO] = []
-        var nextRecordsByID: [UUID: LibraryDisplaySnapshot] = [:]
+        var records: [LibraryBookRecord] = []
+        var nextRecordsByID: [UUID: LibraryBookRecord] = [:]
         var nextBooksByID: [UUID: Book] = [:]
         var nextBooksByPersistentID: [Book.ID: Book] = [:]
         var nextSourceIndexByID: [UUID: Int] = [:]
         var nextSourceIndexByPersistentID: [Book.ID: Int] = [:]
         records.reserveCapacity(books.count)
-        pluginRecords.reserveCapacity(books.count)
         nextRecordsByID.reserveCapacity(books.count)
         nextBooksByID.reserveCapacity(books.count)
         nextBooksByPersistentID.reserveCapacity(books.count)
         nextSourceIndexByID.reserveCapacity(books.count)
         nextSourceIndexByPersistentID.reserveCapacity(books.count)
         for (index, book) in books.enumerated() {
-            let record = LibraryDisplaySnapshot(
+            let record = LibraryBookRecord(
                 book,
                 sourceOrdinal: index,
                 includeCollections: true,
                 includeHighlights: true
             )
             records.append(record)
-            pluginRecords.append(PluginBookDTO(book))
             nextRecordsByID[record.id] = record
             nextBooksByID[record.id] = book
             nextBooksByPersistentID[book.id] = book
@@ -662,19 +1149,17 @@ final class LibraryReadModel {
         Log.librarySignposter.endInterval("LibrarySnapshot", interval)
 
         let facetInterval = Log.librarySignposter.beginInterval("SidebarFacets")
-        await worker.replacePluginRecords(pluginRecords)
-        guard !Task.isCancelled else {
-            Log.librarySignposter.endInterval("SidebarFacets", facetInterval)
-            return
-        }
-        let nextFacets = await worker.makeFacets(
+        await worker.rebuild(
             records: records,
+            sourceOrder: records.map(\.id),
+            generation: catalogGeneration
+        )
+        let nextFacets = await worker.makeFacets(
             smartCollections: smartCollections,
             deviceFileNames: deviceFileNames,
             deviceIsConnected: deviceIsConnected
         )
         Log.librarySignposter.endInterval("SidebarFacets", facetInterval)
-        guard !Task.isCancelled else { return }
 
         orderedRecords = records
         recordsByID = nextRecordsByID
@@ -685,23 +1170,31 @@ final class LibraryReadModel {
         self.smartCollections = smartCollections
         self.deviceFileNames = deviceFileNames
         self.deviceIsConnected = deviceIsConnected
-        self.catalogRevision = catalogRevision
         bookCount = books.count
         facets = nextFacets
         didBootstrap = true
+        isReady = true
         diagnostics.fullRebuildCount += 1
         diagnostics.lastCapturedRecordCount = books.count
-        publish(changes: [], requiresFullDisplayRebuild: true)
+        publish(
+            fromGeneration: generation,
+            toGeneration: catalogGeneration,
+            changes: [],
+            requiresFullDisplayRebuild: true
+        )
     }
 
     private func publish(
+        fromGeneration: Int,
+        toGeneration: Int,
         changes: [LibraryReadModelRecordChange],
         requiresFullDisplayRebuild: Bool
     ) {
-        generation &+= 1
+        generation = toGeneration
         updates.append(
             LibraryReadModelUpdate(
-                generation: generation,
+                fromGeneration: fromGeneration,
+                toGeneration: toGeneration,
                 changes: changes,
                 requiresFullDisplayRebuild: requiresFullDisplayRebuild
             )

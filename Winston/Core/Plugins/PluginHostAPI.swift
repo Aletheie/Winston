@@ -438,7 +438,10 @@ final class PluginHostAPI {
 
         case .libraryGet(let uuid):
             if let denied = require(.libraryRead) { return .failure(denied) }
-            return encode(book(with: uuid).map(PluginBookDTO.init))
+            return encode(
+                libraryReadModel?.pluginBook(uuid: uuid)
+                    ?? book(with: uuid).map(PluginBookDTO.init)
+            )
 
         case .libraryUpdate(let uuid, let patch):
             if let denied = require(.libraryWrite) { return .failure(denied) }
