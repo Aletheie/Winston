@@ -334,6 +334,77 @@ struct LibraryTimeMachineTests {
         #expect(try Data(contentsOf: covers.appending(path: "\(id.uuidString).jpg")) == restoredData)
     }
 
+    @Test func committedCoverRestoreResumesPublicationFromJournal() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "WinstonCoverRestoreRecovery-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let books = root.appending(path: "books", directoryHint: .isDirectory)
+        let covers = root.appending(path: "covers", directoryHint: .isDirectory)
+        let managedState = root.appending(path: "managed", directoryHint: .isDirectory)
+        let backupCover = root.appending(path: "backup.jpg")
+        try FileManager.default.createDirectory(at: covers, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let container = PersistenceController.inMemory()
+        let context = container.mainContext
+        let id = UUID()
+        let book = Book(uuid: id, fileName: "book.epub", originalFileName: "Book.epub")
+        book.coverVersion = 1
+        context.insert(book)
+        try context.save()
+        let liveCover = covers.appending(path: "\(id.uuidString).jpg")
+        try Data("current".utf8).write(to: liveCover)
+        let restoredData = Data("restored".utf8)
+        try restoredData.write(to: backupCover)
+
+        let failing = ManagedFileCoordinator(
+            booksDirectory: books,
+            coversDirectory: covers,
+            stateDirectory: managedState
+        ) {
+            if case .duringPublish = $0 { throw TimeMachineTestError.expected }
+        }
+        let mutations = CatalogMutationService(
+            modelContext: context,
+            managedFiles: failing
+        )
+        let restorer = LibraryTimeMachineRestorer(
+            modelContext: context,
+            coversDirectory: covers,
+            createSafetyBackup: { source in source },
+            managedFiles: failing,
+            mutationService: mutations
+        )
+        let backup = snapshot(
+            id: id,
+            title: "Book",
+            coverURL: backupCover,
+            coverVersion: 1
+        )
+
+        _ = try await restorer.restore(backup, scope: .cover, from: root)
+
+        #expect(book.coverVersion == 2)
+        #expect(try Data(contentsOf: liveCover) == Data("current".utf8))
+        #expect(await failing.pendingTransactions().count == 1)
+
+        let recovering = ManagedFileCoordinator(
+            booksDirectory: books,
+            coversDirectory: covers,
+            stateDirectory: managedState
+        )
+        let recovery = CatalogMutationService(
+            modelContext: context,
+            managedFiles: recovering
+        )
+        let report = await recovery.recoverManagedFiles()
+
+        #expect(!report.hasPendingWork)
+        #expect(try Data(contentsOf: liveCover) == restoredData)
+        #expect(await recovering.pendingTransactions().isEmpty)
+    }
+
     @Test func wholeBookRestoreRecreatesDeletedCatalogRecordAndPersonalData() async throws {
         let root = FileManager.default.temporaryDirectory.appending(
             path: "WinstonBookRestore-\(UUID().uuidString)",
