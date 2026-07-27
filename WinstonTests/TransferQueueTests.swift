@@ -180,6 +180,35 @@ struct TransferQueueTests {
         #expect(Set(cleanupBases).count == 2)
     }
 
+    @Test func transferPlannerFreezesAssetGenerationAndDeviceDestination() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Immutable Plan")
+        let descriptor = KindleSendPreparation.descriptor(for: book)
+        let destination = targetFileName(for: book, format: "mobi")
+        let existing = DeviceBook(
+            path: "documents/\(destination)",
+            fileName: destination,
+            sizeBytes: 10
+        )
+
+        let plan = TransferPlanner.makePlan(
+            readModel: [descriptor],
+            inventory: DeviceInventorySnapshot(
+                info: FakeKindleConnection.fakeInfo,
+                books: [existing]
+            )
+        )
+
+        let item = try #require(plan.items.first)
+        #expect(plan.deviceIdentifier == FakeKindleConnection.fakeInfo.identifier)
+        #expect(item.destination.fileName == destination)
+        #expect(item.existingDeviceBookID == existing.id)
+        #expect(item.sourceFileGeneration == TransferFileGeneration.capture(at: book.fileURL))
+
+        try Data("new generation".utf8).write(to: book.fileURL)
+        #expect(item.sourceFileGeneration != TransferFileGeneration.capture(at: book.fileURL))
+    }
+
     @Test func separateDirectSendsKeepStableDistinctPathsForEqualBasenames() async throws {
         let lib = try await TestLibrary()
         let first = try makeMOBIBook(in: lib, title: "Direct First")
@@ -217,9 +246,14 @@ struct TransferQueueTests {
 
         await queue.send(books: [book], via: monitor)
 
+        let sent = await fake.sentFiles
         let profile = try #require(profiles.profile(for: FakeKindleConnection.fakeInfo))
         let receipt = try #require(profiles.receipts(for: profile.id)[book.uuid])
         #expect(receipt.sentFileName == targetFileName(for: book, format: "mobi"))
+        #expect(receipt.artifactFormat == "mobi")
+        #expect(receipt.artifactSizeBytes == sent.first.map { UInt64($0.byteCount) })
+        #expect(receipt.artifactFingerprint == receipt.sourceFingerprint)
+        #expect(receipt.transportIdentifier == "fake-1")
         #expect(receipt.coverVersion == book.coverVersion)
     }
 
@@ -331,12 +365,22 @@ struct TransferQueueTests {
             .appending(path: book.fileURL.deletingPathExtension().lastPathComponent + ".mobi")
         try? FileManager.default.removeItem(at: temporaryOutput)
         let fake = FakeKindleConnection()
-        let queue = TransferQueue(toasts: ToastCenter())
+        var records: [KindleSyncTransferRecord] = []
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { records.append($0) }
+        )
 
         await queue.send(books: [book], via: makeMonitor(fake))
 
         let sent = await fake.sentFiles
+        let record = try #require(records.first)
         #expect(sent.map(\.fileName) == [targetFileName(for: book, format: "mobi")])
+        #expect(record.artifactFormat == "mobi")
+        #expect(record.artifactSizeBytes == sent.first.map { UInt64($0.byteCount) })
+        #expect(record.artifactFingerprint != nil)
+        #expect(record.artifactFingerprint != record.sourceFingerprint)
+        #expect(record.transportIdentifier == "fake-1")
         #expect(queue.items.allSatisfy { $0.stage == .done })
         #expect(!FileManager.default.fileExists(atPath: temporaryOutput.path(percentEncoded: false)))
     }

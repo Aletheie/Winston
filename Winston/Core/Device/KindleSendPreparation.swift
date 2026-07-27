@@ -83,6 +83,18 @@ nonisolated enum DevicePathAllocator {
         )
     }
 
+    static func allocatePath(
+        originalFileName: String,
+        targetFormat: String,
+        ownerID: UUID
+    ) -> DeviceTransferPath {
+        allocatedPath(allocate(
+            originalFileName: originalFileName,
+            targetFormat: targetFormat,
+            ownerID: ownerID
+        ))
+    }
+
     static func legacyMatchKey(for deviceFileName: String) -> String {
         let baseName = (deviceFileName as NSString).deletingPathExtension
         guard let markerRange = baseName.range(of: marker, options: [.backwards, .caseInsensitive]) else {
@@ -109,6 +121,13 @@ nonisolated enum DevicePathAllocator {
 
     private static func stableToken(for ownerID: UUID) -> String {
         ownerID.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
+    private static func allocatedPath(_ fileName: String) -> DeviceTransferPath {
+        guard let path = DeviceTransferPath(fileName: fileName) else {
+            preconditionFailure("DevicePathAllocator produced an invalid leaf")
+        }
+        return path
     }
 
     private static func normalizedExtension(_ proposed: String) -> String {
@@ -138,7 +157,7 @@ nonisolated enum DevicePathAllocator {
     }
 }
 
-nonisolated struct KindleSendDescriptor: Sendable {
+nonisolated struct KindleSendDescriptor: Equatable, Sendable {
     let bookUUID: UUID
     let assetGeneration: KindleTransferAssetGeneration
     let sourceIsPrimary: Bool
@@ -159,105 +178,235 @@ nonisolated struct KindleSendDescriptor: Sendable {
     let fileUnavailable: Bool
 }
 
-nonisolated struct TransferArtifact: Sendable {
-    let bookID: UUID
-    let assetGeneration: KindleTransferAssetGeneration
+nonisolated struct TransferPlanItem: Sendable, Identifiable {
+    let descriptor: KindleSendDescriptor
     let sourceFileGeneration: TransferFileGeneration
-    let sourceIsPrimary: Bool
-    let displayName: String
-    let sourceURL: URL
-    let sourceFormat: String
-    let targetFileName: String
-    let coverOwner: CoverOwner
-    let coverVersion: Int
+    let destination: DeviceTransferPath
+    let existingDeviceBookID: DeviceBook.ID?
 
-    init(
-        descriptor: KindleSendDescriptor,
-        sourceURL: URL,
-        sourceFileGeneration: TransferFileGeneration
-    ) {
-        bookID = descriptor.bookUUID
-        assetGeneration = descriptor.assetGeneration
-        self.sourceFileGeneration = sourceFileGeneration
-        sourceIsPrimary = descriptor.sourceIsPrimary
-        displayName = descriptor.displayName
-        self.sourceURL = sourceURL
-        sourceFormat = descriptor.sourceFormat
-        targetFileName = descriptor.targetFileName
-        coverOwner = descriptor.coverOwner
-        coverVersion = descriptor.coverVersion
-    }
+    var id: UUID { descriptor.bookUUID }
+    var displayName: String { descriptor.displayName }
+}
 
-    func sourceGenerationIsCurrent() -> Bool {
-        TransferFileGeneration.capture(at: sourceURL) == sourceFileGeneration
-    }
+nonisolated struct TransferPlan: Sendable {
+    let deviceIdentifier: String
+    let requestedBookIDs: [UUID]
+    let items: [TransferPlanItem]
+    let conflicts: [BulkOperationConflict]
 
-    func materialize(in directory: URL) async throws -> MaterializedTransferArtifact {
-        try await TransferArtifactMaterializer.materialize(self, in: directory)
-    }
+    var conflictCount: Int { conflicts.count }
+    var affectedTargetCount: Int { items.count }
+}
 
-    /// Performs the only filesystem validation used by send preparation.
-    /// Descriptors and sync candidates remain cheap immutable catalog values;
-    /// the concrete file generation is captured immediately before staging.
-    @concurrent
-    static func prepare(
-        descriptor: KindleSendDescriptor
-    ) async throws -> TransferArtifact {
-        guard !descriptor.fileUnavailable,
-              let sourceURL = BookFileStore.validatedURL(
-                for: descriptor.assetGeneration.fileName
-              ),
-              let generation = TransferFileGeneration.capture(at: sourceURL)
-        else {
-            throw TransferArtifactError.sourceUnavailable
+/// Resolves catalog/read-model descriptors against one immutable device inventory.
+/// Edition choice and destination allocation are complete when this returns.
+nonisolated enum TransferPlanner {
+    static func makePlan(
+        readModel descriptors: [KindleSendDescriptor],
+        inventory: DeviceInventorySnapshot
+    ) -> TransferPlan {
+        var seenBookIDs: Set<UUID> = []
+        let unique = descriptors.filter {
+            seenBookIDs.insert($0.bookUUID).inserted
         }
-        let catalogSize = descriptor.assetGeneration.sizeBytes
-        guard catalogSize <= 0 || generation.fileSize == catalogSize else {
-            throw TransferArtifactError.sourceChanged
+        let destinations = Dictionary(uniqueKeysWithValues: unique.map {
+            (
+                $0.bookUUID,
+                DevicePathAllocator.allocatePath(
+                    originalFileName: $0.originalFileName,
+                    targetFormat: $0.targetFormat,
+                    ownerID: $0.bookUUID
+                )
+            )
+        })
+        let destinationGroups = Dictionary(grouping: unique) {
+            destinations[$0.bookUUID]?.fileName.lowercased() ?? ""
         }
-        return TransferArtifact(
-            descriptor: descriptor,
-            sourceURL: sourceURL,
-            sourceFileGeneration: generation
+        let collidingBookIDs = Set(destinationGroups.values.flatMap { group in
+            group.count > 1 ? group.map(\.bookUUID) : []
+        })
+        var items: [TransferPlanItem] = []
+        var conflicts: [BulkOperationConflict] = []
+
+        for descriptor in unique {
+            let targetID = BulkOperationTargetID.catalogBook(descriptor.bookUUID)
+            guard let destination = destinations[descriptor.bookUUID] else {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .invalidTarget
+                ))
+                continue
+            }
+            if collidingBookIDs.contains(descriptor.bookUUID) {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .destinationCollision
+                ))
+            } else if descriptor.fileUnavailable {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .unavailable
+                ))
+            } else if descriptor.drmProtected {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .drmProtected
+                ))
+            } else if let sourceFileGeneration = TransferFileGeneration.capture(
+                at: descriptor.sourceURL
+            ) {
+                let existing = inventory.books.first {
+                    $0.fileName.caseInsensitiveCompare(destination.fileName) == .orderedSame
+                }
+                items.append(TransferPlanItem(
+                    descriptor: descriptor,
+                    sourceFileGeneration: sourceFileGeneration,
+                    destination: destination,
+                    existingDeviceBookID: existing?.id
+                ))
+            } else {
+                conflicts.append(BulkOperationConflict(
+                    targetID: targetID,
+                    reason: .unavailable
+                ))
+            }
+        }
+
+        return TransferPlan(
+            deviceIdentifier: inventory.info.identifier,
+            requestedBookIDs: unique.map(\.bookUUID),
+            items: items,
+            conflicts: conflicts
         )
     }
 }
 
-nonisolated struct MaterializedTransferArtifact: Sendable {
-    let artifact: TransferArtifact
-    let sourceURL: URL
+/// Final, read-only payload produced for one concrete catalog asset generation.
+/// The transport sees only `byteTransfer`; provenance stays above that boundary.
+nonisolated struct TransferArtifact: Sendable {
+    let bookID: UUID
+    let assetGeneration: KindleTransferAssetGeneration
+    let sourceIsPrimary: Bool
+    let displayName: String
+    let sourceFormat: String
     let sourceFingerprint: String
     let sourceSizeBytes: UInt64
+    let fileURL: URL
+    let format: String
+    let fingerprint: String
+    let byteCount: UInt64
+    let destination: DeviceTransferPath
+    let coverOwner: CoverOwner
+    let coverVersion: Int
+
+    var byteTransfer: DeviceByteTransfer {
+        DeviceByteTransfer(
+            sourceURL: fileURL,
+            destination: destination,
+            expectedByteCount: byteCount
+        )
+    }
 }
 
 nonisolated enum TransferArtifactError: Error, LocalizedError {
     case sourceUnavailable
     case sourceChanged
     case stagingFailed
+    case transportResultMismatch
 
     var errorDescription: String? {
         switch self {
         case .sourceUnavailable: "The source file is unavailable."
         case .sourceChanged: "The source file changed while waiting to transfer."
         case .stagingFailed: "The source file could not be prepared for transfer."
+        case .transportResultMismatch: "The device reported an incomplete transfer."
         }
     }
 }
 
-nonisolated private enum TransferArtifactMaterializer {
+nonisolated enum TransferArtifactBuilder {
+    private struct MaterializedFile {
+        let url: URL
+        let fingerprint: String
+        let byteCount: UInt64
+    }
+
+    /// Captures and validates the selected asset, performs any required conversion,
+    /// and seals the exact bytes that will be handed to transport.
     @concurrent
-    static func materialize(
-        _ artifact: TransferArtifact,
+    static func build(
+        _ item: TransferPlanItem,
         in directory: URL
-    ) async throws -> MaterializedTransferArtifact {
-        guard artifact.sourceGenerationIsCurrent() else {
+    ) async throws -> TransferArtifact {
+        let descriptor = item.descriptor
+        guard !descriptor.fileUnavailable,
+              let sourceURL = BookFileStore.validatedURL(
+                for: descriptor.assetGeneration.fileName
+              ),
+              TransferFileGeneration.capture(at: sourceURL)
+                == item.sourceFileGeneration
+        else {
             throw TransferArtifactError.sourceChanged
         }
+        let catalogSize = descriptor.assetGeneration.sizeBytes
+        guard catalogSize <= 0
+                || item.sourceFileGeneration.fileSize == catalogSize else {
+            throw TransferArtifactError.sourceChanged
+        }
+
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let ext = ManagedLeafName(rawValue: artifact.sourceFormat.lowercased())?.rawValue ?? "bin"
-        let destination = directory.appending(
-            path: "\(artifact.assetGeneration.assetID.uuidString).\(ext)"
+        let sourceExtension = normalizedExtension(descriptor.sourceFormat)
+        let immutableSource = directory.appending(
+            path: "source-\(descriptor.assetGeneration.assetID.uuidString).\(sourceExtension)"
         )
+        let sourceFile = try copyAndHash(
+            from: sourceURL,
+            to: immutableSource,
+            expectedGeneration: item.sourceFileGeneration
+        )
+        if let expectedFingerprint = descriptor.assetGeneration.contentHash,
+           expectedFingerprint.caseInsensitiveCompare(sourceFile.fingerprint) != .orderedSame {
+            throw TransferArtifactError.sourceChanged
+        }
+
+        let payload: MaterializedFile
+        if descriptor.requiresConversion {
+            let converted = try await EbookConverter.convertForKindle(sourceFile.url)
+            defer { try? FileManager.default.removeItem(at: converted) }
+            payload = try copyAndHash(
+                from: converted,
+                to: directory.appending(
+                    path: "payload-\(descriptor.assetGeneration.assetID.uuidString).\(normalizedExtension(descriptor.targetFormat))"
+                ),
+                expectedGeneration: nil
+            )
+        } else {
+            payload = sourceFile
+        }
+
+        return TransferArtifact(
+            bookID: descriptor.bookUUID,
+            assetGeneration: descriptor.assetGeneration,
+            sourceIsPrimary: descriptor.sourceIsPrimary,
+            displayName: descriptor.displayName,
+            sourceFormat: descriptor.sourceFormat,
+            sourceFingerprint: sourceFile.fingerprint,
+            sourceSizeBytes: sourceFile.byteCount,
+            fileURL: payload.url,
+            format: descriptor.targetFormat,
+            fingerprint: payload.fingerprint,
+            byteCount: payload.byteCount,
+            destination: item.destination,
+            coverOwner: descriptor.coverOwner,
+            coverVersion: descriptor.coverVersion
+        )
+    }
+
+    private static func copyAndHash(
+        from source: URL,
+        to destination: URL,
+        expectedGeneration: TransferFileGeneration?
+    ) throws -> MaterializedFile {
         guard FileManager.default.createFile(
             atPath: destination.path(percentEncoded: false),
             contents: nil
@@ -266,7 +415,7 @@ nonisolated private enum TransferArtifactMaterializer {
         }
 
         do {
-            let input = try FileHandle(forReadingFrom: artifact.sourceURL)
+            let input = try FileHandle(forReadingFrom: source)
             let output = try FileHandle(forWritingTo: destination)
             defer {
                 try? input.close()
@@ -281,30 +430,30 @@ nonisolated private enum TransferArtifactMaterializer {
                 try output.write(contentsOf: chunk)
             }
             try output.synchronize()
-            guard artifact.sourceGenerationIsCurrent(),
-                  byteCount == UInt64(max(0, artifact.sourceFileGeneration.fileSize))
-            else {
-                throw TransferArtifactError.sourceChanged
+            if let expectedGeneration {
+                guard TransferFileGeneration.capture(at: source) == expectedGeneration,
+                      byteCount == UInt64(max(0, expectedGeneration.fileSize)) else {
+                    throw TransferArtifactError.sourceChanged
+                }
             }
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o400],
                 ofItemAtPath: destination.path(percentEncoded: false)
             )
             let fingerprint = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-            if let expectedFingerprint = artifact.assetGeneration.contentHash,
-               expectedFingerprint.caseInsensitiveCompare(fingerprint) != .orderedSame {
-                throw TransferArtifactError.sourceChanged
-            }
-            return MaterializedTransferArtifact(
-                artifact: artifact,
-                sourceURL: destination,
-                sourceFingerprint: fingerprint,
-                sourceSizeBytes: byteCount
+            return MaterializedFile(
+                url: destination,
+                fingerprint: fingerprint,
+                byteCount: byteCount
             )
         } catch {
             try? FileManager.default.removeItem(at: destination)
             throw error
         }
+    }
+
+    private static func normalizedExtension(_ format: String) -> String {
+        ManagedLeafName(rawValue: format.lowercased())?.rawValue ?? "bin"
     }
 }
 

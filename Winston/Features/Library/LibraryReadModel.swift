@@ -625,6 +625,14 @@ private actor LibraryMetadataQueryEngine {
         }
     }
 
+    func kindleTransferDescriptors(
+        for bookIDs: [UUID]
+    ) -> [KindleSendDescriptor] {
+        bookIDs.compactMap {
+            snapshot.recordsByID[$0]?.kindleTransferDescriptor
+        }
+    }
+
     func deviceMetadata() -> LibraryDeviceMetadataSnapshot {
         var authors: [String: String] = [:]
         for record in snapshot.recordsByID.values {
@@ -920,11 +928,13 @@ final class LibraryReadModel {
 
         if configurationChanged {
             let interval = Log.librarySignposter.beginInterval("SidebarFacets")
+            LibraryPerformanceDiagnostics.beginSQLScope("sidebar_facets")
             let rebuiltFacets = await metadataEngine.makeFacets(
                 smartCollections: nextSmartCollections,
                 deviceFileNames: deviceFileNames,
                 deviceIsConnected: deviceIsConnected
             )
+            LibraryPerformanceDiagnostics.endSQLScope("sidebar_facets")
             Log.librarySignposter.endInterval("SidebarFacets", interval)
             facets = rebuiltFacets
         } else if !recordChanges.isEmpty {
@@ -989,6 +999,13 @@ final class LibraryReadModel {
     func kindleCandidates() async -> [KindleSyncCandidate]? {
         guard didBootstrap else { return nil }
         return await metadataEngine.kindleCandidates()
+    }
+
+    func kindleTransferDescriptors(
+        for bookIDs: [UUID]
+    ) async -> [KindleSendDescriptor]? {
+        guard didBootstrap else { return nil }
+        return await metadataEngine.kindleTransferDescriptors(for: bookIDs)
     }
 
     func deviceMetadata() async -> LibraryDeviceMetadataSnapshot? {
@@ -1139,6 +1156,7 @@ final class LibraryReadModel {
         deviceIsConnected: Bool
     ) async {
         let interval = Log.librarySignposter.beginInterval("LibrarySnapshot")
+        LibraryPerformanceDiagnostics.beginSQLScope("library_snapshot")
         var records: [LibraryBookRecord] = []
         var nextRecordsByID: [UUID: LibraryBookRecord] = [:]
         var nextBooksByID: [UUID: Book] = [:]
@@ -1167,14 +1185,17 @@ final class LibraryReadModel {
             if (index + 1).isMultiple(of: 512) {
                 await Task.yield()
                 guard !Task.isCancelled else {
+                    LibraryPerformanceDiagnostics.endSQLScope("library_snapshot")
                     Log.librarySignposter.endInterval("LibrarySnapshot", interval)
                     return
                 }
             }
         }
+        LibraryPerformanceDiagnostics.endSQLScope("library_snapshot")
         Log.librarySignposter.endInterval("LibrarySnapshot", interval)
 
         let facetInterval = Log.librarySignposter.beginInterval("SidebarFacets")
+        LibraryPerformanceDiagnostics.beginSQLScope("sidebar_facets")
         await metadataEngine.rebuild(
             records: records,
             sourceOrder: records.map(\.id),
@@ -1185,6 +1206,7 @@ final class LibraryReadModel {
             deviceFileNames: deviceFileNames,
             deviceIsConnected: deviceIsConnected
         )
+        LibraryPerformanceDiagnostics.endSQLScope("sidebar_facets")
         Log.librarySignposter.endInterval("SidebarFacets", facetInterval)
 
         orderedRecords = records

@@ -214,6 +214,7 @@ struct LibraryView: View {
     // MARK: - Body
 
     var body: some View {
+        let _ = LibraryPerformanceDiagnostics.recordBody("LibraryViewBody")
         content
             .background { ThemedBackground() }
             .safeAreaInset(edge: .top, spacing: 0) { topBar }
@@ -574,7 +575,28 @@ struct LibraryView: View {
         if settings.inspectBeforeKindleTransfer {
             presentBookDoctor(for: toSend, purpose: .sendToKindle)
         } else {
-            transferQueue.beginSend(books: toSend, via: deviceMonitor)
+            beginTransferFromReadModel(bookIDs: toSend.map(\.uuid))
+        }
+    }
+
+    private func beginTransferFromReadModel(bookIDs: [UUID]) {
+        Task {
+            if let descriptors = await readModel.kindleTransferDescriptors(
+                for: bookIDs
+            ) {
+                guard !descriptors.isEmpty else { return }
+                transferQueue.beginSend(
+                    readModel: descriptors,
+                    via: deviceMonitor
+                )
+            } else {
+                let fallbackBooks = readModel.books(for: bookIDs)
+                guard !fallbackBooks.isEmpty else { return }
+                transferQueue.beginSend(
+                    books: fallbackBooks,
+                    via: deviceMonitor
+                )
+            }
         }
     }
 
@@ -595,7 +617,9 @@ struct LibraryView: View {
                 guard let url = book.primaryFileURL else { return false }
                 return paths.contains(url.standardizedFileURL.path(percentEncoded: false))
             }
-            if !ready.isEmpty { transferQueue.beginSend(books: ready, via: deviceMonitor) }
+            if !ready.isEmpty {
+                beginTransferFromReadModel(bookIDs: ready.map(\.uuid))
+            }
         case .review:
             break
         }

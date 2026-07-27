@@ -7,7 +7,11 @@ nonisolated struct KindleSyncReceipt: Codable, Equatable, Identifiable, Sendable
     var sourceFormat: String?
     var sourceSizeBytes: UInt64?
     var sourceFingerprint: String
+    var artifactFormat: String?
+    var artifactSizeBytes: UInt64?
+    var artifactFingerprint: String?
     var sentFileName: String
+    var transportIdentifier: String?
     var coverVersion: Int?
     var coverIdentity: String?
     var syncedAt: Date
@@ -20,7 +24,11 @@ nonisolated struct KindleSyncReceipt: Codable, Equatable, Identifiable, Sendable
         sourceFormat: String? = nil,
         sourceSizeBytes: UInt64? = nil,
         sourceFingerprint: String,
+        artifactFormat: String? = nil,
+        artifactSizeBytes: UInt64? = nil,
+        artifactFingerprint: String? = nil,
         sentFileName: String,
+        transportIdentifier: String? = nil,
         coverVersion: Int?,
         coverIdentity: String? = nil,
         syncedAt: Date
@@ -30,7 +38,11 @@ nonisolated struct KindleSyncReceipt: Codable, Equatable, Identifiable, Sendable
         self.sourceFormat = sourceFormat
         self.sourceSizeBytes = sourceSizeBytes
         self.sourceFingerprint = sourceFingerprint
+        self.artifactFormat = artifactFormat
+        self.artifactSizeBytes = artifactSizeBytes
+        self.artifactFingerprint = artifactFingerprint
         self.sentFileName = sentFileName
+        self.transportIdentifier = transportIdentifier
         self.coverVersion = coverVersion
         self.coverIdentity = coverIdentity
         self.syncedAt = syncedAt
@@ -53,7 +65,11 @@ nonisolated struct KindleSyncTransferRecord: Equatable, Sendable {
     let sourceFormat: String?
     let sourceSizeBytes: UInt64?
     let sourceFingerprint: String
+    let artifactFormat: String?
+    let artifactSizeBytes: UInt64?
+    let artifactFingerprint: String?
     let sentFileName: String
+    let transportIdentifier: String?
     let coverVersion: Int?
     let coverIdentity: String?
     let completedAt: Date
@@ -66,7 +82,11 @@ nonisolated struct KindleSyncTransferRecord: Equatable, Sendable {
         sourceFormat: String? = nil,
         sourceSizeBytes: UInt64? = nil,
         sourceFingerprint: String,
+        artifactFormat: String? = nil,
+        artifactSizeBytes: UInt64? = nil,
+        artifactFingerprint: String? = nil,
         sentFileName: String,
+        transportIdentifier: String? = nil,
         coverVersion: Int?,
         coverIdentity: String? = nil,
         completedAt: Date
@@ -78,7 +98,11 @@ nonisolated struct KindleSyncTransferRecord: Equatable, Sendable {
         self.sourceFormat = sourceFormat
         self.sourceSizeBytes = sourceSizeBytes
         self.sourceFingerprint = sourceFingerprint
+        self.artifactFormat = artifactFormat
+        self.artifactSizeBytes = artifactSizeBytes
+        self.artifactFingerprint = artifactFingerprint
         self.sentFileName = sentFileName
+        self.transportIdentifier = transportIdentifier
         self.coverVersion = coverVersion
         self.coverIdentity = coverIdentity
         self.completedAt = completedAt
@@ -175,7 +199,11 @@ final class KindleSyncProfileStore {
             sourceFormat: record.sourceFormat,
             sourceSizeBytes: record.sourceSizeBytes,
             sourceFingerprint: record.sourceFingerprint,
+            artifactFormat: record.artifactFormat,
+            artifactSizeBytes: record.artifactSizeBytes,
+            artifactFingerprint: record.artifactFingerprint,
             sentFileName: record.sentFileName,
+            transportIdentifier: record.transportIdentifier,
             coverVersion: record.coverVersion,
             coverIdentity: record.coverIdentity,
             syncedAt: record.completedAt

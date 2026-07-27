@@ -139,6 +139,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
     let hasMissingMetadata: Bool
     let pluginBook: PluginBookDTO?
     let kindleCandidate: KindleSyncCandidate?
+    let kindleTransferDescriptor: KindleSendDescriptor?
 
     init(
         id: UUID,
@@ -166,7 +167,8 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
         deviceMatchKeys: Set<String> = [],
         hasMissingMetadata: Bool = false,
         pluginBook: PluginBookDTO? = nil,
-        kindleCandidate: KindleSyncCandidate? = nil
+        kindleCandidate: KindleSyncCandidate? = nil,
+        kindleTransferDescriptor: KindleSendDescriptor? = nil
     ) {
         self.id = id
         self.sourceOrdinal = sourceOrdinal
@@ -202,6 +204,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
         self.hasMissingMetadata = hasMissingMetadata
         self.pluginBook = pluginBook
         self.kindleCandidate = kindleCandidate
+        self.kindleTransferDescriptor = kindleTransferDescriptor
     }
 
     @MainActor init(
@@ -211,6 +214,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
         includeHighlights: Bool
     ) {
         let hasDigitalFile = book.hasCatalogDigitalFile
+        let kindleSnapshot = KindleSendPreparation.snapshot(for: book)
         let catalogFormat = Book.catalogFormat(
             fileName: book.primaryAsset?.fileName ?? book.fileName,
             hasDigitalFile: hasDigitalFile,
@@ -268,7 +272,10 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
             || Self.isBlank(book.author)
             || Self.isBlank(book.language)
         pluginBook = PluginBookDTO(book)
-        kindleCandidate = KindleSendPreparation.candidate(for: book)
+        kindleCandidate = KindleSendPreparation.candidate(for: kindleSnapshot)
+        kindleTransferDescriptor = KindleSendPreparation.descriptor(
+            for: kindleSnapshot
+        )
     }
 
     private static func isBlank(_ value: String?) -> Bool {
@@ -301,6 +308,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
             && lhs.hasMissingMetadata == rhs.hasMissingMetadata
             && lhs.pluginBook == rhs.pluginBook
             && lhs.kindleCandidate == rhs.kindleCandidate
+            && lhs.kindleTransferDescriptor == rhs.kindleTransferDescriptor
     }
 }
 

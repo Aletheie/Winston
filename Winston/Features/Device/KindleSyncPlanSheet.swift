@@ -310,10 +310,32 @@ struct KindleSyncPlanSheet: View {
         let sendIDs = selected
             .filter { $0.action == .add || $0.action == .update }
             .compactMap(\.bookID)
-        let booksToSend = sendIDs.compactMap { booksByID[$0] }
-        failureCount += max(0, sendIDs.count - booksToSend.count)
-        if !Task.isCancelled, !booksToSend.isEmpty {
-            await transferQueue.send(books: booksToSend, via: monitor, announcesResult: false)
+        var didSend = false
+        if let descriptors = await readModel.kindleTransferDescriptors(
+            for: sendIDs
+        ) {
+            failureCount += max(0, sendIDs.count - descriptors.count)
+            if !Task.isCancelled, !descriptors.isEmpty {
+                await transferQueue.send(
+                    readModel: descriptors,
+                    via: monitor,
+                    announcesResult: false
+                )
+                didSend = true
+            }
+        } else {
+            let booksToSend = sendIDs.compactMap { booksByID[$0] }
+            failureCount += max(0, sendIDs.count - booksToSend.count)
+            if !Task.isCancelled, !booksToSend.isEmpty {
+                await transferQueue.send(
+                    books: booksToSend,
+                    via: monitor,
+                    announcesResult: false
+                )
+                didSend = true
+            }
+        }
+        if didSend {
             failureCount += transferQueue.failedCount
             completedCount += transferQueue.items.count - transferQueue.failedCount
         }

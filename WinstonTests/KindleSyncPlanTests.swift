@@ -457,6 +457,10 @@ struct KindleSyncPlanTests {
         #expect(receipt.assetID == nil)
         #expect(receipt.sourceFormat == nil)
         #expect(receipt.sourceSizeBytes == nil)
+        #expect(receipt.artifactFormat == nil)
+        #expect(receipt.artifactSizeBytes == nil)
+        #expect(receipt.artifactFingerprint == nil)
+        #expect(receipt.transportIdentifier == nil)
         #expect(receipt.coverIdentity == nil)
         #expect(receipt.sourceFingerprint == "legacy-source")
     }

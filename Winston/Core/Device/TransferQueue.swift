@@ -26,17 +26,6 @@ private nonisolated final class TransferProgressGate: @unchecked Sendable {
 @MainActor
 @Observable
 final class TransferQueue {
-    private struct SendRequest: Sendable {
-        let descriptor: KindleSendDescriptor
-        let drmProtected: Bool
-        let generationIsCurrent: @MainActor @Sendable () -> Bool
-
-        var uuid: UUID { descriptor.bookUUID }
-        var displayName: String { descriptor.displayName }
-        var targetFileName: String { descriptor.targetFileName }
-        var fileUnavailable: Bool { descriptor.fileUnavailable }
-    }
-
     enum Direction: Sendable, Equatable {
         case toDevice
         case fromDevice
@@ -65,7 +54,7 @@ final class TransferQueue {
     private(set) var items: [Item] = []
     private(set) var isTransferring = false
     private(set) var lastError: String?
-    private(set) var activePlan: BulkOperationPlan?
+    private(set) var activePlan: TransferPlan?
     private(set) var lastBulkOperationResult: BulkOperationResult?
 
     private let toasts: ToastCenter
@@ -92,19 +81,30 @@ final class TransferQueue {
 
     func beginSend(books: [Book], via monitor: DeviceMonitor) {
         guard !isTransferring else { return }
-        let requests = Self.makeRequests(for: books)
-        guard !requests.isEmpty else { return }
+        let descriptors = Self.makeDescriptors(for: books)
+        guard !descriptors.isEmpty else { return }
         clearTask?.cancel()
         clearTask = nil
         isTransferring = true
         sendTask = Task { [weak self] in
-            await self?.performSend(requests: requests, via: monitor)
+            await self?.performSend(readModel: descriptors, via: monitor)
         }
+    }
+
+    func beginSend(
+        readModel descriptors: [KindleSendDescriptor],
+        via monitor: DeviceMonitor
+    ) {
+        guard !isTransferring else { return }
+        beginSend(descriptors: descriptors, via: monitor)
     }
 
     func beginSend(asset: BookAsset, for book: Book, via monitor: DeviceMonitor) {
         guard !isTransferring else { return }
-        beginSend(requests: [Self.makeRequest(for: asset, book: book)], via: monitor)
+        beginSend(
+            descriptors: [KindleSendPreparation.descriptor(for: asset, in: book)],
+            via: monitor
+        )
     }
 
     func cancel() {
@@ -150,28 +150,49 @@ final class TransferQueue {
 
     func send(books: [Book], via monitor: DeviceMonitor, announcesResult: Bool) async {
         guard !isTransferring else { return }
-        let requests = Self.makeRequests(for: books)
-        guard !requests.isEmpty else { return }
+        let descriptors = Self.makeDescriptors(for: books)
+        guard !descriptors.isEmpty else { return }
         clearTask?.cancel()
         clearTask = nil
         isTransferring = true
-        await performSend(requests: requests, via: monitor, announcesResult: announcesResult)
+        await performSend(
+            readModel: descriptors,
+            via: monitor,
+            announcesResult: announcesResult
+        )
+    }
+
+    func send(
+        readModel descriptors: [KindleSendDescriptor],
+        via monitor: DeviceMonitor,
+        announcesResult: Bool = true
+    ) async {
+        guard !isTransferring, !descriptors.isEmpty else { return }
+        clearTask?.cancel()
+        clearTask = nil
+        isTransferring = true
+        await performSend(
+            readModel: descriptors,
+            via: monitor,
+            announcesResult: announcesResult
+        )
     }
 
     func send(asset: BookAsset, for book: Book, via monitor: DeviceMonitor) async {
         guard !isTransferring else { return }
-        let request = Self.makeRequest(for: asset, book: book)
+        let descriptor = KindleSendPreparation.descriptor(for: asset, in: book)
         clearTask?.cancel()
         clearTask = nil
         isTransferring = true
-        await performSend(requests: [request], via: monitor)
+        await performSend(readModel: [descriptor], via: monitor)
     }
 
     private func performSend(
-        requests: [SendRequest],
+        readModel descriptors: [KindleSendDescriptor],
         via monitor: DeviceMonitor,
         announcesResult: Bool = true
     ) async {
+        let descriptors = Self.uniqueDescriptors(descriptors)
         var pollingSuspended = false
         let stagingDirectory = FileManager.default.temporaryDirectory
             .appending(path: "WinstonTransferArtifacts", directoryHint: .isDirectory)
@@ -187,22 +208,37 @@ final class TransferQueue {
         }
 
         lastError = nil
-        replaceItems(requests.map { Item(displayName: $0.displayName, direction: .toDevice) })
-        let plan = await Self.makePlan(for: requests)
-        activePlan = plan
-        let session = BulkOperationSession(plan: plan)
+        replaceItems(descriptors.map {
+            Item(displayName: $0.displayName, direction: .toDevice)
+        })
+        guard let inventory = monitor.inventory else {
+            lastError = "Device disconnected"
+            for item in items { markFailed(item.id) }
+            if announcesResult {
+                toasts.error(String(localized: "Some transfers failed (\(failedCount))."))
+            }
+            return
+        }
+
+        let transferPlan = TransferPlanner.makePlan(
+            readModel: descriptors,
+            inventory: inventory
+        )
+        activePlan = transferPlan
+        let bulkPlan = await Self.makeBulkPlan(from: transferPlan)
+        let session = BulkOperationSession(plan: bulkPlan)
         activeSession = session
-        let requestsByTarget = Dictionary(
-            uniqueKeysWithValues: requests.map {
-                (BulkOperationTargetID.catalogBook($0.uuid), $0)
+        let planItemsByTarget = Dictionary(
+            uniqueKeysWithValues: transferPlan.items.map {
+                (BulkOperationTargetID.catalogBook($0.id), $0)
             }
         )
         let itemIDsByTarget = Dictionary(
-            uniqueKeysWithValues: zip(requests, items).map {
-                (BulkOperationTargetID.catalogBook($0.0.uuid), $0.1.id)
+            uniqueKeysWithValues: zip(descriptors, items).map {
+                (BulkOperationTargetID.catalogBook($0.0.bookUUID), $0.1.id)
             }
         )
-        for conflict in plan.conflicts {
+        for conflict in transferPlan.conflicts {
             if let itemID = itemIDsByTarget[conflict.targetID] {
                 markFailed(itemID)
             }
@@ -210,7 +246,7 @@ final class TransferQueue {
         }
 
         Log.device.info(
-            "Send plan: \(plan.affectedTargetCount) change(s), \(plan.conflictCount) conflict(s)"
+            "Send plan: \(transferPlan.affectedTargetCount) change(s), \(transferPlan.conflictCount) conflict(s)"
         )
         let connection = monitor.connection
         let deviceInfo = monitor.info
@@ -222,7 +258,7 @@ final class TransferQueue {
         let result = await session.execute { [weak self] chunk in
             guard let self,
                   let targetID = chunk.targetIDs.first,
-                  let request = requestsByTarget[targetID],
+                  let planItem = planItemsByTarget[targetID],
                   let itemID = itemIDsByTarget[targetID] else {
                 throw BulkOperationDurableError(.executionFailed)
             }
@@ -235,16 +271,10 @@ final class TransferQueue {
                 self.markCancelled(itemID)
                 throw CancellationError()
             }
-            guard request.generationIsCurrent() else {
-                self.lastError = TransferArtifactError.sourceChanged.localizedDescription
+            guard deviceInfo.identifier == transferPlan.deviceIdentifier else {
+                self.lastError = "Device disconnected"
                 self.markFailed(itemID)
-                return BulkOperationChunkOutcome(conflicts: [
-                    BulkOperationConflict(
-                        targetID: targetID,
-                        reason: .sourceChanged,
-                        detail: self.lastError
-                    ),
-                ])
+                throw BulkOperationDurableError(.deviceDisconnected)
             }
             guard await connection.isAlive() else {
                 self.lastError = "Device disconnected"
@@ -253,21 +283,16 @@ final class TransferQueue {
                 throw BulkOperationDurableError(.deviceDisconnected)
             }
 
-            let preparedArtifact: MaterializedTransferArtifact
-            self.setStage(.preparing, for: itemID)
+            let artifact: TransferArtifact
+            self.setStage(
+                planItem.descriptor.requiresConversion ? .converting : .preparing,
+                for: itemID
+            )
             do {
-                let artifact = try await TransferArtifact.prepare(
-                    descriptor: request.descriptor
+                artifact = try await TransferArtifactBuilder.build(
+                    planItem,
+                    in: stagingDirectory
                 )
-                guard request.generationIsCurrent(),
-                      artifact.sourceGenerationIsCurrent() else {
-                    throw TransferArtifactError.sourceChanged
-                }
-                preparedArtifact = try await artifact.materialize(in: stagingDirectory)
-                guard request.generationIsCurrent(),
-                      artifact.sourceGenerationIsCurrent() else {
-                    throw TransferArtifactError.sourceChanged
-                }
                 self.setStage(.waiting, for: itemID)
             } catch is CancellationError {
                 self.markCancelled(itemID)
@@ -285,8 +310,8 @@ final class TransferQueue {
             }
 
             if let conflict = try await self.transfer(
-                request,
-                preparedArtifact: preparedArtifact,
+                planItem,
+                artifact: artifact,
                 itemID: itemID,
                 connection: connection,
                 deviceInfo: deviceInfo
@@ -323,80 +348,19 @@ final class TransferQueue {
     }
 
     private func transfer(
-        _ request: SendRequest,
-        preparedArtifact: MaterializedTransferArtifact,
+        _ planItem: TransferPlanItem,
+        artifact: TransferArtifact,
         itemID: UUID,
         connection: any KindleDeviceConnection,
         deviceInfo: DeviceInfo
     ) async throws -> BulkOperationConflict? {
-        let targetID = BulkOperationTargetID.catalogBook(request.uuid)
-        if request.fileUnavailable {
-            lastError = "File unavailable"
-            markFailed(itemID)
-            return BulkOperationConflict(targetID: targetID, reason: .unavailable)
-        }
-        if request.drmProtected {
-            lastError = "DRM-protected"
-            toasts.error(String(localized: "\u{201C}\(request.displayName)\u{201D} is DRM\u{2011}protected and can't be sent."))
-            markFailed(itemID)
-            return BulkOperationConflict(targetID: targetID, reason: .drmProtected)
-        }
-        guard request.generationIsCurrent(),
-              preparedArtifact.artifact.sourceGenerationIsCurrent() else {
-            lastError = TransferArtifactError.sourceChanged.localizedDescription
-            markFailed(itemID)
-            return BulkOperationConflict(
-                targetID: targetID,
-                reason: .sourceChanged,
-                detail: lastError
-            )
-        }
-
-        var sourceURL = preparedArtifact.sourceURL
-        var temporaryConversion: URL?
-        var shouldAdoptConversion = false
-        defer {
-            if let temporaryConversion { try? FileManager.default.removeItem(at: temporaryConversion) }
-        }
-
-        if EbookConverter.needsConversion(format: preparedArtifact.artifact.sourceFormat) {
-            setStage(.converting, for: itemID)
-            do {
-                sourceURL = try await EbookConverter.convertForKindle(sourceURL)
-                temporaryConversion = sourceURL
-                shouldAdoptConversion = preparedArtifact.artifact.sourceIsPrimary
-            } catch {
-                if error is CancellationError {
-                    markCancelled(itemID)
-                    throw CancellationError()
-                }
-                Log.device.error("Convert-for-Kindle failed for \(request.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                lastError = error.localizedDescription
-                markFailed(itemID)
-                return BulkOperationConflict(
-                    targetID: targetID,
-                    reason: .itemFailed,
-                    detail: error.localizedDescription
-                )
-            }
-        }
-
-        guard request.generationIsCurrent(),
-              preparedArtifact.artifact.sourceGenerationIsCurrent() else {
-            lastError = TransferArtifactError.sourceChanged.localizedDescription
-            markFailed(itemID)
-            return BulkOperationConflict(
-                targetID: targetID,
-                reason: .sourceChanged,
-                detail: lastError
-            )
-        }
+        let targetID = BulkOperationTargetID.catalogBook(planItem.id)
         guard !Task.isCancelled else {
             markCancelled(itemID)
             throw CancellationError()
         }
 
-        let fileName = request.targetFileName
+        let fileName = artifact.destination.fileName
         let base = (fileName as NSString).deletingPathExtension
         setStage(.transferring, for: itemID)
         let signposter = Log.deviceSignposter
@@ -408,9 +372,8 @@ final class TransferQueue {
         do {
             Log.device.info("Transferring \(fileName, privacy: .public)")
             let progressGate = TransferProgressGate()
-            try await connection.send(
-                fileURL: sourceURL,
-                fileName: fileName,
+            let technicalResult = try await connection.transfer(
+                artifact.byteTransfer,
                 progress: { [weak self] fraction in
                     guard progressGate.shouldPublish(fraction) else { return }
                     Task { @MainActor [weak self] in
@@ -418,28 +381,36 @@ final class TransferQueue {
                     }
                 }
             )
+            guard technicalResult.destination == artifact.destination,
+                  technicalResult.bytesTransferred == artifact.byteCount else {
+                throw TransferArtifactError.transportResultMismatch
+            }
             Log.device.notice("Transferred \(fileName, privacy: .public)")
-            if shouldAdoptConversion {
-                await onConversionArtifact?(request.uuid, sourceURL)
+            if planItem.descriptor.requiresConversion, artifact.sourceIsPrimary {
+                await onConversionArtifact?(artifact.bookID, artifact.fileURL)
             }
             try await connection.removeStaleVariants(baseName: base, keeping: fileName)
             let coverPushed = await pushThumbnail(
-                for: preparedArtifact.artifact.coverOwner,
-                sentFile: sourceURL,
+                for: artifact.coverOwner,
+                sentFile: artifact.fileURL,
                 connection: connection
             )
             try await onTransferCompleted?(KindleSyncTransferRecord(
                 deviceIdentifier: deviceInfo.identifier,
                 deviceName: deviceInfo.name,
-                bookID: request.uuid,
-                assetID: preparedArtifact.artifact.assetGeneration.assetID,
-                sourceFormat: preparedArtifact.artifact.sourceFormat,
-                sourceSizeBytes: preparedArtifact.sourceSizeBytes,
-                sourceFingerprint: preparedArtifact.sourceFingerprint,
-                sentFileName: fileName,
-                coverVersion: coverPushed ? preparedArtifact.artifact.coverVersion : nil,
+                bookID: artifact.bookID,
+                assetID: artifact.assetGeneration.assetID,
+                sourceFormat: artifact.sourceFormat,
+                sourceSizeBytes: artifact.sourceSizeBytes,
+                sourceFingerprint: artifact.sourceFingerprint,
+                artifactFormat: artifact.format,
+                artifactSizeBytes: artifact.byteCount,
+                artifactFingerprint: artifact.fingerprint,
+                sentFileName: technicalResult.destination.fileName,
+                transportIdentifier: technicalResult.transportIdentifier,
+                coverVersion: coverPushed ? artifact.coverVersion : nil,
                 coverIdentity: coverPushed
-                    ? preparedArtifact.artifact.coverOwner.generationKey
+                    ? artifact.coverOwner.generationKey
                     : nil,
                 completedAt: .now
             ))
@@ -462,32 +433,28 @@ final class TransferQueue {
         }
     }
 
-    private static func makePlan(
-        for requests: [SendRequest]
+    private static func makeBulkPlan(
+        from transferPlan: TransferPlan
     ) async -> BulkOperationPlan {
-        let targetGroups = Dictionary(grouping: requests) {
-            $0.targetFileName.lowercased()
-        }
-        let conflictingBookIDs = Set(targetGroups.values.flatMap { group -> [UUID] in
-            Set(group.map(\.uuid)).count > 1 ? group.map(\.uuid) : []
-        })
-        let candidates = requests.map { request -> BulkOperationCandidate in
-            let targetID = BulkOperationTargetID.catalogBook(request.uuid)
-            if conflictingBookIDs.contains(request.uuid) {
-                return .conflict(targetID, reason: .destinationCollision)
+        let conflictsByTarget = Dictionary(
+            transferPlan.conflicts.map { ($0.targetID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let candidates = transferPlan.requestedBookIDs.map { bookID in
+            let targetID = BulkOperationTargetID.catalogBook(bookID)
+            if let conflict = conflictsByTarget[targetID] {
+                return BulkOperationCandidate.conflict(
+                    targetID,
+                    reason: conflict.reason,
+                    detail: conflict.detail
+                )
             }
-            if request.fileUnavailable {
-                return .conflict(targetID, reason: .unavailable)
-            }
-            if request.drmProtected {
-                return .conflict(targetID, reason: .drmProtected)
-            }
-            return .change(targetID)
+            return BulkOperationCandidate.change(targetID)
         }
         return await BulkOperationPlanner.shared.makePlan(
             operation: .deviceSend,
-            requestedTargetIDs: requests.map {
-                BulkOperationTargetID.catalogBook($0.uuid)
+            requestedTargetIDs: transferPlan.requestedBookIDs.map {
+                BulkOperationTargetID.catalogBook($0)
             },
             candidates: candidates,
             chunkSize: 1
@@ -524,87 +491,38 @@ final class TransferQueue {
         switch artifactError {
         case .sourceChanged:
             return .sourceChanged
-        case .sourceUnavailable, .stagingFailed:
+        case .sourceUnavailable, .stagingFailed, .transportResultMismatch:
             return .itemFailed
         }
     }
 
-    private static func makeRequests(for books: [Book]) -> [SendRequest] {
+    private static func makeDescriptors(
+        for books: [Book]
+    ) -> [KindleSendDescriptor] {
+        uniqueDescriptors(books.map {
+            KindleSendPreparation.descriptor(for: $0)
+        })
+    }
+
+    private static func uniqueDescriptors(
+        _ descriptors: [KindleSendDescriptor]
+    ) -> [KindleSendDescriptor] {
         var seenBookIDs: Set<UUID> = []
-        return books.compactMap { book in
-            guard seenBookIDs.insert(book.uuid).inserted else { return nil }
-            return makeRequest(for: book)
+        return descriptors.filter {
+            seenBookIDs.insert($0.bookUUID).inserted
         }
     }
 
-    private static func makeRequest(for book: Book) -> SendRequest {
-        makeRequest(
-            descriptor: KindleSendPreparation.descriptor(for: book),
-            book: book
-        )
-    }
-
-    private static func makeRequest(for asset: BookAsset, book: Book) -> SendRequest {
-        makeRequest(
-            descriptor: KindleSendPreparation.descriptor(for: asset, in: book),
-            book: book
-        )
-    }
-
-    private static func makeRequest(
-        descriptor: KindleSendDescriptor,
-        book: Book
-    ) -> SendRequest {
-        let generation = descriptor.assetGeneration
-        let bookWasAttached = book.modelContext != nil
-        let expectedOriginalFileName = book.originalFileName
-        let expectedCoverOwner = descriptor.coverOwner
-        let expectedCoverVersion = descriptor.coverVersion
-        let expectedDRMProtected = descriptor.drmProtected
-        let expectedSourceFileGeneration = TransferFileGeneration.capture(
-            at: descriptor.sourceURL
-        )
-        return SendRequest(
-            descriptor: descriptor,
-            drmProtected: descriptor.drmProtected,
-            generationIsCurrent: { [book] in
-                if bookWasAttached, book.modelContext == nil { return false }
-                guard book.uuid == descriptor.bookUUID,
-                      book.originalFileName == expectedOriginalFileName,
-                      book.coverReference.owner == expectedCoverOwner,
-                      book.coverReference.version == expectedCoverVersion,
-                      TransferFileGeneration.capture(at: descriptor.sourceURL)
-                        == expectedSourceFileGeneration else { return false }
-                if generation.isCatalogued {
-                    guard let asset = book.assets.first(where: { $0.uuid == generation.assetID }) else {
-                        return false
-                    }
-                    return asset.fileName == generation.fileName
-                        && asset.format == generation.format
-                        && asset.validationStatus == generation.validationStatus
-                        && asset.availability == generation.availability
-                        && asset.origin == generation.origin
-                        && asset.contentHash == generation.contentHash
-                        && asset.sizeBytes == generation.sizeBytes
-                        && asset.dateAdded == generation.dateAdded
-                        && asset.generatedFromContentHash == generation.generatedFromContentHash
-                        && (asset.drmProtected == true) == expectedDRMProtected
-                }
-                return book.fileName == generation.fileName
-                    && book.format == generation.format
-                    && book.fileSizeBytes == generation.sizeBytes
-                    && book.dateAdded == generation.dateAdded
-                    && (book.primaryDRMProtected == true) == expectedDRMProtected
-            }
-        )
-    }
-
-    private func beginSend(requests: [SendRequest], via monitor: DeviceMonitor) {
+    private func beginSend(
+        descriptors: [KindleSendDescriptor],
+        via monitor: DeviceMonitor
+    ) {
+        guard !descriptors.isEmpty else { return }
         clearTask?.cancel()
         clearTask = nil
         isTransferring = true
         sendTask = Task { [weak self] in
-            await self?.performSend(requests: requests, via: monitor)
+            await self?.performSend(readModel: descriptors, via: monitor)
         }
     }
 
@@ -667,7 +585,8 @@ final class TransferQueue {
     ) async -> Bool {
         guard !isTransferring,
               let connection = monitor.connection,
-              let deviceInfo = monitor.info else { return false }
+              let deviceInfo = monitor.info,
+              let inventory = monitor.inventory else { return false }
         let descriptor = KindleSendPreparation.descriptor(for: book)
         guard !descriptor.requiresConversion,
               descriptor.targetFormat.caseInsensitiveCompare(deviceBook.format) == .orderedSame else {
@@ -700,27 +619,24 @@ final class TransferQueue {
             await monitor.disconnect()
             return false
         }
-        let request = Self.makeRequest(descriptor: descriptor, book: book)
-        guard !request.fileUnavailable, !request.drmProtected,
-              request.generationIsCurrent() else {
-            lastError = TransferArtifactError.sourceChanged.localizedDescription
+        let plan = TransferPlanner.makePlan(
+            readModel: [descriptor],
+            inventory: inventory
+        )
+        guard let planItem = plan.items.first else {
+            lastError = plan.conflicts.first.map {
+                Self.message(for: $0.reason)
+            } ?? TransferArtifactError.sourceUnavailable.localizedDescription
             markFailed(item.id)
             return false
         }
-        let preparedArtifact: MaterializedTransferArtifact
+        let artifact: TransferArtifact
         setStage(.preparing, for: item.id)
         do {
-            let artifact = try await TransferArtifact.prepare(
-                descriptor: request.descriptor
+            artifact = try await TransferArtifactBuilder.build(
+                planItem,
+                in: stagingDirectory
             )
-            guard request.generationIsCurrent(),
-                  artifact.sourceGenerationIsCurrent() else {
-                throw TransferArtifactError.sourceChanged
-            }
-            preparedArtifact = try await artifact.materialize(in: stagingDirectory)
-            guard request.generationIsCurrent(), artifact.sourceGenerationIsCurrent() else {
-                throw TransferArtifactError.sourceChanged
-            }
         } catch {
             lastError = error.localizedDescription
             if error is CancellationError {
@@ -732,8 +648,8 @@ final class TransferQueue {
         }
         setStage(.transferring, for: item.id)
         let pushed = await pushThumbnail(
-            for: preparedArtifact.artifact.coverOwner,
-            sentFile: preparedArtifact.sourceURL,
+            for: artifact.coverOwner,
+            sentFile: artifact.fileURL,
             connection: connection
         )
         guard pushed else {
@@ -748,14 +664,19 @@ final class TransferQueue {
             try await onTransferCompleted?(KindleSyncTransferRecord(
                 deviceIdentifier: deviceInfo.identifier,
                 deviceName: deviceInfo.name,
-                bookID: book.uuid,
-                assetID: preparedArtifact.artifact.assetGeneration.assetID,
-                sourceFormat: preparedArtifact.artifact.sourceFormat,
-                sourceSizeBytes: preparedArtifact.sourceSizeBytes,
-                sourceFingerprint: preparedArtifact.sourceFingerprint,
+                bookID: artifact.bookID,
+                assetID: artifact.assetGeneration.assetID,
+                sourceFormat: artifact.sourceFormat,
+                sourceSizeBytes: artifact.sourceSizeBytes,
+                sourceFingerprint: artifact.sourceFingerprint,
+                artifactFormat: artifact.format,
+                artifactSizeBytes: artifact.byteCount,
+                artifactFingerprint: artifact.fingerprint,
                 sentFileName: deviceBook.fileName,
-                coverVersion: preparedArtifact.artifact.coverVersion,
-                coverIdentity: preparedArtifact.artifact.coverOwner.generationKey,
+                transportIdentifier: deviceBook.mtpItemID.map(String.init)
+                    ?? deviceBook.path,
+                coverVersion: artifact.coverVersion,
+                coverIdentity: artifact.coverOwner.generationKey,
                 completedAt: .now
             ))
         } catch {
