@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-nonisolated struct TransferFileGeneration: Equatable, Sendable {
+nonisolated struct TransferFileGeneration: Codable, Equatable, Sendable {
     let resourceIdentifier: String?
     let modificationDate: Date?
     let fileSize: Int64
@@ -21,7 +21,7 @@ nonisolated struct TransferFileGeneration: Equatable, Sendable {
     }
 }
 
-nonisolated struct KindleTransferAssetGeneration: Equatable, Sendable {
+nonisolated struct KindleTransferAssetGeneration: Codable, Equatable, Sendable {
     let assetID: UUID
     let fileName: String
     let format: String
@@ -157,7 +157,7 @@ nonisolated enum DevicePathAllocator {
     }
 }
 
-nonisolated struct KindleSendDescriptor: Equatable, Sendable {
+nonisolated struct KindleSendDescriptor: Codable, Equatable, Sendable {
     let bookUUID: UUID
     let assetGeneration: KindleTransferAssetGeneration
     let sourceIsPrimary: Bool

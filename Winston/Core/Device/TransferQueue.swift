@@ -54,16 +54,23 @@ final class TransferQueue {
     private(set) var items: [Item] = []
     private(set) var isTransferring = false
     private(set) var lastError: String?
+    private(set) var lastWarning: String?
     private(set) var activePlan: TransferPlan?
     private(set) var lastBulkOperationResult: BulkOperationResult?
+    private(set) var journalLoadIssue: TransferQueueJournalLoadIssue?
+    private(set) var quarantinedJournalURL: URL?
 
     private let toasts: ToastCenter
     private let onConversionArtifact: (@MainActor @Sendable (UUID, URL) async -> Void)?
     private let onTransferCompleted: (@MainActor @Sendable (KindleSyncTransferRecord) async throws -> Void)?
+    private let journalStore: TransferQueueJournalStore
+    private let now: @Sendable () -> Date
     private var sendTask: Task<Void, Never>?
     private var clearTask: Task<Void, Never>?
     @ObservationIgnored private var activeSession: BulkOperationSession?
     @ObservationIgnored private var itemIndexByID: [UUID: Int] = [:]
+    @ObservationIgnored private var bookIDByItemID: [UUID: UUID] = [:]
+    private var durableJob: DurableTransferJob?
     private var activeItemID: UUID?
     private var failedItemCount = 0
     private var completedItemCount = 0
@@ -72,11 +79,41 @@ final class TransferQueue {
     init(
         toasts: ToastCenter,
         onConversionArtifact: (@MainActor @Sendable (UUID, URL) async -> Void)? = nil,
-        onTransferCompleted: (@MainActor @Sendable (KindleSyncTransferRecord) async throws -> Void)? = nil
+        onTransferCompleted: (@MainActor @Sendable (KindleSyncTransferRecord) async throws -> Void)? = nil,
+        journalDirectory: URL? = nil,
+        now: @escaping @Sendable () -> Date = { .now }
     ) {
         self.toasts = toasts
         self.onConversionArtifact = onConversionArtifact
         self.onTransferCompleted = onTransferCompleted
+        self.now = now
+        let store = TransferQueueJournalStore(
+            directory: journalDirectory ?? Self.defaultJournalDirectory(),
+            now: now
+        )
+        journalStore = store
+        let loadResult = store.load()
+        journalLoadIssue = loadResult.issue
+        quarantinedJournalURL = loadResult.quarantinedURL
+        durableJob = loadResult.job
+        if let job = loadResult.job, job.isTerminal {
+            do {
+                try store.remove()
+                durableJob = nil
+            } catch {
+                Log.device.error(
+                    "Could not remove terminal transfer journal: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    var pendingTransferCount: Int {
+        durableJob?.pendingItems.count ?? 0
+    }
+
+    var pendingTransferDeviceIdentifier: String? {
+        pendingTransferCount > 0 ? durableJob?.deviceIdentifier : nil
     }
 
     func beginSend(books: [Book], via monitor: DeviceMonitor) {
@@ -120,6 +157,31 @@ final class TransferQueue {
                 markCancelled(item.id)
             }
         }
+    }
+
+    /// Resumes only items that never crossed the verified payload commit point.
+    /// Completed/committed items in the journal are intentionally skipped.
+    func resumePending(via monitor: DeviceMonitor, announcesResult: Bool = true) async {
+        guard !isTransferring,
+              let durableJob,
+              durableJob.resumePolicy == .sameDeviceAutomatically,
+              durableJob.deviceIdentifier == monitor.info?.identifier
+        else { return }
+        let descriptors = durableJob.pendingItems.map(\.descriptor)
+        guard !descriptors.isEmpty else {
+            finishDurableJobIfTerminal()
+            return
+        }
+
+        clearTask?.cancel()
+        clearTask = nil
+        isTransferring = true
+        await performSend(
+            readModel: descriptors,
+            via: monitor,
+            announcesResult: announcesResult,
+            resumingJobID: durableJob.id
+        )
     }
 
     var activeItem: Item? {
@@ -190,7 +252,8 @@ final class TransferQueue {
     private func performSend(
         readModel descriptors: [KindleSendDescriptor],
         via monitor: DeviceMonitor,
-        announcesResult: Bool = true
+        announcesResult: Bool = true,
+        resumingJobID: UUID? = nil
     ) async {
         let descriptors = Self.uniqueDescriptors(descriptors)
         var pollingSuspended = false
@@ -204,13 +267,18 @@ final class TransferQueue {
             activePlan = nil
             isTransferring = false
             sendTask = nil
+            finishDurableJobIfTerminal()
             scheduleClear()
         }
 
         lastError = nil
-        replaceItems(descriptors.map {
-            Item(displayName: $0.displayName, direction: .toDevice)
-        })
+        lastWarning = nil
+        replaceItems(
+            descriptors.map {
+                Item(displayName: $0.displayName, direction: .toDevice)
+            },
+            bookIDs: descriptors.map(\.bookUUID)
+        )
         guard let inventory = monitor.inventory else {
             lastError = "Device disconnected"
             for item in items { markFailed(item.id) }
@@ -220,10 +288,28 @@ final class TransferQueue {
             return
         }
 
-        let transferPlan = TransferPlanner.makePlan(
+        var transferPlan = TransferPlanner.makePlan(
             readModel: descriptors,
             inventory: inventory
         )
+        if let resumingJobID {
+            guard durableJob?.id == resumingJobID else {
+                lastError = "Transfer recovery record changed"
+                for item in items { markFailed(item.id) }
+                return
+            }
+            transferPlan = validatedResumePlan(transferPlan)
+        } else if !transferPlan.items.isEmpty {
+            guard beginDurableJob(for: transferPlan) else {
+                for item in items where !Self.isTerminal(item.stage) {
+                    markFailed(item.id)
+                }
+                if announcesResult {
+                    toasts.error(String(localized: "The transfer could not be saved for recovery."))
+                }
+                return
+            }
+        }
         activePlan = transferPlan
         let bulkPlan = await Self.makeBulkPlan(from: transferPlan)
         let session = BulkOperationSession(plan: bulkPlan)
@@ -239,10 +325,10 @@ final class TransferQueue {
             }
         )
         for conflict in transferPlan.conflicts {
+            lastError = Self.message(for: conflict.reason)
             if let itemID = itemIDsByTarget[conflict.targetID] {
                 markFailed(itemID)
             }
-            lastError = Self.message(for: conflict.reason)
         }
 
         Log.device.info(
@@ -309,16 +395,35 @@ final class TransferQueue {
                 ])
             }
 
-            if let conflict = try await self.transfer(
-                planItem,
-                artifact: artifact,
-                itemID: itemID,
-                connection: connection,
-                deviceInfo: deviceInfo
-            ) {
-                return BulkOperationChunkOutcome(conflicts: [conflict])
+            do {
+                let warning = try await self.transfer(
+                    planItem,
+                    artifact: artifact,
+                    itemID: itemID,
+                    connection: connection,
+                    deviceInfo: deviceInfo
+                )
+                return .applied(
+                    [targetID],
+                    warnings: [warning].compactMap { $0 }
+                )
+            } catch is CancellationError {
+                self.markCancelled(itemID)
+                throw CancellationError()
+            } catch {
+                Log.device.error(
+                    "Transfer of \(artifact.destination.fileName, privacy: .public) failed before payload verification: \(error.localizedDescription, privacy: .public)"
+                )
+                self.lastError = error.localizedDescription
+                self.markFailed(itemID)
+                return BulkOperationChunkOutcome(conflicts: [
+                    BulkOperationConflict(
+                        targetID: targetID,
+                        reason: Self.conflictReason(for: error),
+                        detail: error.localizedDescription
+                    ),
+                ])
             }
-            return .applied([targetID])
         }
         lastBulkOperationResult = result
 
@@ -338,6 +443,12 @@ final class TransferQueue {
         )
         if announcesResult, result.completion != .cancelled, failedCount > 0 {
             toasts.error(String(localized: "Some transfers failed (\(failedCount))."))
+        } else if announcesResult,
+                  result.completion != .cancelled,
+                  !result.warnings.isEmpty {
+            toasts.info(String(
+                localized: "Sent \(sent) to Kindle; some follow-up work needs attention."
+            ))
         } else if announcesResult, result.completion != .cancelled, sent > 0 {
             toasts.success(String(localized: "Sent \(sent) to Kindle."))
         }
@@ -353,7 +464,7 @@ final class TransferQueue {
         itemID: UUID,
         connection: any KindleDeviceConnection,
         deviceInfo: DeviceInfo
-    ) async throws -> BulkOperationConflict? {
+    ) async throws -> BulkOperationWarning? {
         let targetID = BulkOperationTargetID.catalogBook(planItem.id)
         guard !Task.isCancelled else {
             markCancelled(itemID)
@@ -369,32 +480,46 @@ final class TransferQueue {
         )
         defer { signposter.endInterval("SendBook", interval) }
 
-        do {
-            Log.device.info("Transferring \(fileName, privacy: .public)")
-            let progressGate = TransferProgressGate()
-            let technicalResult = try await connection.transfer(
-                artifact.byteTransfer,
-                progress: { [weak self] fraction in
-                    guard progressGate.shouldPublish(fraction) else { return }
-                    Task { @MainActor [weak self] in
-                        self?.updateProgress(fraction, for: itemID)
-                    }
+        Log.device.info("Transferring \(fileName, privacy: .public)")
+        let progressGate = TransferProgressGate()
+        let technicalResult = try await connection.transfer(
+            artifact.byteTransfer,
+            progress: { [weak self] fraction in
+                guard progressGate.shouldPublish(fraction) else { return }
+                Task { @MainActor [weak self] in
+                    self?.updateProgress(fraction, for: itemID)
                 }
-            )
-            guard technicalResult.destination == artifact.destination,
-                  technicalResult.bytesTransferred == artifact.byteCount else {
-                throw TransferArtifactError.transportResultMismatch
             }
-            Log.device.notice("Transferred \(fileName, privacy: .public)")
-            if planItem.descriptor.requiresConversion, artifact.sourceIsPrimary {
-                await onConversionArtifact?(artifact.bookID, artifact.fileURL)
-            }
+        )
+        guard technicalResult.destination == artifact.destination,
+              technicalResult.bytesTransferred == artifact.byteCount else {
+            throw TransferArtifactError.transportResultMismatch
+        }
+
+        // This is the payload commit point. Everything below is follow-up
+        // bookkeeping and may warn, but must never claim the payload send
+        // itself failed.
+        markPayloadCommitted(itemID)
+        Log.device.notice("Transferred and verified \(fileName, privacy: .public)")
+        if planItem.descriptor.requiresConversion, artifact.sourceIsPrimary {
+            await onConversionArtifact?(artifact.bookID, artifact.fileURL)
+        }
+
+        var postProcessingFailures: [String] = []
+        do {
             try await connection.removeStaleVariants(baseName: base, keeping: fileName)
-            let coverPushed = await pushThumbnail(
-                for: artifact.coverOwner,
-                sentFile: artifact.fileURL,
-                connection: connection
+        } catch {
+            postProcessingFailures.append(error.localizedDescription)
+            Log.device.error(
+                "Post-transfer cleanup failed for \(fileName, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
+        }
+        let coverPushed = await pushThumbnail(
+            for: artifact.coverOwner,
+            sentFile: artifact.fileURL,
+            connection: connection
+        )
+        do {
             try await onTransferCompleted?(KindleSyncTransferRecord(
                 deviceIdentifier: deviceInfo.identifier,
                 deviceName: deviceInfo.name,
@@ -412,25 +537,24 @@ final class TransferQueue {
                 coverIdentity: coverPushed
                     ? artifact.coverOwner.generationKey
                     : nil,
-                completedAt: .now
+                completedAt: now()
             ))
-            markDone(itemID)
-            return nil
         } catch {
-            if error is CancellationError {
-                Log.device.info("Transfer of \(fileName, privacy: .public) cancelled")
-                markCancelled(itemID)
-                throw CancellationError()
-            }
-            Log.device.error("Transfer of \(fileName, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-            lastError = error.localizedDescription
-            markFailed(itemID)
-            return BulkOperationConflict(
-                targetID: targetID,
-                reason: .itemFailed,
-                detail: error.localizedDescription
+            postProcessingFailures.append(error.localizedDescription)
+            Log.device.error(
+                "Transfer receipt persistence failed for \(fileName, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
         }
+
+        markDone(itemID)
+        guard !postProcessingFailures.isEmpty else { return nil }
+        let detail = postProcessingFailures.joined(separator: " ")
+        lastWarning = detail
+        return BulkOperationWarning(
+            targetIDs: [targetID],
+            reason: .postProcessingFailed,
+            detail: detail
+        )
     }
 
     private static func makeBulkPlan(
@@ -677,7 +801,7 @@ final class TransferQueue {
                     ?? deviceBook.path,
                 coverVersion: artifact.coverVersion,
                 coverIdentity: artifact.coverOwner.generationKey,
-                completedAt: .now
+                completedAt: now()
             ))
         } catch {
             lastError = error.localizedDescription
@@ -715,13 +839,153 @@ final class TransferQueue {
         return succeeded
     }
 
+    // MARK: - Durable send journal
+
+    private func beginDurableJob(for plan: TransferPlan) -> Bool {
+        let timestamp = now()
+        let job = DurableTransferJob(
+            schemaVersion: DurableTransferJob.currentSchemaVersion,
+            id: UUID(),
+            deviceIdentifier: plan.deviceIdentifier,
+            resumePolicy: .sameDeviceAutomatically,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            items: plan.items.map {
+                DurableTransferItem(
+                    descriptor: $0.descriptor,
+                    sourceFileGeneration: $0.sourceFileGeneration,
+                    state: .pending,
+                    detail: nil
+                )
+            }
+        )
+        do {
+            try journalStore.save(job)
+            durableJob = job
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            Log.device.error(
+                "Could not create durable transfer journal: \(error.localizedDescription, privacy: .public)"
+            )
+            return false
+        }
+    }
+
+    private func validatedResumePlan(_ plan: TransferPlan) -> TransferPlan {
+        guard let durableJob else { return plan }
+        let frozenItems = Dictionary(
+            uniqueKeysWithValues: durableJob.items.map {
+                ($0.descriptor.bookUUID, $0)
+            }
+        )
+        var validItems: [TransferPlanItem] = []
+        var conflicts = plan.conflicts
+        for item in plan.items {
+            guard let frozen = frozenItems[item.id],
+                  frozen.state == .pending,
+                  frozen.sourceFileGeneration == item.sourceFileGeneration else {
+                conflicts.append(BulkOperationConflict(
+                    targetID: .catalogBook(item.id),
+                    reason: .sourceChanged,
+                    detail: TransferArtifactError.sourceChanged.localizedDescription
+                ))
+                continue
+            }
+            validItems.append(item)
+        }
+        return TransferPlan(
+            deviceIdentifier: plan.deviceIdentifier,
+            requestedBookIDs: plan.requestedBookIDs,
+            items: validItems,
+            conflicts: conflicts
+        )
+    }
+
+    private func markPayloadCommitted(_ itemID: UUID) {
+        updateDurableState(
+            for: itemID,
+            state: .payloadCommitted,
+            detail: nil
+        )
+    }
+
+    private func updateDurableState(
+        for itemID: UUID,
+        state: DurableTransferItemState,
+        detail: String?
+    ) {
+        guard let bookID = bookIDByItemID[itemID],
+              var job = durableJob,
+              let index = job.items.firstIndex(where: {
+                  $0.descriptor.bookUUID == bookID
+              })
+        else { return }
+
+        let previous = job.items[index].state
+        if previous == .payloadCommitted, state != .completed {
+            return
+        }
+        if previous.isTerminal, previous != .payloadCommitted {
+            return
+        }
+        guard previous != state || job.items[index].detail != detail else {
+            return
+        }
+
+        job.items[index].state = state
+        job.items[index].detail = detail
+        job.updatedAt = now()
+        do {
+            try journalStore.save(job)
+            durableJob = job
+        } catch {
+            let message = "Could not update transfer recovery record: \(error.localizedDescription)"
+            lastWarning = message
+            Log.device.error("\(message, privacy: .public)")
+        }
+    }
+
+    private func finishDurableJobIfTerminal() {
+        guard durableJob?.isTerminal == true else { return }
+        do {
+            try journalStore.remove()
+            durableJob = nil
+        } catch {
+            let message = "Could not remove completed transfer recovery record: \(error.localizedDescription)"
+            lastWarning = message
+            Log.device.error("\(message, privacy: .public)")
+        }
+    }
+
+    private static func defaultJournalDirectory() -> URL {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil else {
+            return AppPaths.transferQueueJournalDirectory
+        }
+        return FileManager.default.temporaryDirectory
+            .appending(path: "WinstonTransferQueueTests", directoryHint: .isDirectory)
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+    }
+
     // MARK: - Bookkeeping
 
-    private func replaceItems(_ newItems: [Item]) {
+    private func replaceItems(
+        _ newItems: [Item],
+        bookIDs: [UUID]? = nil
+    ) {
         items = newItems
         itemIndexByID = Dictionary(
             uniqueKeysWithValues: newItems.indices.map { (newItems[$0].id, $0) }
         )
+        if let bookIDs, bookIDs.count == newItems.count {
+            bookIDByItemID = Dictionary(
+                uniqueKeysWithValues: zip(newItems, bookIDs).map {
+                    ($0.0.id, $0.1)
+                }
+            )
+        } else {
+            bookIDByItemID = [:]
+        }
         failedItemCount = newItems.count { $0.stage == .failed }
         completedItemCount = newItems.count { $0.stage == .done }
         totalProgress = newItems.reduce(0) { $0 + $1.progress }
@@ -753,6 +1017,7 @@ final class TransferQueue {
         items[index].progress = 1
         items[index].stage = .done
         completedItemCount += 1
+        updateDurableState(for: id, state: .completed, detail: nil)
         advanceActiveItem(after: index, completedID: id)
     }
 
@@ -764,6 +1029,7 @@ final class TransferQueue {
         }
         items[index].stage = .failed
         failedItemCount += 1
+        updateDurableState(for: id, state: .failed, detail: lastError)
         advanceActiveItem(after: index, completedID: id)
     }
 
@@ -771,6 +1037,7 @@ final class TransferQueue {
         guard let index = itemIndexByID[id], items.indices.contains(index) else { return }
         guard !Self.isTerminal(items[index].stage) else { return }
         items[index].stage = .cancelled
+        updateDurableState(for: id, state: .cancelled, detail: nil)
         advanceActiveItem(after: index, completedID: id)
     }
 
