@@ -25,6 +25,8 @@ enum LibraryCommand: Equatable {
     case searchInsideBooks
     case convertSelected
     case fetchMetadata
+    case showLibraryIntegrity
+    case showImportRecovery
     case showMetadataFixes
     case reviewEditions
     case showStatistics
@@ -177,6 +179,10 @@ struct AppCommands: Commands {
                 .disabled(library == nil)
             Button("Reconcile Books\u{2026}") { library?.perform(.reviewEditions) }
                 .keyboardShortcut("d", modifiers: [.command, .option])
+                .disabled(library == nil)
+            Button("Library Integrity\u{2026}") { library?.perform(.showLibraryIntegrity) }
+                .disabled(library == nil)
+            Button("Import Review & Recovery\u{2026}") { library?.perform(.showImportRecovery) }
                 .disabled(library == nil)
             Button("Metadata Fixes\u{2026}") { library?.perform(.showMetadataFixes) }
                 .disabled(library == nil)

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import OSLog
 import PDFKit
 import SwiftData
 
@@ -248,6 +249,22 @@ nonisolated enum ImportSourceDiscoveryError: Error, Sendable, Equatable {
     case unreadable
 }
 
+nonisolated enum ImportFailureReason: String, Codable, Sendable, Equatable, CaseIterable {
+    case unsupportedFormat
+    case unreadableSource
+    case staging
+    case validation
+    case catalog
+    case recoveryDeferred
+}
+
+nonisolated struct ImportFailure: Sendable, Equatable {
+    let sourceURL: URL?
+    let requestedBookID: UUID?
+    let reason: ImportFailureReason
+    let detail: String
+}
+
 nonisolated struct ImportDiscoveredSource: Sendable, Equatable {
     let url: URL
     let format: String
@@ -293,6 +310,7 @@ final class ImportSession {
     let source: ImportSessionSource
     private(set) var requestedBookIDs: Set<UUID>
     private(set) var step: ImportSessionStep = .sourceDiscovery
+    private(set) var failures: [ImportFailure] = []
     private var task: Task<Void, Never>?
 
     init(
@@ -318,6 +336,10 @@ final class ImportSession {
     func advance(to step: ImportSessionStep) {
         guard self.step != .cancelled, self.step != .failed else { return }
         self.step = step
+    }
+
+    func recordFailures(_ failures: [ImportFailure]) {
+        self.failures.append(contentsOf: failures)
     }
 
     func start(_ task: Task<Void, Never>) {
@@ -353,10 +375,12 @@ final class ImportService {
     }
 
     nonisolated private struct CopyRequest: Sendable {
-        let source: URL
+        let source: ImportSource
         let uuid: UUID
         let workID: UUID
         let originalName: String
+
+        var sourceURL: URL { source.url }
     }
 
     nonisolated private struct PreparedImport: Sendable {
@@ -386,19 +410,16 @@ final class ImportService {
     private struct ResolvedPreparedImport {
         let prepared: PreparedImport
         let proposal: ImportModelProposal
-        let coverTransaction: ManagedFileTransaction?
+        let coverMutation: PreparedCoverMutation?
 
         var transactions: [ManagedFileTransaction] {
-            prepared.transactions + [coverTransaction].compactMap { $0 }
+            prepared.transactions + [coverMutation?.transaction].compactMap { $0 }
         }
     }
 
     private struct ImportedBookPreimage {
         let book: Book
         let assets: [BookAsset]
-        let coverVersion: Int
-        let coverScopeRaw: String?
-        let coverAssetUUID: UUID?
     }
 
     private struct ImportedWorkPreimage {
@@ -409,15 +430,14 @@ final class ImportService {
 
     nonisolated private enum PreparationOutcome: Sendable {
         case prepared(PreparedImport)
-        case failed(UUID)
+        case failed(ImportFailure)
         case cancelled(UUID)
     }
 
     private struct ImportChunkResult {
         var importedBookIDs: [UUID] = []
         var reviewBookIDs: [UUID] = []
-        var pendingContentHashes: [String] = []
-        var failedBookIDs: [UUID] = []
+        var failures: [ImportFailure] = []
         var targetUnavailable = false
     }
 
@@ -435,6 +455,10 @@ final class ImportService {
     private let mutations: CatalogMutationService
     private let analysisCoordinator: CatalogAnalysisCoordinator
     private let managedFiles: ManagedFileCoordinator
+    private let coverMutations: CoverMutationCoordinator
+    private let identityIndex: CatalogIdentityIndex
+    private let recoveryQueue: ImportRecoveryQueueStore
+    private let importSourceLeases: ImportSourceLeaseStore
     private let analyzeBook: @Sendable (URL) async -> ImportBookAnalysis
     private let measureFile: @Sendable (URL) async -> Int64
     private let inspectDRM: @Sendable (URL) async -> Bool
@@ -442,6 +466,10 @@ final class ImportService {
     private let importCommitChunkSize: Int
 
     private(set) var pendingMetadataUUIDs: Set<UUID> = []
+    private(set) var lastImportFailures: [ImportFailure] = []
+    private(set) var importRecoveryItems: [ImportRecoveryItem] = []
+    private(set) var lastRecoveryQueueError: String?
+    private(set) var lastMaintenanceError: String?
     private var activeImportOperationCount = 0
     private var activePreparationJobCount = 0
     private var preparingImportUUIDs: Set<UUID> = []
@@ -451,6 +479,7 @@ final class ImportService {
     private var queuedMetadataJobs: ArraySlice<MetadataJob> = []
     private var activeMetadataTasks: [UUID: Task<Void, Never>] = [:]
     private var activeImportSessions: [UUID: ImportSession] = [:]
+    private var recoveryQueueWriteTask: Task<Void, Never>?
 
     init(
         modelContext: ModelContext,
@@ -461,6 +490,9 @@ final class ImportService {
         editions: CatalogReconciliationService? = nil,
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared,
+        identityIndex: CatalogIdentityIndex? = nil,
+        recoveryQueue: ImportRecoveryQueueStore = .shared,
+        importSourceLeases: ImportSourceLeaseStore = ImportSourceLeaseStore(),
         maximumConcurrentMetadataJobs: Int = BookDoctorService.defaultMaximumConcurrentInspections,
         importCommitChunkSize: Int = 25,
         analyzeBook: @escaping @Sendable (URL) async -> ImportBookAnalysis = ImportService.defaultAnalysis,
@@ -468,9 +500,10 @@ final class ImportService {
         inspectDRM: @escaping @Sendable (URL) async -> Bool = ImportService.defaultDRMInspection
     ) {
         let coordinator = mutations?.analysisCoordinator ?? metadata.analysisCoordinator
+        let resolvedManagedFiles = mutations?.managedFiles ?? managedFiles
         let resolvedMutations = mutations ?? CatalogMutationService(
             modelContext: modelContext,
-            managedFiles: managedFiles,
+            managedFiles: resolvedManagedFiles,
             analysisCoordinator: coordinator
         )
         self.modelContext = modelContext
@@ -481,7 +514,16 @@ final class ImportService {
         self.editions = editions
         self.mutations = resolvedMutations
         self.analysisCoordinator = resolvedMutations.analysisCoordinator
-        self.managedFiles = managedFiles
+        self.managedFiles = resolvedManagedFiles
+        coverMutations = CoverMutationCoordinator.resolve(
+            modelContext: modelContext,
+            mutations: resolvedMutations,
+            managedFiles: resolvedManagedFiles
+        )
+        self.identityIndex = identityIndex
+            ?? CatalogIdentityIndexRegistry.resolve(modelContext: modelContext)
+        self.recoveryQueue = recoveryQueue
+        self.importSourceLeases = importSourceLeases
         self.maximumConcurrentMetadataJobs = max(1, maximumConcurrentMetadataJobs)
         self.importCommitChunkSize = max(1, importCommitChunkSize)
         self.analyzeBook = analyzeBook
@@ -497,12 +539,74 @@ final class ImportService {
         activePreparationJobCount + activeMetadataTasks.count
     }
 
+    func reloadImportRecoveryQueue() async {
+        await recoveryQueueWriteTask?.value
+        do {
+            importRecoveryItems = try await recoveryQueue.load()
+            lastRecoveryQueueError = nil
+        } catch {
+            lastRecoveryQueueError = error.localizedDescription
+            Log.persistence.error(
+                "Could not load the import recovery queue: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    func dismissImportRecoveryItems(ids: Set<UUID>) async {
+        await recoveryQueueWriteTask?.value
+        do {
+            importRecoveryItems = try await recoveryQueue.dismiss(ids: ids)
+            lastRecoveryQueueError = nil
+        } catch {
+            lastRecoveryQueueError = error.localizedDescription
+            Log.persistence.error(
+                "Could not update the import recovery queue: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    @discardableResult
+    func retryImportRecoveryItem(id: UUID) -> ImportSession? {
+        guard let item = importRecoveryItems.first(where: { $0.id == id }),
+              let sourceURL = item.sourceURL,
+              item.canRetry else {
+            return nil
+        }
+        let attemptedPath = sourceURL.standardizedFileURL.path(percentEncoded: false)
+        var retrySession: ImportSession?
+        retrySession = addBooks(from: [sourceURL]) { [weak self] imported in
+            guard let self, !imported.isEmpty else { return }
+            let failedPaths = Set(retrySession?.failures.compactMap {
+                $0.sourceURL?.standardizedFileURL.path(percentEncoded: false)
+            } ?? [])
+            guard !failedPaths.contains(attemptedPath) else { return }
+            Task { await self.dismissImportRecoveryItems(ids: [id]) }
+        }
+        return retrySession
+    }
+
     @discardableResult
     func addBooks(
         from urls: [URL],
         completion: ImportCompletion? = nil
     ) -> ImportSession? {
-        addBooks(from: urls, assigningTo: nil, completion: completion)
+        addBooks(
+            fromImportSources: urls.map(ImportSource.external),
+            assigningTo: nil,
+            completion: completion
+        )
+    }
+
+    @discardableResult
+    func addBooks(
+        from sources: [ImportSource],
+        completion: ImportCompletion? = nil
+    ) -> ImportSession? {
+        addBooks(
+            fromImportSources: sources,
+            assigningTo: nil,
+            completion: completion
+        )
     }
 
     @discardableResult
@@ -511,16 +615,38 @@ final class ImportService {
         assigningTo targetWork: Work?,
         completion: ImportCompletion? = nil
     ) -> ImportSession? {
+        addBooks(
+            fromImportSources: urls.map(ImportSource.external),
+            assigningTo: targetWork,
+            completion: completion
+        )
+    }
+
+    private func addBooks(
+        fromImportSources sources: [ImportSource],
+        assigningTo targetWork: Work?,
+        completion: ImportCompletion?
+    ) -> ImportSession? {
         var requests: [CopyRequest] = []
-        var failed = 0
-        for url in urls {
-            guard libraryEbookExtensions.contains(url.pathExtension.lowercased()) else { failed += 1; continue }
+        var validationFailures: [ImportFailure] = []
+        for source in sources {
+            let url = source.url
+            guard libraryEbookExtensions.contains(url.pathExtension.lowercased()) else {
+                validationFailures.append(ImportFailure(
+                    sourceURL: url,
+                    requestedBookID: nil,
+                    reason: .unsupportedFormat,
+                    detail: ImportSourceDiscoveryError.unsupportedFormat.localizedDescription
+                ))
+                cleanupOwnedSource(source)
+                continue
+            }
 
             let originalName = url.lastPathComponent
             let sourcePath = url.standardizedFileURL.path(percentEncoded: false)
             guard pendingSourcePaths.insert(sourcePath).inserted else { continue }
             requests.append(CopyRequest(
-                source: url,
+                source: source,
                 uuid: UUID(),
                 workID: UUID(),
                 originalName: originalName
@@ -528,36 +654,49 @@ final class ImportService {
         }
 
         guard !requests.isEmpty else {
-            reportImportFailures(failed)
+            lastImportFailures = validationFailures
+            scheduleImportFailurePersistence(validationFailures)
+            reportImportFailures(validationFailures)
             completion?([])
             return nil
         }
 
         let targetWorkID = targetWork?.uuid
-        let validationFailures = failed
         let requestIDs = Set(requests.map(\.uuid))
         pendingMetadataUUIDs.formUnion(requestIDs)
         preparingImportUUIDs.formUnion(requestIDs)
         activeImportOperationCount += 1
         let session = ImportSession(requestedBookIDs: requestIDs)
+        session.recordFailures(validationFailures)
         session.discover(requestIDs)
         activeImportSessions[session.id] = session
-        let task = Task { [weak self, requests, session] in
+        let leaseStore = importSourceLeases
+        let task = Task { [weak self, requests, session, leaseStore] in
             guard let self else {
+                Self.cleanupOwnedSources(
+                    requests.map(\.source),
+                    using: leaseStore
+                )
                 completion?([])
                 return
             }
+            var completedBooks: [Book] = []
             defer {
                 activeImportOperationCount -= 1
                 session.finish(as: Task.isCancelled ? .cancelled : .completed)
                 if activeImportSessions[session.id] === session {
                     activeImportSessions.removeValue(forKey: session.id)
                 }
+                Self.cleanupOwnedSources(
+                    requests.map(\.source),
+                    using: leaseStore
+                )
+                completion?(completedBooks)
             }
 
             var importedBookIDs: [UUID] = []
             var reviewBookIDs: Set<UUID> = []
-            var failureCount = validationFailures
+            var importFailures = validationFailures
             var pendingRecoveryCount = 0
             var nextIndex = 0
             while nextIndex < requests.count,
@@ -578,11 +717,18 @@ final class ImportService {
                         } else {
                             prepared.append(value)
                         }
-                    case .failed(let id), .cancelled(let id):
+                    case .failed(let failure):
+                        let id = failure.requestedBookID
+                        if let id {
+                            preparingImportUUIDs.remove(id)
+                            cancelledImportUUIDs.remove(id)
+                            pendingMetadataUUIDs.remove(id)
+                        }
+                        importFailures.append(failure)
+                    case .cancelled(let id):
                         preparingImportUUIDs.remove(id)
                         cancelledImportUUIDs.remove(id)
                         pendingMetadataUUIDs.remove(id)
-                        failureCount += 1
                     }
                 }
                 if Task.isCancelled
@@ -599,24 +745,31 @@ final class ImportService {
                 importedBookIDs.append(contentsOf: chunkResult.importedBookIDs)
                 reviewBookIDs.formUnion(chunkResult.reviewBookIDs)
                 preparingImportUUIDs.subtract(prepared.map(\.request.uuid))
-                pendingRecoveryCount += chunkResult.pendingContentHashes.count
-                failureCount += chunkResult.failedBookIDs.count
+                pendingRecoveryCount += chunkResult.failures.count {
+                    $0.reason == .recoveryDeferred
+                }
+                importFailures.append(contentsOf: chunkResult.failures)
                 pendingMetadataUUIDs.subtract(prepared.map(\.request.uuid))
 
                 for request in requestChunk {
                     pendingSourcePaths.remove(
-                        request.source.standardizedFileURL.path(percentEncoded: false)
+                        request.sourceURL.standardizedFileURL.path(percentEncoded: false)
                     )
                 }
                 if chunkResult.targetUnavailable {
                     let remaining = requests[end...]
-                    failureCount += remaining.count
                     for request in remaining {
+                        importFailures.append(ImportFailure(
+                            sourceURL: request.sourceURL,
+                            requestedBookID: request.uuid,
+                            reason: .catalog,
+                            detail: "The requested target work is no longer available."
+                        ))
                         preparingImportUUIDs.remove(request.uuid)
                         cancelledImportUUIDs.remove(request.uuid)
                         pendingMetadataUUIDs.remove(request.uuid)
                         pendingSourcePaths.remove(
-                            request.source.standardizedFileURL.path(percentEncoded: false)
+                            request.sourceURL.standardizedFileURL.path(percentEncoded: false)
                         )
                     }
                     break
@@ -632,14 +785,13 @@ final class ImportService {
                     cancelledImportUUIDs.remove(request.uuid)
                     pendingMetadataUUIDs.remove(request.uuid)
                     pendingSourcePaths.remove(
-                        request.source.standardizedFileURL.path(percentEncoded: false)
+                        request.sourceURL.standardizedFileURL.path(percentEncoded: false)
                     )
                 }
             }
 
             guard !Task.isCancelled,
                   activeImportSessions[session.id] === session else {
-                completion?([])
                 return
             }
             let uniqueImportedBookIDs = Array(Set(importedBookIDs))
@@ -667,17 +819,53 @@ final class ImportService {
                 )
             }
 
-            reportImportFailures(failureCount)
+            var imported: [Book] = []
+            for bookID in uniqueImportedBookIDs {
+                do {
+                    imported.append(try mutations.book(id: bookID))
+                } catch {
+                    importFailures.append(ImportFailure(
+                        sourceURL: nil,
+                        requestedBookID: bookID,
+                        reason: .catalog,
+                        detail: error.localizedDescription
+                    ))
+                }
+            }
+            session.recordFailures(
+                Array(importFailures.dropFirst(validationFailures.count))
+            )
+            lastImportFailures = importFailures
+            await persistImportFailures(importFailures)
+            reportImportFailures(importFailures)
             if pendingRecoveryCount > 0 {
                 toasts.error(String(
                     localized: "Some imported files are waiting for recovery (\(pendingRecoveryCount))."
                 ))
             }
-            let imported = uniqueImportedBookIDs.compactMap { try? mutations.book(id: $0) }
-            completion?(imported)
+            completedBooks = imported
         }
         session.start(task)
         return session
+    }
+
+    private func cleanupOwnedSource(_ source: ImportSource) {
+        Self.cleanupOwnedSources([source], using: importSourceLeases)
+    }
+
+    nonisolated private static func cleanupOwnedSources(
+        _ sources: [ImportSource],
+        using leaseStore: ImportSourceLeaseStore
+    ) {
+        for lease in sources.compactMap(\.ownedLease) {
+            do {
+                try leaseStore.remove(lease)
+            } catch {
+                Log.persistence.error(
+                    "Could not clean import source lease \(lease.id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
     }
 
     func cancelPending(_ uuid: UUID) {
@@ -717,8 +905,17 @@ final class ImportService {
 
     func backfillMissingSizes() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.fileSizeBytes == 0 })
-        guard let fetched = try? modelContext.fetch(descriptor) else { return }
-        let snapshots = fetched.filter(\.hasDigitalFile).compactMap(BookAnalysisSnapshot.init(book:))
+        let fetched: [Book]
+        do {
+            fetched = try modelContext.fetch(descriptor)
+            lastMaintenanceError = nil
+        } catch {
+            reportMaintenanceFetchFailure(error, operation: "file-size backfill")
+            return
+        }
+        let snapshots = fetched
+            .filter(\.hasCatalogDigitalFile)
+            .compactMap(BookAnalysisSnapshot.init(book:))
         guard !snapshots.isEmpty else { return }
 
         for chunkStart in stride(from: 0, to: snapshots.count, by: 50) {
@@ -788,11 +985,31 @@ final class ImportService {
     }
 
     func detectMissingDRM() async {
-        let descriptor = FetchDescriptor<Book>()
-        guard let fetched = try? modelContext.fetch(descriptor) else { return }
+        let legacyDescriptor = FetchDescriptor<Book>(
+            predicate: #Predicate { $0.drmProtected == nil }
+        )
+        var assetDescriptor = FetchDescriptor<BookAsset>(
+            predicate: #Predicate { $0.drmProtected == nil }
+        )
+        assetDescriptor.relationshipKeyPathsForPrefetching = [\BookAsset.book]
+        let fetched: [Book]
+        do {
+            let legacyBooks = try modelContext.fetch(legacyDescriptor)
+            let assetBooks = try modelContext.fetch(assetDescriptor).compactMap(\.book)
+            fetched = Array(
+                Dictionary(
+                    (legacyBooks + assetBooks).map { ($0.uuid, $0) },
+                    uniquingKeysWith: { first, _ in first }
+                ).values
+            )
+            lastMaintenanceError = nil
+        } catch {
+            reportMaintenanceFetchFailure(error, operation: "DRM backfill")
+            return
+        }
         let snapshots = fetched
             .filter {
-                $0.hasDigitalFile
+                $0.hasCatalogDigitalFile
                     && ($0.primaryAsset?.drmProtected ?? $0.drmProtected) == nil
             }
             .compactMap(BookAnalysisSnapshot.init(book:))
@@ -875,7 +1092,14 @@ final class ImportService {
 
     func rescanMissingMetadata() async {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.title == nil })
-        guard let fetched = try? modelContext.fetch(descriptor) else { return }
+        let fetched: [Book]
+        do {
+            fetched = try modelContext.fetch(descriptor)
+            lastMaintenanceError = nil
+        } catch {
+            reportMaintenanceFetchFailure(error, operation: "metadata rescan")
+            return
+        }
         let bookIDs = fetched
             .filter(\.hasCatalogDigitalFile)
             .map(\.uuid)
@@ -977,15 +1201,15 @@ final class ImportService {
         managedFiles: ManagedFileCoordinator,
         analyzer: @escaping @Sendable (URL) async -> ImportBookAnalysis
     ) async -> PreparationOutcome {
-        let accessing = request.source.startAccessingSecurityScopedResource()
+        let accessing = request.sourceURL.startAccessingSecurityScopedResource()
         defer {
-            if accessing { request.source.stopAccessingSecurityScopedResource() }
+            if accessing { request.sourceURL.stopAccessingSecurityScopedResource() }
         }
 
         var transactions: [ManagedFileTransaction] = []
         do {
             try Task.checkCancellation()
-            let discovered = try ImportSourceDiscovery.discover(request.source)
+            let discovered = try ImportSourceDiscovery.discover(request.sourceURL)
             let source = try ManagedFileSource.book(
                 sourceURL: discovered.url,
                 destination: .newAsset(assetID: request.uuid)
@@ -1018,9 +1242,30 @@ final class ImportService {
         } catch is CancellationError {
             for transaction in transactions { await managedFiles.abort(transaction) }
             return .cancelled(request.uuid)
+        } catch let error as ImportSourceDiscoveryError {
+            for transaction in transactions { await managedFiles.abort(transaction) }
+            let reason: ImportFailureReason = switch error {
+            case .unsupportedFormat:
+                .unsupportedFormat
+            case .invalidURL, .unreadable:
+                .unreadableSource
+            case .symbolicLink, .notRegularFile:
+                .validation
+            }
+            return .failed(ImportFailure(
+                sourceURL: request.sourceURL,
+                requestedBookID: request.uuid,
+                reason: reason,
+                detail: error.localizedDescription
+            ))
         } catch {
             for transaction in transactions { await managedFiles.abort(transaction) }
-            return .failed(request.uuid)
+            return .failed(ImportFailure(
+                sourceURL: request.sourceURL,
+                requestedBookID: request.uuid,
+                reason: .staging,
+                detail: error.localizedDescription
+            ))
         }
     }
 
@@ -1031,24 +1276,49 @@ final class ImportService {
     ) async -> ImportChunkResult {
         guard !prepared.isEmpty else { return ImportChunkResult() }
         guard !modelContext.hasChanges else {
-            modelContext.rollback()
             await abort(prepared.flatMap(\.transactions))
-            return ImportChunkResult(failedBookIDs: prepared.map(\.request.uuid))
+            return ImportChunkResult(failures: importFailures(
+                for: prepared,
+                reason: .catalog,
+                detail: CatalogMutationError.dirtyContext.localizedDescription
+            ))
         }
 
         if let targetWorkID {
-            guard let work = try? mutations.work(id: targetWorkID),
-                  work.modelContext != nil else {
+            do {
+                let work = try mutations.work(id: targetWorkID)
+                guard work.modelContext != nil else {
+                    throw CatalogMutationError.modelNotFound
+                }
+            } catch {
                 await abort(prepared.flatMap(\.transactions))
                 return ImportChunkResult(
-                    failedBookIDs: prepared.map(\.request.uuid),
+                    failures: importFailures(
+                        for: prepared,
+                        reason: .catalog,
+                        detail: error.localizedDescription
+                    ),
                     targetUnavailable: true
                 )
             }
         }
 
         session.advance(to: .reconciliation)
-        var reconciler = makeImportReconciler()
+        let baseReconciler: ImportReconciler
+        do {
+            baseReconciler = try identityIndex.reconciler()
+        } catch {
+            Log.persistence.error(
+                "Import reconciliation index failed: \(String(describing: error), privacy: .public)"
+            )
+            await abort(prepared.flatMap(\.transactions))
+            return ImportChunkResult(failures: importFailures(
+                for: prepared,
+                reason: .catalog,
+                detail: error.localizedDescription
+            ))
+        }
+        var reconciler = baseReconciler
         var proposals: [(PreparedImport, ImportModelProposal)] = []
         var result = ImportChunkResult()
         for candidate in prepared {
@@ -1071,57 +1341,77 @@ final class ImportService {
         guard !proposals.isEmpty else { return result }
 
         session.advance(to: .modelProposal)
-        var resolved: [ResolvedPreparedImport] = []
-        var coveredBookIDs: Set<UUID> = []
-        do {
-            for (candidate, proposal) in proposals {
-                let existingCoverVersion: Int = switch proposal.reconciliation {
-                case .addFormatToEdition(let existingBookID, _):
-                    (try? mutations.book(id: existingBookID).coverVersion) ?? 0
-                case .createAnotherEdition, .createNewWork, .ambiguousReview:
-                    0
-                case .exactDuplicate:
-                    0
-                }
-                let shouldPublishCover = candidate.inspection.coverJPEGData != nil
-                    && existingCoverVersion == 0
-                    && coveredBookIDs.insert(proposal.targetBookID).inserted
-                let coverTransaction: ManagedFileTransaction?
-                if shouldPublishCover, let coverData = candidate.inspection.coverJPEGData {
-                    coverTransaction = try await managedFiles.stage(
-                        intent: .importBook,
-                        sources: [.cover(data: coverData, bookID: proposal.targetBookID)],
-                        requirement: ManagedFileRequirement(
-                            presentBookIDs: [proposal.targetBookID],
-                            coverVersions: [proposal.targetBookID: existingCoverVersion + 1]
-                        )
-                    )
-                } else {
-                    coverTransaction = nil
-                }
-                resolved.append(ResolvedPreparedImport(
-                    prepared: candidate,
-                    proposal: proposal,
-                    coverTransaction: coverTransaction
-                ))
-            }
-        } catch {
-            await abort(
-                prepared.flatMap(\.transactions)
-                    + resolved.compactMap(\.coverTransaction)
-            )
-            result.failedBookIDs.append(contentsOf: proposals.map(\.0.request.uuid))
-            return result
-        }
-
-        let createdBookIDs = Set(resolved.compactMap { candidate -> UUID? in
-            switch candidate.proposal.reconciliation {
+        let createdBookIDs = Set(proposals.compactMap { candidate -> UUID? in
+            switch candidate.1.reconciliation {
             case .createAnotherEdition, .createNewWork, .ambiguousReview:
-                candidate.proposal.candidate.proposedBookID
+                candidate.1.candidate.proposedBookID
             case .exactDuplicate, .addFormatToEdition:
                 nil
             }
         })
+        var resolved: [ResolvedPreparedImport] = []
+        var coveredBookIDs: Set<UUID> = []
+        do {
+            for (candidate, proposal) in proposals {
+                let existingReference: CoverReference? = switch proposal.reconciliation {
+                case .addFormatToEdition(let existingBookID, _):
+                    if createdBookIDs.contains(existingBookID) {
+                        nil
+                    } else {
+                        try mutations.book(id: existingBookID).coverReference
+                    }
+                case .createAnotherEdition, .createNewWork, .ambiguousReview:
+                    nil
+                case .exactDuplicate:
+                    nil
+                }
+                let editionOwner = CoverOwner.edition(proposal.targetBookID)
+                let shouldPublishCover = candidate.inspection.coverJPEGData != nil
+                    && (existingReference == nil
+                        || existingReference == CoverReference(
+                            owner: editionOwner,
+                            version: 0
+                        ))
+                    && coveredBookIDs.insert(proposal.targetBookID).inserted
+                let coverMutation: PreparedCoverMutation?
+                if shouldPublishCover, let coverData = candidate.inspection.coverJPEGData {
+                    coverMutation = try await coverMutations.prepare(
+                        payload: coverData,
+                        targetReference: CoverReference(
+                            owner: editionOwner,
+                            version: (existingReference?.version ?? 0) + 1
+                        ),
+                        selectedBookIDs: [proposal.targetBookID],
+                        expectedBookReferences: existingReference.map {
+                            [proposal.targetBookID: $0]
+                        } ?? [:],
+                        priority: .system,
+                        intent: .importBook,
+                        targetMayBeCreated: existingReference == nil
+                    )
+                } else {
+                    coverMutation = nil
+                }
+                resolved.append(ResolvedPreparedImport(
+                    prepared: candidate,
+                    proposal: proposal,
+                    coverMutation: coverMutation
+                ))
+            }
+        } catch {
+            Log.persistence.error(
+                "Import cover preparation failed: \(String(describing: error), privacy: .public)"
+            )
+            await abort(prepared.flatMap(\.transactions))
+            await abortCoverMutations(resolved.compactMap(\.coverMutation))
+            result.failures.append(contentsOf: importFailures(
+                for: proposals.map(\.0),
+                reason: .staging,
+                detail: error.localizedDescription
+            ))
+            return result
+        }
+
         var requiredBookIDs = Set(resolved.compactMap { candidate -> UUID? in
             guard case .addFormatToEdition(let existingBookID, _) =
                 candidate.proposal.reconciliation else { return nil }
@@ -1142,152 +1432,161 @@ final class ImportService {
             return workID
         })
         requiredWorkIDs.subtract(createdWorkIDs)
-        var booksByID: [UUID: Book]
-        var worksByID: [UUID: Work]
-        do {
-            booksByID = Dictionary(
-                uniqueKeysWithValues: try requiredBookIDs.map {
-                    let book = try mutations.book(id: $0)
-                    return (book.uuid, book)
-                }
-            )
-            worksByID = Dictionary(
-                uniqueKeysWithValues: try requiredWorkIDs.map {
-                    let work = try mutations.work(id: $0)
-                    return (work.uuid, work)
-                }
-            )
-        } catch {
-            await abort(resolved.flatMap(\.transactions))
-            result.failedBookIDs.append(contentsOf: proposals.map(\.0.request.uuid))
-            return result
-        }
-
         var bookPreimages: [UUID: ImportedBookPreimage] = [:]
         var workPreimages: [UUID: ImportedWorkPreimage] = [:]
-        var targetBooksByRequestID: [UUID: Book] = [:]
-        var affectedBookIDs: Set<UUID> = []
-        var affectedWorkIDs: Set<UUID> = []
-        for candidate in resolved {
-            let prepared = candidate.prepared
-            let proposal = candidate.proposal
-            let inspection = prepared.inspection
-            let book: Book
-            switch proposal.reconciliation {
-            case .exactDuplicate:
-                continue
-
-            case .addFormatToEdition(let existingBookID, let workID):
-                guard let existing = booksByID[existingBookID] else { continue }
-                if !createdBookIDs.contains(existingBookID),
-                   bookPreimages[existingBookID] == nil {
-                    bookPreimages[existingBookID] = ImportedBookPreimage(
-                        book: existing,
-                        assets: existing.assets,
-                        coverVersion: existing.coverVersion,
-                        coverScopeRaw: existing.coverScopeRaw,
-                        coverAssetUUID: existing.coverAssetUUID
-                    )
-                }
-                book = existing
-                if let workID { affectedWorkIDs.insert(workID) }
-
+        let targetBookIDsByRequestID = Dictionary(
+            uniqueKeysWithValues: resolved.map {
+                ($0.prepared.request.uuid, $0.proposal.targetBookID)
+            }
+        )
+        let affectedBookIDs = Set(targetBookIDsByRequestID.values)
+        let affectedWorkIDs = Set(resolved.compactMap { candidate -> UUID? in
+            switch candidate.proposal.reconciliation {
+            case .addFormatToEdition(_, let workID):
+                workID
             case .createAnotherEdition(let workID):
-                guard let work = worksByID[workID] else { continue }
-                if !createdWorkIDs.contains(workID),
-                   workPreimages[workID] == nil {
-                    workPreimages[workID] = ImportedWorkPreimage(
-                        work: work,
-                        editions: work.editions,
-                        preferredEditionUUID: work.preferredEditionUUID
-                    )
-                }
-                book = makeImportedBook(from: prepared, work: work)
-                booksByID[book.uuid] = book
-
+                workID
             case .createNewWork, .ambiguousReview:
-                let work = Work(
-                    uuid: proposal.candidate.proposedWorkID,
-                    title: inspection.metadata.title,
-                    author: inspection.metadata.author
-                )
-                modelContext.insert(work)
-                worksByID[work.uuid] = work
-                book = makeImportedBook(from: prepared, work: work)
-                booksByID[book.uuid] = book
+                candidate.proposal.candidate.proposedWorkID
+            case .exactDuplicate:
+                nil
             }
-
-            let asset = BookAsset(
-                uuid: inspection.assetID,
-                fileName: inspection.managedFileName,
-                origin: .original,
-                sourceProvenance: .directImport,
-                contentHash: inspection.sha256,
-                sizeBytes: inspection.sizeBytes,
-                drmProtected: inspection.drmProtected,
-                dateAdded: book.dateAdded,
-                validationStatus: inspection.validation,
-                book: book
-            )
-            modelContext.insert(asset)
-            if candidate.coverTransaction != nil {
-                book.coverVersion += 1
-                _ = book.selectCoverOwner(.edition(book.uuid))
-            }
-            targetBooksByRequestID[prepared.request.uuid] = book
-            affectedBookIDs.insert(book.uuid)
-            if let workID = book.work?.uuid { affectedWorkIDs.insert(workID) }
-        }
-
-        guard targetBooksByRequestID.count == resolved.count else {
-            modelContext.rollback()
-            await abort(resolved.flatMap(\.transactions))
-            result.failedBookIDs.append(contentsOf: proposals.map(\.0.request.uuid))
-            return result
-        }
+        })
 
         do {
             session.advance(to: .chunkCommit)
-            let commit = try await mutations.commitStagedFiles(
-                .importBooks(bookIDs: Array(affectedBookIDs)),
-                transactions: resolved.flatMap(\.transactions),
+            let preparedCovers = resolved.compactMap(\.coverMutation)
+            let commit = try await coverMutations.commit(
+                preparedCovers,
+                command: .importBooks(bookIDs: Array(affectedBookIDs)),
+                additionalTransactions: resolved.flatMap(\.prepared.transactions),
                 affectedBookIDs: affectedBookIDs,
                 affectedWorkIDs: affectedWorkIDs,
                 revertingOnFailure: {
                     for preimage in bookPreimages.values {
                         preimage.book.assets = preimage.assets
-                        preimage.book.coverVersion = preimage.coverVersion
-                        preimage.book.coverScopeRaw = preimage.coverScopeRaw
-                        preimage.book.coverAssetUUID = preimage.coverAssetUUID
                     }
                     for preimage in workPreimages.values {
                         preimage.work.editions = preimage.editions
                         preimage.work.preferredEditionUUID = preimage.preferredEditionUUID
                     }
                 }
-            )
+            ) {
+                if let targetWorkID {
+                    let target = try self.mutations.work(id: targetWorkID)
+                    guard target.modelContext != nil else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                }
+
+                var booksByID = Dictionary(
+                    uniqueKeysWithValues: try requiredBookIDs.map {
+                        let book = try self.mutations.book(id: $0)
+                        return (book.uuid, book)
+                    }
+                )
+                var worksByID = Dictionary(
+                    uniqueKeysWithValues: try requiredWorkIDs.map {
+                        let work = try self.mutations.work(id: $0)
+                        return (work.uuid, work)
+                    }
+                )
+
+                for candidate in resolved {
+                    let prepared = candidate.prepared
+                    let proposal = candidate.proposal
+                    let inspection = prepared.inspection
+                    let book: Book
+                    switch proposal.reconciliation {
+                    case .exactDuplicate:
+                        continue
+
+                    case .addFormatToEdition(let existingBookID, _):
+                        guard let existing = booksByID[existingBookID] else {
+                            throw CatalogMutationError.modelNotFound
+                        }
+                        if !createdBookIDs.contains(existingBookID),
+                           bookPreimages[existingBookID] == nil {
+                            bookPreimages[existingBookID] = ImportedBookPreimage(
+                                book: existing,
+                                assets: existing.assets
+                            )
+                        }
+                        book = existing
+
+                    case .createAnotherEdition(let workID):
+                        guard let work = worksByID[workID] else {
+                            throw CatalogMutationError.modelNotFound
+                        }
+                        if !createdWorkIDs.contains(workID),
+                           workPreimages[workID] == nil {
+                            workPreimages[workID] = ImportedWorkPreimage(
+                                work: work,
+                                editions: work.editions,
+                                preferredEditionUUID: work.preferredEditionUUID
+                            )
+                        }
+                        book = self.makeImportedBook(from: prepared, work: work)
+                        booksByID[book.uuid] = book
+
+                    case .createNewWork, .ambiguousReview:
+                        let work = Work(
+                            uuid: proposal.candidate.proposedWorkID,
+                            title: inspection.metadata.title,
+                            author: inspection.metadata.author
+                        )
+                        self.modelContext.insert(work)
+                        worksByID[work.uuid] = work
+                        book = self.makeImportedBook(from: prepared, work: work)
+                        booksByID[book.uuid] = book
+                    }
+
+                    let asset = BookAsset(
+                        uuid: inspection.assetID,
+                        fileName: inspection.managedFileName,
+                        origin: .original,
+                        sourceProvenance: .directImport,
+                        contentHash: inspection.sha256,
+                        sizeBytes: inspection.sizeBytes,
+                        drmProtected: inspection.drmProtected,
+                        dateAdded: book.dateAdded,
+                        validationStatus: inspection.validation,
+                        book: book
+                    )
+                    self.modelContext.insert(asset)
+                }
+            }
             session.advance(to: .publishing)
             let pending = Set(commit.pendingTransactionIDs)
             for candidate in resolved {
                 let prepared = candidate.prepared
                 if candidate.transactions.contains(where: { pending.contains($0.id) }) {
-                    result.pendingContentHashes.append(prepared.inspection.sha256)
+                    result.failures.append(ImportFailure(
+                        sourceURL: prepared.request.sourceURL,
+                        requestedBookID: prepared.request.uuid,
+                        reason: .recoveryDeferred,
+                        detail: "The catalog commit succeeded, but managed-file publication is pending recovery."
+                    ))
                     continue
                 }
-                guard let book = targetBooksByRequestID[prepared.request.uuid] else { continue }
-                result.importedBookIDs.append(book.uuid)
-                if case .ambiguousReview = candidate.proposal.reconciliation {
-                    result.reviewBookIDs.append(book.uuid)
+                guard let bookID = targetBookIDsByRequestID[prepared.request.uuid] else {
+                    continue
                 }
-                if let coverData = prepared.inspection.coverJPEGData,
-                   candidate.coverTransaction != nil,
-                   let image = NSImage(data: coverData) {
-                    await CoverCache.shared.replace(image, for: book.coverCacheURL)
+                result.importedBookIDs.append(bookID)
+                if case .ambiguousReview = candidate.proposal.reconciliation {
+                    result.reviewBookIDs.append(bookID)
                 }
             }
             return result
         } catch {
-            result.failedBookIDs.append(contentsOf: resolved.map(\.prepared.request.uuid))
+            Log.persistence.error(
+                "Import catalog commit failed: \(String(describing: error), privacy: .public)"
+            )
+            result.failures.append(contentsOf: importFailures(
+                for: resolved.map(\.prepared),
+                reason: .catalog,
+                detail: error.localizedDescription
+            ))
             return result
         }
     }
@@ -1315,30 +1614,16 @@ final class ImportService {
         return book
     }
 
-    private func makeImportReconciler() -> ImportReconciler {
-        let books = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
-        return ImportReconciler(records: books.map { book in
-            ImportCatalogRecord(
-                bookID: book.uuid,
-                workID: book.work?.uuid,
-                fingerprint: ImportFingerprint(
-                    contentHashes: Set(book.assets.compactMap(\.contentHash)),
-                    formats: Set(book.assets.map(\.format) + [book.format])
-                ),
-                identity: ImportIdentityRecord(
-                    title: book.displayTitle,
-                    author: book.displayAuthor,
-                    isbn: book.isbn,
-                    language: book.language,
-                    publisher: book.publisher,
-                    year: book.year
-                )
-            )
-        })
-    }
-
     private func abort(_ transactions: [ManagedFileTransaction]) async {
         for transaction in transactions { await managedFiles.abort(transaction) }
+    }
+
+    private func abortCoverMutations(
+        _ prepared: [PreparedCoverMutation]
+    ) async {
+        for mutation in prepared {
+            await coverMutations.abort(mutation)
+        }
     }
 
     // MARK: - Background extraction
@@ -1601,9 +1886,87 @@ final class ImportService {
         }
     }
 
-    private func reportImportFailures(_ count: Int) {
-        if count > 0 {
-            toasts.error(String(localized: "Some files couldn\u{2019}t be imported (\(count))."))
+    private func importFailures(
+        for prepared: [PreparedImport],
+        reason: ImportFailureReason,
+        detail: String
+    ) -> [ImportFailure] {
+        prepared.map {
+            ImportFailure(
+                sourceURL: $0.request.sourceURL,
+                requestedBookID: $0.request.uuid,
+                reason: reason,
+                detail: detail
+            )
+        }
+    }
+
+    private func reportMaintenanceFetchFailure(
+        _ error: Error,
+        operation: String
+    ) {
+        lastMaintenanceError = error.localizedDescription
+        Log.persistence.error(
+            "Catalog \(operation, privacy: .public) fetch failed: \(error.localizedDescription, privacy: .public)"
+        )
+    }
+
+    private func reportImportFailures(_ failures: [ImportFailure]) {
+        let actionable = failures.filter { $0.reason != .recoveryDeferred }
+        guard !actionable.isEmpty else { return }
+        for failure in actionable {
+            Log.persistence.error(
+                "Import failed [\(failure.reason.rawValue, privacy: .public)] \(failure.sourceURL?.lastPathComponent ?? "unknown", privacy: .public): \(failure.detail, privacy: .public)"
+            )
+        }
+        let reasons = Set(actionable.map(\.reason))
+            .sorted { $0.rawValue < $1.rawValue }
+            .map(\.localizedLabel)
+            .joined(separator: ", ")
+        toasts.error(
+            String(localized: "Some files couldn\u{2019}t be imported (\(actionable.count)).")
+                + " " + reasons
+        )
+    }
+
+    private func persistImportFailures(_ failures: [ImportFailure]) async {
+        do {
+            importRecoveryItems = try await recoveryQueue.record(failures)
+            lastRecoveryQueueError = nil
+        } catch {
+            // The import result is already authoritative. Failure to update
+            // its review queue must never reclassify a committed import.
+            lastRecoveryQueueError = error.localizedDescription
+            Log.persistence.error(
+                "Could not persist the import recovery queue: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private func scheduleImportFailurePersistence(_ failures: [ImportFailure]) {
+        let previous = recoveryQueueWriteTask
+        recoveryQueueWriteTask = Task { [weak self] in
+            await previous?.value
+            await self?.persistImportFailures(failures)
+        }
+    }
+}
+
+extension ImportFailureReason {
+    var localizedLabel: String {
+        switch self {
+        case .unsupportedFormat:
+            String(localized: "Unsupported format")
+        case .unreadableSource:
+            String(localized: "Unreadable source")
+        case .staging:
+            String(localized: "File staging failed")
+        case .validation:
+            String(localized: "Source validation failed")
+        case .catalog:
+            String(localized: "Catalog update failed")
+        case .recoveryDeferred:
+            String(localized: "Recovery deferred")
         }
     }
 }

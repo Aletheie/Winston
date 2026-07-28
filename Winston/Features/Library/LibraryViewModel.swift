@@ -179,6 +179,13 @@ final class LibraryViewModel {
         importer.addBooks(from: urls, completion: completion)
     }
     @discardableResult
+    func addBooks(
+        from sources: [ImportSource],
+        completion: ImportService.ImportCompletion? = nil
+    ) -> ImportSession? {
+        importer.addBooks(from: sources, completion: completion)
+    }
+    @discardableResult
     func addEditions(from urls: [URL], to work: Work) -> ImportSession? {
         importer.addBooks(from: urls, assigningTo: work)
     }
@@ -583,7 +590,9 @@ final class LibraryViewModel {
 
     // MARK: - Highlights / Export / Covers (forwarded)
 
-    func importHighlights(via monitor: DeviceMonitor) { highlights.importHighlights(via: monitor) }
+    func importHighlights(via monitor: DeviceMonitor) async {
+        await highlights.importHighlights(via: monitor)
+    }
     func exportLibrary(to folder: URL) { exporter.exportLibrary(to: folder) }
     func setCustomCover(for book: Book, from url: URL) { covers.setCustomCover(for: book, from: url) }
     func setCustomCover(for book: Book, from data: Data) { covers.setCustomCover(for: book, from: data) }

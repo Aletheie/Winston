@@ -8,6 +8,8 @@ enum LibrarySheet: Identifiable {
     case addPhysicalBook
     case edit(Book)
     case bulkEdit(Set<UUID>)
+    case libraryIntegrity
+    case importRecovery
     case metadataFixes
     case statistics
     case highlights
@@ -25,6 +27,8 @@ enum LibrarySheet: Identifiable {
         case .addPhysicalBook: "addPhysicalBook"
         case .edit(let book): "edit-\(book.uuid.uuidString)"
         case .bulkEdit(let ids): "bulkEdit-\(ids.count)-\(ids.hashValue)"
+        case .libraryIntegrity: "libraryIntegrity"
+        case .importRecovery: "importRecovery"
         case .metadataFixes:  "metadataFixes"
         case .statistics:     "statistics"
         case .highlights:     "highlights"
@@ -208,7 +212,9 @@ struct LibraryView: View {
     }
 
     private var convertibleSelectionCount: Int {
-        selectedBooks.filter { $0.hasDigitalFile && EbookConverter.needsConversion(format: $0.format) }.count
+        selectedBooks.filter {
+            $0.hasCatalogDigitalFile && EbookConverter.needsConversion(format: $0.format)
+        }.count
     }
 
     // MARK: - Body
@@ -236,7 +242,7 @@ struct LibraryView: View {
                     kindlePresenceFilter: $kindlePresenceFilter,
                     showsKindleFilter: deviceMonitor.isConnected,
                     transmitEnabled: deviceMonitor.isConnected
-                        && selectedBooks.contains(where: \.hasDigitalFile)
+                        && selectedBooks.contains(where: \.hasCatalogDigitalFile)
                         && !transferQueue.isTransferring,
                     onImport: { isImporting = true },
                     onAddPhysicalBook: { activeSheet = .addPhysicalBook },
@@ -271,12 +277,25 @@ struct LibraryView: View {
                             await viewModel.bulkUpdate(bookIDs: bookIDs, edit: edit)
                         }
                     }
+                case .libraryIntegrity:
+                    LibraryIntegritySheet(
+                        viewModel: viewModel,
+                        onShowBook: showBookInLibrary,
+                        onReviewMetadata: {
+                            presentAfterDismissingSheet(.metadataFixes)
+                        },
+                        onOpenRecovery: {
+                            presentAfterDismissingSheet(.importRecovery)
+                        }
+                    )
+                case .importRecovery:
+                    ImportRecoverySheet(viewModel: viewModel)
                 case .metadataFixes:
                     MetadataFixesSheet(viewModel: viewModel)
                 case .statistics:
                     StatisticsView(books: books)
                 case .highlights:
-                    HighlightsView(books: books)
+                    HighlightsView()
                 case .series(let name):
                     SeriesView(
                         books: books,
@@ -519,6 +538,10 @@ struct LibraryView: View {
             convertSelectedBooks()
         case .fetchMetadata:
             viewModel.fetchOnlineMetadata(for: selectedBooks)
+        case .showLibraryIntegrity:
+            activeSheet = .libraryIntegrity
+        case .showImportRecovery:
+            activeSheet = .importRecovery
         case .showMetadataFixes:
             activeSheet = .metadataFixes
         case .reviewEditions:
@@ -562,6 +585,14 @@ struct LibraryView: View {
     private func showBookInLibrary(_ bookID: UUID) {
         guard let book = readModel.book(uuid: bookID) else { return }
         showInLibrary(book)
+    }
+
+    private func presentAfterDismissingSheet(_ sheet: LibrarySheet) {
+        activeSheet = nil
+        Task { @MainActor in
+            await Task.yield()
+            activeSheet = sheet
+        }
     }
 
     private func handleBookClick(book: Book) {
