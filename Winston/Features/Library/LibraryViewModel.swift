@@ -1,6 +1,7 @@
 import Foundation
-import SwiftData
 import Observation
+import OSLog
+import SwiftData
 
 struct PhysicalBookDraft: Sendable {
     var title: String
@@ -49,7 +50,11 @@ final class LibraryViewModel {
         )
         self.mutations = mutations
         self.managedFiles = managedFiles
-        let wishlist = WishlistService(modelContext: modelContext, toasts: toasts)
+        let wishlist = WishlistService(
+            modelContext: modelContext,
+            toasts: toasts,
+            mutations: mutations
+        )
         let metadata = MetadataService(
             modelContext: modelContext,
             settings: settings,
@@ -62,7 +67,8 @@ final class LibraryViewModel {
             modelContext: modelContext,
             settings: settings,
             toasts: toasts,
-            wishlist: wishlist
+            wishlist: wishlist,
+            mutations: mutations
         )
         let editions = CatalogReconciliationService(
             modelContext: modelContext,
@@ -103,7 +109,7 @@ final class LibraryViewModel {
             modelContext: modelContext,
             mutations: mutations
         )
-        self.exporter = ExportService(modelContext: modelContext)
+        self.exporter = ExportService(modelContext: modelContext, toasts: toasts)
         self.covers = CoverService(
             modelContext: modelContext,
             mutations: mutations,
@@ -129,6 +135,8 @@ final class LibraryViewModel {
     // MARK: - Derived state (forwarded)
 
     var pendingMetadataUUIDs: Set<UUID> { importer.pendingMetadataUUIDs }
+    var importRecoveryItems: [ImportRecoveryItem] { importer.importRecoveryItems }
+    var importRecoveryQueueError: String? { importer.lastRecoveryQueueError }
     var convertingUUIDs: Set<UUID> { conversion.convertingUUIDs }
     var enrichingUUIDs: Set<UUID> { metadata.enrichingUUIDs }
     var isExtracting: Bool { importer.isExtracting }
@@ -218,6 +226,27 @@ final class LibraryViewModel {
     func isMissing(_ book: Book) -> Bool { health.isMissing(book) }
     @discardableResult
     func scanForMissingFiles() async -> Int { await health.scanForMissingFiles() }
+    func integrityReport() async throws -> LibraryIntegrityReport {
+        try await health.integrityReport()
+    }
+    func repairCatalogInvariants(
+        from report: LibraryIntegrityReport
+    ) async throws -> LibraryIntegrityRepairResult {
+        try await health.repairCatalogInvariants(from: report)
+    }
+    func inspectPendingManagedFiles() async throws -> ManagedFilePendingInspection {
+        try await managedFiles.inspectPendingTransactions()
+    }
+    func reloadImportRecoveryQueue() async {
+        await importer.reloadImportRecoveryQueue()
+    }
+    func dismissImportRecoveryItems(ids: Set<UUID>) async {
+        await importer.dismissImportRecoveryItems(ids: ids)
+    }
+    @discardableResult
+    func retryImportRecoveryItem(id: UUID) -> ImportSession? {
+        importer.retryImportRecoveryItem(id: id)
+    }
     func relink(_ book: Book, from url: URL) async { await health.relink(book, from: url) }
 
     @discardableResult
@@ -568,10 +597,17 @@ final class LibraryViewModel {
     func rescanMissingMetadata() async { await importer.rescanMissingMetadata() }
     func detectMissingDRM() async { await importer.detectMissingDRM() }
     func backfillMissingAssetHashes() async {
-        await BookAssetMaintenance.backfillMissingHashes(
-            context: modelContext,
-            mutations: mutations
-        )
+        do {
+            _ = try await BookAssetMaintenance.backfillMissingHashes(
+                context: modelContext,
+                mutations: mutations
+            )
+        } catch {
+            Log.persistence.error(
+                "Asset hash backfill fetch failed: \(error.localizedDescription, privacy: .public)"
+            )
+            toasts.error(String(localized: "Couldn’t read files that need integrity hashes."))
+        }
     }
 
     @discardableResult
@@ -598,14 +634,12 @@ final class LibraryViewModel {
         let originalPrimaryAssetUUID = book.primaryAssetUUID
         let originalFileSize = book.fileSizeBytes
         let originalDRMProtected = book.drmProtected
-        let originalCoverVersion = book.coverVersion
         let assetID = UUID()
         guard let source = try? ManagedFileSource.book(
             sourceURL: url,
             destination: .newAsset(assetID: assetID)
         ) else { return nil }
         let fileName = source.finalRelativeName
-        let expectedCoverVersion = shouldBecomePrimary ? originalCoverVersion + 1 : originalCoverVersion
         let operationID = UUID()
         let progress = beginManagedFileOperation(id: operationID, intent: .importBook)
         defer { endManagedFileOperation(id: operationID) }
@@ -616,8 +650,7 @@ final class LibraryViewModel {
                 sources: [source],
                 requirement: ManagedFileRequirement(
                     presentBookIDs: [bookID],
-                    referencedBookFileNames: [fileName],
-                    coverVersions: shouldBecomePrimary ? [bookID: expectedCoverVersion] : [:]
+                    referencedBookFileNames: [fileName]
                 ),
                 operationID: operationID,
                 progress: progress
@@ -628,8 +661,7 @@ final class LibraryViewModel {
 
         guard let liveBook = try? mutations.book(id: bookID),
               liveBook.fileName == originalPrimaryName,
-              liveBook.primaryAssetUUID == originalPrimaryAssetUUID,
-              liveBook.coverVersion == originalCoverVersion else {
+              liveBook.primaryAssetUUID == originalPrimaryAssetUUID else {
             await managedFiles.abort(transaction)
             return nil
         }
@@ -654,7 +686,6 @@ final class LibraryViewModel {
                     liveBook.primaryAssetUUID = originalPrimaryAssetUUID
                     liveBook.fileSizeBytes = originalFileSize
                     liveBook.drmProtected = originalDRMProtected
-                    liveBook.coverVersion = originalCoverVersion
                     if let insertedAsset {
                         liveBook.assets.removeAll { $0 === insertedAsset }
                         if insertedAsset.modelContext != nil {
@@ -666,7 +697,6 @@ final class LibraryViewModel {
                 let liveBook = try mutations.book(id: bookID)
                 guard liveBook.fileName == originalPrimaryName,
                       liveBook.primaryAssetUUID == originalPrimaryAssetUUID,
-                      liveBook.coverVersion == originalCoverVersion,
                       !liveBook.assets.contains(where: { $0.contentHash == staged.sha256 }) else {
                     throw CatalogMutationError.modelNotFound
                 }
@@ -687,7 +717,6 @@ final class LibraryViewModel {
                     liveBook.fileName = fileName
                     liveBook.fileSizeBytes = asset.sizeBytes
                     liveBook.drmProtected = asset.drmProtected
-                    liveBook.coverVersion = expectedCoverVersion
                 }
                 insertedAsset = asset
             }
@@ -708,7 +737,6 @@ final class LibraryViewModel {
         let assetID = asset.uuid
         let oldName = asset.fileName
         let oldDateAdded = asset.dateAdded
-        let originalCoverVersion = book.coverVersion
         let originalBookFileName = book.fileName
         let originalPrimaryAssetUUID = book.primaryAssetUUID
         let originalBookFileSize = book.fileSizeBytes
@@ -727,7 +755,6 @@ final class LibraryViewModel {
             destination: .replacement(assetID: assetID, previous: previousIdentity)
         ) else { return }
         let fileName = source.finalRelativeName
-        let expectedCoverVersion = wasPrimary ? originalCoverVersion + 1 : originalCoverVersion
         let operationID = UUID()
         let progress = beginManagedFileOperation(id: operationID, intent: .replaceBookFile)
         defer { endManagedFileOperation(id: operationID) }
@@ -739,8 +766,7 @@ final class LibraryViewModel {
                 requirement: ManagedFileRequirement(
                     presentBookIDs: [bookID],
                     referencedBookFileNames: [fileName],
-                    unreferencedBookFileNames: [oldName],
-                    coverVersions: wasPrimary ? [bookID: expectedCoverVersion] : [:]
+                    unreferencedBookFileNames: [oldName]
                 ),
                 cleanups: [.file(previousIdentity)],
                 operationID: operationID,
@@ -754,7 +780,6 @@ final class LibraryViewModel {
             DRMDetector.isProtected(url: staged.stagedURL)
         }.value
         guard let liveBook = try? mutations.book(id: bookID),
-              liveBook.coverVersion == originalCoverVersion,
               let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
               liveAsset.fileName == oldName,
               liveAsset.dateAdded == oldDateAdded else {
@@ -795,12 +820,10 @@ final class LibraryViewModel {
                     liveBook.primaryAssetUUID = originalPrimaryAssetUUID
                     liveBook.fileSizeBytes = originalBookFileSize
                     liveBook.drmProtected = originalDRMProtected
-                    liveBook.coverVersion = originalCoverVersion
                 }
             ) {
                 let liveBook = try mutations.book(id: bookID)
-                guard liveBook.coverVersion == originalCoverVersion,
-                      let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
+                guard let liveAsset = liveBook.assets.first(where: { $0.uuid == assetID }),
                       liveAsset.fileName == oldName,
                       liveAsset.dateAdded == oldDateAdded else {
                     throw CatalogMutationError.modelNotFound
@@ -825,7 +848,6 @@ final class LibraryViewModel {
                     liveBook.fileName = fileName
                     liveBook.fileSizeBytes = staged.byteCount
                     liveBook.drmProtected = drmProtected
-                    liveBook.coverVersion = expectedCoverVersion
                 }
             }
             if !result.isFullyPublished {
@@ -879,7 +901,6 @@ final class LibraryViewModel {
                 storedBook.fileName = storedAsset.fileName
                 storedBook.fileSizeBytes = storedAsset.sizeBytes
                 storedBook.drmProtected = storedAsset.drmProtected
-                storedBook.coverVersion += 1
             }
         } catch {
             return

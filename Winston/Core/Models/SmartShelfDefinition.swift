@@ -18,6 +18,227 @@ nonisolated protocol SmartShelfBookValues: Sendable {
     var smartShelfHasMissingMetadata: Bool { get }
 }
 
+nonisolated struct SmartShelfFieldDependencies: OptionSet, Hashable, Sendable {
+    let rawValue: UInt32
+
+    static let readingStatus = Self(rawValue: 1 << 0)
+    static let language = Self(rawValue: 1 << 1)
+    static let pageCount = Self(rawValue: 1 << 2)
+    static let format = Self(rawValue: 1 << 3)
+    static let rating = Self(rawValue: 1 << 4)
+    static let translator = Self(rawValue: 1 << 5)
+    static let tags = Self(rawValue: 1 << 6)
+    static let author = Self(rawValue: 1 << 7)
+    static let title = Self(rawValue: 1 << 8)
+    static let series = Self(rawValue: 1 << 9)
+    static let publisher = Self(rawValue: 1 << 10)
+    static let highlights = Self(rawValue: 1 << 11)
+    static let drmProtected = Self(rawValue: 1 << 12)
+    static let devicePresence = Self(rawValue: 1 << 13)
+    static let missingMetadata = Self(rawValue: 1 << 14)
+
+    static let all: Self = [
+        .readingStatus,
+        .language,
+        .pageCount,
+        .format,
+        .rating,
+        .translator,
+        .tags,
+        .author,
+        .title,
+        .series,
+        .publisher,
+        .highlights,
+        .drmProtected,
+        .devicePresence,
+        .missingMetadata,
+    ]
+}
+
+nonisolated struct CompiledSmartShelfDefinition: Hashable, Sendable {
+    let matchMode: SmartShelfDefinition.MatchMode
+    let rules: [CompiledSmartShelfRule]
+    let dependencies: SmartShelfFieldDependencies
+
+    var requiresHighlights: Bool {
+        dependencies.contains(.highlights)
+    }
+
+    func matches(
+        _ book: some SmartShelfBookValues,
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool
+    ) -> Bool {
+        guard !rules.isEmpty else { return false }
+        return switch matchMode {
+        case .all:
+            rules.allSatisfy {
+                $0.matches(
+                    book,
+                    deviceFileNames: deviceFileNames,
+                    deviceIsConnected: deviceIsConnected
+                )
+            }
+        case .any:
+            rules.contains {
+                $0.matches(
+                    book,
+                    deviceFileNames: deviceFileNames,
+                    deviceIsConnected: deviceIsConnected
+                )
+            }
+        }
+    }
+}
+
+nonisolated struct CompiledSmartShelfRule: Hashable, Sendable {
+    let field: SmartShelfRule.Field
+    let comparison: SmartShelfRule.Comparison
+    let normalizedValue: String
+    let numberValue: Int?
+
+    init(_ rule: SmartShelfRule) {
+        field = rule.field
+        comparison = rule.comparison
+        normalizedValue = Self.normalize(rule.value)
+        numberValue = Int(
+            rule.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    var dependencies: SmartShelfFieldDependencies {
+        field.dependencies
+    }
+
+    func matches(
+        _ book: some SmartShelfBookValues,
+        deviceFileNames: Set<String>,
+        deviceIsConnected: Bool
+    ) -> Bool {
+        switch field {
+        case .readingStatus:
+            stringMatches(book.smartShelfReadingStatusRaw)
+        case .language:
+            stringMatches(book.smartShelfLanguage)
+        case .pageCount:
+            numberMatches(book.smartShelfPageCount)
+        case .format:
+            stringMatches(book.smartShelfFormat)
+        case .rating:
+            numberMatches(book.smartShelfRating)
+        case .translator:
+            stringMatches(book.smartShelfTranslator)
+        case .tag:
+            stringsMatch(book.smartShelfTags)
+        case .author:
+            stringMatches(book.smartShelfAuthor)
+        case .title:
+            stringMatches(book.smartShelfTitle)
+        case .series:
+            stringMatches(book.smartShelfSeries)
+        case .publisher:
+            stringMatches(book.smartShelfPublisher)
+        case .highlights:
+            booleanMatches(book.smartShelfHasHighlights)
+        case .drmProtected:
+            booleanMatches(book.smartShelfIsDRMProtected)
+        case .onDevice:
+            booleanMatches(
+                deviceIsConnected
+                    ? !book.smartShelfDeviceMatchKeys.isDisjoint(with: deviceFileNames)
+                    : nil
+            )
+        case .missingMetadata:
+            booleanMatches(book.smartShelfHasMissingMetadata)
+        }
+    }
+
+    private func stringMatches(_ actual: String?) -> Bool {
+        let actual = actual?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch comparison {
+        case .isMissing:
+            return actual?.isEmpty != false
+        case .isPresent:
+            return actual?.isEmpty == false
+        default:
+            guard let actual, !actual.isEmpty else {
+                return comparison == .doesNotContain
+                    || comparison == .isNotEqual
+            }
+            guard !normalizedValue.isEmpty else { return false }
+            let normalizedActual = Self.normalize(actual)
+            switch comparison {
+            case .contains: return normalizedActual.contains(normalizedValue)
+            case .doesNotContain: return !normalizedActual.contains(normalizedValue)
+            case .isEqual: return normalizedActual == normalizedValue
+            case .isNotEqual: return normalizedActual != normalizedValue
+            default: return false
+            }
+        }
+    }
+
+    private func stringsMatch(_ actual: [String]) -> Bool {
+        switch comparison {
+        case .isMissing:
+            return actual.isEmpty
+        case .isPresent:
+            return !actual.isEmpty
+        default:
+            guard !normalizedValue.isEmpty else { return false }
+            let normalized = actual.map(Self.normalize)
+            switch comparison {
+            case .contains:
+                return normalized.contains { $0.contains(normalizedValue) }
+            case .doesNotContain:
+                return !normalized.contains { $0.contains(normalizedValue) }
+            case .isEqual:
+                return normalized.contains(normalizedValue)
+            case .isNotEqual:
+                return !normalized.contains(normalizedValue)
+            default:
+                return false
+            }
+        }
+    }
+
+    private func numberMatches(_ actual: Int?) -> Bool {
+        switch comparison {
+        case .isMissing:
+            return actual == nil
+        case .isPresent:
+            return actual != nil
+        default:
+            guard let actual, let numberValue else { return false }
+            switch comparison {
+            case .isEqual: return actual == numberValue
+            case .lessThan: return actual < numberValue
+            case .greaterThan: return actual > numberValue
+            case .atLeast: return actual >= numberValue
+            case .atMost: return actual <= numberValue
+            default: return false
+            }
+        }
+    }
+
+    private func booleanMatches(_ actual: Bool?) -> Bool {
+        guard let actual else { return false }
+        return switch comparison {
+        case .isTrue: actual
+        case .isFalse: !actual
+        default: false
+        }
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: Locale(identifier: "en_US_POSIX")
+            )
+    }
+}
+
 nonisolated struct SmartShelfDefinition: Codable, Hashable, Sendable {
     enum MatchMode: String, Codable, CaseIterable, Identifiable, Sendable {
         case all
@@ -46,7 +267,18 @@ nonisolated struct SmartShelfDefinition: Codable, Hashable, Sendable {
     }
 
     var requiresHighlights: Bool {
-        rules.contains { $0.field == .highlights }
+        compiled.requiresHighlights
+    }
+
+    var compiled: CompiledSmartShelfDefinition {
+        let compiledRules = rules.map(CompiledSmartShelfRule.init)
+        return CompiledSmartShelfDefinition(
+            matchMode: matchMode,
+            rules: compiledRules,
+            dependencies: compiledRules.reduce(into: []) {
+                $0.formUnion($1.dependencies)
+            }
+        )
     }
 
     func matches(
@@ -54,25 +286,11 @@ nonisolated struct SmartShelfDefinition: Codable, Hashable, Sendable {
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) -> Bool {
-        guard !rules.isEmpty else { return false }
-        switch matchMode {
-        case .all:
-            return rules.allSatisfy {
-                $0.matches(
-                    book,
-                    deviceFileNames: deviceFileNames,
-                    deviceIsConnected: deviceIsConnected
-                )
-            }
-        case .any:
-            return rules.contains {
-                $0.matches(
-                    book,
-                    deviceFileNames: deviceFileNames,
-                    deviceIsConnected: deviceIsConnected
-                )
-            }
-        }
+        compiled.matches(
+            book,
+            deviceFileNames: deviceFileNames,
+            deviceIsConnected: deviceIsConnected
+        )
     }
 }
 
@@ -176,6 +394,26 @@ nonisolated struct SmartShelfRule: Codable, Hashable, Identifiable, Sendable {
         var usesNumberValue: Bool { self == .pageCount || self == .rating }
         var usesFormatValue: Bool { self == .format }
         var usesStatusValue: Bool { self == .readingStatus }
+
+        var dependencies: SmartShelfFieldDependencies {
+            switch self {
+            case .readingStatus: .readingStatus
+            case .language: .language
+            case .pageCount: .pageCount
+            case .format: .format
+            case .rating: .rating
+            case .translator: .translator
+            case .tag: .tags
+            case .author: .author
+            case .title: .title
+            case .series: .series
+            case .publisher: .publisher
+            case .highlights: .highlights
+            case .drmProtected: .drmProtected
+            case .onDevice: .devicePresence
+            case .missingMetadata: .missingMetadata
+            }
+        }
     }
 
     enum Comparison: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -258,117 +496,11 @@ nonisolated struct SmartShelfRule: Codable, Hashable, Identifiable, Sendable {
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) -> Bool {
-        switch field {
-        case .readingStatus:
-            return stringMatches(book.smartShelfReadingStatusRaw)
-        case .language:
-            return stringMatches(book.smartShelfLanguage)
-        case .pageCount:
-            return numberMatches(book.smartShelfPageCount)
-        case .format:
-            return stringMatches(book.smartShelfFormat)
-        case .rating:
-            return numberMatches(book.smartShelfRating)
-        case .translator:
-            return stringMatches(book.smartShelfTranslator)
-        case .tag:
-            return stringsMatch(book.smartShelfTags)
-        case .author:
-            return stringMatches(book.smartShelfAuthor)
-        case .title:
-            return stringMatches(book.smartShelfTitle)
-        case .series:
-            return stringMatches(book.smartShelfSeries)
-        case .publisher:
-            return stringMatches(book.smartShelfPublisher)
-        case .highlights:
-            return booleanMatches(book.smartShelfHasHighlights)
-        case .drmProtected:
-            return booleanMatches(book.smartShelfIsDRMProtected)
-        case .onDevice:
-            return booleanMatches(
-                deviceIsConnected
-                    ? !book.smartShelfDeviceMatchKeys.isDisjoint(with: deviceFileNames)
-                    : nil
-            )
-        case .missingMetadata:
-            return booleanMatches(book.smartShelfHasMissingMetadata)
-        }
-    }
-
-    private func stringMatches(_ actual: String?) -> Bool {
-        let actual = actual?.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch comparison {
-        case .isMissing:
-            return actual?.isEmpty != false
-        case .isPresent:
-            return actual?.isEmpty == false
-        default:
-            guard let actual, !actual.isEmpty else {
-                return comparison == .doesNotContain || comparison == .isNotEqual
-            }
-            let normalizedActual = Self.normalized(actual)
-            let expected = Self.normalized(value)
-            guard !expected.isEmpty else { return false }
-            switch comparison {
-            case .contains: return normalizedActual.contains(expected)
-            case .doesNotContain: return !normalizedActual.contains(expected)
-            case .isEqual: return normalizedActual == expected
-            case .isNotEqual: return normalizedActual != expected
-            default: return false
-            }
-        }
-    }
-
-    private func stringsMatch(_ actual: [String]) -> Bool {
-        switch comparison {
-        case .isMissing: return actual.isEmpty
-        case .isPresent: return !actual.isEmpty
-        default:
-            let expected = Self.normalized(value)
-            guard !expected.isEmpty else { return false }
-            let normalized = actual.map(Self.normalized)
-            switch comparison {
-            case .contains: return normalized.contains { $0.contains(expected) }
-            case .doesNotContain: return !normalized.contains { $0.contains(expected) }
-            case .isEqual: return normalized.contains(expected)
-            case .isNotEqual: return !normalized.contains(expected)
-            default: return false
-            }
-        }
-    }
-
-    private func numberMatches(_ actual: Int?) -> Bool {
-        switch comparison {
-        case .isMissing: return actual == nil
-        case .isPresent: return actual != nil
-        default:
-            guard let actual, let expected = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-                return false
-            }
-            switch comparison {
-            case .isEqual: return actual == expected
-            case .lessThan: return actual < expected
-            case .greaterThan: return actual > expected
-            case .atLeast: return actual >= expected
-            case .atMost: return actual <= expected
-            default: return false
-            }
-        }
-    }
-
-    private func booleanMatches(_ actual: Bool?) -> Bool {
-        guard let actual else { return false }
-        return switch comparison {
-        case .isTrue: actual
-        case .isFalse: !actual
-        default: false
-        }
-    }
-
-    private static func normalized(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        CompiledSmartShelfRule(self).matches(
+            book,
+            deviceFileNames: deviceFileNames,
+            deviceIsConnected: deviceIsConnected
+        )
     }
 }
 

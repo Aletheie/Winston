@@ -46,15 +46,17 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
         return facets
     }
 
+    @discardableResult
     mutating func apply(
         _ changes: [LibraryReadModelRecordChange],
         smartCollections: [LibrarySmartCollectionSnapshot],
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool,
         now: Date = .now
-    ) {
+    ) -> Int {
         let recentCutoff = now.addingTimeInterval(-14 * 24 * 3600)
         var refreshKeys = false
+        var smartShelfEvaluationCount = 0
         for change in changes {
             if let old = change.old {
                 remove(old, recentCutoff: recentCutoff)
@@ -69,16 +71,22 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
                 refreshKeys = true
             }
 
+            let changedDependencies = change.smartShelfChangedDependencies
             for collection in smartCollections {
+                guard !collection.dependencies.isDisjoint(
+                    with: changedDependencies
+                ) else { continue }
                 let oldMatches = change.old.map {
-                    collection.matches(
+                    smartShelfEvaluationCount += 1
+                    return collection.matches(
                         $0,
                         deviceFileNames: deviceFileNames,
                         deviceIsConnected: deviceIsConnected
                     )
                 } ?? false
                 let newMatches = change.new.map {
-                    collection.matches(
+                    smartShelfEvaluationCount += 1
+                    return collection.matches(
                         $0,
                         deviceFileNames: deviceFileNames,
                         deviceIsConnected: deviceIsConnected
@@ -93,6 +101,42 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
             }
         }
         if refreshKeys { refreshKeysAndTips() }
+        return smartShelfEvaluationCount
+    }
+
+    @discardableResult
+    mutating func applyDeviceConfigurationChange(
+        records: [LibraryBookRecord],
+        smartCollections: [LibrarySmartCollectionSnapshot],
+        oldDeviceFileNames: Set<String>,
+        newDeviceFileNames: Set<String>,
+        deviceIsConnected: Bool
+    ) -> Int {
+        let deviceCollections = smartCollections.filter(\.hasDeviceDependency)
+        guard !records.isEmpty, !deviceCollections.isEmpty else { return 0 }
+        var evaluationCount = 0
+        for record in records {
+            for collection in deviceCollections {
+                evaluationCount += 2
+                let oldMatches = collection.matches(
+                    record,
+                    deviceFileNames: oldDeviceFileNames,
+                    deviceIsConnected: deviceIsConnected
+                )
+                let newMatches = collection.matches(
+                    record,
+                    deviceFileNames: newDeviceFileNames,
+                    deviceIsConnected: deviceIsConnected
+                )
+                guard oldMatches != newMatches else { continue }
+                if newMatches {
+                    smartCounts[collection.id, default: 0] += 1
+                } else {
+                    Self.decrement(&smartCounts, key: collection.id)
+                }
+            }
+        }
+        return evaluationCount
     }
 
     private mutating func add(
@@ -187,15 +231,23 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
 nonisolated struct LibrarySmartCollectionSnapshot: Equatable, Sendable {
     let id: UUID
     let savedSearch: LibraryQuery.NormalizedQuery?
-    let definition: SmartShelfDefinition?
+    let compiledDefinition: CompiledSmartShelfDefinition?
+
+    var dependencies: SmartShelfFieldDependencies {
+        compiledDefinition?.dependencies ?? .all
+    }
+
+    var hasDeviceDependency: Bool {
+        compiledDefinition?.dependencies.contains(.devicePresence) == true
+    }
 
     func matches(
         _ record: LibraryBookRecord,
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool
     ) -> Bool {
-        if let definition {
-            return definition.matches(
+        if let compiledDefinition {
+            return compiledDefinition.matches(
                 record,
                 deviceFileNames: deviceFileNames,
                 deviceIsConnected: deviceIsConnected
@@ -212,6 +264,57 @@ nonisolated struct LibraryReadModelRecordChange: Equatable, Sendable {
     let id: UUID
     let old: LibraryBookRecord?
     let new: LibraryBookRecord?
+
+    var smartShelfChangedDependencies: SmartShelfFieldDependencies {
+        guard let old, let new else { return .all }
+        var dependencies: SmartShelfFieldDependencies = []
+        if old.readingStatus != new.readingStatus {
+            dependencies.insert(.readingStatus)
+        }
+        if old.language != new.language {
+            dependencies.insert(.language)
+        }
+        if old.pageCount != new.pageCount {
+            dependencies.insert(.pageCount)
+        }
+        if old.format != new.format {
+            dependencies.insert(.format)
+        }
+        if old.userRating != new.userRating {
+            dependencies.insert(.rating)
+        }
+        if old.translator != new.translator {
+            dependencies.insert(.translator)
+        }
+        if old.tags != new.tags {
+            dependencies.insert(.tags)
+        }
+        if old.author != new.author {
+            dependencies.insert(.author)
+        }
+        if old.title != new.title {
+            dependencies.insert(.title)
+        }
+        if old.series != new.series {
+            dependencies.insert(.series)
+        }
+        if old.publisher != new.publisher {
+            dependencies.insert(.publisher)
+        }
+        if old.hasHighlights != new.hasHighlights {
+            dependencies.insert(.highlights)
+        }
+        if old.drmProtected != new.drmProtected {
+            dependencies.insert(.drmProtected)
+        }
+        if old.deviceMatchKeys != new.deviceMatchKeys {
+            dependencies.insert(.devicePresence)
+        }
+        if old.hasMissingMetadata != new.hasMissingMetadata {
+            dependencies.insert(.missingMetadata)
+        }
+        return dependencies
+    }
 }
 
 nonisolated struct LibraryReadModelDisplayDelta: Equatable, Sendable {
@@ -234,6 +337,7 @@ nonisolated struct LibraryReadModelDiagnostics: Equatable, Sendable {
     var fullRebuildCount = 0
     var incrementallyCapturedRecordCount = 0
     var lastCapturedRecordCount = 0
+    var lastSmartShelfEvaluationCount = 0
 }
 
 private nonisolated struct LibraryReadModelUpdate: Sendable {
@@ -474,12 +578,18 @@ private nonisolated struct LibraryReadModelSnapshot: Sendable {
 /// cancellation checks, and sort keys; it has no dependency on SQLite FTS.
 private actor LibraryMetadataQueryEngine {
     private var snapshot = LibraryReadModelSnapshot()
+    private let now: @Sendable () -> Date
+
+    init(now: @escaping @Sendable () -> Date) {
+        self.now = now
+    }
 
     func rebuild(
         records: [LibraryBookRecord],
         sourceOrder: [UUID],
         generation: Int
     ) {
+        guard generation >= snapshot.generation else { return }
         snapshot = LibraryReadModelSnapshot(
             generation: generation,
             records: records,
@@ -492,6 +602,7 @@ private actor LibraryMetadataQueryEngine {
         sourceOrder: [UUID]?,
         generation: Int
     ) {
+        guard generation >= snapshot.generation else { return }
         snapshot.apply(
             changes: changes,
             sourceOrder: sourceOrder,
@@ -508,7 +619,8 @@ private actor LibraryMetadataQueryEngine {
             records: snapshot.orderedRecords(),
             smartCollections: smartCollections,
             deviceFileNames: deviceFileNames,
-            deviceIsConnected: deviceIsConnected
+            deviceIsConnected: deviceIsConnected,
+            now: now()
         )
     }
 
@@ -534,14 +646,15 @@ private actor LibraryMetadataQueryEngine {
         let savedQuery = spec.savedSearch.map {
             LibraryQuery.NormalizedQuery(SearchQuery.parse($0))
         }
-        let recentCutoff = Date.now.addingTimeInterval(-14 * 24 * 3600)
+        let recentCutoff = now().addingTimeInterval(-14 * 24 * 3600)
+        let compiledSmartShelf = spec.smartShelf?.compiled
         candidates = candidates.filter { id in
             guard !Task.isCancelled, let record = snapshot.recordsByID[id] else {
                 return false
             }
             let belongs: Bool
-            if let smartShelf = spec.smartShelf {
-                belongs = smartShelf.matches(
+            if let compiledSmartShelf {
+                belongs = compiledSmartShelf.matches(
                     record,
                     deviceFileNames: spec.deviceFileNames,
                     deviceIsConnected: spec.deviceIsConnected
@@ -648,6 +761,13 @@ private actor LibraryMetadataQueryEngine {
         )
     }
 
+    func records(matchingDeviceKeys keys: Set<String>) -> [LibraryBookRecord] {
+        let ids = keys.reduce(into: Set<UUID>()) { result, key in
+            result.formUnion(snapshot.indexes.deviceKeys[key] ?? [])
+        }
+        return ids.compactMap { snapshot.recordsByID[$0] }
+    }
+
     private func ordered(
         _ lhsID: UUID,
         before rhsID: UUID,
@@ -722,9 +842,23 @@ final class LibraryReadModel {
     @ObservationIgnored private var smartCollections: [LibrarySmartCollectionSnapshot] = []
     @ObservationIgnored private var deviceFileNames: Set<String> = []
     @ObservationIgnored private var deviceIsConnected = false
+    @ObservationIgnored private var deviceGeneration = -1
     @ObservationIgnored private var updates: [LibraryReadModelUpdate] = []
-    @ObservationIgnored private let metadataEngine = LibraryMetadataQueryEngine()
+    @ObservationIgnored private let metadataEngine: LibraryMetadataQueryEngine
+    @ObservationIgnored private let now: @Sendable () -> Date
+    @ObservationIgnored private let synchronizationHook: @Sendable (Int) async -> Void
+    @ObservationIgnored private var synchronizationEpoch = 0
+    @ObservationIgnored private var highestRequestedGeneration = -1
     @ObservationIgnored private(set) var diagnostics = LibraryReadModelDiagnostics()
+
+    init(
+        now: @escaping @Sendable () -> Date = { .now },
+        synchronizationHook: @escaping @Sendable (Int) async -> Void = { _ in }
+    ) {
+        self.now = now
+        metadataEngine = LibraryMetadataQueryEngine(now: now)
+        self.synchronizationHook = synchronizationHook
+    }
 
     /// Applies the semantic change set returned by `CatalogMutationService`.
     /// The journal-backed synchronization path below remains the recovery mechanism
@@ -761,13 +895,29 @@ final class LibraryReadModel {
         collections: [BookCollection],
         delta: LibraryCatalogDelta,
         deviceFileNames: Set<String>,
-        deviceIsConnected: Bool
+        deviceIsConnected: Bool,
+        deviceInventoryDelta: DeviceInventoryDelta? = nil
     ) async {
-        guard delta.toRevision >= generation else { return }
+        guard delta.toRevision >= generation,
+              delta.toRevision >= highestRequestedGeneration else { return }
+        highestRequestedGeneration = max(
+            highestRequestedGeneration,
+            delta.toRevision
+        )
+        synchronizationEpoch &+= 1
+        let requestEpoch = synchronizationEpoch
+        await synchronizationHook(delta.toRevision)
+        guard requestIsCurrent(
+            requestEpoch,
+            generation: delta.toRevision
+        ) else { return }
         let nextSmartCollections = Self.smartCollectionSnapshots(collections)
-        let configurationChanged = nextSmartCollections != smartCollections
-            || deviceFileNames != self.deviceFileNames
-            || deviceIsConnected != self.deviceIsConnected
+        let smartCollectionsChanged = nextSmartCollections != smartCollections
+        let deviceFilesChanged = deviceFileNames != self.deviceFileNames
+        let deviceConnectionChanged = deviceIsConnected != self.deviceIsConnected
+        let configurationChanged = smartCollectionsChanged
+            || deviceFilesChanged
+            || deviceConnectionChanged
 
         if !didBootstrap
             || delta.requiresFullRebuild
@@ -777,8 +927,39 @@ final class LibraryReadModel {
                 smartCollections: nextSmartCollections,
                 catalogGeneration: delta.toRevision,
                 deviceFileNames: deviceFileNames,
-                deviceIsConnected: deviceIsConnected
+                deviceIsConnected: deviceIsConnected,
+                deviceGeneration: deviceInventoryDelta?.toGeneration,
+                requestEpoch: requestEpoch
             )
+            return
+        }
+
+        if delta.isEmpty,
+           !smartCollectionsChanged,
+           deviceFilesChanged,
+           !deviceConnectionChanged,
+           let deviceInventoryDelta,
+           deviceInventoryDelta.fromGeneration == deviceGeneration {
+            let affectedRecords = await metadataEngine.records(
+                matchingDeviceKeys: deviceInventoryDelta.changedMatchKeys
+            )
+            guard requestIsCurrent(
+                requestEpoch,
+                generation: delta.toRevision
+            ) else { return }
+            var updatedFacets = facets
+            diagnostics.lastSmartShelfEvaluationCount =
+                updatedFacets.applyDeviceConfigurationChange(
+                    records: affectedRecords,
+                    smartCollections: smartCollections,
+                    oldDeviceFileNames: self.deviceFileNames,
+                    newDeviceFileNames: deviceFileNames,
+                    deviceIsConnected: deviceIsConnected
+                )
+            facets = updatedFacets
+            self.deviceFileNames = deviceFileNames
+            self.deviceGeneration = deviceInventoryDelta.toGeneration
+            diagnostics.lastCapturedRecordCount = affectedRecords.count
             return
         }
 
@@ -794,12 +975,17 @@ final class LibraryReadModel {
         if !configurationChanged,
            !delta.changesBookMembership,
            delta.fields.isDisjoint(with: recordRelevantFields) {
-            diagnostics.lastCapturedRecordCount = 0
             await metadataEngine.apply(
                 changes: [],
                 sourceOrder: nil,
                 generation: delta.toRevision
             )
+            guard requestIsCurrent(
+                requestEpoch,
+                generation: delta.toRevision
+            ) else { return }
+            diagnostics.lastCapturedRecordCount = 0
+            diagnostics.lastSmartShelfEvaluationCount = 0
             publish(
                 fromGeneration: generation,
                 toGeneration: delta.toRevision,
@@ -842,16 +1028,11 @@ final class LibraryReadModel {
                         smartCollections: nextSmartCollections,
                         catalogGeneration: delta.toRevision,
                         deviceFileNames: deviceFileNames,
-                        deviceIsConnected: deviceIsConnected
+                        deviceIsConnected: deviceIsConnected,
+                        deviceGeneration: deviceInventoryDelta?.toGeneration,
+                        requestEpoch: requestEpoch
                     )
                     return
-                }
-                recordsByID.removeValue(forKey: id)
-                booksByID.removeValue(forKey: id)
-                if let persistentID = booksByPersistentID.first(where: {
-                    $0.value.uuid == id
-                })?.key {
-                    booksByPersistentID.removeValue(forKey: persistentID)
                 }
                 recordChanges.append(
                     LibraryReadModelRecordChange(id: id, old: old, new: nil)
@@ -864,7 +1045,9 @@ final class LibraryReadModel {
                     smartCollections: nextSmartCollections,
                     catalogGeneration: delta.toRevision,
                     deviceFileNames: deviceFileNames,
-                    deviceIsConnected: deviceIsConnected
+                    deviceIsConnected: deviceIsConnected,
+                    deviceGeneration: deviceInventoryDelta?.toGeneration,
+                    requestEpoch: requestEpoch
                 )
                 return
             }
@@ -875,9 +1058,6 @@ final class LibraryReadModel {
                 includeHighlights: true
             )
             guard old != updated else { continue }
-            recordsByID[id] = updated
-            booksByID[id] = book
-            booksByPersistentID[book.id] = book
             recordChanges.append(
                 LibraryReadModelRecordChange(id: id, old: old, new: updated)
             )
@@ -887,16 +1067,71 @@ final class LibraryReadModel {
         let sourceOrderChanged = membershipChanged
             || currentSourceOrder != orderedRecords.map(\.id)
         if sourceOrderChanged {
-            guard recordsByID.count == books.count else {
+            let deletedCount = recordChanges.count {
+                $0.old != nil && $0.new == nil
+            }
+            let insertedCount = recordChanges.count {
+                $0.old == nil && $0.new != nil
+            }
+            guard recordsByID.count - deletedCount + insertedCount == books.count else {
                 await rebuild(
                     books: books,
                     smartCollections: nextSmartCollections,
                     catalogGeneration: delta.toRevision,
                     deviceFileNames: deviceFileNames,
-                    deviceIsConnected: deviceIsConnected
+                    deviceIsConnected: deviceIsConnected,
+                    deviceGeneration: deviceInventoryDelta?.toGeneration,
+                    requestEpoch: requestEpoch
                 )
                 return
             }
+        }
+
+        let sourceOrderUpdate = sourceOrderChanged ? currentSourceOrder : nil
+        await metadataEngine.apply(
+            changes: recordChanges,
+            sourceOrder: sourceOrderUpdate,
+            generation: delta.toRevision
+        )
+
+        let rebuiltFacets: LibraryFacetSnapshot?
+        if configurationChanged {
+            let interval = Log.librarySignposter.beginInterval("SidebarFacets")
+            LibraryPerformanceDiagnostics.beginSQLScope("sidebar_facets")
+            rebuiltFacets = await metadataEngine.makeFacets(
+                smartCollections: nextSmartCollections,
+                deviceFileNames: deviceFileNames,
+                deviceIsConnected: deviceIsConnected
+            )
+            LibraryPerformanceDiagnostics.endSQLScope("sidebar_facets")
+            Log.librarySignposter.endInterval("SidebarFacets", interval)
+        } else {
+            rebuiltFacets = nil
+        }
+
+        guard requestIsCurrent(
+            requestEpoch,
+            generation: delta.toRevision
+        ) else { return }
+
+        for change in recordChanges {
+            if let new = change.new,
+               let book = currentBooksByID[change.id] {
+                if let previous = booksByID[change.id], previous.id != book.id {
+                    booksByPersistentID.removeValue(forKey: previous.id)
+                }
+                recordsByID[change.id] = new
+                booksByID[change.id] = book
+                booksByPersistentID[book.id] = book
+            } else {
+                recordsByID.removeValue(forKey: change.id)
+                if let previous = booksByID.removeValue(forKey: change.id) {
+                    booksByPersistentID.removeValue(forKey: previous.id)
+                }
+            }
+        }
+
+        if sourceOrderChanged {
             orderedRecords = currentSourceOrder.compactMap { recordsByID[$0] }
             booksByID = currentBooksByID
             booksByPersistentID = Dictionary(
@@ -919,38 +1154,30 @@ final class LibraryReadModel {
 
         diagnostics.lastCapturedRecordCount = affectedIDs.count
         diagnostics.incrementallyCapturedRecordCount += affectedIDs.count
-        let sourceOrderUpdate = sourceOrderChanged ? currentSourceOrder : nil
-        await metadataEngine.apply(
-            changes: recordChanges,
-            sourceOrder: sourceOrderUpdate,
-            generation: delta.toRevision
-        )
-
-        if configurationChanged {
-            let interval = Log.librarySignposter.beginInterval("SidebarFacets")
-            LibraryPerformanceDiagnostics.beginSQLScope("sidebar_facets")
-            let rebuiltFacets = await metadataEngine.makeFacets(
-                smartCollections: nextSmartCollections,
-                deviceFileNames: deviceFileNames,
-                deviceIsConnected: deviceIsConnected
-            )
-            LibraryPerformanceDiagnostics.endSQLScope("sidebar_facets")
-            Log.librarySignposter.endInterval("SidebarFacets", interval)
+        if let rebuiltFacets {
             facets = rebuiltFacets
+            diagnostics.lastSmartShelfEvaluationCount =
+                orderedRecords.count * nextSmartCollections.count
         } else if !recordChanges.isEmpty {
             var updatedFacets = facets
-            updatedFacets.apply(
+            diagnostics.lastSmartShelfEvaluationCount = updatedFacets.apply(
                 recordChanges,
                 smartCollections: smartCollections,
                 deviceFileNames: self.deviceFileNames,
-                deviceIsConnected: self.deviceIsConnected
+                deviceIsConnected: self.deviceIsConnected,
+                now: now()
             )
             facets = updatedFacets
+        } else {
+            diagnostics.lastSmartShelfEvaluationCount = 0
         }
 
         smartCollections = nextSmartCollections
         self.deviceFileNames = deviceFileNames
         self.deviceIsConnected = deviceIsConnected
+        if let deviceInventoryDelta {
+            deviceGeneration = deviceInventoryDelta.toGeneration
+        }
         publish(
             fromGeneration: generation,
             toGeneration: delta.toRevision,
@@ -1099,13 +1326,14 @@ final class LibraryReadModel {
         guard !delta.requiresFullRebuild else { return nil }
         var updated = currentIDs
         var changed = false
+        let queryNow = now()
 
         for change in delta.changes {
             let oldMatches = change.old.map {
-                LibraryQuery.displayMatches($0, query: query)
+                LibraryQuery.displayMatches($0, query: query, now: queryNow)
             } ?? false
             let newMatches = change.new.map {
-                LibraryQuery.displayMatches($0, query: query)
+                LibraryQuery.displayMatches($0, query: query, now: queryNow)
             } ?? false
 
             if oldMatches, newMatches,
@@ -1153,7 +1381,9 @@ final class LibraryReadModel {
         smartCollections: [LibrarySmartCollectionSnapshot],
         catalogGeneration: Int,
         deviceFileNames: Set<String>,
-        deviceIsConnected: Bool
+        deviceIsConnected: Bool,
+        deviceGeneration: Int?,
+        requestEpoch: Int
     ) async {
         let interval = Log.librarySignposter.beginInterval("LibrarySnapshot")
         LibraryPerformanceDiagnostics.beginSQLScope("library_snapshot")
@@ -1184,7 +1414,11 @@ final class LibraryReadModel {
             nextSourceIndexByPersistentID[book.id] = index
             if (index + 1).isMultiple(of: 512) {
                 await Task.yield()
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled,
+                      requestIsCurrent(
+                        requestEpoch,
+                        generation: catalogGeneration
+                      ) else {
                     LibraryPerformanceDiagnostics.endSQLScope("library_snapshot")
                     Log.librarySignposter.endInterval("LibrarySnapshot", interval)
                     return
@@ -1209,6 +1443,10 @@ final class LibraryReadModel {
         LibraryPerformanceDiagnostics.endSQLScope("sidebar_facets")
         Log.librarySignposter.endInterval("SidebarFacets", facetInterval)
 
+        guard requestIsCurrent(
+            requestEpoch,
+            generation: catalogGeneration
+        ) else { return }
         orderedRecords = records
         recordsByID = nextRecordsByID
         booksByID = nextBooksByID
@@ -1218,18 +1456,32 @@ final class LibraryReadModel {
         self.smartCollections = smartCollections
         self.deviceFileNames = deviceFileNames
         self.deviceIsConnected = deviceIsConnected
+        if let deviceGeneration {
+            self.deviceGeneration = deviceGeneration
+        }
         bookCount = books.count
         facets = nextFacets
         didBootstrap = true
         isReady = true
         diagnostics.fullRebuildCount += 1
         diagnostics.lastCapturedRecordCount = books.count
+        diagnostics.lastSmartShelfEvaluationCount =
+            books.count * smartCollections.count
         publish(
             fromGeneration: generation,
             toGeneration: catalogGeneration,
             changes: [],
             requiresFullDisplayRebuild: true
         )
+    }
+
+    private func requestIsCurrent(
+        _ epoch: Int,
+        generation requestedGeneration: Int
+    ) -> Bool {
+        epoch == synchronizationEpoch
+            && requestedGeneration >= generation
+            && requestedGeneration >= highestRequestedGeneration
     }
 
     private func publish(
@@ -1277,7 +1529,7 @@ final class LibraryReadModel {
                         LibraryQuery.NormalizedQuery(SearchQuery.parse($0))
                     }
                     : nil,
-                definition: definition
+                compiledDefinition: definition?.compiled
             )
         }
         .sorted { $0.id.uuidString < $1.id.uuidString }

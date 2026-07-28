@@ -3,6 +3,39 @@ import Observation
 import Testing
 @testable import Winston
 
+private actor ReadModelSynchronizationGate {
+    private let blockedGeneration: Int
+    private var didEnter = false
+    private var entryContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(blockedGeneration: Int) {
+        self.blockedGeneration = blockedGeneration
+    }
+
+    func pauseIfNeeded(generation: Int) async {
+        guard generation == blockedGeneration else { return }
+        didEnter = true
+        entryContinuation?.resume()
+        entryContinuation = nil
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+    }
+
+    func waitUntilEntered() async {
+        guard !didEnter else { return }
+        await withCheckedContinuation { continuation in
+            entryContinuation = continuation
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
 @MainActor
 @Suite(.serialized)
 struct LibraryReadModelTests {
@@ -64,6 +97,96 @@ struct LibraryReadModelTests {
         )
         #expect(incremental?.ids == originalIDs)
         #expect(incremental?.changed == false)
+    }
+
+    @Test func newerGenerationWinsWhenOlderSynchronizationCompletesLast() async {
+        let gate = ReadModelSynchronizationGate(blockedGeneration: 1)
+        let model = LibraryReadModel(synchronizationHook: { generation in
+            await gate.pauseIfNeeded(generation: generation)
+        })
+        let olderBooks = makeBooks(8)
+        let newerBooks = makeBooks(3)
+        let olderDelta = fullDelta(to: 1)
+        let newerDelta = fullDelta(to: 2)
+
+        let olderSynchronization = Task { @MainActor in
+            await model.synchronize(
+                books: olderBooks,
+                collections: [],
+                delta: olderDelta,
+                deviceFileNames: [],
+                deviceIsConnected: false
+            )
+        }
+        await gate.waitUntilEntered()
+
+        await model.synchronize(
+            books: newerBooks,
+            collections: [],
+            delta: newerDelta,
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+        await gate.release()
+        await olderSynchronization.value
+        let recordIDs: [UUID] = model.recordSnapshot().map(\.id)
+        let newerBookIDs: [UUID] = newerBooks.map(\.uuid)
+        let queryGeneration = await model.query(allBooksQuery).generation
+
+        #expect(model.generation == 2)
+        #expect(model.bookCount == newerBooks.count)
+        #expect(recordIDs == newerBookIDs)
+        #expect(queryGeneration == 2)
+    }
+
+    @Test func recentClassificationUsesInjectedClockAtExactCutoff() async {
+        let fixedNow = Date(timeIntervalSince1970: 2_000_000_000)
+        let cutoff = fixedNow.addingTimeInterval(-14 * 24 * 3600)
+        let recent = Book(
+            fileName: "recent.epub",
+            originalFileName: "Recent.epub",
+            dateAdded: cutoff.addingTimeInterval(1)
+        )
+        let atCutoff = Book(
+            fileName: "cutoff.epub",
+            originalFileName: "Cutoff.epub",
+            dateAdded: cutoff
+        )
+        let old = Book(
+            fileName: "old.epub",
+            originalFileName: "Old.epub",
+            dateAdded: cutoff.addingTimeInterval(-1)
+        )
+        let books = [recent, atCutoff, old]
+        let recentQuery = query(filter: .recentlyAdded)
+        let model = LibraryReadModel(now: { fixedNow })
+
+        await model.synchronize(
+            books: books,
+            collections: [],
+            delta: fullDelta(to: 0),
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+
+        #expect(model.facets.recent == 1)
+        #expect(await model.displayIDs(query: recentQuery) == [recent.uuid])
+        #expect(
+            LibraryQuery.displayIDs(
+                for: model.recordSnapshot(),
+                query: recentQuery,
+                now: fixedNow
+            ) == [recent.uuid]
+        )
+        #expect(
+            LibraryQuery.apply(
+                to: books,
+                filter: .recentlyAdded,
+                searchText: "",
+                sort: [],
+                now: fixedNow
+            ).map(\.uuid) == [recent.uuid]
+        )
     }
 
     @Test func statusFilterRemovesOnlyTheChangedBook() async throws {
@@ -225,6 +348,123 @@ struct LibraryReadModelTests {
         #expect(model.diagnostics.lastCapturedRecordCount == 1)
         let candidates = try #require(await model.kindleCandidates())
         #expect(candidates.first(where: { $0.id == books[42].uuid })?.coverVersion == 1)
+    }
+
+    @Test func smartShelfDependencyMaskSkipsUnrelatedCoverChanges() async {
+        let book = makeBooks(1)[0]
+        let statusShelf = BookCollection(name: "Reading")
+        statusShelf.smartShelfDefinition = SmartShelfDefinition(rules: [
+            SmartShelfRule(
+                field: .readingStatus,
+                value: ReadingStatus.reading.rawValue
+            ),
+        ])
+        let titleShelf = BookCollection(name: "Named")
+        titleShelf.smartShelfDefinition = SmartShelfDefinition(rules: [
+            SmartShelfRule(
+                field: .title,
+                comparison: .contains,
+                value: "Book"
+            ),
+        ])
+        let collections = [statusShelf, titleShelf]
+        let model = LibraryReadModel()
+        await model.synchronize(
+            books: [book],
+            collections: collections,
+            delta: fullDelta(to: 0),
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+
+        book.coverVersion += 1
+        await model.synchronize(
+            books: [book],
+            collections: collections,
+            delta: LibraryCatalogDelta(
+                fromRevision: 0,
+                toRevision: 1,
+                affectedBookIDs: [book.uuid],
+                affectedCollectionIDs: [],
+                fields: [.cover],
+                requiresFullRebuild: false,
+                changesBookMembership: false
+            ),
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+        #expect(model.diagnostics.lastSmartShelfEvaluationCount == 0)
+
+        book.readingStatus = .reading
+        await model.synchronize(
+            books: [book],
+            collections: collections,
+            delta: LibraryCatalogDelta(
+                fromRevision: 1,
+                toRevision: 2,
+                affectedBookIDs: [book.uuid],
+                affectedCollectionIDs: [],
+                fields: [.readingState],
+                requiresFullRebuild: false,
+                changesBookMembership: false
+            ),
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+        #expect(model.diagnostics.lastSmartShelfEvaluationCount == 2)
+        #expect(model.facets.smartCounts[statusShelf.id] == 1)
+    }
+
+    @Test func deviceInventoryDeltaUpdatesOnlyMatchingSmartShelfRecords() async {
+        let books = makeBooks(1_000)
+        let changed = books[537]
+        let shelf = BookCollection(name: "On Kindle")
+        shelf.smartShelfDefinition = SmartShelfDefinition(rules: [
+            SmartShelfRule(field: .onDevice, comparison: .isTrue),
+        ])
+        let model = LibraryReadModel()
+        await model.synchronize(
+            books: books,
+            collections: [shelf],
+            delta: fullDelta(to: 0),
+            deviceFileNames: [],
+            deviceIsConnected: true,
+            deviceInventoryDelta: .empty
+        )
+        let deviceBook = DeviceBook(
+            path: "documents/\(changed.originalFileName)",
+            fileName: changed.originalFileName,
+            sizeBytes: 10
+        )
+        let deviceDelta = DeviceInventoryDelta(
+            fromGeneration: 0,
+            toGeneration: 1,
+            inserted: [deviceBook],
+            updated: [],
+            removed: []
+        )
+
+        await model.synchronize(
+            books: books,
+            collections: [shelf],
+            delta: LibraryCatalogDelta(
+                fromRevision: 0,
+                toRevision: 0,
+                affectedBookIDs: [],
+                affectedCollectionIDs: [],
+                fields: [],
+                requiresFullRebuild: false,
+                changesBookMembership: false
+            ),
+            deviceFileNames: [deviceBook.matchKey],
+            deviceIsConnected: true,
+            deviceInventoryDelta: deviceDelta
+        )
+
+        #expect(model.diagnostics.fullRebuildCount == 1)
+        #expect(model.diagnostics.lastCapturedRecordCount == 1)
+        #expect(model.diagnostics.lastSmartShelfEvaluationCount == 2)
+        #expect(model.facets.smartCounts[shelf.id] == 1)
     }
 
     @Test func observationInvalidatesGenerationButNotUnchangedFacets() async {
