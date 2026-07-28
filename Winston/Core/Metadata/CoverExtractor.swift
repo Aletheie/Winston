@@ -195,11 +195,15 @@ actor CoverCache {
 
     // Drops every tier — a tier-scoped insert would leave stale renditions.
     func replace(_ image: NSImage?, for url: URL) {
+        invalidate(for: url)
+        insert(image, for: url, tier: .display)
+    }
+
+    func invalidate(for url: URL) {
         cancelPendingLoad(for: key(url, .thumb))
         cancelPendingLoad(for: key(url, .display))
         cache.removeObject(forKey: key(url, .thumb) as NSString)
         cache.removeObject(forKey: key(url, .display) as NSString)
-        insert(image, for: url, tier: .display)
     }
 
     func diagnostics() -> CoverCacheDiagnostics {
@@ -350,6 +354,41 @@ actor CoverWorkScheduler {
         await storedCover(for: .edition(uuid), maxPixel: maxPixel)
     }
 
+    func storedDerivedCover(
+        for key: DerivedCoverKey,
+        maxPixel: Int
+    ) async -> NSImage? {
+        let data: Data?
+        do {
+            data = try await ioPermits.run {
+                try Task.checkCancellation()
+                return await DerivedCoverStore.shared.loadData(for: key)
+            }
+        } catch {
+            return nil
+        }
+        guard let data, !Task.isCancelled else { return nil }
+
+        do {
+            return try await cpuPermits.run {
+                try Task.checkCancellation()
+                return await cancellationPropagatingDetached(priority: .utility) {
+                    guard !Task.isCancelled,
+                          let decoded = ImageTranscoder.decodedImage(
+                              from: data,
+                              maxPixel: maxPixel
+                          ) else { return nil }
+                    return NSImage(
+                        cgImage: decoded,
+                        size: NSSize(width: decoded.width, height: decoded.height)
+                    )
+                }
+            }
+        } catch {
+            return nil
+        }
+    }
+
     func extractAndEncode(
         from url: URL,
         maxDimension: CGFloat
@@ -373,12 +412,14 @@ actor CoverWorkScheduler {
             return try await cpuPermits.run {
                 try Task.checkCancellation()
                 return await cancellationPropagatingDetached(priority: .utility) {
-                    guard !Task.isCancelled,
-                          let data = ImageTranscoder.jpegData(from: extracted) else { return nil }
+                    guard !Task.isCancelled else { return nil }
                     let scaled = CoverCache.downscaled(
                         extracted,
                         maxDimension: maxDimension
                     )
+                    guard let data = ImageTranscoder.jpegData(from: scaled) else {
+                        return nil
+                    }
                     return Task.isCancelled ? nil : (scaled, data)
                 }
             }
@@ -387,18 +428,17 @@ actor CoverWorkScheduler {
         }
     }
 
-    func install(
+    func installDerived(
         _ data: Data,
-        using token: CoverMutationToken
+        for key: DerivedCoverKey
     ) async -> Bool {
         do {
             return try await ioPermits.run {
                 try Task.checkCancellation()
-                return await CoverRepository.shared.install(
+                return await DerivedCoverStore.shared.installIfMissing(
                     data,
-                    using: token,
-                    onlyIfMissing: true
-                ) != nil
+                    for: key
+                )
             }
         } catch {
             return false

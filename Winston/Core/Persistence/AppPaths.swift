@@ -1,7 +1,8 @@
 import Foundation
 
 enum AppPaths {
-    // var only as a test seam — the app never mutates it; TestLibrary swaps it under a serialized lease.
+    // Mutable only for serialized tests and the opt-in isolated performance process.
+    // Normal application launches never replace this root.
     nonisolated(unsafe) static var rootDirectory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appending(path: "Winston", directoryHint: .isDirectory)
@@ -15,6 +16,12 @@ enum AppPaths {
 
     nonisolated static var coversDirectory: URL {
         appSupportDirectory.appending(path: "covers", directoryHint: .isDirectory)
+    }
+
+    /// Discardable previews extracted from book assets. These files are never
+    /// authoritative cover payloads and may be deleted or rebuilt at any time.
+    nonisolated static var derivedCoversDirectory: URL {
+        appSupportDirectory.appending(path: "DerivedCovers", directoryHint: .isDirectory)
     }
 
     nonisolated static var managedFilesDirectory: URL {
@@ -31,6 +38,14 @@ enum AppPaths {
 
     nonisolated static var calibreImportSessionsDirectory: URL {
         managedFilesDirectory.appending(path: "CalibreImportSessions", directoryHint: .isDirectory)
+    }
+
+    nonisolated static var deviceImportLeasesDirectory: URL {
+        managedFilesDirectory.appending(path: "DeviceImportLeases", directoryHint: .isDirectory)
+    }
+
+    nonisolated static var transferQueueJournalDirectory: URL {
+        appSupportDirectory.appending(path: "TransferQueue", directoryHint: .isDirectory)
     }
 
     nonisolated static var pluginsDirectory: URL {
@@ -51,8 +66,11 @@ enum AppPaths {
 
     nonisolated static func ensureRequiredDirectories() throws {
         for directory in [appSupportDirectory, booksDirectory, coversDirectory,
+                          derivedCoversDirectory,
                           managedFilesDirectory, managedFileStagingDirectory,
-                          managedFileJournalDirectory, calibreImportSessionsDirectory, pluginsDirectory,
+                          managedFileJournalDirectory, calibreImportSessionsDirectory,
+                          deviceImportLeasesDirectory,
+                          transferQueueJournalDirectory, pluginsDirectory,
                           pluginDataRootDirectory, fullTextIndexDirectory] {
             try ensureDirectory(directory)
         }

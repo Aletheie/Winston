@@ -11,6 +11,15 @@ struct BookCoverImageView: View {
     var body: some View {
         let accents = theme.coverAccents(for: book)
         let coverReference = book.coverReference
+        let primaryAsset = book.primaryAsset
+        let sourceURL = book.fileURL
+        let derivedKey = DerivedCoverKey(
+            assetID: primaryAsset?.uuid ?? book.uuid,
+            contentHash: primaryAsset?.contentHash,
+            fileName: primaryAsset?.fileName ?? book.fileName,
+            sizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
+            maxPixel: Int(tier.maxDimension)
+        )
         Color.clear
             .overlay {
                 if let image = coverImage {
@@ -25,9 +34,10 @@ struct BookCoverImageView: View {
             ) {
                 coverImage = nil
                 let resolved = await resolvedCover(
-                    sourceURL: book.primaryFileURL,
+                    sourceURL: sourceURL,
                     cacheURL: book.coverCacheURL,
-                    reference: coverReference
+                    reference: coverReference,
+                    derivedKey: derivedKey
                 )
                 guard !Task.isCancelled else { return }
                 coverImage = resolved
@@ -37,7 +47,8 @@ struct BookCoverImageView: View {
     private func resolvedCover(
         sourceURL: URL?,
         cacheURL: URL,
-        reference: CoverReference
+        reference: CoverReference,
+        derivedKey: DerivedCoverKey
     ) async -> NSImage? {
         let maxDimension = tier.maxDimension
         let maxPixel = Int(maxDimension)
@@ -54,19 +65,25 @@ struct BookCoverImageView: View {
             guard let sourceURL else { return nil }
             guard !Task.isCancelled else { return nil }
 
-            let token = await CoverRepository.shared.beginBackgroundMutation(
-                for: reference.owner
-            )
+            if let derived = await CoverWorkScheduler.shared.storedDerivedCover(
+                for: derivedKey,
+                maxPixel: maxPixel
+            ) {
+                return derived
+            }
             guard let prepared = await CoverWorkScheduler.shared.extractAndEncode(
                 from: sourceURL,
                 maxDimension: maxDimension
             ), !Task.isCancelled else { return nil }
-            if await CoverWorkScheduler.shared.install(prepared.data, using: token) {
+            if await CoverWorkScheduler.shared.installDerived(
+                prepared.data,
+                for: derivedKey
+            ) {
                 return prepared.image
             }
             guard !Task.isCancelled else { return nil }
-            return await CoverWorkScheduler.shared.storedCover(
-                for: reference.owner,
+            return await CoverWorkScheduler.shared.storedDerivedCover(
+                for: derivedKey,
                 maxPixel: maxPixel
             )
         }

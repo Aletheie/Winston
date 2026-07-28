@@ -64,7 +64,7 @@ final class ConversionService {
         let sourceURL: URL
         let sourceFileName: String
         let sourceAsset: SourceGeneration?
-        let coverVersion: Int
+        let selectedCoverOwner: CoverOwner
         let newAssetUUID: UUID
         let target: TargetGeneration
         let title: String
@@ -142,9 +142,6 @@ final class ConversionService {
         let primaryAssetUUID: UUID?
         let fileSizeBytes: Int64
         let drmProtected: Bool?
-        let coverVersion: Int
-        let coverScopeRaw: String?
-        let coverAssetUUID: UUID?
 
         init(_ book: Book) {
             self.book = book
@@ -152,9 +149,6 @@ final class ConversionService {
             primaryAssetUUID = book.primaryAssetUUID
             fileSizeBytes = book.fileSizeBytes
             drmProtected = book.drmProtected
-            coverVersion = book.coverVersion
-            coverScopeRaw = book.coverScopeRaw
-            coverAssetUUID = book.coverAssetUUID
         }
 
         func restore() {
@@ -162,9 +156,6 @@ final class ConversionService {
             book.primaryAssetUUID = primaryAssetUUID
             book.fileSizeBytes = fileSizeBytes
             book.drmProtected = drmProtected
-            book.coverVersion = coverVersion
-            book.coverScopeRaw = coverScopeRaw
-            book.coverAssetUUID = coverAssetUUID
         }
     }
 
@@ -313,7 +304,6 @@ final class ConversionService {
             for: request,
             sourceHash: sourceHash,
             targetIdentity: targetIdentity,
-            extractedCover: nil,
             operationID: operationID,
             progress: progress
         )
@@ -353,7 +343,7 @@ final class ConversionService {
             sourceURL: sourceURL,
             sourceFileName: sourceFileName,
             sourceAsset: sourceAsset,
-            coverVersion: book.coverVersion,
+            selectedCoverOwner: book.coverReference.owner,
             newAssetUUID: UUID(),
             target: target,
             title: book.displayTitle,
@@ -379,7 +369,8 @@ final class ConversionService {
         }
 
         let extractedCover = await Task.detached(priority: .utility) { () -> (NSImage, Data)? in
-            if !CoverStore.exists(for: request.uuid),
+            if request.selectedCoverOwner == .edition(request.uuid),
+               !CoverStore.exists(for: .edition(request.uuid)),
                let cover = CoverExtractor.extractCover(from: request.sourceURL),
                let data = ImageTranscoder.jpegData(from: cover) {
                 return (cover, data)
@@ -389,6 +380,24 @@ final class ConversionService {
         if let conflict = snapshotConflict(for: request) {
             notify(conflict, request: request)
             return
+        }
+        if let extractedCover {
+            let key = DerivedCoverKey(
+                assetID: request.sourceAsset?.uuid ?? request.uuid,
+                contentHash: sourceHash,
+                fileName: request.sourceFileName,
+                sizeBytes: 0,
+                maxPixel: Int(CoverCache.Tier.display.maxDimension)
+            )
+            if await DerivedCoverStore.shared.installIfMissing(
+                extractedCover.1,
+                for: key
+            ) {
+                await CoverCache.shared.replace(
+                    extractedCover.0,
+                    for: CoverStore.url(for: .edition(request.uuid))
+                )
+            }
         }
 
         let converted: URL
@@ -403,18 +412,11 @@ final class ConversionService {
             at: converted,
             for: request,
             sourceHash: sourceHash,
-            targetIdentity: targetIdentity,
-            extractedCover: extractedCover
+            targetIdentity: targetIdentity
         )
         await managedFiles.removeTemporaryItem(at: converted)
         switch result {
         case .installed:
-            if let image = extractedCover?.0 {
-                await CoverCache.shared.replace(
-                    image,
-                    for: CoverStore.url(for: .edition(request.uuid))
-                )
-            }
             toasts.success(String(localized: "Created \(request.format.label) copy."))
         case .conflict(let conflict):
             notify(conflict, request: request)
@@ -430,7 +432,6 @@ final class ConversionService {
         for request: Request,
         sourceHash: String,
         targetIdentity: TargetFileIdentity,
-        extractedCover: (NSImage, Data)?,
         operationID: UUID? = nil,
         progress: ManagedFileProgressHandler? = nil
     ) async -> InstallResult {
@@ -500,21 +501,6 @@ final class ConversionService {
         let oldFileName = replacement?.fileName
         let retiredNames = Set(oldFileName.map { [$0] } ?? [])
 
-        let coverIsMissing = if extractedCover != nil {
-            await Task.detached(priority: .utility) {
-                !CoverStore.exists(for: request.uuid)
-            }.value
-        } else {
-            false
-        }
-        let shouldInstallCover = extractedCover != nil
-            && lookupBook(uuid: request.uuid)?.coverVersion == request.coverVersion
-            && coverIsMissing
-        let expectedCoverVersion = request.coverVersion + (shouldInstallCover ? 1 : 0)
-        var sources = [bookSource]
-        if shouldInstallCover, let coverData = extractedCover?.1 {
-            sources.append(.cover(data: coverData, bookID: request.uuid))
-        }
         let cleanups: [ManagedFileCleanup]
         if let replacementIdentity {
             cleanups = [.file(replacementIdentity)]
@@ -526,12 +512,11 @@ final class ConversionService {
         do {
             transaction = try await managedFiles.stage(
                 intent: .conversionOutput,
-                sources: sources,
+                sources: [bookSource],
                 requirement: ManagedFileRequirement(
                     presentBookIDs: [request.uuid],
                     referencedBookFileNames: [newFileName],
-                    unreferencedBookFileNames: retiredNames,
-                    coverVersions: shouldInstallCover ? [request.uuid: expectedCoverVersion] : [:]
+                    unreferencedBookFileNames: retiredNames
                 ),
                 cleanups: cleanups,
                 operationID: operationID,
@@ -639,12 +624,6 @@ final class ConversionService {
                     liveBook.fileName = newFileName
                     liveBook.fileSizeBytes = stagedBook.byteCount
                 }
-                if shouldInstallCover {
-                    liveBook.coverVersion = expectedCoverVersion
-                    guard liveBook.selectCoverOwner(.edition(liveBook.uuid)) else {
-                        throw CatalogMutationError.invalidRequest
-                    }
-                }
             }
             return result.isFullyPublished ? .installed : .pendingRecovery
         } catch {
@@ -670,8 +649,7 @@ final class ConversionService {
         if Self.targetGeneration(for: book, format: request.target.format) != request.target {
             return .targetChanged
         }
-        guard (book.primaryAsset?.fileName ?? book.fileName) == request.sourceFileName,
-              book.coverVersion == request.coverVersion else {
+        guard (book.primaryAsset?.fileName ?? book.fileName) == request.sourceFileName else {
             return .sourceChanged
         }
         if let expectedSource = request.sourceAsset {
