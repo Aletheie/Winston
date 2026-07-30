@@ -63,17 +63,16 @@ enum BookAssetMaintenance {
         hashFile: @escaping @Sendable (URL) async -> String? = { url in
             try? ContentHasher.sha256Cancellable(of: url)
         }
-    ) async -> Int {
+    ) async throws -> Int {
         let resolvedMutations = mutations ?? CatalogMutationService(modelContext: context)
         let coordinator = resolvedMutations.analysisCoordinator
-        let assets = (try? context.fetch(FetchDescriptor<BookAsset>())) ?? []
-        let books = (try? context.fetch(FetchDescriptor<Book>())) ?? []
+        var descriptor = FetchDescriptor<BookAsset>(
+            predicate: #Predicate { $0.contentHash == nil }
+        )
+        descriptor.relationshipKeyPathsForPrefetching = [\BookAsset.book]
+        let assets = try context.fetch(descriptor)
         let snapshots = assets.compactMap { asset -> BookAnalysisSnapshot? in
-            guard asset.contentHash == nil else { return nil }
-            let book = asset.book ?? books.first { book in
-                book.assets.contains(where: { $0.uuid == asset.uuid })
-            }
-            guard let book else { return nil }
+            guard let book = asset.book else { return nil }
             return BookAnalysisSnapshot(book: book, sourceAsset: asset)
         }
         guard !snapshots.isEmpty else { return 0 }

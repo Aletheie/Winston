@@ -15,7 +15,7 @@ struct EditionsBackfillTests {
         library.context.insert(book)
         try library.context.save()
 
-        #expect(EditionsBackfill.run(context: library.context) == 2)
+        #expect(try EditionsBackfill.run(context: library.context) == 2)
         #expect(book.work?.title == "Book")
         #expect(book.work?.preferredEditionUUID == book.uuid)
         #expect(book.assets.count == 1)
@@ -25,7 +25,7 @@ struct EditionsBackfillTests {
         #expect(book.assets.first?.sourceProvenance == .legacyMigration)
         #expect(book.coverScope == .edition)
 
-        #expect(EditionsBackfill.run(context: library.context) == 0)
+        #expect(try EditionsBackfill.run(context: library.context) == 0)
         #expect(try library.context.fetchCount(FetchDescriptor<Work>()) == 1)
         #expect(try library.context.fetchCount(FetchDescriptor<BookAsset>()) == 1)
     }
@@ -39,7 +39,7 @@ struct EditionsBackfillTests {
         book.work = existingWork
         try library.context.save()
 
-        #expect(EditionsBackfill.run(context: library.context) == 1)
+        #expect(try EditionsBackfill.run(context: library.context) == 1)
         #expect(book.work?.uuid == existingWork.uuid)
         #expect(book.assets.count == 1)
     }
@@ -55,7 +55,7 @@ struct EditionsBackfillTests {
         book.work = retained
         try library.context.save()
 
-        #expect(EditionsBackfill.pruneOrphanWorks(context: library.context) == 1)
+        #expect(try EditionsBackfill.pruneOrphanWorks(context: library.context) == 1)
         let works = try library.context.fetch(FetchDescriptor<Work>())
         #expect(works.map(\.uuid) == [retained.uuid])
     }
@@ -71,7 +71,7 @@ struct EditionsBackfillTests {
         library.context.insert(book)
         try library.context.save()
 
-        _ = EditionsBackfill.run(context: library.context)
+        _ = try EditionsBackfill.run(context: library.context)
 
         #expect(book.fileSizeBytes == Int64(bytes.count))
         #expect(book.assets.first?.sizeBytes == Int64(bytes.count))
@@ -94,12 +94,12 @@ struct EditionsBackfillTests {
         asset.availabilityRaw = nil
         try library.context.save()
 
-        #expect(EditionsBackfill.run(context: library.context) == 1)
+        #expect(try EditionsBackfill.run(context: library.context) == 1)
         #expect(book.coverScope == .edition)
         #expect(book.coverReference.owner == .edition(book.uuid))
         #expect(asset.format == "EPUB")
         #expect(asset.sourceProvenance == .unknown)
         #expect(asset.availability == .available)
-        #expect(EditionsBackfill.run(context: library.context) == 0)
+        #expect(try EditionsBackfill.run(context: library.context) == 0)
     }
 }

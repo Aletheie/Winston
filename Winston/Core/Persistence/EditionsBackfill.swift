@@ -1,86 +1,143 @@
 import Foundation
+import OSLog
 import SwiftData
 
 enum EditionsBackfill {
+    private struct AssetSeed {
+        let id: UUID
+        let fileName: String
+        let sizeBytes: Int64
+        let drmProtected: Bool?
+        let dateAdded: Date
+    }
+
+    private struct BookPlan {
+        let bookID: UUID
+        let existingWorkID: UUID?
+        let newWorkID: UUID?
+        let asset: AssetSeed?
+        let affectedAssetIDs: Set<UUID>
+        let requiresInvariantRepair: Bool
+    }
+
     @discardableResult
     static func run(
         context: ModelContext,
         mutations: CatalogMutationService? = nil,
         batchSize: Int = 100
-    ) -> Int {
+    ) throws -> Int {
+        context.processPendingChanges()
+        guard !context.hasChanges else {
+            Log.persistence.error("Editions backfill refused a dirty catalog context")
+            throw CatalogMutationError.invalidRequest
+        }
+
         let writer = mutations ?? CatalogMutationService(modelContext: context)
         var descriptor = FetchDescriptor<Book>()
         descriptor.relationshipKeyPathsForPrefetching = [\.assets, \.work]
-        let books = (try? context.fetch(descriptor)) ?? []
-        var committed = 0
-        var staged = 0
-        var changedBookIDs: Set<UUID> = []
-        var changedWorkIDs: Set<UUID> = []
-        var changedAssetIDs: Set<UUID> = []
-
-        for (index, book) in books.enumerated() {
+        let books = try context.fetch(descriptor)
+        let plans = books.compactMap { book -> BookPlan? in
+            let asset: AssetSeed?
             if book.assets.isEmpty, book.hasDigitalFile {
                 let size = book.fileSizeBytes > 0
                     ? book.fileSizeBytes
                     : BookFileStore.size(of: book.fileName)
-                if book.fileSizeBytes == 0, size > 0 { book.fileSizeBytes = size }
-                let asset = BookAsset(
-                    uuid: book.uuid,
+                asset = AssetSeed(
+                    id: book.uuid,
                     fileName: book.fileName,
-                    origin: .original,
-                    sourceProvenance: .legacyMigration,
                     sizeBytes: size,
                     drmProtected: book.drmProtected,
-                    dateAdded: book.dateAdded,
-                    book: book
+                    dateAdded: book.dateAdded
                 )
-                context.insert(asset)
-                book.primaryAssetUUID = asset.uuid
-                staged += 1
-                changedBookIDs.insert(book.uuid)
-                changedAssetIDs.insert(asset.uuid)
+            } else {
+                asset = nil
             }
-
-            if book.work == nil {
-                let work = Work(title: book.displayTitle, author: book.author, dateCreated: book.dateAdded)
-                context.insert(work)
-                book.work = work
-                work.preferredEditionUUID = book.uuid
-                staged += 1
-                changedBookIDs.insert(book.uuid)
-                changedWorkIDs.insert(work.uuid)
+            let newWorkID = book.work == nil ? UUID() : nil
+            let requiresInvariantRepair =
+                !CatalogModelInvariantService.violations(in: book).isEmpty
+            guard asset != nil || newWorkID != nil || requiresInvariantRepair else {
+                return nil
             }
-
-            if CatalogModelInvariantService.repair(book: book) {
-                staged += 1
-                changedBookIDs.insert(book.uuid)
-                changedAssetIDs.formUnion(book.assets.map(\.uuid))
-            }
-
-            if staged > 0, (index + 1).isMultiple(of: max(1, batchSize)) {
-                guard commitStaged(
-                    writer: writer,
-                    staged: staged,
-                    bookIDs: changedBookIDs,
-                    workIDs: changedWorkIDs,
-                    assetIDs: changedAssetIDs
-                ) else { return committed }
-                committed += staged
-                staged = 0
-                changedBookIDs.removeAll(keepingCapacity: true)
-                changedWorkIDs.removeAll(keepingCapacity: true)
-                changedAssetIDs.removeAll(keepingCapacity: true)
-            }
+            return BookPlan(
+                bookID: book.uuid,
+                existingWorkID: book.work?.uuid,
+                newWorkID: newWorkID,
+                asset: asset,
+                affectedAssetIDs: Set(book.assets.map(\.uuid))
+                    .union(asset.map { [$0.id] } ?? []),
+                requiresInvariantRepair: requiresInvariantRepair
+            )
         }
 
-        if staged > 0 {
-            guard commitStaged(
-                writer: writer,
-                staged: staged,
-                bookIDs: changedBookIDs,
-                workIDs: changedWorkIDs,
-                assetIDs: changedAssetIDs
-            ) else { return committed }
+        var committed = 0
+        let chunkSize = max(1, batchSize)
+        for start in stride(from: 0, to: plans.count, by: chunkSize) {
+            let chunk = Array(plans[start ..< min(start + chunkSize, plans.count)])
+            let bookIDs = Set(chunk.map(\.bookID))
+            let workIDs = Set(chunk.compactMap(\.existingWorkID))
+                .union(chunk.compactMap(\.newWorkID))
+            let assetIDs = chunk.reduce(into: Set<UUID>()) {
+                $0.formUnion($1.affectedAssetIDs)
+            }
+            var staged = 0
+            do {
+                try writer.commitPrepared(
+                    .legacyMigration(bookIDs: Array(bookIDs)),
+                    affectedBookIDs: bookIDs,
+                    affectedWorkIDs: workIDs,
+                    affectedAssetIDs: assetIDs
+                ) { writeContext in
+                    for plan in chunk {
+                        let bookID = plan.bookID
+                        let matches = try writeContext.fetch(FetchDescriptor<Book>(
+                            predicate: #Predicate { $0.uuid == bookID }
+                        ))
+                        guard let book = matches.first else {
+                            throw CatalogMutationError.modelNotFound
+                        }
+
+                        if let seed = plan.asset,
+                           book.assets.isEmpty,
+                           book.hasDigitalFile {
+                            if book.fileSizeBytes == 0, seed.sizeBytes > 0 {
+                                book.fileSizeBytes = seed.sizeBytes
+                            }
+                            let asset = BookAsset(
+                                uuid: seed.id,
+                                fileName: seed.fileName,
+                                origin: .original,
+                                sourceProvenance: .legacyMigration,
+                                sizeBytes: seed.sizeBytes,
+                                drmProtected: seed.drmProtected,
+                                dateAdded: seed.dateAdded,
+                                book: book
+                            )
+                            writeContext.insert(asset)
+                            book.primaryAssetUUID = asset.uuid
+                            staged += 1
+                        }
+
+                        if let workID = plan.newWorkID, book.work == nil {
+                            let work = Work(
+                                uuid: workID,
+                                title: book.displayTitle,
+                                author: book.author,
+                                dateCreated: book.dateAdded
+                            )
+                            writeContext.insert(work)
+                            book.work = work
+                            work.preferredEditionUUID = book.uuid
+                            staged += 1
+                        }
+
+                        if CatalogModelInvariantService.repair(book: book) {
+                            staged += 1
+                        }
+                    }
+                }
+            } catch {
+                throw error
+            }
             committed += staged
         }
         return committed
@@ -90,45 +147,34 @@ enum EditionsBackfill {
     static func pruneOrphanWorks(
         context: ModelContext,
         mutations: CatalogMutationService? = nil
-    ) -> Int {
+    ) throws -> Int {
         var descriptor = FetchDescriptor<Work>()
         descriptor.relationshipKeyPathsForPrefetching = [\.editions]
-        let works = (try? context.fetch(descriptor)) ?? []
-        let orphaned = works.filter(\.editions.isEmpty)
-        for work in orphaned { context.delete(work) }
-        if !orphaned.isEmpty {
-            let workIDs = Set(orphaned.map(\.uuid))
+        let works = try context.fetch(descriptor)
+        let workIDs = Set(works.lazy.filter(\.editions.isEmpty).map(\.uuid))
+        var deleted = 0
+        if !workIDs.isEmpty {
             let writer = mutations ?? CatalogMutationService(modelContext: context)
             do {
-                try writer.commitStaged(
+                try writer.commitPrepared(
                     .maintenanceCleanup(workIDs: Array(workIDs)),
                     affectedWorkIDs: workIDs
-                )
+                ) { writeContext in
+                    for workID in workIDs {
+                        let matches = try writeContext.fetch(FetchDescriptor<Work>(
+                            predicate: #Predicate { $0.uuid == workID }
+                        ))
+                        guard let work = matches.first, work.editions.isEmpty else {
+                            continue
+                        }
+                        writeContext.delete(work)
+                        deleted += 1
+                    }
+                }
             } catch {
-                return 0
+                throw error
             }
         }
-        return orphaned.count
-    }
-
-    private static func commitStaged(
-        writer: CatalogMutationService,
-        staged: Int,
-        bookIDs: Set<UUID>,
-        workIDs: Set<UUID>,
-        assetIDs: Set<UUID>
-    ) -> Bool {
-        guard staged > 0 else { return true }
-        do {
-            try writer.commitStaged(
-                .legacyMigration(bookIDs: Array(bookIDs)),
-                affectedBookIDs: bookIDs,
-                affectedWorkIDs: workIDs,
-                affectedAssetIDs: assetIDs
-            )
-            return true
-        } catch {
-            return false
-        }
+        return deleted
     }
 }
