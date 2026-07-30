@@ -12,6 +12,47 @@ struct MetadataServiceTests {
         MetadataService(modelContext: lib.context, settings: AppSettings(), online: online)
     }
 
+    @Test func importSummarySeparatesFailuresCancellationAndRecovery() throws {
+        let failedURL = URL(filePath: "/tmp/Unreadable.epub")
+        let deferredURL = URL(filePath: "/tmp/Deferred.pdf")
+        let failures = [
+            ImportFailure(
+                sourceURL: failedURL,
+                requestedBookID: UUID(),
+                reason: .validation,
+                detail: "The source could not be validated."
+            ),
+            ImportFailure(
+                sourceURL: deferredURL,
+                requestedBookID: UUID(),
+                reason: .recoveryDeferred,
+                detail: "Publication is waiting for recovery."
+            ),
+        ]
+        let session = ImportSession(
+            requestedSourceCount: 5,
+            completedSourceCount: 3
+        )
+        session.recordFailures(failures)
+        session.finish(as: .cancelled)
+        let importedID = UUID()
+
+        let summary = ImportSummary(
+            session: session,
+            importedBookIDs: [importedID, importedID]
+        )
+
+        #expect(summary.requestedCount == 5)
+        #expect(summary.importedBookIDs == [importedID])
+        #expect(summary.failedCount == 1)
+        #expect(summary.cancelledCount == 2)
+        #expect(summary.wasCancelled)
+        #expect(summary.recoveryDeferredCount == 1)
+        #expect(summary.failures == failures)
+        #expect(summary.failures.first?.sourceURL == failedURL)
+        #expect(summary.failures.first?.detail == "The source could not be validated.")
+    }
+
     @Test func enrichFillsOnlyEmptyFieldsAndMarksLookup() async throws {
         let lib = try await TestLibrary()
         let book = Book(fileName: "a.epub", originalFileName: "Some Novel.epub")
@@ -329,7 +370,7 @@ struct MetadataServiceTests {
         let source = lib.root.appending(path: "page-source.epub")
         try Data("page source".utf8).write(to: source)
         let uuid = UUID()
-        let fileName = try BookFileStore.importCopy(of: source, uuid: uuid)
+        let fileName = try TestManagedFileFixtureStore.importCopy(of: source, uuid: uuid)
         let book = Book(uuid: uuid, fileName: fileName, originalFileName: "Pages.epub")
         let asset = BookAsset(
             uuid: uuid,
@@ -639,7 +680,7 @@ struct MetadataServiceTests {
 
         await online.waitUntilStarted()
         lib.context.delete(book)
-        lib.context.saveQuietly()
+        lib.context.fixtureSaveBestEffort()
         await online.resume()
 
         #expect(await task.value == false)
@@ -665,7 +706,7 @@ struct MetadataServiceTests {
 
         await online.waitUntilDownloadStarted()
         lib.context.delete(book)
-        lib.context.saveQuietly()
+        lib.context.fixtureSaveBestEffort()
         await online.resumeDownload()
 
         #expect(await task.value == false)
@@ -782,7 +823,7 @@ struct MetadataServiceTests {
             var value = BookMetadata()
             value.title = "Unified Pipeline"
             value.author = "Ada Author"
-            value.isbn = "9781234567890"
+            value.isbn = "9780306406157"
             value.language = "eng"
             return value
         }()
@@ -853,16 +894,68 @@ struct MetadataServiceTests {
             toasts: toasts
         )
 
+        var session: ImportSession?
         let importedCount: Int = await withCheckedContinuation { continuation in
-            importer.addBooks(from: [link]) { books in
+            session = importer.addBooks(from: [link]) { books in
                 continuation.resume(returning: books.count)
             }
         }
 
         #expect(importedCount == 0)
+        #expect(session?.failures.count == 1)
+        #expect(session?.failures.first?.reason == .validation)
+        #expect(session?.failures.first?.sourceURL == link)
         #expect(lib.context.allBooks().isEmpty)
         #expect(try lib.context.fetch(FetchDescriptor<BookAsset>()).isEmpty)
         #expect(!lib.context.hasChanges)
+    }
+
+    @Test func standardImportPublishesAccuratePartialSummary() async throws {
+        let lib = try await TestLibrary()
+        let valid = lib.root.appending(path: "Valid.epub")
+        let unsupported = lib.root.appending(path: "Unsupported.docx")
+        try Data("valid".utf8).write(to: valid)
+        try Data("unsupported".utf8).write(to: unsupported)
+        let settings = AppSettings()
+        settings.onlineMetadataEnabled = false
+        let toasts = ToastCenter()
+        let importer = ImportService(
+            modelContext: lib.context,
+            settings: settings,
+            metadata: MetadataService(
+                modelContext: lib.context,
+                settings: settings
+            ),
+            wishlist: WishlistService(
+                modelContext: lib.context,
+                toasts: toasts
+            ),
+            toasts: toasts,
+            analyzeBook: { _ in
+                ImportBookAnalysis(
+                    metadata: BookMetadata(),
+                    drmProtected: false
+                )
+            }
+        )
+
+        let importedCount = await withCheckedContinuation { continuation in
+            importer.addBooks(from: [valid, unsupported]) { books in
+                continuation.resume(returning: books.count)
+            }
+        }
+        let summary = try #require(importer.lastImportSummary)
+
+        #expect(importedCount == 1)
+        #expect(summary.requestedCount == 2)
+        #expect(summary.importedCount == 1)
+        #expect(summary.failedCount == 1)
+        #expect(summary.cancelledCount == 0)
+        #expect(summary.recoveryDeferredCount == 0)
+        #expect(summary.failures.count == 1)
+        #expect(summary.failures.first?.sourceURL == unsupported)
+        #expect(summary.failures.first?.reason == .unsupportedFormat)
+        #expect(toasts.messages.last?.action == .reviewImport)
     }
 
     @Test func importRefreshesWorkIdentityAfterOnlineEnrichment() async throws {

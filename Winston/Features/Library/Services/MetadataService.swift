@@ -2,6 +2,7 @@ import Foundation
 import SwiftData
 import AppKit
 import CryptoKit
+import OSLog
 
 nonisolated struct OnlineEnrichmentProposal: Sendable {
     let outcome: OnlineMetadataFetchResult
@@ -16,13 +17,14 @@ final class MetadataService {
     private let modelContext: ModelContext
     private let settings: AppSettings
     private let online: any OnlineMetadataFetching
-    private let covers: CoverRepository
+    private let coverMutations: CoverMutationCoordinator
     private let mutations: CatalogMutationService
     let analysisCoordinator: CatalogAnalysisCoordinator
     private let estimatePageCount: @Sendable (URL, String) async -> Int?
 
     private(set) var enrichingUUIDs: Set<UUID> = []
     private(set) var metadataFetchSummary: String?
+    private(set) var lastCatalogError: String?
     private var enrichmentRuns: [UUID: UUID] = [:]
     private var manualFetchTask: Task<Void, Never>?
     private var manualFetchGeneration = 0
@@ -31,8 +33,8 @@ final class MetadataService {
         modelContext: ModelContext,
         settings: AppSettings,
         online: any OnlineMetadataFetching = OnlineMetadataService(),
-        covers: CoverRepository = .shared,
         mutations: CatalogMutationService? = nil,
+        coverMutations: CoverMutationCoordinator? = nil,
         analysisCoordinator: CatalogAnalysisCoordinator? = nil,
         estimatePageCount: @escaping @Sendable (URL, String) async -> Int? = {
             await PageCountEstimator.pageCount(at: $0, format: $1)
@@ -48,8 +50,12 @@ final class MetadataService {
         self.modelContext = modelContext
         self.settings = settings
         self.online = online
-        self.covers = covers
         self.mutations = resolvedMutations
+        self.coverMutations = coverMutations ?? CoverMutationCoordinator.resolve(
+            modelContext: modelContext,
+            mutations: resolvedMutations,
+            managedFiles: resolvedMutations.managedFiles
+        )
         self.analysisCoordinator = resolvedMutations.analysisCoordinator
         self.estimatePageCount = estimatePageCount
     }
@@ -340,7 +346,13 @@ final class MetadataService {
     func renameTag(_ old: String, to new: String) -> Bool {
         let name = new.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty, name != old else { return true }
-        let updates = ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? [])
+        let books: [Book]
+        do {
+            books = try modelContext.fetchAllBooksForGlobalAnalysis()
+        } catch {
+            return catalogFetchFailed(operation: "renameTag", error: error)
+        }
+        let updates = books
             .filter { $0.tags.contains(old) }
             .map {
                 CatalogBookUpdate(
@@ -357,7 +369,13 @@ final class MetadataService {
 
     @discardableResult
     func deleteTag(_ tag: String) -> Bool {
-        let updates = ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? [])
+        let books: [Book]
+        do {
+            books = try modelContext.fetchAllBooksForGlobalAnalysis()
+        } catch {
+            return catalogFetchFailed(operation: "deleteTag", error: error)
+        }
+        let updates = books
             .filter { $0.tags.contains(tag) }
             .map {
                 CatalogBookUpdate(
@@ -375,7 +393,12 @@ final class MetadataService {
     @discardableResult
     func renameSeries(_ old: String, to new: String) -> Bool {
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.series == old })
-        let ids = Set(((try? modelContext.fetch(descriptor)) ?? []).map(\.uuid))
+        let ids: Set<UUID>
+        do {
+            ids = Set(try modelContext.fetch(descriptor).map(\.uuid))
+        } catch {
+            return catalogFetchFailed(operation: "renameSeries", error: error)
+        }
         guard !ids.isEmpty else { return true }
         let series = Self.nilIfEmpty(new)
         let updates = ids.map {
@@ -389,8 +412,13 @@ final class MetadataService {
 
     @discardableResult
     func renameAuthor(_ old: String, to new: String) -> Bool {
-        let ids = Set(((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? [])
-            .filter { $0.displayAuthor == old }.map(\.uuid))
+        let books: [Book]
+        do {
+            books = try modelContext.fetchAllBooksForGlobalAnalysis()
+        } catch {
+            return catalogFetchFailed(operation: "renameAuthor", error: error)
+        }
+        let ids = Set(books.filter { $0.displayAuthor == old }.map(\.uuid))
         guard !ids.isEmpty else { return true }
         let author = Self.nilIfEmpty(new)
         let updates = ids.map {
@@ -411,7 +439,12 @@ final class MetadataService {
     @discardableResult
     func applyMetadataFixes(_ fixes: [MetadataFix]) -> Bool {
         guard !fixes.isEmpty else { return true }
-        let catalogBooks = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
+        let catalogBooks: [Book]
+        do {
+            catalogBooks = try modelContext.fetchAllBooksForGlobalAnalysis()
+        } catch {
+            return catalogFetchFailed(operation: "metadataFixes", error: error)
+        }
         var updates: [CatalogBookUpdate] = []
         for fix in fixes {
             switch fix.kind {
@@ -465,6 +498,13 @@ final class MetadataService {
         return succeeded(mutations.execute(.updateBooks(updates, operation: "metadataFixes")))
     }
 
+    private func catalogFetchFailed(operation: String, error: Error) -> Bool {
+        Log.persistence.error(
+            "Catalog fetch failed for \(operation, privacy: .public): \(error.localizedDescription, privacy: .public)"
+        )
+        return false
+    }
+
     private func succeeded(
         _ result: Result<CatalogChangeSet, CatalogMutationError>
     ) -> Bool {
@@ -503,8 +543,18 @@ final class MetadataService {
             var matched = 0
             for bookID in bookIDs {
                 guard !Task.isCancelled,
-                      manualFetchGeneration == generation,
-                      let book = try? mutations.book(id: bookID) else { continue }
+                      manualFetchGeneration == generation else { return }
+                let book: Book
+                do {
+                    book = try mutations.book(id: bookID)
+                    lastCatalogError = nil
+                } catch {
+                    lastCatalogError = error.localizedDescription
+                    metadataFetchSummary = String(
+                        localized: "Couldn’t read the library catalog."
+                    )
+                    return
+                }
                 if await performEnrich(book, replaceCover: true) { matched += 1 }
             }
             guard !Task.isCancelled,
@@ -525,7 +575,17 @@ final class MetadataService {
         guard settings.onlineMetadataEnabled else { return }
         let language = preferredLanguage
         let token = normalizedHardcoverToken
-        let candidates = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
+        let candidates: [Book]
+        do {
+            candidates = try modelContext.fetchAllBooksForGlobalAnalysis()
+            lastCatalogError = nil
+        } catch {
+            lastCatalogError = error.localizedDescription
+            Log.persistence.error(
+                "Online metadata backfill catalog fetch failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return
+        }
         let books: [Book]
         if let token {
             let configuration = lookupConfiguration(language: language, hardcoverToken: token)
@@ -541,8 +601,17 @@ final class MetadataService {
         let bookIDs = books.map(\.uuid)
         guard !bookIDs.isEmpty else { return }
         for bookID in bookIDs {
-            guard !Task.isCancelled,
-                  let book = try? mutations.book(id: bookID) else { continue }
+            guard !Task.isCancelled else { return }
+            let book: Book
+            do {
+                book = try mutations.book(id: bookID)
+            } catch {
+                lastCatalogError = error.localizedDescription
+                Log.persistence.error(
+                    "Online metadata backfill book lookup failed: \(error.localizedDescription, privacy: .public)"
+                )
+                return
+            }
             await performEnrich(book, replaceCover: false)
         }
     }
@@ -569,9 +638,13 @@ final class MetadataService {
     func performEnrich(bookID: UUID, replaceCover: Bool) async -> Bool {
         let input: (BookAnalysisSnapshot, CoverReference, Int)
         do {
-            guard let book = try? mutations.book(id: bookID),
-                  let snapshot = BookAnalysisSnapshot(book: book) else { return false }
+            let book = try mutations.book(id: bookID)
+            guard let snapshot = BookAnalysisSnapshot(book: book) else {
+                return false
+            }
             input = (snapshot, book.coverReference, book.coverVersion)
+        } catch {
+            return false
         }
         return await performEnrich(
             snapshot: input.0,
@@ -590,9 +663,6 @@ final class MetadataService {
         let uuid = snapshot.bookID
         let coverOwner = CoverOwner.edition(uuid)
         let hasCover = CoverStore.exists(for: coverReference.owner)
-        let coverToken = replaceCover
-            ? await covers.beginUserMutation(for: coverOwner)
-            : await covers.beginBackgroundMutation(for: coverOwner)
 
         let runID = UUID()
         enrichmentRuns[uuid] = runID
@@ -647,32 +717,35 @@ final class MetadataService {
               let currentBook = try? mutations.book(id: snapshot.bookID),
               snapshot.matches(currentBook) else { return false }
 
-        var coverRollback: CoverRollbackTicket?
-        var installedCoverURL: URL?
+        var preparedCover: PreparedCoverMutation?
         if let data = proposal.coverJPEGData,
            currentBook.coverReference == coverReference,
            currentBook.coverVersion == editionCoverVersion,
            (replaceCover || !CoverStore.exists(for: coverOwner)) {
-            installedCoverURL = CoverStore.url(for: coverOwner)
-            coverRollback = await covers.install(
-                data,
-                using: coverToken,
-                onlyIfMissing: !replaceCover
-            )
-        }
-
-        if coverRollback != nil, !(await covers.isCurrent(coverToken)) {
-            return false
+            do {
+                preparedCover = try await coverMutations.prepare(
+                    payload: data,
+                    targetReference: CoverReference(
+                        owner: coverOwner,
+                        version: coverReference.version
+                    ),
+                    selectedBookIDs: [snapshot.bookID],
+                    expectedBookReferences: [snapshot.bookID: coverReference],
+                    priority: replaceCover ? .user : .background
+                )
+            } catch {
+                preparedCover = nil
+            }
         }
         guard analysisCoordinator.isCurrent(job.ticket),
               proposal.lookupConfiguration == currentLookupConfiguration,
               let liveBook = try? mutations.book(id: snapshot.bookID),
               snapshot.matches(liveBook),
-              coverRollback == nil
+              preparedCover == nil
                 || (liveBook.coverReference == coverReference
                     && liveBook.coverVersion == editionCoverVersion) else {
-            if let coverRollback, let installedCoverURL {
-                await rollbackCover(coverRollback, cacheURL: installedCoverURL)
+            if let preparedCover {
+                await coverMutations.abort(preparedCover)
             }
             return false
         }
@@ -681,51 +754,54 @@ final class MetadataService {
         guard matched || proposal.outcome.reachedNetwork else { return false }
         let bookPreimage = CatalogBookMetadataPreimage(liveBook)
         let workPreimage = liveBook.work.map(CatalogWorkPreimage.init)
+        let applyProposal = {
+            let storedBook = try self.mutations.book(id: snapshot.bookID)
+            guard self.analysisCoordinator.isCurrent(job.ticket),
+                  proposal.lookupConfiguration == self.currentLookupConfiguration,
+                  snapshot.matches(storedBook),
+                  preparedCover == nil
+                    || (storedBook.coverReference == coverReference
+                        && storedBook.coverVersion == editionCoverVersion) else {
+                throw CatalogMutationError.staleAnalysis
+            }
+            if let fetched = proposal.outcome.metadata {
+                self.applyOnlineProposal(fetched, to: storedBook)
+            }
+            storedBook.onlineLookupAt = proposal.completedAt
+            storedBook.onlineLookupConfiguration = proposal.lookupConfiguration
+        }
         do {
-            try mutations.commit(
-                .applyAnalysis(bookID: snapshot.bookID, kind: .onlineEnrichment),
-                affectedBookIDs: [snapshot.bookID],
-                affectedWorkIDs: Set([snapshot.identityRevision.workID].compactMap { $0 }),
-                revertingOnFailure: {
-                    bookPreimage.restore()
-                    workPreimage?.restore()
-                }
-            ) {
-                let storedBook = try mutations.book(id: snapshot.bookID)
-                guard analysisCoordinator.isCurrent(job.ticket),
-                      proposal.lookupConfiguration == currentLookupConfiguration,
-                      snapshot.matches(storedBook),
-                      coverRollback == nil
-                        || (storedBook.coverReference == coverReference
-                            && storedBook.coverVersion == editionCoverVersion) else {
-                    throw CatalogMutationError.staleAnalysis
-                }
-                if let fetched = proposal.outcome.metadata {
-                    applyOnlineProposal(fetched, to: storedBook)
-                }
-                storedBook.onlineLookupAt = proposal.completedAt
-                storedBook.onlineLookupConfiguration = proposal.lookupConfiguration
-                if coverRollback != nil {
-                    storedBook.coverVersion = editionCoverVersion + 1
-                    guard storedBook.selectCoverOwner(coverOwner) else {
-                        throw CatalogMutationError.invalidRequest
-                    }
-                }
+            if let preparedCover {
+                _ = try await coverMutations.commit(
+                    preparedCover,
+                    command: .applyAnalysis(
+                        bookID: snapshot.bookID,
+                        kind: .onlineEnrichment
+                    ),
+                    affectedBookIDs: [snapshot.bookID],
+                    affectedWorkIDs: Set([snapshot.identityRevision.workID].compactMap { $0 }),
+                    revertingOnFailure: {
+                        bookPreimage.restore()
+                        workPreimage?.restore()
+                    },
+                    applying: applyProposal
+                )
+            } else {
+                try mutations.commit(
+                    .applyAnalysis(bookID: snapshot.bookID, kind: .onlineEnrichment),
+                    affectedBookIDs: [snapshot.bookID],
+                    affectedWorkIDs: Set([snapshot.identityRevision.workID].compactMap { $0 }),
+                    revertingOnFailure: {
+                        bookPreimage.restore()
+                        workPreimage?.restore()
+                    },
+                    applying: applyProposal
+                )
             }
         } catch {
-            if let coverRollback, let installedCoverURL {
-                await rollbackCover(coverRollback, cacheURL: installedCoverURL)
-            }
             return false
         }
 
-        if let coverRollback,
-           let installedCoverURL,
-           let data = proposal.coverJPEGData,
-           await covers.isCurrent(coverToken) {
-            _ = coverRollback
-            await CoverCache.shared.replace(NSImage(data: data), for: installedCoverURL)
-        }
         return matched
     }
 
@@ -755,15 +831,6 @@ final class MetadataService {
                 work.author = book.displayAuthor
             }
             work.refreshMatchKey()
-        }
-    }
-
-    private func rollbackCover(_ rollback: CoverRollbackTicket, cacheURL: URL) async {
-        if await covers.rollback(rollback) {
-            await CoverCache.shared.replace(
-                rollback.previousData.flatMap(NSImage.init(data:)),
-                for: cacheURL
-            )
         }
     }
 
