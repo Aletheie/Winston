@@ -5,10 +5,10 @@ import Testing
 
 @Suite("Reading history import")
 struct ReadingHistoryImportParserTests {
-    @Test func parsesGoodreadsQuotedFieldsAndNormalizesISBN() throws {
+    @Test func parsesGoodreadsQuotedFieldsAndCanonicalizesValidISBN() throws {
         let csv = #"""
         Book Id,Title,Author,ISBN13,My Rating,Date Read,Exclusive Shelf,Read Count,My Review
-        1,"The Book, Again",Ada Reader,"=""9781234567890""",4,2024/02/03,read,2,"First line
+        1,"The Book, Again",Ada Reader,"=""9780306406157""",4,2024/02/03,read,2,"First line
         second line"
         """#
 
@@ -21,12 +21,26 @@ struct ReadingHistoryImportParserTests {
         #expect(document.source == .goodreads)
         #expect(record.title == "The Book, Again")
         #expect(record.author == "Ada Reader")
-        #expect(record.isbn == "9781234567890")
+        #expect(record.isbn == "9780306406157")
         #expect(record.status == .finished)
         #expect(record.rating == 4)
         #expect(record.readCount == 2)
         #expect(record.cycles.count == 1)
         #expect(record.cycles.first?.status == .finished)
+    }
+
+    @Test func invalidImportISBNIsRetainedForReview() throws {
+        let csv = #"""
+        Book Id,Title,Author,ISBN13,Exclusive Shelf
+        1,Invalid ISBN,Ada Reader,978-0-306-40615-8,read
+        """#
+
+        let document = try ReadingHistoryExportParser.parse(
+            data: Data(csv.utf8),
+            fileName: "goodreads_library_export.csv"
+        )
+
+        #expect(document.records.first?.isbn == "978-0-306-40615-8")
     }
 
     @Test func parsesStoryGraphRereadDatesAndFractionalRating() throws {
@@ -131,8 +145,15 @@ struct ReadingHistoryImportApplicationTests {
         let book = Book(fileName: "book-0.epub", originalFileName: "Book 0.epub")
         book.title = "Book 0"
         book.author = "Author"
+        let container = PersistenceController.inMemory()
+        container.mainContext.insert(book)
+        try container.mainContext.save()
         let model = ReadingHistoryImportViewModel()
-        await model.load(fileURL: url, books: [book])
+        await model.load(
+            fileURL: url,
+            modelContainer: container,
+            pageSize: 32
+        )
 
         let clock = ContinuousClock()
         let startedAt = clock.now
@@ -150,11 +171,37 @@ struct ReadingHistoryImportApplicationTests {
         #expect(elapsed < .seconds(1))
     }
 
+    @Test func catalogProjectionUsesKeysetPagesAcrossEqualDates() async throws {
+        let container = PersistenceController.inMemory()
+        let context = container.mainContext
+        let sharedDate = day(2026, 7, 27)
+        let expectedCount = 257
+        for index in 0..<expectedCount {
+            let book = Book(
+                fileName: "projection-\(index).epub",
+                originalFileName: "Projection \(index).epub",
+                dateAdded: sharedDate
+            )
+            book.title = "Projection \(index)"
+            context.insert(book)
+        }
+        try context.save()
+
+        let loader = ReadingHistoryCatalogProjectionLoader(
+            modelContainer: container
+        )
+        let snapshot = try await loader.loadAll(pageSize: 32)
+
+        #expect(snapshot.books.count == expectedCount)
+        #expect(Set(snapshot.books.map(\.id)).count == expectedCount)
+        #expect(snapshot.pageCount == 9)
+    }
+
     @Test func matcherPrefersISBNAndLeavesTitleOnlyMatchForReview() throws {
         let isbnBook = Book(fileName: "one.epub", originalFileName: "One.epub")
         isbnBook.title = "Different Export Title"
         isbnBook.author = "Ada Reader"
-        isbnBook.isbn = "978-1-234-56789-0"
+        isbnBook.isbn = "0-306-40615-2"
         let titleBook = Book(fileName: "two.epub", originalFileName: "Two.epub")
         titleBook.title = "Title Only"
         titleBook.author = "Someone"
@@ -163,7 +210,7 @@ struct ReadingHistoryImportApplicationTests {
             id: "exact",
             title: "Changed Title",
             author: "Other Author",
-            isbn: "9781234567890",
+            isbn: "ISBN-13: 9780306406157",
             status: .finished
         )
         let uncertain = record(id: "uncertain", title: "Title Only", status: .finished)
@@ -175,6 +222,28 @@ struct ReadingHistoryImportApplicationTests {
         #expect(rows[1].matchKind == .titleOnly)
         #expect(rows[1].matchedBookID == titleBook.uuid)
         #expect(!rows[1].isIncluded)
+    }
+
+    @Test func invalidISBNDoesNotOverrideTitleAndAuthorMatching() {
+        let book = Book(fileName: "one.epub", originalFileName: "One.epub")
+        book.title = "Catalog Title"
+        book.author = "Catalog Author"
+        book.isbn = "978-0-306-40615-8"
+        let imported = record(
+            id: "invalid",
+            title: "Different Title",
+            author: "Different Author",
+            isbn: "9780306406158",
+            status: .finished
+        )
+
+        let row = ReadingHistoryImportMatcher.match(
+            records: [imported],
+            books: [book]
+        ).first
+
+        #expect(row?.matchKind == .unmatched)
+        #expect(row?.matchedBookID == nil)
     }
 
     @Test func ambiguousMatchesAreNotImportedUntilChosen() {
@@ -297,7 +366,7 @@ struct ReadingHistoryImportApplicationTests {
         rows[0].isIncluded = true
         let importer = ReadingHistoryImporter(modelContext: context, save: { throw TestImportError.expected })
 
-        #expect(throws: TestImportError.expected) {
+        #expect(throws: CatalogMutationError.self) {
             try importer.apply(rows)
         }
         #expect(book.rating == nil)

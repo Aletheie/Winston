@@ -24,6 +24,7 @@ nonisolated enum ReadingHistoryImportError: LocalizedError, Equatable, Sendable 
     case unknownSource
     case missingTitleColumn
     case noBooks
+    case catalogChanged
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +40,8 @@ nonisolated enum ReadingHistoryImportError: LocalizedError, Equatable, Sendable 
             String(localized: "The export is missing its book title column.")
         case .noBooks:
             String(localized: "No books were found in that export.")
+        case .catalogChanged:
+            String(localized: "The library changed while reading history was being imported.")
         }
     }
 }
@@ -188,7 +191,10 @@ nonisolated enum ReadingHistoryExportParser {
     ) -> ReadingHistoryImportRecord? {
         guard let title = row.value(for: titleHeaders)?.trimmedNonEmpty else { return nil }
         let author = row.value(for: ["author", "authors", "primaryauthor", "authorname"])?.trimmedNonEmpty
-        let isbn = normalizeISBN(row.value(for: ["isbn13", "isbn", "isbnuid", "editionisbn"]))
+        let rawISBN = row.value(
+            for: ["isbn13", "isbn", "isbnuid", "editionisbn"]
+        )?.trimmedNonEmpty
+        let isbn = MetadataNormalizer.canonicalISBN13(rawISBN) ?? rawISBN
 
         let rawStatus = row.value(for: ["exclusiveshelf", "readstatus", "readingstatus", "status", "bookstatus"])
             ?? row.value(for: ["bookshelves", "shelves", "tags"])
@@ -303,7 +309,7 @@ nonisolated enum ReadingHistoryExportParser {
         guard let raw else { return nil }
         let values = raw
             .components(separatedBy: CharacterSet(charactersIn: ",;|"))
-            .map(\.normalizedMatchKey)
+            .map(MetadataNormalizer.identifierKey)
         for value in values {
             switch value {
             case "toread", "wanttoread", "unread", "planned", "planstoread": return .unread
@@ -336,12 +342,6 @@ nonisolated enum ReadingHistoryExportParser {
         guard var value = Double(raw) else { return nil }
         if isPercentage || value > 1 { value /= 100 }
         return min(max(value, 0), 1)
-    }
-
-    private static func normalizeISBN(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        let value = raw.uppercased().filter { $0.isNumber || $0 == "X" }
-        return value.count == 10 || value.count == 13 ? value : nil
     }
 
     private static func parseDateList(
@@ -568,6 +568,148 @@ nonisolated struct ReadingHistoryBookOption: Equatable, Identifiable, Sendable {
     let isbn: String?
 }
 
+nonisolated struct ReadingHistorySessionProjection: Equatable, Sendable {
+    let startedAt: Date
+    let endedAt: Date?
+    let status: ReadingSessionStatus
+}
+
+nonisolated struct ReadingHistoryBookProjection: Equatable, Identifiable, Sendable {
+    let id: UUID
+    let title: String
+    let author: String?
+    let isbn: String?
+    let readingStatus: ReadingStatus
+    let rating: Int?
+    let sessions: [ReadingHistorySessionProjection]
+
+    var option: ReadingHistoryBookOption {
+        ReadingHistoryBookOption(
+            id: id,
+            title: title,
+            author: author,
+            isbn: isbn
+        )
+    }
+}
+
+nonisolated struct ReadingHistoryCatalogProjectionSnapshot: Equatable, Sendable {
+    let books: [ReadingHistoryBookProjection]
+    let pageCount: Int
+}
+
+private nonisolated struct ReadingHistoryCatalogProjectionPage: Sendable {
+    let books: [ReadingHistoryBookProjection]
+    let lastDateAdded: Date?
+    let trailingLastDateCount: Int
+}
+
+/// Reads catalog values in bounded pages on a dedicated SwiftData executor.
+/// No managed `Book` or `ReadingSession` instance crosses the actor boundary.
+@ModelActor
+actor ReadingHistoryCatalogProjectionLoader {
+    func loadAll(pageSize: Int = 256) throws -> ReadingHistoryCatalogProjectionSnapshot {
+        let limit = max(1, pageSize)
+        var projections: [ReadingHistoryBookProjection] = []
+        var cursorDate: Date?
+        var skippedAtCursor = 0
+        var pageCount = 0
+
+        while true {
+            try Task.checkCancellation()
+            let page = try loadPage(
+                startingAt: cursorDate,
+                skippingAtCursor: skippedAtCursor,
+                limit: limit
+            )
+            pageCount += 1
+            projections.append(contentsOf: page.books)
+
+            guard page.books.count == limit,
+                  let lastDateAdded = page.lastDateAdded else {
+                break
+            }
+            if cursorDate == lastDateAdded {
+                skippedAtCursor += page.trailingLastDateCount
+            } else {
+                cursorDate = lastDateAdded
+                skippedAtCursor = page.trailingLastDateCount
+            }
+        }
+
+        return ReadingHistoryCatalogProjectionSnapshot(
+            books: projections,
+            pageCount: pageCount
+        )
+    }
+
+    func load(bookIDs: Set<UUID>) throws -> [ReadingHistoryBookProjection] {
+        guard !bookIDs.isEmpty else { return [] }
+        let requestedIDs = Array(bookIDs)
+        var descriptor = FetchDescriptor<Book>(
+            predicate: #Predicate { requestedIDs.contains($0.uuid) },
+            sortBy: [SortDescriptor(\Book.uuid)]
+        )
+        descriptor.relationshipKeyPathsForPrefetching = [\Book.readingSessions]
+        return try modelContext.fetch(descriptor).map(Self.projection)
+    }
+
+    private func loadPage(
+        startingAt cursorDate: Date?,
+        skippingAtCursor: Int,
+        limit: Int
+    ) throws -> ReadingHistoryCatalogProjectionPage {
+        var descriptor: FetchDescriptor<Book>
+        if let cursorDate {
+            descriptor = FetchDescriptor<Book>(
+                predicate: #Predicate { $0.dateAdded >= cursorDate },
+                sortBy: [
+                    SortDescriptor(\Book.dateAdded),
+                    SortDescriptor(\Book.uuid),
+                ]
+            )
+            descriptor.fetchOffset = skippingAtCursor
+        } else {
+            descriptor = FetchDescriptor<Book>(
+                sortBy: [
+                    SortDescriptor(\Book.dateAdded),
+                    SortDescriptor(\Book.uuid),
+                ]
+            )
+        }
+        descriptor.fetchLimit = limit
+        descriptor.relationshipKeyPathsForPrefetching = [\Book.readingSessions]
+        let books = try modelContext.fetch(descriptor)
+        let lastDateAdded = books.last?.dateAdded
+        let trailingLastDateCount = lastDateAdded.map { date in
+            books.reversed().prefix { $0.dateAdded == date }.count
+        } ?? 0
+        return ReadingHistoryCatalogProjectionPage(
+            books: books.map(Self.projection),
+            lastDateAdded: lastDateAdded,
+            trailingLastDateCount: trailingLastDateCount
+        )
+    }
+
+    private static func projection(_ book: Book) -> ReadingHistoryBookProjection {
+        ReadingHistoryBookProjection(
+            id: book.uuid,
+            title: book.displayTitle,
+            author: book.displayAuthor,
+            isbn: book.isbn,
+            readingStatus: book.readingStatus,
+            rating: book.rating,
+            sessions: book.readingSessions.map {
+                ReadingHistorySessionProjection(
+                    startedAt: $0.startedAt,
+                    endedAt: $0.endedAt,
+                    status: $0.status
+                )
+            }
+        )
+    }
+}
+
 nonisolated struct ReadingHistoryImportImpact: Equatable, Sendable {
     let newCycleCount: Int
     let changesStatus: Bool
@@ -586,13 +728,12 @@ nonisolated struct ReadingHistoryImportPreviewRow: Equatable, Identifiable, Send
     var impact: ReadingHistoryImportImpact?
 }
 
-@MainActor
-enum ReadingHistoryImportMatcher {
+nonisolated enum ReadingHistoryImportMatcher {
     static func match(
         records: [ReadingHistoryImportRecord],
-        books: [Book]
+        projections: [ReadingHistoryBookProjection]
     ) -> [ReadingHistoryImportPreviewRow] {
-        let options = books.map(makeOption)
+        let options = projections.map(\.option)
         let byISBN = Dictionary(grouping: options.compactMap { option -> (String, ReadingHistoryBookOption)? in
             guard let isbn = normalizedISBN(option.isbn) else { return nil }
             return (isbn, option)
@@ -601,7 +742,10 @@ enum ReadingHistoryImportMatcher {
             BookMatchKey(title: $0.title, author: $0.author)
         })
         let byTitle = Dictionary(grouping: options, by: { $0.title.normalizedMatchKey })
-        let booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
+        let projectionsByID = Dictionary(
+            projections.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
 
         return records.map { record in
             let matched: [ReadingHistoryBookOption]
@@ -624,8 +768,8 @@ enum ReadingHistoryImportMatcher {
             }
 
             let bookID = matched.count == 1 ? matched[0].id : nil
-            let impact = bookID.flatMap { booksByID[$0] }.map {
-                ReadingHistoryImportImpactBuilder.impact(record: record, book: $0)
+            let impact = bookID.flatMap { projectionsByID[$0] }.map {
+                ReadingHistoryImportImpactBuilder.impact(record: record, projection: $0)
             }
             let include = bookID != nil && kind != .titleOnly && impact?.hasChanges == true
             return ReadingHistoryImportPreviewRow(
@@ -640,6 +784,38 @@ enum ReadingHistoryImportMatcher {
         }
     }
 
+    @MainActor
+    static func match(
+        records: [ReadingHistoryImportRecord],
+        books: [Book]
+    ) -> [ReadingHistoryImportPreviewRow] {
+        match(
+            records: records,
+            projections: books.map { book in
+                ReadingHistoryBookProjection(
+                    id: book.uuid,
+                    title: book.displayTitle,
+                    author: book.displayAuthor,
+                    isbn: book.isbn,
+                    readingStatus: book.readingStatus,
+                    rating: book.rating,
+                    sessions: book.readingSessions.map {
+                        ReadingHistorySessionProjection(
+                            startedAt: $0.startedAt,
+                            endedAt: $0.endedAt,
+                            status: $0.status
+                        )
+                    }
+                )
+            }
+        )
+    }
+
+    static func makeOption(_ projection: ReadingHistoryBookProjection) -> ReadingHistoryBookOption {
+        projection.option
+    }
+
+    @MainActor
     static func makeOption(_ book: Book) -> ReadingHistoryBookOption {
         ReadingHistoryBookOption(
             id: book.uuid,
@@ -650,22 +826,44 @@ enum ReadingHistoryImportMatcher {
     }
 
     static func normalizedISBN(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        let value = raw.uppercased().filter { $0.isNumber || $0 == "X" }
-        return value.count == 10 || value.count == 13 ? value : nil
+        MetadataNormalizer.canonicalISBN13(raw)
     }
 }
 
-@MainActor
-enum ReadingHistoryImportImpactBuilder {
-    static func impact(record: ReadingHistoryImportRecord, book: Book) -> ReadingHistoryImportImpact {
+nonisolated enum ReadingHistoryImportImpactBuilder {
+    static func impact(
+        record: ReadingHistoryImportRecord,
+        projection: ReadingHistoryBookProjection
+    ) -> ReadingHistoryImportImpact {
         let newCycles = record.cycles.count { cycle in
-            !ReadingHistorySessionMatcher.contains(cycle, in: book.readingSessions)
+            !ReadingHistorySessionMatcher.contains(cycle, in: projection.sessions)
         }
         return ReadingHistoryImportImpact(
             newCycleCount: newCycles,
-            changesStatus: record.status.map { $0 != book.readingStatus } ?? false,
-            changesRating: record.winstonRating.map { $0 != book.rating } ?? false
+            changesStatus: record.status.map { $0 != projection.readingStatus } ?? false,
+            changesRating: record.winstonRating.map { $0 != projection.rating } ?? false
+        )
+    }
+
+    @MainActor
+    static func impact(record: ReadingHistoryImportRecord, book: Book) -> ReadingHistoryImportImpact {
+        impact(
+            record: record,
+            projection: ReadingHistoryBookProjection(
+                id: book.uuid,
+                title: book.displayTitle,
+                author: book.displayAuthor,
+                isbn: book.isbn,
+                readingStatus: book.readingStatus,
+                rating: book.rating,
+                sessions: book.readingSessions.map {
+                    ReadingHistorySessionProjection(
+                        startedAt: $0.startedAt,
+                        endedAt: $0.endedAt,
+                        status: $0.status
+                    )
+                }
+            )
         )
     }
 }
@@ -687,109 +885,134 @@ final class ReadingHistoryImporter {
         let rating: Int?
     }
 
-    private let modelContext: ModelContext
     private let mutations: CatalogMutationService
-    private let injectedSave: (@MainActor () throws -> Void)?
 
     init(
         modelContext: ModelContext,
         mutations: CatalogMutationService? = nil,
         save: (@MainActor () throws -> Void)? = nil
     ) {
-        self.modelContext = modelContext
-        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
-        injectedSave = save
+        if let mutations {
+            self.mutations = mutations
+        } else if let save {
+            self.mutations = CatalogMutationService(
+                modelContext: modelContext,
+                saveAdapter: CatalogSaveAdapter { _ in try save() }
+            )
+        } else {
+            self.mutations = CatalogMutationService(modelContext: modelContext)
+        }
     }
 
     func apply(_ rows: [ReadingHistoryImportPreviewRow]) throws -> ReadingHistoryImportResult {
         let selected = rows.filter { $0.isIncluded && $0.matchedBookID != nil }
         let bookIDs = Set(selected.compactMap(\.matchedBookID))
-        let booksByID = Dictionary(uniqueKeysWithValues:
-            ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? [])
-            .filter { bookIDs.contains($0.uuid) }
-            .map { ($0.uuid, $0) })
-        let rollbackStates = booksByID.values.map {
-            BookRollbackState(
-                book: $0,
-                readingStatusRaw: $0.readingStatusRaw,
-                dateStarted: $0.dateStarted,
-                dateFinished: $0.dateFinished,
-                rating: $0.rating
-            )
-        }
-        var insertedSessions: [ReadingSession] = []
         var touched: Set<UUID> = []
         var cyclesAdded = 0
         var statusesChanged = 0
         var ratingsChanged = 0
+        var rollbackStates: [BookRollbackState] = []
+        var insertedSessions: [ReadingSession] = []
+        var transactionContext: ModelContext?
 
-        for row in selected {
-            guard let bookID = row.matchedBookID, let book = booksByID[bookID] else { continue }
-            var changed = false
-            for cycle in row.record.cycles
-            where !ReadingHistorySessionMatcher.contains(cycle, in: book.readingSessions) {
-                guard let startedAt = cycle.startedAt ?? cycle.endedAt else { continue }
-                let endedAt = cycle.status.isActive ? nil : (cycle.endedAt ?? startedAt)
-                let session = ReadingSession(
-                    startedAt: startedAt,
-                    endedAt: endedAt,
-                    status: cycle.status,
-                    progress: cycle.progress,
-                    book: book
+        if !selected.isEmpty {
+            try mutations.commitPrepared(
+                .updateMetadataBatch(
+                    bookIDs: Array(bookIDs),
+                    operation: "readingHistoryImport",
+                    fields: ["readingStatus", "readingProgress", "rating"]
+                ),
+                affectedBookIDs: bookIDs,
+                revertingOnFailure: {
+                    let insertedIDs = Set(insertedSessions.map(\.uuid))
+                    for state in rollbackStates {
+                        state.book.readingStatusRaw = state.readingStatusRaw
+                        state.book.dateStarted = state.dateStarted
+                        state.book.dateFinished = state.dateFinished
+                        state.book.rating = state.rating
+                        state.book.readingSessions.removeAll {
+                            insertedIDs.contains($0.uuid)
+                        }
+                    }
+                    if let transactionContext {
+                        for session in insertedSessions
+                        where session.modelContext != nil {
+                            transactionContext.delete(session)
+                        }
+                    }
+                }
+            ) { writeContext in
+                transactionContext = writeContext
+                let requestedBookIDs = Array(bookIDs)
+                var descriptor = FetchDescriptor<Book>(
+                    predicate: #Predicate {
+                        requestedBookIDs.contains($0.uuid)
+                    }
                 )
-                modelContext.insert(session)
-                insertedSessions.append(session)
-                cyclesAdded += 1
-                changed = true
-            }
-            if let status = row.record.status, book.readingStatus != status {
-                applySummaryStatus(status, record: row.record, to: book)
-                statusesChanged += 1
-                changed = true
-            } else if changed {
-                refreshSummary(for: book)
-            }
-            if let rating = row.record.winstonRating, book.rating != rating {
-                book.rating = rating
-                ratingsChanged += 1
-                changed = true
-            }
-            if changed { touched.insert(bookID) }
-        }
-
-        do {
-            if let injectedSave {
-                try injectedSave()
-                if !touched.isEmpty {
-                    LibraryMutationLog.shared.bump(
-                        affectedBookIDs: touched,
-                        fields: [.readingState, .displayMetadata]
+                descriptor.relationshipKeyPathsForPrefetching = [\.readingSessions]
+                let booksByID = Dictionary(uniqueKeysWithValues:
+                    try writeContext.fetch(descriptor)
+                        .map { ($0.uuid, $0) }
+                )
+                guard booksByID.count == bookIDs.count else {
+                    throw ReadingHistoryImportError.catalogChanged
+                }
+                rollbackStates = booksByID.values.map {
+                    BookRollbackState(
+                        book: $0,
+                        readingStatusRaw: $0.readingStatusRaw,
+                        dateStarted: $0.dateStarted,
+                        dateFinished: $0.dateFinished,
+                        rating: $0.rating
                     )
                 }
-            } else if !touched.isEmpty {
-                try mutations.commitStaged(
-                    .updateMetadataBatch(
-                        bookIDs: Array(touched),
-                        operation: "readingHistoryImport",
-                        fields: ["readingStatus", "readingProgress", "rating"]
-                    ),
-                    affectedBookIDs: touched
-                )
+
+                for row in selected {
+                    guard let bookID = row.matchedBookID,
+                          let book = booksByID[bookID] else {
+                        continue
+                    }
+                    var changed = false
+                    for cycle in row.record.cycles
+                    where !ReadingHistorySessionMatcher.contains(
+                        cycle,
+                        in: book.readingSessions
+                    ) {
+                        guard let startedAt = cycle.startedAt ?? cycle.endedAt else {
+                            continue
+                        }
+                        let endedAt = cycle.status.isActive
+                            ? nil
+                            : (cycle.endedAt ?? startedAt)
+                        let session = ReadingSession(
+                            startedAt: startedAt,
+                            endedAt: endedAt,
+                            status: cycle.status,
+                            progress: cycle.progress,
+                            book: book
+                        )
+                        writeContext.insert(session)
+                        insertedSessions.append(session)
+                        cyclesAdded += 1
+                        changed = true
+                    }
+                    if let status = row.record.status,
+                       book.readingStatus != status {
+                        self.applySummaryStatus(status, record: row.record, to: book)
+                        statusesChanged += 1
+                        changed = true
+                    } else if changed {
+                        self.refreshSummary(for: book)
+                    }
+                    if let rating = row.record.winstonRating,
+                       book.rating != rating {
+                        book.rating = rating
+                        ratingsChanged += 1
+                        changed = true
+                    }
+                    if changed { touched.insert(bookID) }
+                }
             }
-        } catch {
-            let insertedIDs = Set(insertedSessions.map(\.uuid))
-            for state in rollbackStates {
-                state.book.readingStatusRaw = state.readingStatusRaw
-                state.book.dateStarted = state.dateStarted
-                state.book.dateFinished = state.dateFinished
-                state.book.rating = state.rating
-                state.book.readingSessions.removeAll { insertedIDs.contains($0.uuid) }
-            }
-            for session in insertedSessions where session.modelContext != nil {
-                modelContext.delete(session)
-            }
-            modelContext.rollback()
-            throw error
         }
         return ReadingHistoryImportResult(
             bookCount: touched.count,
@@ -832,8 +1055,23 @@ final class ReadingHistoryImporter {
     }
 }
 
-@MainActor
-private enum ReadingHistorySessionMatcher {
+nonisolated private enum ReadingHistorySessionMatcher {
+    static func contains(
+        _ cycle: ReadingHistoryImportCycle,
+        in sessions: [ReadingHistorySessionProjection]
+    ) -> Bool {
+        sessions.contains { session in
+            guard session.status == cycle.status else { return false }
+            if let endedAt = cycle.endedAt {
+                return sameDay(session.endedAt, endedAt)
+                    && (cycle.startedAt == nil || sameDay(session.startedAt, cycle.startedAt))
+            }
+            guard let startedAt = cycle.startedAt else { return false }
+            return session.endedAt == nil && sameDay(session.startedAt, startedAt)
+        }
+    }
+
+    @MainActor
     static func contains(_ cycle: ReadingHistoryImportCycle, in sessions: [ReadingSession]) -> Bool {
         sessions.contains { session in
             guard session.status == cycle.status else { return false }
