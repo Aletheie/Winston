@@ -14,15 +14,16 @@ final class DeviceMonitor {
     private(set) var state: State = .disconnected
     private(set) var books: [DeviceBook] = [] {
         didSet {
-            deviceFileNames = Set(books.lazy.map(\.matchKey))
-            booksRevision &+= 1
+            publishInventoryChange(from: oldValue, to: books)
         }
     }
     private(set) var deviceFileNames: Set<String> = []
-    private(set) var booksRevision = 0
+    private(set) var inventoryGeneration = 0
+    private(set) var lastInventoryDelta = DeviceInventoryDelta.empty
     private(set) var connection: (any KindleDeviceConnection)?
     private(set) var lastError: String?
     private(set) var lastBulkOperationResult: BulkOperationResult?
+    private(set) var isEjecting = false
 
     private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var deviceDeleteSession: BulkOperationSession?
@@ -40,8 +41,16 @@ final class DeviceMonitor {
     }
 
     var inventory: DeviceInventorySnapshot? {
-        info.map { DeviceInventorySnapshot(info: $0, books: books) }
+        info.map {
+            DeviceInventorySnapshot(
+                generation: inventoryGeneration,
+                info: $0,
+                books: books
+            )
+        }
     }
+
+    var booksRevision: Int { inventoryGeneration }
 
     // MARK: - Lifecycle
 
@@ -63,13 +72,38 @@ final class DeviceMonitor {
     func suspendPolling() { suspended = true }
     func resumePolling() { suspended = false }
 
-    func userDisconnect() async {
+    func userDisconnect() async throws {
+        guard let activeConnection = connection else {
+            throw DeviceError.notConnected
+        }
+        guard !isEjecting else { return }
+        isEjecting = true
+        defer { isEjecting = false }
         manuallyDisconnected = true
+        lastError = nil
         Log.device.info("User ejecting the device")
-        await connection?.eject()
-        connection = nil
-        books = []
-        state = .disconnected
+        do {
+            try await activeConnection.eject()
+            clearConnection(ifCurrent: activeConnection)
+        } catch {
+            let connectionChanged = !isCurrentConnection(activeConnection)
+            let physicallyDisconnected = await !activeConnection.isAlive()
+            if connectionChanged || physicallyDisconnected {
+                clearConnection(ifCurrent: activeConnection)
+                manuallyDisconnected = false
+                Log.device.info(
+                    "Device disappeared while eject was in flight; treating it as disconnected"
+                )
+                return
+            }
+
+            manuallyDisconnected = false
+            lastError = error.localizedDescription
+            Log.device.error(
+                "User eject failed while the device remained connected: \(error.localizedDescription, privacy: .public)"
+            )
+            throw error
+        }
     }
 
     // MARK: - Polling
@@ -151,6 +185,22 @@ final class DeviceMonitor {
     func adoptConnectionForTesting(_ newConnection: any KindleDeviceConnection, info: DeviceInfo) {
         connection = newConnection
         state = .connected(info)
+    }
+
+    private func isCurrentConnection(
+        _ candidate: any KindleDeviceConnection
+    ) -> Bool {
+        guard let connection else { return false }
+        return ObjectIdentifier(connection) == ObjectIdentifier(candidate)
+    }
+
+    private func clearConnection(
+        ifCurrent candidate: any KindleDeviceConnection
+    ) {
+        guard isCurrentConnection(candidate) else { return }
+        connection = nil
+        books = []
+        state = .disconnected
     }
 
     // MARK: - Books
@@ -276,5 +326,55 @@ final class DeviceMonitor {
     func cancelDeviceDelete() {
         guard let session = deviceDeleteSession else { return }
         Task { await session.cancel() }
+    }
+
+    private func publishInventoryChange(
+        from oldBooks: [DeviceBook],
+        to newBooks: [DeviceBook]
+    ) {
+        guard oldBooks != newBooks else { return }
+        let oldByID = Dictionary(
+            oldBooks.map { ($0.id, $0) },
+            uniquingKeysWith: { _, last in last }
+        )
+        let newByID = Dictionary(
+            newBooks.map { ($0.id, $0) },
+            uniquingKeysWith: { _, last in last }
+        )
+        let inserted = newByID.keys
+            .filter { oldByID[$0] == nil }
+            .compactMap { newByID[$0] }
+            .sorted { $0.id < $1.id }
+        let removed = oldByID.keys
+            .filter { newByID[$0] == nil }
+            .compactMap { oldByID[$0] }
+            .sorted { $0.id < $1.id }
+        let updated = newByID.keys
+            .filter { id in
+                guard let old = oldByID[id], let new = newByID[id] else {
+                    return false
+                }
+                return old != new
+            }
+            .compactMap { newByID[$0] }
+            .sorted { $0.id < $1.id }
+        let updatedIDs = Set(updated.map(\.id))
+        let changedMatchKeys = Set(
+            inserted.map(\.matchKey)
+                + removed.map(\.matchKey)
+                + updated.map(\.matchKey)
+                + updatedIDs.compactMap { oldByID[$0]?.matchKey }
+        )
+        let previousGeneration = inventoryGeneration
+        inventoryGeneration &+= 1
+        lastInventoryDelta = DeviceInventoryDelta(
+            fromGeneration: previousGeneration,
+            toGeneration: inventoryGeneration,
+            inserted: inserted,
+            updated: updated,
+            removed: removed,
+            changedMatchKeys: changedMatchKeys
+        )
+        deviceFileNames = Set(newBooks.lazy.map(\.matchKey))
     }
 }

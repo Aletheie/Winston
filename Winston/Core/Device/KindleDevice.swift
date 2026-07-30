@@ -109,8 +109,65 @@ nonisolated struct DeviceTransferResult: Sendable, Equatable {
 }
 
 nonisolated struct DeviceInventorySnapshot: Sendable, Equatable {
+    let generation: Int
     let info: DeviceInfo
     let books: [DeviceBook]
+
+    init(
+        generation: Int = 0,
+        info: DeviceInfo,
+        books: [DeviceBook]
+    ) {
+        self.generation = generation
+        self.info = info
+        self.books = books
+    }
+}
+
+nonisolated struct DeviceInventoryDelta: Sendable, Equatable {
+    let fromGeneration: Int
+    let toGeneration: Int
+    let inserted: [DeviceBook]
+    let updated: [DeviceBook]
+    let removed: [DeviceBook]
+    let changedMatchKeys: Set<String>
+
+    init(
+        fromGeneration: Int,
+        toGeneration: Int,
+        inserted: [DeviceBook],
+        updated: [DeviceBook],
+        removed: [DeviceBook],
+        changedMatchKeys: Set<String>? = nil
+    ) {
+        self.fromGeneration = fromGeneration
+        self.toGeneration = toGeneration
+        self.inserted = inserted
+        self.updated = updated
+        self.removed = removed
+        self.changedMatchKeys = changedMatchKeys ?? Set(
+            inserted.map(\.matchKey)
+                + updated.map(\.matchKey)
+                + removed.map(\.matchKey)
+        )
+    }
+
+    static let empty = DeviceInventoryDelta(
+        fromGeneration: 0,
+        toGeneration: 0,
+        inserted: [],
+        updated: [],
+        removed: [],
+        changedMatchKeys: []
+    )
+
+    var isEmpty: Bool {
+        fromGeneration == toGeneration
+            && inserted.isEmpty
+            && updated.isEmpty
+            && removed.isEmpty
+    }
+
 }
 
 nonisolated enum DeviceError: Error, LocalizedError, Equatable {
@@ -124,20 +181,67 @@ nonisolated enum DeviceError: Error, LocalizedError, Equatable {
     case unsafePath
 
     var errorDescription: String? {
-        switch self {
-        case .notConnected:               "No device connected"
-        case .openFailed:                 "Could not open the device"
-        case .listFailed:                 "Could not read the device contents"
-        case .transferFailed(let code):   "Transfer failed (error \(code))"
-        case .deleteFailed(let code):     "Delete failed (error \(code))"
-        case .fileMissing:                "The file no longer exists"
-        case .invalidFileName:            "The destination file name is invalid"
-        case .unsafePath:                 "The device path violates the mounted-volume boundary"
+        localizedDescription()
+    }
+
+    func localizedDescription(locale: Locale? = nil) -> String {
+        let bundle = locale.map(WinstonLocalization.bundle(for:))
+            ?? WinstonLocalization.bundle
+        let locale = locale ?? .current
+        return switch self {
+        case .notConnected:
+            String(
+                localized: "No device connected",
+                bundle: bundle,
+                locale: locale
+            )
+        case .openFailed:
+            String(
+                localized: "Could not open the device",
+                bundle: bundle,
+                locale: locale
+            )
+        case .listFailed:
+            String(
+                localized: "Could not read the device contents",
+                bundle: bundle,
+                locale: locale
+            )
+        case .transferFailed(let code):
+            String(
+                localized: "Transfer failed (error \(code))",
+                bundle: bundle,
+                locale: locale
+            )
+        case .deleteFailed(let code):
+            String(
+                localized: "Delete failed (error \(code))",
+                bundle: bundle,
+                locale: locale
+            )
+        case .fileMissing:
+            String(
+                localized: "The file no longer exists",
+                bundle: bundle,
+                locale: locale
+            )
+        case .invalidFileName:
+            String(
+                localized: "The destination file name is invalid",
+                bundle: bundle,
+                locale: locale
+            )
+        case .unsafePath:
+            String(
+                localized: "The device path violates the mounted-volume boundary",
+                bundle: bundle,
+                locale: locale
+            )
         }
     }
 }
 
-nonisolated protocol KindleDeviceConnection: Sendable {
+nonisolated protocol KindleDeviceConnection: AnyObject, Sendable {
     func info() async throws -> DeviceInfo
     func listBooks() async throws -> [DeviceBook]
     func transfer(
@@ -150,13 +254,13 @@ nonisolated protocol KindleDeviceConnection: Sendable {
     func readClippingsText() async throws -> String?
     func isAlive() async -> Bool
     func disconnect() async
-    func eject() async
+    func eject() async throws
     func removeStaleVariants(baseName: String, keeping fileName: String) async throws
     func removeAppleDoubleSidecars() async throws -> Int
 }
 
 nonisolated extension KindleDeviceConnection {
-    func eject() async { await disconnect() }
+    func eject() async throws { await disconnect() }
     func removeStaleVariants(baseName: String, keeping fileName: String) async throws {}
 
     /// Compatibility adapter for callers that already own a leaf name. New send

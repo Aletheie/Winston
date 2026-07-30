@@ -11,20 +11,43 @@ struct DeviceView: View {
     @Environment(TransferQueue.self) private var transferQueue
     @Environment(ToastCenter.self) private var toasts
     @State private var selectedDeviceBooks: Set<DeviceBook.ID> = []
-    @State private var isCleaningSidecars = false
+    @State private var activeOperation: DeviceOperation?
     @State private var sidecarCleanupTask: Task<Void, Never>?
     @State private var sidecarSummary: String?
-    @State private var deviceRows: [DeviceBookRow] = []
-    @State private var deviceAuthors: [String] = []
-    @State private var deviceOnlyBooks: [DeviceBook] = []
-    @State private var authorByDeviceKey: [String: String] = [:]
-    @State private var hasBuiltRows = false
+    @State private var projection = DeviceProjection.unbuilt
     @State private var showsSyncPlan = false
 
-    private struct RowsRevision: Hashable {
-        let catalog: Int
-        let readModelIsReady: Bool
-        let device: Int
+    private struct DeviceProjection {
+        let rows: [DeviceBookRow]
+        let authors: [String]
+        let deviceOnlyBooks: [DeviceBook]
+        let authorByDeviceKey: [String: String]
+        let revision: DeviceProjectionRevision?
+
+        static let unbuilt = DeviceProjection(
+            rows: [],
+            authors: [],
+            deviceOnlyBooks: [],
+            authorByDeviceKey: [:],
+            revision: nil
+        )
+    }
+
+    private enum DeviceOperation: Equatable {
+        case refreshing
+        case copyingToLibrary
+        case importingHighlights
+        case cleaningSidecars
+        case deleting
+        case ejecting
+    }
+
+    private var projectionRevision: DeviceProjectionRevision {
+        DeviceProjectionRevision(
+            catalog: readModel.generation,
+            readModelIsReady: readModel.isReady,
+            device: monitor.booksRevision
+        )
     }
 
     var body: some View {
@@ -37,16 +60,24 @@ struct DeviceView: View {
         }
         .background { ThemedBackground() }
         .navigationTitle(monitor.info.map { "On \($0.name)" } ?? "Device")
-        .task(id: RowsRevision(
-            catalog: readModel.generation,
-            readModelIsReady: readModel.isReady,
-            device: monitor.booksRevision
-        )) {
-            if hasBuiltRows {
+        .task(id: projectionRevision) {
+            let revision = projectionRevision
+            let deviceBooks = monitor.books
+            let libraryBooks = books
+            if projection.revision != nil {
                 try? await Task.sleep(for: .milliseconds(80))
                 guard !Task.isCancelled else { return }
             }
-            await rebuildRows()
+            await rebuildProjection(
+                revision: revision,
+                deviceBooks: deviceBooks,
+                libraryBooks: libraryBooks
+            )
+        }
+        .task(id: monitor.info?.identifier) {
+            guard monitor.info != nil else { return }
+            await monitor.refreshBooks()
+            await transferQueue.resumePending(via: monitor)
         }
         .sheet(isPresented: $showsSyncPlan) {
             KindleSyncPlanSheet(books: books, readModel: readModel)
@@ -59,32 +90,53 @@ struct DeviceView: View {
         }
     }
 
-    private func rebuildRows() async {
-        guard !monitor.books.isEmpty else {
-            authorByDeviceKey = [:]
-            deviceOnlyBooks = []
-            deviceRows = []
-            deviceAuthors = []
-            hasBuiltRows = true
-            return
+    private func rebuildProjection(
+        revision: DeviceProjectionRevision,
+        deviceBooks: [DeviceBook],
+        libraryBooks: [Book]
+    ) async {
+        let metadata: LibraryDeviceMetadataSnapshot?
+        if deviceBooks.isEmpty || !revision.readModelIsReady {
+            metadata = nil
+        } else {
+            metadata = await readModel.deviceMetadata()
+            guard metadata?.generation == revision.catalog else { return }
         }
-        let metadata = await readModel.deviceMetadata()
-        guard !Task.isCancelled else { return }
+
         let authorMap = metadata?.authorByDeviceKey ?? Dictionary(
-            books.flatMap { book in
+            libraryBooks.flatMap { book in
                 book.displayAuthor.map { author in
                     book.deviceMatchKeys.map { ($0, author) }
                 } ?? []
             },
             uniquingKeysWith: { first, _ in first }
         )
-        let libraryKeys = metadata?.libraryKeys ?? Set(books.flatMap(\.deviceMatchKeys))
-        let rows = DeviceTableQuery.rows(books: monitor.books, authorByMatchKey: authorMap)
-        authorByDeviceKey = authorMap
-        deviceOnlyBooks = monitor.books.filter { !libraryKeys.contains($0.matchKey) }
-        deviceRows = rows
-        deviceAuthors = DeviceTableQuery.authors(in: rows)
-        hasBuiltRows = true
+        let libraryKeys = metadata?.libraryKeys
+            ?? Set(libraryBooks.flatMap(\.deviceMatchKeys))
+        let rows = DeviceTableQuery.rows(
+            books: deviceBooks,
+            authorByMatchKey: authorMap
+        )
+        let value = DeviceProjection(
+            rows: rows,
+            authors: DeviceTableQuery.authors(in: rows),
+            deviceOnlyBooks: deviceBooks.filter {
+                !libraryKeys.contains($0.matchKey)
+            },
+            authorByDeviceKey: authorMap,
+            revision: revision
+        )
+        guard DeviceProjectionPublicationPolicy.shouldPublish(
+            captured: revision,
+            current: projectionRevision,
+            isCancelled: Task.isCancelled
+        ) else { return }
+
+        projection = value
+        selectedDeviceBooks = DeviceProjectionPublicationPolicy.pruneSelection(
+            selectedDeviceBooks,
+            to: value.rows
+        )
     }
 
     @ViewBuilder
@@ -93,16 +145,17 @@ struct DeviceView: View {
             DeviceHeader(
                 info: info,
                 bookCount: monitor.books.count,
-                deviceOnlyCount: deviceOnlyBooks.count,
-                isBusy: transferQueue.isTransferring,
+                deviceOnlyCount: projection.deviceOnlyBooks.count,
+                isBusy: isDeviceBusy,
                 isImportingHighlights: viewModel.isImportingHighlights,
-                isCleaningSidecars: isCleaningSidecars,
+                isCleaningSidecars: activeOperation == .cleaningSidecars,
+                isEjecting: activeOperation == .ejecting || monitor.isEjecting,
                 onPlan: { showsSyncPlan = true },
                 onImport: importAllFromDevice,
-                onRefresh: { Task { await monitor.refreshBooks(); await monitor.refreshInfo() } },
-                onImportHighlights: { viewModel.importHighlights(via: monitor) },
+                onRefresh: refreshDevice,
+                onImportHighlights: importHighlights,
                 onCleanSidecars: info.kind == .massStorage ? { cleanSidecars() } : nil,
-                onDisconnect: { Task { await monitor.userDisconnect() } }
+                onDisconnect: ejectDevice
             )
             .padding(16)
             .background(.ultraThinMaterial)
@@ -123,8 +176,8 @@ struct DeviceView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 DeviceLibrarySection(
-                    rows: deviceRows,
-                    authors: deviceAuthors,
+                    rows: projection.rows,
+                    authors: projection.authors,
                     selection: $selectedDeviceBooks,
                     onCopy: copyToLibrary,
                     onDelete: deleteFromDevice,
@@ -136,35 +189,79 @@ struct DeviceView: View {
 
     // MARK: - Actions
 
+    private var isDeviceBusy: Bool {
+        activeOperation != nil
+            || transferQueue.isTransferring
+            || viewModel.isImportingHighlights
+            || monitor.isEjecting
+    }
+
+    private func begin(_ operation: DeviceOperation) -> Bool {
+        guard !isDeviceBusy else { return false }
+        activeOperation = operation
+        return true
+    }
+
+    private func finish(_ operation: DeviceOperation) {
+        if activeOperation == operation {
+            activeOperation = nil
+        }
+    }
+
     private func importAllFromDevice() {
-        copyToLibrary(Set(deviceOnlyBooks.map(\.id)))
+        copyToLibrary(Set(projection.deviceOnlyBooks.map(\.id)))
     }
 
     private func deleteByAuthor(_ author: String) {
-        let ids = Set(monitor.books.filter { authorByDeviceKey[$0.matchKey] == author }.map(\.id))
+        let ids = Set(monitor.books.filter {
+            projection.authorByDeviceKey[$0.matchKey] == author
+        }.map(\.id))
         deleteFromDevice(ids)
     }
 
     private func copyToLibrary(_ ids: Set<DeviceBook.ID>) {
         let books = monitor.books.filter { ids.contains($0.id) }
+        guard !books.isEmpty else { return }
         Task {
+            guard begin(.copyingToLibrary) else { return }
+            defer { finish(.copyingToLibrary) }
             for book in books {
-                guard let url = await transferQueue.copyToLibrary(book, via: monitor) else { break }
-                viewModel.addBooks(from: [url])
+                guard let lease = await transferQueue.copyToLibrary(book, via: monitor) else { break }
+                viewModel.addBooks(from: [.winstonOwned(lease)])
             }
         }
     }
 
+    private func refreshDevice() {
+        Task {
+            guard begin(.refreshing) else { return }
+            defer { finish(.refreshing) }
+            await monitor.refreshBooks()
+            await monitor.refreshInfo()
+        }
+    }
+
+    private func importHighlights() {
+        Task {
+            guard begin(.importingHighlights) else { return }
+            defer { finish(.importingHighlights) }
+            await viewModel.importHighlights(via: monitor)
+        }
+    }
+
     private func cleanSidecars() {
-        if isCleaningSidecars {
+        if activeOperation == .cleaningSidecars {
             cancelSidecarCleanup()
             return
         }
         guard let connection = monitor.connection else { return }
-        isCleaningSidecars = true
+        guard begin(.cleaningSidecars) else { return }
         sidecarSummary = nil
         sidecarCleanupTask = Task {
-            defer { isCleaningSidecars = false }
+            defer {
+                sidecarCleanupTask = nil
+                finish(.cleaningSidecars)
+            }
             do {
                 let removed = try await connection.removeAppleDoubleSidecars()
                 sidecarSummary = removed == 0
@@ -181,10 +278,27 @@ struct DeviceView: View {
     private func cancelSidecarCleanup() {
         sidecarCleanupTask?.cancel()
         sidecarCleanupTask = nil
+        finish(.cleaningSidecars)
+    }
+
+    private func ejectDevice() {
+        Task {
+            guard begin(.ejecting) else { return }
+            defer { finish(.ejecting) }
+            do {
+                try await monitor.userDisconnect()
+            } catch {
+                toasts.error(String(
+                    localized: "Couldn’t eject the Kindle. \(error.localizedDescription)"
+                ))
+            }
+        }
     }
 
     private func deleteFromDevice(_ ids: Set<DeviceBook.ID>) {
         Task {
+            guard begin(.deleting) else { return }
+            defer { finish(.deleting) }
             let result = await monitor.removeFromDevice(ids: ids)
             let deleted = Set(result.appliedTargetIDs.compactMap(\.deviceBookID))
             if result.completion == .failed || result.conflictCount > 0 {
@@ -206,6 +320,7 @@ private struct DeviceHeader: View {
     let isBusy: Bool
     let isImportingHighlights: Bool
     let isCleaningSidecars: Bool
+    let isEjecting: Bool
     let onPlan: () -> Void
     let onImport: () -> Void
     let onRefresh: () -> Void
@@ -269,6 +384,7 @@ private struct DeviceHeader: View {
                         Image(systemName: "quote.bubble")
                     }
                     .buttonStyle(.borderless)
+                    .disabled(isBusy)
                     .help("Import highlights & notes from this device")
                     .accessibilityLabel("Import highlights & notes from this device")
                 }
@@ -286,6 +402,7 @@ private struct DeviceHeader: View {
                                 .font(.system(size: 12, weight: .medium))
                         }
                         .buttonStyle(.borderless)
+                        .disabled(isBusy)
                         .help("Remove hidden macOS files that can confuse the Kindle indexer")
                         .accessibilityLabel("Remove hidden macOS files that can confuse the Kindle indexer")
                     }
@@ -295,16 +412,24 @@ private struct DeviceHeader: View {
                         .font(.system(size: 12, weight: .medium))
                 }
                 .buttonStyle(.borderless)
+                .disabled(isBusy)
                 .help("Refresh device contents")
                 .accessibilityLabel("Refresh device contents")
 
-                Button(action: onDisconnect) {
-                    Image(systemName: "eject")
-                        .font(.system(size: 12, weight: .medium))
+                if isEjecting {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Ejecting the Kindle")
+                } else {
+                    Button(action: onDisconnect) {
+                        Image(systemName: "eject")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isBusy)
+                    .help("Disconnect (eject) the Kindle so it re-indexes sideloaded books")
+                    .accessibilityLabel("Disconnect (eject) the Kindle so it re-indexes sideloaded books")
                 }
-                .buttonStyle(.borderless)
-                .help("Disconnect (eject) the Kindle so it re-indexes sideloaded books")
-                .accessibilityLabel("Disconnect (eject) the Kindle so it re-indexes sideloaded books")
             }
         }
     }
