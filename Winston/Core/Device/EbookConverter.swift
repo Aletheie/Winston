@@ -63,8 +63,20 @@ nonisolated enum EbookConverter {
     }
 
     static func canConvert(from sourceFormat: String, to format: OutputFormat) -> Bool {
+        canConvert(
+            from: sourceFormat,
+            to: format,
+            calibreAvailable: isCalibreAvailable
+        )
+    }
+
+    static func canConvert(
+        from sourceFormat: String,
+        to format: OutputFormat,
+        calibreAvailable: Bool
+    ) -> Bool {
         guard sourceFormat.lowercased() != format.ext else { return false }
-        return canConvertNatively(from: sourceFormat, to: format) || isCalibreAvailable
+        return canConvertNatively(from: sourceFormat, to: format) || calibreAvailable
     }
 
     static var prefersAZW3ForKindle: Bool {
@@ -78,7 +90,27 @@ nonisolated enum EbookConverter {
     }
 
     static func canConvertForKindle(_ sourceFormat: String) -> Bool {
-        canConvert(from: sourceFormat, to: kindleTarget(forFormat: sourceFormat))
+        canConvertForKindle(
+            sourceFormat,
+            calibreAvailable: isCalibreAvailable
+        )
+    }
+
+    static func canConvertForKindle(
+        _ sourceFormat: String,
+        calibreAvailable: Bool
+    ) -> Bool {
+        let target: OutputFormat
+        if prefersAZW3ForKindle, calibreAvailable {
+            target = .azw3
+        } else {
+            target = nativeMOBISources.contains(sourceFormat.lowercased()) ? .mobi : .azw3
+        }
+        return canConvert(
+            from: sourceFormat,
+            to: target,
+            calibreAvailable: calibreAvailable
+        )
     }
 
     static func convertForKindle(_ source: URL) async throws -> URL {

@@ -222,10 +222,10 @@ struct EbookConverterAsyncTests {
         let temporaryOutput = try #require(outputCandidate)
         #expect(FileManager.default.fileExists(atPath: temporaryOutput.path(percentEncoded: false)))
 
-        BookFileStore.delete(fileName: oldFileName)
+        TestManagedFileFixtureStore.delete(fileName: oldFileName)
         CoverStore.delete(for: uuid)
         library.context.delete(book)
-        library.context.saveQuietly()
+        library.context.fixtureSaveBestEffort()
 
         let completionDeadline = Date.now.addingTimeInterval(3)
         while service.convertingUUIDs.contains(uuid), Date.now < completionDeadline {
