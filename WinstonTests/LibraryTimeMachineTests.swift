@@ -367,6 +367,215 @@ struct LibraryTimeMachineTests {
         #expect(try Data(contentsOf: covers.appending(path: "\(id.uuidString).jpg")) == restoredData)
     }
 
+    @Test func workCoverRestorePreservesOwnerAndUpdatesEverySelectingEdition() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appending(
+            path: "WinstonWorkCoverRestore-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let covers = root.appending(path: "covers", directoryHint: .isDirectory)
+        let backupCover = root.appending(path: "backup.jpg")
+        try fileManager.createDirectory(at: covers, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let container = PersistenceController.inMemory()
+        let context = container.mainContext
+        let work = Work(title: "Shared Work")
+        work.coverVersion = 5
+        let restoredEdition = Book(
+            fileName: "restored.epub",
+            originalFileName: "Restored.epub"
+        )
+        let siblingEdition = Book(
+            fileName: "sibling.epub",
+            originalFileName: "Sibling.epub"
+        )
+        restoredEdition.work = work
+        siblingEdition.work = work
+        #expect(restoredEdition.selectCoverOwner(.work(work.uuid)))
+        #expect(siblingEdition.selectCoverOwner(.work(work.uuid)))
+        context.insert(work)
+        context.insert(restoredEdition)
+        context.insert(siblingEdition)
+        try context.save()
+
+        let liveCover = CoverStore.url(for: .work(work.uuid), in: covers)
+        try Data("current-work-cover".utf8).write(to: liveCover)
+        let restoredData = Data("restored-work-cover".utf8)
+        try restoredData.write(to: backupCover)
+        let backup = LibraryTimeMachineBookSnapshot(
+            id: restoredEdition.uuid,
+            fileName: restoredEdition.fileName,
+            originalFileName: restoredEdition.originalFileName,
+            coverVersion: 2,
+            coverScopeRaw: CoverScope.work.rawValue,
+            metadata: .init(title: "Shared Work"),
+            work: LibraryTimeMachineWorkSnapshot(
+                id: work.uuid,
+                title: work.title,
+                author: nil,
+                originalTitle: nil,
+                originalLanguage: nil,
+                openLibraryWorkKey: nil,
+                hardcoverBookID: nil,
+                preferredEditionUUID: restoredEdition.uuid,
+                coverVersionRaw: 2,
+                dateCreated: work.dateCreated,
+                notes: nil
+            ),
+            coverURL: backupCover
+        )
+        let restorer = LibraryTimeMachineRestorer(
+            modelContext: context,
+            coversDirectory: covers,
+            createSafetyBackup: { source in source }
+        )
+
+        _ = try await restorer.restore(backup, scope: .cover, from: root)
+
+        let expected = CoverReference(owner: .work(work.uuid), version: 6)
+        #expect(work.coverVersion == 6)
+        #expect(restoredEdition.coverReference == expected)
+        #expect(siblingEdition.coverReference == expected)
+        #expect(try Data(contentsOf: liveCover) == restoredData)
+        #expect(!fileManager.fileExists(
+            atPath: CoverStore.url(
+                for: .edition(restoredEdition.uuid),
+                in: covers
+            ).path(percentEncoded: false)
+        ))
+    }
+
+    @Test func generatedAssetCoverRestorePreservesOwnerAndAssetGeneration() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appending(
+            path: "WinstonGeneratedCoverRestore-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let covers = root.appending(path: "covers", directoryHint: .isDirectory)
+        let backupCover = root.appending(path: "backup.jpg")
+        try fileManager.createDirectory(at: covers, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let container = PersistenceController.inMemory()
+        let context = container.mainContext
+        let book = Book(fileName: "book.epub", originalFileName: "Book.epub")
+        let asset = BookAsset(
+            fileName: "generated.epub",
+            origin: .generated,
+            coverVersion: 3,
+            book: book
+        )
+        context.insert(book)
+        context.insert(asset)
+        #expect(book.selectCoverOwner(.generatedAsset(asset.uuid)))
+        try context.save()
+
+        let liveCover = CoverStore.url(for: .generatedAsset(asset.uuid), in: covers)
+        try Data("current-generated-cover".utf8).write(to: liveCover)
+        let restoredData = Data("restored-generated-cover".utf8)
+        try restoredData.write(to: backupCover)
+        let backup = LibraryTimeMachineBookSnapshot(
+            id: book.uuid,
+            fileName: book.fileName,
+            originalFileName: book.originalFileName,
+            coverVersion: 1,
+            coverScopeRaw: CoverScope.generatedAsset.rawValue,
+            coverAssetUUID: asset.uuid,
+            metadata: .init(title: "Book"),
+            assets: [
+                LibraryTimeMachineAssetSnapshot(
+                    id: asset.uuid,
+                    fileName: asset.fileName,
+                    originRaw: AssetOrigin.generated.rawValue,
+                    contentHash: nil,
+                    generatedFromContentHash: nil,
+                    sizeBytes: 0,
+                    dateAdded: asset.dateAdded,
+                    validationStatusRaw: nil,
+                    coverVersionRaw: 1
+                ),
+            ],
+            coverURL: backupCover
+        )
+        let restorer = LibraryTimeMachineRestorer(
+            modelContext: context,
+            coversDirectory: covers,
+            createSafetyBackup: { source in source }
+        )
+
+        _ = try await restorer.restore(backup, scope: .cover, from: root)
+
+        let expected = CoverReference(owner: .generatedAsset(asset.uuid), version: 4)
+        #expect(asset.coverVersion == 4)
+        #expect(book.coverReference == expected)
+        #expect(try Data(contentsOf: liveCover) == restoredData)
+        #expect(!fileManager.fileExists(
+            atPath: CoverStore.url(
+                for: .edition(book.uuid),
+                in: covers
+            ).path(percentEncoded: false)
+        ))
+    }
+
+    @Test func workCoverRestoreRejectsBackupWithoutItsWorkReference() async throws {
+        let container = PersistenceController.inMemory()
+        let context = container.mainContext
+        let book = Book(fileName: "book.epub", originalFileName: "Book.epub")
+        context.insert(book)
+        try context.save()
+        let backup = LibraryTimeMachineBookSnapshot(
+            id: book.uuid,
+            fileName: book.fileName,
+            originalFileName: book.originalFileName,
+            coverScopeRaw: CoverScope.work.rawValue,
+            coverURL: URL(filePath: "/tmp/unreachable-work-cover.jpg")
+        )
+        let restorer = LibraryTimeMachineRestorer(
+            modelContext: context,
+            createSafetyBackup: { source in source }
+        )
+
+        do {
+            _ = try await restorer.restore(backup, scope: .cover, from: URL(filePath: "/tmp"))
+            Issue.record("A Work cover without its Work snapshot should be rejected")
+        } catch LibraryTimeMachineRestoreError.backupWorkCoverOwnerUnavailable {
+            // Expected: malformed owner references fail closed before any restore mutation.
+        } catch {
+            Issue.record("Unexpected restore error: \(error)")
+        }
+    }
+
+    @Test func generatedCoverRestoreRejectsBackupWithoutItsAssetReference() async throws {
+        let container = PersistenceController.inMemory()
+        let context = container.mainContext
+        let book = Book(fileName: "book.epub", originalFileName: "Book.epub")
+        context.insert(book)
+        try context.save()
+        let missingAssetID = UUID()
+        let backup = LibraryTimeMachineBookSnapshot(
+            id: book.uuid,
+            fileName: book.fileName,
+            originalFileName: book.originalFileName,
+            coverScopeRaw: CoverScope.generatedAsset.rawValue,
+            coverAssetUUID: missingAssetID,
+            coverURL: URL(filePath: "/tmp/unreachable-generated-cover.jpg")
+        )
+        let restorer = LibraryTimeMachineRestorer(
+            modelContext: context,
+            createSafetyBackup: { source in source }
+        )
+
+        do {
+            _ = try await restorer.restore(backup, scope: .cover, from: URL(filePath: "/tmp"))
+            Issue.record("A generated cover without its asset snapshot should be rejected")
+        } catch LibraryTimeMachineRestoreError.backupAssetCoverOwnerUnavailable {
+            // Expected: malformed owner references fail closed before any restore mutation.
+        } catch {
+            Issue.record("Unexpected restore error: \(error)")
+        }
+    }
+
     @Test func committedCoverRestoreResumesPublicationFromJournal() async throws {
         let root = FileManager.default.temporaryDirectory.appending(
             path: "WinstonCoverRestoreRecovery-\(UUID().uuidString)",
@@ -394,10 +603,11 @@ struct LibraryTimeMachineTests {
         let failing = ManagedFileCoordinator(
             booksDirectory: books,
             coversDirectory: covers,
-            stateDirectory: managedState
-        ) {
+            stateDirectory: managedState,
+            faultInjector: {
             if case .duringPublish = $0 { throw TimeMachineTestError.expected }
-        }
+            }
+        )
         let mutations = CatalogMutationService(
             modelContext: context,
             managedFiles: failing

@@ -3,7 +3,7 @@ import SwiftData
 import SwiftUI
 
 @MainActor
-private func libraryTimeMachineBooks(in context: ModelContext) -> [Book] {
+private func libraryTimeMachineBooks(in context: ModelContext) throws -> [Book] {
     var descriptor = FetchDescriptor<Book>()
     descriptor.relationshipKeyPathsForPrefetching = [
         \Book.readingSessions,
@@ -12,7 +12,7 @@ private func libraryTimeMachineBooks(in context: ModelContext) -> [Book] {
         \Book.assets,
         \Book.work,
     ]
-    return (try? context.fetch(descriptor)) ?? []
+    return try context.fetch(descriptor)
 }
 
 nonisolated enum LibraryTimeMachineBookFilter: String, CaseIterable, Identifiable, Sendable {
@@ -235,7 +235,17 @@ final class LibraryTimeMachineViewModel {
                 result: result,
                 bookTitle: pendingRestore.snapshot.displayTitle
             )
-            await rebuildDiff(currentBooks: libraryTimeMachineBooks(in: modelContext))
+            do {
+                await rebuildDiff(
+                    currentBooks: try libraryTimeMachineBooks(in: modelContext)
+                )
+            } catch {
+                // The restore is already durable. Keep its success visible even
+                // when the follow-up comparison cannot be refreshed.
+                restoreError = String(
+                    localized: "The restore succeeded, but the comparison couldn’t be refreshed."
+                )
+            }
             reloadBackups(in: backupFolder)
             onBackupsChanged()
         } catch {
@@ -246,6 +256,10 @@ final class LibraryTimeMachineViewModel {
     func clearRestoreMessage() {
         restoreNotice = nil
         restoreError = nil
+    }
+
+    func reportCatalogLoadFailure(_ error: Error) {
+        phase = .failed(error.localizedDescription)
     }
 
     private func scheduleVisibleDiffRecompute(immediately: Bool = false) {
@@ -367,7 +381,13 @@ struct LibraryTimeMachineSheet: View {
         }
         .onChange(of: LibraryMutationLog.shared.catalogRevision) {
             Task {
-                await model.rebuildDiff(currentBooks: libraryTimeMachineBooks(in: modelContext))
+                do {
+                    await model.rebuildDiff(
+                        currentBooks: try libraryTimeMachineBooks(in: modelContext)
+                    )
+                } catch {
+                    model.reportCatalogLoadFailure(error)
+                }
             }
         }
         .confirmationDialog(
@@ -394,7 +414,13 @@ struct LibraryTimeMachineSheet: View {
     private func loadSelectedBackup() async {
         await Task.yield()
         guard !Task.isCancelled else { return }
-        await model.loadSelectedBackup(currentBooks: libraryTimeMachineBooks(in: modelContext))
+        do {
+            await model.loadSelectedBackup(
+                currentBooks: try libraryTimeMachineBooks(in: modelContext)
+            )
+        } catch {
+            model.reportCatalogLoadFailure(error)
+        }
     }
 }
 

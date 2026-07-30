@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 import SwiftData
 
@@ -50,6 +49,9 @@ enum LibraryTimeMachineRestoreError: LocalizedError {
     case bookUnavailable
     case backupCoverUnavailable
     case backupCoverUnreadable
+    case backupWorkCoverOwnerUnavailable
+    case backupAssetCoverOwnerUnavailable
+    case backupCoverOwnerInvalid
     case safetyBackupFailed(String)
     case coverWriteFailed
     case saveFailed(String)
@@ -62,6 +64,12 @@ enum LibraryTimeMachineRestoreError: LocalizedError {
             String(localized: "This backup does not contain a saved cover for the book.")
         case .backupCoverUnreadable:
             String(localized: "The saved cover in this backup could not be read.")
+        case .backupWorkCoverOwnerUnavailable:
+            String(localized: "The backup cover refers to a work that is unavailable.")
+        case .backupAssetCoverOwnerUnavailable:
+            String(localized: "The backup cover refers to a generated file that is unavailable.")
+        case .backupCoverOwnerInvalid:
+            String(localized: "The backup contains an invalid saved-cover owner.")
         case .safetyBackupFailed(let reason):
             String(
                 localized: "A safety backup could not be created: \(reason)",
@@ -162,10 +170,18 @@ private struct LibraryTimeMachineBookPreimage {
 struct LibraryTimeMachineRestorer {
     typealias SafetyBackupAction = @Sendable (URL) async throws -> URL
 
+    private struct CoverRestorePlan {
+        let owner: CoverOwner
+        let selectedBookIDs: Set<UUID>
+        let expectedBookReferences: [UUID: CoverReference]
+        let targetMayBeCreated: Bool
+    }
+
     private let modelContext: ModelContext
     private let createSafetyBackup: SafetyBackupAction
     private let mutations: CatalogMutationService
     private let managedFiles: ManagedFileCoordinator
+    private let coverMutations: CoverMutationCoordinator
 
     init(
         modelContext: ModelContext,
@@ -173,7 +189,8 @@ struct LibraryTimeMachineRestorer {
         coversDirectory: URL = AppPaths.coversDirectory,
         createSafetyBackup: SafetyBackupAction? = nil,
         managedFiles: ManagedFileCoordinator? = nil,
-        mutationService: CatalogMutationService? = nil
+        mutationService: CatalogMutationService? = nil,
+        coverMutationCoordinator: CoverMutationCoordinator? = nil
     ) {
         self.modelContext = modelContext
         let fileCoordinator: ManagedFileCoordinator
@@ -192,8 +209,14 @@ struct LibraryTimeMachineRestorer {
             )
         }
         self.managedFiles = fileCoordinator
-        mutations = mutationService ?? CatalogMutationService(
+        let resolvedMutations = mutationService ?? CatalogMutationService(
             modelContext: modelContext,
+            managedFiles: fileCoordinator
+        )
+        mutations = resolvedMutations
+        coverMutations = coverMutationCoordinator ?? CoverMutationCoordinator.resolve(
+            modelContext: modelContext,
+            mutations: resolvedMutations,
             managedFiles: fileCoordinator
         )
         if let createSafetyBackup {
@@ -220,7 +243,16 @@ struct LibraryTimeMachineRestorer {
         scope: LibraryTimeMachineRestoreScope,
         from sourceBackup: URL
     ) async throws -> LibraryTimeMachineRestoreResult {
-        let existing = try? mutations.book(id: snapshot.id)
+        let existing: Book?
+        do {
+            existing = try mutations.book(id: snapshot.id)
+        } catch CatalogMutationError.modelNotFound {
+            existing = nil
+        } catch {
+            throw LibraryTimeMachineRestoreError.saveFailed(
+                error.localizedDescription
+            )
+        }
         if scope != .book, existing == nil {
             throw LibraryTimeMachineRestoreError.bookUnavailable
         }
@@ -230,6 +262,15 @@ struct LibraryTimeMachineRestorer {
                 "The catalog contains unrelated unsaved changes."
             )
         }
+        let coverIsIncluded = scope == .cover || scope == .book
+        let createdBook = scope == .book && existing == nil
+        let coverPlan = try coverIsIncluded
+            ? makeCoverRestorePlan(
+                for: snapshot,
+                existing: existing,
+                createdBook: createdBook
+            )
+            : nil
         let restoredCoverData = try await coverData(for: snapshot, scope: scope)
 
         let safetyBackup: URL
@@ -241,9 +282,7 @@ struct LibraryTimeMachineRestorer {
             throw LibraryTimeMachineRestoreError.safetyBackupFailed(error.localizedDescription)
         }
 
-        let coverIsIncluded = scope == .cover || scope == .book
         var restoredBook: Book?
-        let createdBook = scope == .book && existing == nil
         var skippedCollections = 0
         var insertedWork: Work?
         let preimage = existing.map(LibraryTimeMachineBookPreimage.init)
@@ -252,54 +291,46 @@ struct LibraryTimeMachineRestorer {
         case .cover: [.cover]
         case .book: .all
         }
-        let affectedWorkIDs = Set([
+        var affectedWorkIDs = Set([
             existing?.work?.uuid,
             createdBook ? snapshot.work?.id : nil,
         ].compactMap { $0 })
-        let affectedAssetIDs = createdBook
+        var affectedAssetIDs = createdBook
             ? Set(snapshot.assets.map(\.id))
             : Set(existing?.assets.map(\.uuid) ?? [])
+        if let owner = coverPlan?.owner {
+            switch owner {
+            case .work(let workID):
+                affectedWorkIDs.insert(workID)
+            case .generatedAsset(let assetID):
+                affectedAssetIDs.insert(assetID)
+            case .edition:
+                break
+            }
+        }
         let affectedCollectionIDs = scope == .book
             ? Set(snapshot.collections.map(\.id))
             : []
-        let expectedCoverVersion = max(
-            (existing?.coverVersion ?? snapshot.coverVersion) + 1,
-            snapshot.coverVersion + 1
-        )
-        let coverTransaction: ManagedFileTransaction?
-        if coverIsIncluded {
+        let preparedCover: PreparedCoverMutation?
+        if let coverPlan {
             do {
-                let identity = try await managedFiles.captureIdentity(
-                    of: .cover(bookID: snapshot.id)
+                preparedCover = try await coverMutations.prepare(
+                    payload: restoredCoverData,
+                    targetReference: CoverReference(
+                        owner: coverPlan.owner,
+                        version: snapshot.coverVersion
+                    ),
+                    selectedBookIDs: coverPlan.selectedBookIDs,
+                    expectedBookReferences: coverPlan.expectedBookReferences,
+                    priority: .user,
+                    intent: .restore,
+                    targetMayBeCreated: coverPlan.targetMayBeCreated
                 )
-                let requirement = ManagedFileRequirement(
-                    presentBookIDs: [snapshot.id],
-                    coverVersions: [snapshot.id: expectedCoverVersion]
-                )
-                if let restoredCoverData {
-                    coverTransaction = try await managedFiles.stage(
-                        intent: .restore,
-                        sources: [
-                            .cover(
-                                data: restoredCoverData,
-                                bookID: snapshot.id,
-                                replacing: identity
-                            ),
-                        ],
-                        requirement: requirement
-                    )
-                } else {
-                    coverTransaction = try await managedFiles.prepareCleanup(
-                        intent: .restore,
-                        requirement: requirement,
-                        cleanups: [.file(identity)]
-                    )
-                }
             } catch {
                 throw LibraryTimeMachineRestoreError.coverWriteFailed
             }
         } else {
-            coverTransaction = nil
+            preparedCover = nil
         }
 
         let rollbackMutation = {
@@ -359,25 +390,17 @@ struct LibraryTimeMachineRestorer {
                 }
             }
 
-            if coverIsIncluded {
-                restoredBook?.coverVersion = expectedCoverVersion
-                guard let restoredBook,
-                      restoredBook.selectCoverOwner(.edition(snapshot.id)) else {
-                    throw CatalogMutationError.invalidRequest
-                }
-            }
         }
 
-        var coverWasPublished = !coverIsIncluded
         do {
-            if let coverTransaction {
-                let result = try await mutations.commitFileMutation(
-                    .restoreBook(
+            if let preparedCover {
+                _ = try await coverMutations.commit(
+                    preparedCover,
+                    command: .restoreBook(
                         bookID: snapshot.id,
                         fields: fields,
                         createsBook: createdBook
                     ),
-                    transaction: coverTransaction,
                     affectedBookIDs: [snapshot.id],
                     affectedWorkIDs: affectedWorkIDs,
                     affectedAssetIDs: affectedAssetIDs,
@@ -385,7 +408,6 @@ struct LibraryTimeMachineRestorer {
                     revertingOnFailure: rollbackMutation,
                     applying: applyMutation
                 )
-                coverWasPublished = result.isFullyPublished
             } else {
                 try mutations.commit(
                     .restoreBook(
@@ -405,11 +427,6 @@ struct LibraryTimeMachineRestorer {
             throw LibraryTimeMachineRestoreError.saveFailed(error.localizedDescription)
         }
 
-        if coverWasPublished, coverIsIncluded, let restoredBook {
-            let image = restoredCoverData.flatMap(NSImage.init(data:))
-            await CoverCache.shared.replace(image, for: restoredBook.coverCacheURL)
-        }
-
         return LibraryTimeMachineRestoreResult(
             bookID: snapshot.id,
             scope: scope,
@@ -420,6 +437,90 @@ struct LibraryTimeMachineRestorer {
             } ?? true,
             skippedCollectionCount: skippedCollections,
             safetyBackupURL: safetyBackup
+        )
+    }
+
+    private func makeCoverRestorePlan(
+        for snapshot: LibraryTimeMachineBookSnapshot,
+        existing: Book?,
+        createdBook: Bool
+    ) throws -> CoverRestorePlan {
+        guard let owner = snapshot.coverOwner else {
+            switch snapshot.coverScopeRaw.flatMap(CoverScope.init(rawValue:)) {
+            case .work:
+                throw LibraryTimeMachineRestoreError.backupWorkCoverOwnerUnavailable
+            case .generatedAsset:
+                throw LibraryTimeMachineRestoreError.backupAssetCoverOwnerUnavailable
+            case .edition, .none:
+                throw LibraryTimeMachineRestoreError.backupCoverOwnerInvalid
+            }
+        }
+
+        var selectedBookIDs: Set<UUID> = [snapshot.id]
+        switch owner {
+        case .edition(let bookID):
+            guard bookID == snapshot.id else {
+                throw LibraryTimeMachineRestoreError.backupCoverOwnerInvalid
+            }
+
+        case .work(let workID):
+            guard snapshot.work?.id == workID else {
+                throw LibraryTimeMachineRestoreError.backupWorkCoverOwnerUnavailable
+            }
+            let work: Work?
+            do {
+                work = try mutations.work(id: workID)
+            } catch CatalogMutationError.modelNotFound {
+                guard createdBook else {
+                    throw LibraryTimeMachineRestoreError.backupWorkCoverOwnerUnavailable
+                }
+                work = nil
+            } catch {
+                throw LibraryTimeMachineRestoreError.saveFailed(
+                    error.localizedDescription
+                )
+            }
+            if let existing, existing.work?.uuid != workID {
+                throw LibraryTimeMachineRestoreError.backupWorkCoverOwnerUnavailable
+            }
+            if let work {
+                selectedBookIDs.formUnion(
+                    work.editions.lazy
+                        .filter { $0.coverReference.owner == owner }
+                        .map(\.uuid)
+                )
+            }
+
+        case .generatedAsset(let assetID):
+            guard snapshot.coverAssetUUID == assetID,
+                  snapshot.assets.contains(where: { $0.id == assetID }) else {
+                throw LibraryTimeMachineRestoreError.backupAssetCoverOwnerUnavailable
+            }
+            if let existing,
+               !existing.assets.contains(where: { $0.uuid == assetID }) {
+                throw LibraryTimeMachineRestoreError.backupAssetCoverOwnerUnavailable
+            }
+        }
+
+        var expectedBookReferences: [UUID: CoverReference] = [:]
+        for bookID in selectedBookIDs {
+            do {
+                let book = try mutations.book(id: bookID)
+                expectedBookReferences[bookID] = book.coverReference
+            } catch CatalogMutationError.modelNotFound
+                        where createdBook && bookID == snapshot.id {
+                continue
+            } catch {
+                throw LibraryTimeMachineRestoreError.saveFailed(
+                    error.localizedDescription
+                )
+            }
+        }
+        return CoverRestorePlan(
+            owner: owner,
+            selectedBookIDs: selectedBookIDs,
+            expectedBookReferences: expectedBookReferences,
+            targetMayBeCreated: createdBook
         )
     }
 

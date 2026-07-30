@@ -219,19 +219,33 @@ nonisolated struct LibraryTimeMachineBookSnapshot: Equatable, Sendable, Identifi
         Book.displayTitle(storedTitle: metadata.title, originalFileName: originalFileName)
     }
 
-    var coverOwner: CoverOwner {
-        switch coverScopeRaw.flatMap(CoverScope.init(rawValue:)) ?? .edition {
-        case .work:
-            if let work { return .work(work.id) }
-        case .generatedAsset:
-            if let coverAssetUUID,
-               assets.contains(where: { $0.id == coverAssetUUID }) {
-                return .generatedAsset(coverAssetUUID)
+    /// Resolves only a structurally valid owner. A backup that names a Work or
+    /// generated asset it does not contain must never silently become an
+    /// edition cover during restore.
+    var coverOwner: CoverOwner? {
+        let scope: CoverScope
+        if let coverScopeRaw {
+            guard let decoded = CoverScope(rawValue: coverScopeRaw) else {
+                return nil
             }
-        case .edition:
-            break
+            scope = decoded
+        } else {
+            // Backups predating scoped covers stored only edition payloads.
+            scope = .edition
         }
-        return .edition(id)
+        switch scope {
+        case .work:
+            guard let work else { return nil }
+            return .work(work.id)
+        case .generatedAsset:
+            guard let coverAssetUUID,
+                  assets.contains(where: { $0.id == coverAssetUUID }) else {
+                return nil
+            }
+            return .generatedAsset(coverAssetUUID)
+        case .edition:
+            return .edition(id)
+        }
     }
 
     var displayAuthor: String? {
@@ -530,9 +544,11 @@ enum LibraryTimeMachineDiffBuilder {
         var resolved = snapshots
         for index in resolved.indices {
             guard !Task.isCancelled else { return [] }
-            let cover = coversDirectory.appending(path: resolved[index].coverOwner.storageFileName)
-            if FileManager.default.fileExists(atPath: cover.path(percentEncoded: false)) {
-                resolved[index].coverURL = cover
+            if let owner = resolved[index].coverOwner {
+                let cover = coversDirectory.appending(path: owner.storageFileName)
+                if FileManager.default.fileExists(atPath: cover.path(percentEncoded: false)) {
+                    resolved[index].coverURL = cover
+                }
             }
             let bookFile = booksDirectory.appending(path: resolved[index].fileName)
             resolved[index].bookFileExists = if resolved[index].metadata.hasPhysicalCopyRaw == true
