@@ -12,18 +12,6 @@ extension DiscoveryFetching {
 }
 
 actor DiscoveryService: DiscoveryFetching {
-    nonisolated enum HTTPDisposition: Equatable {
-        case success
-        case unauthorized
-        case failure
-    }
-
-    private nonisolated enum PostResult: Sendable {
-        case success(Data)
-        case unauthorized
-        case failed
-    }
-
     private nonisolated enum GenreResult: Sendable {
         case books([DiscoveryBook])
         case unauthorized
@@ -49,25 +37,30 @@ actor DiscoveryService: DiscoveryFetching {
     }
     """
 
-    private static let endpoint = URL(string: "https://api.hardcover.app/v1/graphql")!
     private static let cacheVersion = 3
     private static let maximumCacheBytes = 4 * 1024 * 1024
     private static let maximumCacheEntries = 32
-    private static let minimumRequestInterval: TimeInterval = 0.34
 
-    private let session: URLSession
+    private let hardcoverClient: HardcoverAPIClient
     private let cacheURL: URL
     private let cacheLifetime: TimeInterval
     private var cachedEntries: [String: DiscoveryCacheEntry]?
     private var inFlight: [String: Task<GenreResult, Never>] = [:]
-    private var nextRequestAt = Date.distantPast
 
     init(
         session: URLSession? = nil,
+        hardcoverClient: HardcoverAPIClient? = nil,
         cacheURL: URL? = nil,
         cacheLifetime: TimeInterval = 24 * 60 * 60
     ) {
-        self.session = session ?? Self.makeSession()
+        self.hardcoverClient = hardcoverClient
+            ?? session.map {
+                HardcoverAPIClient(
+                    session: $0,
+                    minimumRequestInterval: 0
+                )
+            }
+            ?? .shared
         self.cacheURL = cacheURL ?? AppPaths.appSupportDirectory
             .appending(path: "DiscoveryCache.json")
         self.cacheLifetime = cacheLifetime
@@ -159,14 +152,6 @@ actor DiscoveryService: DiscoveryFetching {
         }
     }
 
-    nonisolated static func disposition(for statusCode: Int) -> HTTPDisposition {
-        switch statusCode {
-        case 200: .success
-        case 401, 403: .unauthorized
-        default: .failure
-        }
-    }
-
     nonisolated static func parseBooks(_ data: Data) -> [DiscoveryBook]? {
         guard let decoded = try? JSONDecoder().decode(BooksResponse.self, from: data),
               let rows = decoded.data?.books else { return nil }
@@ -179,68 +164,19 @@ actor DiscoveryService: DiscoveryFetching {
         guard let today = DiscoveryReleaseDate(date: .now, calendar: .autoupdatingCurrent) else {
             return .failed
         }
-        switch await post(
-            Self.genreQuery,
-            variables: ["genre": genre, "today": today.iso8601],
-            token: token
-        ) {
-        case .success(let data):
+        do {
+            let data = try await hardcoverClient.post(
+                query: Self.genreQuery,
+                variables: ["genre": genre, "today": today.iso8601],
+                token: token
+            )
             guard let books = Self.parseBooks(data) else { return .failed }
             return .books(books)
-        case .unauthorized:
+        } catch HardcoverAPIError.unauthorized(_) {
             return .unauthorized
-        case .failed:
+        } catch {
             return .failed
         }
-    }
-
-    private func post(_ query: String, variables: [String: String], token: String) async -> PostResult {
-        guard let payload = try? JSONSerialization.data(
-            withJSONObject: ["query": query, "variables": variables]
-        ) else { return .failed }
-
-        var request = URLRequest(url: Self.endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            token.hasPrefix("Bearer ") ? token : "Bearer \(token)",
-            forHTTPHeaderField: "Authorization"
-        )
-        request.httpBody = payload
-
-        guard await throttle() else { return .failed }
-        guard let (data, response) = try? await session.data(for: request),
-              let status = (response as? HTTPURLResponse)?.statusCode else { return .failed }
-        switch Self.disposition(for: status) {
-        case .success: return .success(data)
-        case .unauthorized: return .unauthorized
-        case .failure: return .failed
-        }
-    }
-
-    private func throttle() async -> Bool {
-        let now = Date.now
-        let slot = max(now, nextRequestAt)
-        nextRequestAt = slot.addingTimeInterval(Self.minimumRequestInterval)
-        let delay = slot.timeIntervalSince(now)
-        if delay > 0 {
-            do {
-                try await Task.sleep(for: .seconds(delay))
-            } catch {
-                return false
-            }
-        }
-        return !Task.isCancelled
-    }
-
-    nonisolated private static func makeSession() -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 10
-        configuration.timeoutIntervalForResource = 15
-        configuration.httpAdditionalHeaders = [
-            "User-Agent": "Winston/1.0 (macOS eBook manager)"
-        ]
-        return URLSession(configuration: configuration)
     }
 
     // MARK: - Daily disk cache

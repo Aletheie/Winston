@@ -73,11 +73,30 @@ struct DiscoveryTests {
         }
     }
 
-    @Test func hardcoverAuthStatusesAreDistinguishedFromNetworkFailures() {
-        #expect(DiscoveryService.disposition(for: 200) == .success)
-        #expect(DiscoveryService.disposition(for: 401) == .unauthorized)
-        #expect(DiscoveryService.disposition(for: 403) == .unauthorized)
-        #expect(DiscoveryService.disposition(for: 500) == .failure)
+    @Test func hardcoverAuthStatusesAreDistinguishedFromNetworkFailures() async {
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonDiscoveryAuth-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+
+        DiscoveryURLProtocol.prepare(statusCode: 401)
+        var service = DiscoveryService(
+            session: URLSession(configuration: DiscoveryURLProtocol.configuration),
+            cacheURL: cacheURL
+        )
+        #expect(
+            await service.books(matching: "Fantasy", token: "test-token")
+                == .needsToken
+        )
+
+        DiscoveryURLProtocol.prepare(statusCode: 500)
+        service = DiscoveryService(
+            session: URLSession(configuration: DiscoveryURLProtocol.configuration),
+            cacheURL: cacheURL
+        )
+        #expect(
+            await service.books(matching: "Fantasy", token: "test-token")
+                == .failed
+        )
     }
 
     @Test func rapidTokenEditsTriggerOneSettledReload() async {
@@ -319,6 +338,7 @@ private final class DiscoveryURLProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var storedRequestCount = 0
     nonisolated(unsafe) private static var responseDelay: TimeInterval = 0
+    nonisolated(unsafe) private static var statusCode = 200
 
     static var configuration: URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
@@ -330,10 +350,11 @@ private final class DiscoveryURLProtocol: URLProtocol, @unchecked Sendable {
         lock.withLock { storedRequestCount }
     }
 
-    static func prepare(responseDelay: TimeInterval = 0) {
+    static func prepare(responseDelay: TimeInterval = 0, statusCode: Int = 200) {
         lock.withLock {
             storedRequestCount = 0
             self.responseDelay = responseDelay
+            self.statusCode = statusCode
         }
     }
 
@@ -342,15 +363,15 @@ private final class DiscoveryURLProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        let delay = Self.lock.withLock { () -> TimeInterval in
+        let (delay, statusCode) = Self.lock.withLock { () -> (TimeInterval, Int) in
             Self.storedRequestCount += 1
-            return Self.responseDelay
+            return (Self.responseDelay, Self.statusCode)
         }
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
 
         let response = HTTPURLResponse(
             url: request.url!,
-            statusCode: 200,
+            statusCode: statusCode,
             httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
         )!
@@ -467,7 +488,7 @@ struct WishlistTests {
         #expect(collections.first(where: \.isWishlist)?.isSmart == true)
     }
 
-    @Test func normalizedIdentityPreventsDuplicateCatalogEntries() {
+    @Test func creditedDiacriticsRemainDistinctWishlistIdentity() {
         let container = PersistenceController.inMemory()
         let wishlist = WishlistService(
             modelContext: container.mainContext,
@@ -479,15 +500,15 @@ struct WishlistTests {
             title: "Válka s Mloky",
             author: "Karel Čapek"
         )))
-        #expect(!wishlist.add(discoveryBook(
+        #expect(wishlist.add(discoveryBook(
             id: "2",
             title: "Valka s mloky",
             author: "Karel Capek"
         )))
-        #expect(wishlist.count == 1)
+        #expect(wishlist.count == 2)
     }
 
-    @Test func importedExactTitleAndAuthorFulfilsWishlist() {
+    @Test func importedExactTitleAndAuthorFulfilsWishlist() throws {
         let container = PersistenceController.inMemory()
         let context = container.mainContext
         let toasts = ToastCenter()
@@ -498,6 +519,7 @@ struct WishlistTests {
         imported.title = "The Fifth Season"
         imported.author = "N. K. Jemisin"
         context.insert(imported)
+        try context.save()
 
         #expect(wishlist.fulfil(with: [imported]) == 1)
         #expect(wishlist.items.isEmpty)
@@ -507,7 +529,7 @@ struct WishlistTests {
         ))
     }
 
-    @Test func sameTitleByDifferentAuthorDoesNotFulfilWishlist() {
+    @Test func sameTitleByDifferentAuthorDoesNotFulfilWishlist() throws {
         let container = PersistenceController.inMemory()
         let context = container.mainContext
         let wishlist = WishlistService(modelContext: context, toasts: ToastCenter())
@@ -517,18 +539,20 @@ struct WishlistTests {
         imported.title = "Home"
         imported.author = "Harlan Coben"
         context.insert(imported)
+        try context.save()
 
         #expect(wishlist.fulfil(with: [imported]) == 0)
         #expect(wishlist.count == 1)
     }
 
-    @Test func alreadyOwnedBookCannotBeAdded() {
+    @Test func alreadyOwnedBookCannotBeAdded() throws {
         let container = PersistenceController.inMemory()
         let context = container.mainContext
         let local = Book(fileName: "owned.epub", originalFileName: "owned.epub")
         local.title = "The Fifth Season"
         local.author = "N. K. Jemisin"
         context.insert(local)
+        try context.save()
 
         let wishlist = WishlistService(modelContext: context, toasts: ToastCenter())
         #expect(!wishlist.add(discoveryBook()))
