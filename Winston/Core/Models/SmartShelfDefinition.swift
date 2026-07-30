@@ -95,13 +95,17 @@ nonisolated struct CompiledSmartShelfDefinition: Hashable, Sendable {
 nonisolated struct CompiledSmartShelfRule: Hashable, Sendable {
     let field: SmartShelfRule.Field
     let comparison: SmartShelfRule.Comparison
+    let operandValue: String
     let normalizedValue: String
     let numberValue: Int?
 
     init(_ rule: SmartShelfRule) {
         field = rule.field
         comparison = rule.comparison
-        normalizedValue = Self.normalize(rule.value)
+        operandValue = rule.value
+        normalizedValue = rule.field == .format
+            ? MetadataNormalizer.formatFilterKey(rule.value)
+            : Self.normalize(rule.value)
         numberValue = Int(
             rule.value.trimmingCharacters(in: .whitespacesAndNewlines)
         )
@@ -120,11 +124,11 @@ nonisolated struct CompiledSmartShelfRule: Hashable, Sendable {
         case .readingStatus:
             stringMatches(book.smartShelfReadingStatusRaw)
         case .language:
-            stringMatches(book.smartShelfLanguage)
+            languageMatches(book.smartShelfLanguage)
         case .pageCount:
             numberMatches(book.smartShelfPageCount)
         case .format:
-            stringMatches(book.smartShelfFormat)
+            formatMatches(book.smartShelfFormat)
         case .rating:
             numberMatches(book.smartShelfRating)
         case .translator:
@@ -175,6 +179,47 @@ nonisolated struct CompiledSmartShelfRule: Hashable, Sendable {
             case .isNotEqual: return normalizedActual != normalizedValue
             default: return false
             }
+        }
+    }
+
+    private func languageMatches(_ actual: String?) -> Bool {
+        let trimmed = actual?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch comparison {
+        case .isMissing:
+            return trimmed?.isEmpty != false
+        case .isPresent:
+            return trimmed?.isEmpty == false
+        case .isEqual:
+            return MetadataNormalizer.languageMatches(
+                actual: actual,
+                operand: operandValue
+            )
+        case .isNotEqual:
+            return !MetadataNormalizer.languageMatches(
+                actual: actual,
+                operand: operandValue
+            )
+        case .contains, .doesNotContain:
+            guard let trimmed, !trimmed.isEmpty else {
+                return comparison == .doesNotContain
+            }
+            let contains = MetadataNormalizer.languageSearchText(trimmed)
+                .contains(MetadataNormalizer.searchKey(operandValue))
+            return comparison == .contains ? contains : !contains
+        default:
+            return false
+        }
+    }
+
+    private func formatMatches(_ actual: String?) -> Bool {
+        let normalizedActual = MetadataNormalizer.formatFilterKey(actual)
+        switch comparison {
+        case .isEqual:
+            return !normalizedValue.isEmpty && normalizedActual == normalizedValue
+        case .isNotEqual:
+            return normalizedActual != normalizedValue
+        default:
+            return stringMatches(actual)
         }
     }
 
@@ -231,11 +276,7 @@ nonisolated struct CompiledSmartShelfRule: Hashable, Sendable {
     }
 
     private static func normalize(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(
-                options: [.caseInsensitive, .diacriticInsensitive],
-                locale: Locale(identifier: "en_US_POSIX")
-            )
+        MetadataNormalizer.comparisonKey(value)
     }
 }
 
@@ -510,6 +551,13 @@ nonisolated struct SmartShelfBookSnapshot: Equatable, Sendable {
     let author: String?
     let publisher: String?
     let language: String?
+    let isbn: String?
+    let canonicalLanguageTag: String?
+    let baseLanguageCode: String?
+    let languageScriptCode: String?
+    let languageRegionCode: String?
+    let languageNormalizationStatus: MetadataLanguageNormalizationStatus
+    let canonicalISBN13: String?
     let translator: String?
     let tags: [String]
     let series: String?
@@ -528,6 +576,7 @@ nonisolated struct SmartShelfBookSnapshot: Equatable, Sendable {
         author: String? = nil,
         publisher: String? = nil,
         language: String? = nil,
+        isbn: String? = nil,
         translator: String? = nil,
         tags: [String] = [],
         series: String? = nil,
@@ -545,6 +594,14 @@ nonisolated struct SmartShelfBookSnapshot: Equatable, Sendable {
         self.author = author
         self.publisher = publisher
         self.language = language
+        self.isbn = isbn
+        let normalizedLanguage = MetadataNormalizer.language(language)
+        canonicalLanguageTag = normalizedLanguage.canonicalTag
+        baseLanguageCode = normalizedLanguage.baseLanguageCode
+        languageScriptCode = normalizedLanguage.scriptCode
+        languageRegionCode = normalizedLanguage.regionCode
+        languageNormalizationStatus = normalizedLanguage.status
+        canonicalISBN13 = MetadataNormalizer.canonicalISBN13(isbn)
         self.translator = translator
         self.tags = tags
         self.series = series
@@ -573,6 +630,14 @@ nonisolated struct SmartShelfBookSnapshot: Equatable, Sendable {
         author = book.displayAuthor
         publisher = book.publisher
         language = book.language
+        isbn = book.isbn
+        let normalizedLanguage = MetadataNormalizer.language(book.language)
+        canonicalLanguageTag = normalizedLanguage.canonicalTag
+        baseLanguageCode = normalizedLanguage.baseLanguageCode
+        languageScriptCode = normalizedLanguage.scriptCode
+        languageRegionCode = normalizedLanguage.regionCode
+        languageNormalizationStatus = normalizedLanguage.status
+        canonicalISBN13 = MetadataNormalizer.canonicalISBN13(book.isbn)
         translator = book.translator
         tags = book.tags
         series = book.series

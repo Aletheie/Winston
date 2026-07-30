@@ -33,11 +33,3 @@ nonisolated enum KindlePresenceFilter: String, CaseIterable, Hashable, Identifia
         }
     }
 }
-
-enum SortField: String, CaseIterable, Identifiable {
-    case title = "TITLE"
-    case author = "AUTHOR"
-    case dateAdded = "DATE"
-    case rating = "RATING"
-    var id: Self { self }
-}

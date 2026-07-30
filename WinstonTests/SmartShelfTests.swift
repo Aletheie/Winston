@@ -39,7 +39,7 @@ struct SmartShelfTests {
             definition: definition,
             deviceFileNames: [onKindle.deviceMatchKey],
             deviceIsConnected: true,
-            sort: []
+            sort: .sourceOrder
         )
 
         #expect(result.map(\.displayTitle) == ["Duna"])
@@ -62,7 +62,7 @@ struct SmartShelfTests {
             definition: definition,
             deviceFileNames: [],
             deviceIsConnected: false,
-            sort: []
+            sort: .sourceOrder
         )
 
         #expect(Set(result.map(\.displayTitle)) == ["Rated", "Marked"])
@@ -77,14 +77,14 @@ struct SmartShelfTests {
             definition: definition,
             deviceFileNames: [],
             deviceIsConnected: false,
-            sort: []
+            sort: .sourceOrder
         )
         let connected = LibraryQuery.applySmartShelf(
             to: [book],
             definition: definition,
             deviceFileNames: [],
             deviceIsConnected: true,
-            sort: []
+            sort: .sourceOrder
         )
 
         #expect(disconnected.isEmpty)
@@ -101,7 +101,7 @@ struct SmartShelfTests {
             definition: definition,
             deviceFileNames: [],
             deviceIsConnected: false,
-            sort: []
+            sort: .sourceOrder
         )
 
         #expect(result.map(\.uuid) == [incomplete.uuid])
@@ -170,5 +170,35 @@ struct SmartShelfTests {
         #expect(collection.smartShelfDefinition == definition)
         #expect(collection.isSmart)
         #expect(collection.savedSearch == nil)
+    }
+
+    @Test func compilationPreservesSemanticsAndRecordsExactDependencies() {
+        let book = makeBook(
+            "Český Esej",
+            fileName: "essay.pdf",
+            language: "ces",
+            pages: 120
+        )
+        book.tags = ["Literární esej"]
+        let definition = SmartShelfDefinition(rules: [
+            SmartShelfRule(field: .tag, comparison: .contains, value: "ESEJ"),
+            SmartShelfRule(field: .language, comparison: .isEqual, value: "CS"),
+            SmartShelfRule(field: .pageCount, comparison: .lessThan, value: "200"),
+        ])
+        let snapshot = SmartShelfBookSnapshot(book)
+        let compiled = definition.compiled
+
+        #expect(compiled.dependencies == [.tags, .language, .pageCount])
+        #expect(compiled.requiresHighlights == false)
+        #expect(definition.matches(
+            snapshot,
+            deviceFileNames: [],
+            deviceIsConnected: false
+        ))
+        #expect(compiled.matches(
+            snapshot,
+            deviceFileNames: [],
+            deviceIsConnected: false
+        ))
     }
 }

@@ -41,8 +41,8 @@ nonisolated struct SearchQuery: Equatable, Sendable {
             case .tag:    query.tags.append(value)
             case .series: query.series.append(value)
             case .title:  query.titles.append(value)
-            case .format: query.formats.append(value.lowercased())
-            case .language: query.languages.append(value.lowercased())
+            case .format: query.formats.append(value)
+            case .language: query.languages.append(value)
             case .translator: query.translators.append(value)
             case .year:   if let constraint = parseYear(value) { query.year = constraint }
             }
