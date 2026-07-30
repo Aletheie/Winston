@@ -23,58 +23,6 @@ nonisolated struct ManagedLeafName: RawRepresentable, Sendable, Hashable {
 }
 
 enum BookFileStore {
-    // Trash is for user-initiated book removal only; artifact cleanup stays on delete(fileName:).
-    // Tests disable trashing so fixtures never land in the user's Trash (process-global, like AppPaths).
-    nonisolated(unsafe) static var trashesRemovedBooks = true
-
-    nonisolated static func replacementCopy(
-        of source: URL,
-        replacing existingFileName: String,
-        uuid: UUID
-    ) throws -> String {
-        let candidate = fileName(for: source, uuid: uuid)
-        return try importCopy(of: source, uuid: candidate == existingFileName ? UUID() : uuid)
-    }
-
-    nonisolated static func importCopy(of source: URL, uuid: UUID) throws -> String {
-        try AppPaths.ensureDirectory(AppPaths.booksDirectory)
-        let fileName = fileName(for: source, uuid: uuid)
-        guard let destination = validatedURL(for: fileName) else {
-            throw CocoaError(.fileWriteInvalidFileName)
-        }
-
-        if source.standardizedFileURL == destination.standardizedFileURL {
-            return fileName
-        }
-
-        let temporary = destination.deletingLastPathComponent()
-            .appending(path: ".\(fileName).\(UUID().uuidString).importing")
-        let fileManager = FileManager.default
-        defer { try? fileManager.removeItem(at: temporary) }
-
-        if let portableHTML = try HTMLAssetInliner.portableData(for: source) {
-            try portableHTML.write(to: temporary)
-        } else {
-            try fileManager.copyItem(at: source, to: temporary)
-        }
-        if fileManager.fileExists(atPath: destination.path(percentEncoded: false)) {
-            _ = try fileManager.replaceItemAt(
-                destination,
-                withItemAt: temporary,
-                backupItemName: nil,
-                options: [.usingNewMetadataOnly]
-            )
-        } else {
-            try fileManager.moveItem(at: temporary, to: destination)
-        }
-        return fileName
-    }
-
-    private nonisolated static func fileName(for source: URL, uuid: UUID) -> String {
-        let ext = source.pathExtension.lowercased()
-        return ext.isEmpty ? uuid.uuidString : "\(uuid.uuidString).\(ext)"
-    }
-
     /// Constructs a managed URL from catalog data without touching the
     /// filesystem. Callers that perform I/O must still use `validatedURL`.
     nonisolated static func catalogURL(for fileName: String) -> URL? {
@@ -106,31 +54,6 @@ enum BookFileStore {
         return (attrs?[.size] as? Int64) ?? 0
     }
 
-    nonisolated static func delete(fileName: String) {
-        guard let url = validatedURL(for: fileName) else {
-            Log.persistence.error("Refused to delete unsafe managed file name: \(fileName, privacy: .private)")
-            return
-        }
-        try? FileManager.default.removeItem(at: url)
-    }
-
-    nonisolated static func trash(fileName: String) {
-        guard let target = validatedURL(for: fileName) else {
-            Log.persistence.error("Refused to trash unsafe managed file name: \(fileName, privacy: .private)")
-            return
-        }
-        let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: target.path(percentEncoded: false)) else { return }
-        if trashesRemovedBooks,
-           (try? fileManager.trashItem(at: target, resultingItemURL: nil)) != nil {
-            return
-        }
-        do {
-            try fileManager.removeItem(at: target)
-        } catch {
-            Log.persistence.error("Removing book file \(fileName, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
 }
 
 nonisolated enum HTMLAssetInliner {

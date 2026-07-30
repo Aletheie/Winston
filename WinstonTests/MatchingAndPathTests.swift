@@ -138,66 +138,12 @@ struct CoverServiceTests {
         #expect(!CoverStore.exists(for: book.uuid))
     }
 
-    @Test func backgroundCoverCannotReplaceNewerUserCover() async throws {
-        let library = try await TestLibrary()
-        let directory = library.root.appending(path: "repository-covers", directoryHint: .isDirectory)
-        let repository = CoverRepository(coversDirectory: directory)
-        let uuid = UUID()
-        let background = await repository.beginBackgroundMutation(for: uuid)
-        let user = await repository.beginUserMutation(for: uuid)
-        let userData = Data("user".utf8)
-
-        let userInstall = await repository.install(userData, using: user)
-        let backgroundInstall = await repository.install(
-            Data("background".utf8),
-            using: background,
-            onlyIfMissing: true
-        )
-
-        #expect(userInstall != nil)
-        #expect(backgroundInstall == nil)
-        #expect(CoverStore.loadData(for: uuid, in: directory) == userData)
-    }
-
-    @Test func staleCoverRollbackCannotReplaceNewerMutation() async throws {
-        let library = try await TestLibrary()
-        let directory = library.root.appending(path: "stale-rollback-covers", directoryHint: .isDirectory)
-        let repository = CoverRepository(coversDirectory: directory)
-        let uuid = UUID()
-        let first = await repository.beginUserMutation(for: uuid)
-        let firstTicket = try #require(await repository.install(Data("first".utf8), using: first))
-        let second = await repository.beginUserMutation(for: uuid)
-        _ = try #require(await repository.install(Data("second".utf8), using: second))
-
-        let rolledBack = await repository.rollback(firstTicket)
-
-        #expect(!rolledBack)
-        #expect(CoverStore.loadData(for: uuid, in: directory) == Data("second".utf8))
-    }
-
-    @Test func currentCoverRollbackRestoresPreviousData() async throws {
-        let library = try await TestLibrary()
-        let directory = library.root.appending(path: "current-rollback-covers", directoryHint: .isDirectory)
-        let repository = CoverRepository(coversDirectory: directory)
-        let uuid = UUID()
-        let first = await repository.beginUserMutation(for: uuid)
-        _ = try #require(await repository.install(Data("first".utf8), using: first))
-        let second = await repository.beginUserMutation(for: uuid)
-        let secondTicket = try #require(await repository.install(Data("second".utf8), using: second))
-
-        let rolledBack = await repository.rollback(secondTicket)
-
-        #expect(rolledBack)
-        #expect(CoverStore.loadData(for: uuid, in: directory) == Data("first".utf8))
-    }
-
-    @Test func coverScopesDoNotSharePayloadsOrMutationGenerations() async throws {
+    @Test func coverScopesDoNotShareAuthoritativePayloads() async throws {
         let library = try await TestLibrary()
         let directory = library.root.appending(
             path: "scoped-covers",
             directoryHint: .isDirectory
         )
-        let repository = CoverRepository(coversDirectory: directory)
         let id = UUID()
         let edition = CoverOwner.edition(id)
         let work = CoverOwner.work(id)
@@ -209,18 +155,66 @@ struct CoverServiceTests {
         #expect(CoverStore.loadData(for: edition, in: directory) == Data("edition".utf8))
         #expect(CoverStore.loadData(for: work, in: directory) == Data("work".utf8))
         #expect(CoverStore.loadData(for: generated, in: directory) == Data("asset".utf8))
+    }
 
-        let workBackground = await repository.beginBackgroundMutation(for: work)
-        _ = await repository.beginUserMutation(for: edition)
-        #expect(await repository.isCurrent(workBackground))
-
-        let installed = await repository.install(
-            Data("new work".utf8),
-            using: workBackground
+    @Test func derivedCoverCacheNeverWritesTheAuthoritativeNamespace() async throws {
+        let library = try await TestLibrary()
+        let derivedDirectory = library.root.appending(
+            path: "derived-covers",
+            directoryHint: .isDirectory
         )
-        #expect(installed != nil)
-        #expect(CoverStore.loadData(for: work, in: directory) == Data("new work".utf8))
-        #expect(CoverStore.loadData(for: edition, in: directory) == Data("edition".utf8))
+        let authoritativeDirectory = library.root.appending(
+            path: "authoritative-covers",
+            directoryHint: .isDirectory
+        )
+        let assetID = UUID()
+        let key = DerivedCoverKey(
+            assetID: assetID,
+            contentHash: String(repeating: "a", count: 64),
+            fileName: "book.epub",
+            sizeBytes: 42,
+            maxPixel: 160
+        )
+        let store = DerivedCoverStore(directory: derivedDirectory)
+        let data = Data("derived".utf8)
+
+        #expect(await store.installIfMissing(data, for: key))
+        #expect(await store.loadData(for: key) == data)
+        let derivedURL = await store.fileURL(for: key)
+        #expect(derivedURL.deletingLastPathComponent() == derivedDirectory)
+        #expect(!CoverStore.exists(
+            for: .generatedAsset(assetID),
+            in: authoritativeDirectory
+        ))
+    }
+
+    @Test func concurrentDerivedCoverInstallNeverReplacesPublishedData() async throws {
+        let library = try await TestLibrary()
+        let derivedDirectory = library.root.appending(
+            path: "derived-cover-race",
+            directoryHint: .isDirectory
+        )
+        let key = DerivedCoverKey(
+            assetID: UUID(),
+            contentHash: String(repeating: "b", count: 64),
+            fileName: "race.epub",
+            sizeBytes: 84,
+            maxPixel: 160
+        )
+        let firstStore = DerivedCoverStore(directory: derivedDirectory)
+        let secondStore = DerivedCoverStore(directory: derivedDirectory)
+        let firstPayload = Data("first".utf8)
+        let secondPayload = Data("second".utf8)
+
+        async let firstInstalled = firstStore.installIfMissing(firstPayload, for: key)
+        async let secondInstalled = secondStore.installIfMissing(secondPayload, for: key)
+        #expect(await firstInstalled)
+        #expect(await secondInstalled)
+
+        let published = try #require(await firstStore.loadData(for: key))
+        #expect(published == firstPayload || published == secondPayload)
+        #expect(await firstStore.installIfMissing(Data("replacement".utf8), for: key))
+        #expect(await firstStore.loadData(for: key) == published)
     }
 
     private func loadDroppedCover(from provider: NSItemProvider) async throws -> DroppedCoverImage {
@@ -254,8 +248,6 @@ struct BookFileStoreTests {
 
         #expect(BookFileStore.validatedURL(for: "../outside.epub") == nil)
         #expect(BookFileStore.size(of: "../outside.epub") == 0)
-        BookFileStore.delete(fileName: "../outside.epub")
-        BookFileStore.trash(fileName: "../outside.epub")
 
         #expect(try Data(contentsOf: outside) == Data("keep".utf8))
         #expect(BookFileStore.url(for: "../outside.epub").deletingLastPathComponent()
@@ -271,7 +263,6 @@ struct BookFileStoreTests {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
 
         #expect(BookFileStore.validatedURL(for: "linked.epub") == nil)
-        BookFileStore.delete(fileName: "linked.epub")
         #expect(try Data(contentsOf: outside) == Data("keep".utf8))
         #expect(FileManager.default.fileExists(atPath: link.path(percentEncoded: false)))
         _ = library
@@ -316,7 +307,7 @@ struct BookFileStoreTests {
         let missingSource = library.root.appending(path: "missing.epub")
 
         do {
-            _ = try BookFileStore.importCopy(of: missingSource, uuid: uuid)
+            _ = try TestManagedFileFixtureStore.importCopy(of: missingSource, uuid: uuid)
             Issue.record("replacement from a missing source should fail")
         } catch { }
 
@@ -330,7 +321,7 @@ struct BookFileStoreTests {
         let destination = BookFileStore.url(for: "\(uuid.uuidString).epub")
         try Data("kept".utf8).write(to: destination)
 
-        let fileName = try BookFileStore.importCopy(of: destination, uuid: uuid)
+        let fileName = try TestManagedFileFixtureStore.importCopy(of: destination, uuid: uuid)
 
         #expect(fileName == "\(uuid.uuidString).epub")
         #expect(try Data(contentsOf: destination) == Data("kept".utf8))
@@ -345,7 +336,7 @@ struct BookFileStoreTests {
         try Data("old".utf8).write(to: destination)
         try Data("complete replacement".utf8).write(to: replacement)
 
-        _ = try BookFileStore.importCopy(of: replacement, uuid: uuid)
+        _ = try TestManagedFileFixtureStore.importCopy(of: replacement, uuid: uuid)
 
         #expect(try Data(contentsOf: destination) == Data("complete replacement".utf8))
         #expect(try Data(contentsOf: replacement) == Data("complete replacement".utf8))
