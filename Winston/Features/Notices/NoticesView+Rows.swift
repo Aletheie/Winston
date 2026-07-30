@@ -527,6 +527,7 @@ private struct NoticeReadButton: View {
     let presentation: NoticeStoryPresentation
 
     @Environment(\.theme) private var theme
+    @Environment(ToastCenter.self) private var toasts
 
     var body: some View {
         if presentation == .featured {
@@ -554,7 +555,7 @@ private struct NoticeReadButton: View {
 
     private func openBook() {
         notices.markRead(notice)
-        LibraryExternalActions.openInReader(book)
+        LibraryExternalActions.openInReader(book, toasts: toasts)
     }
 }
 

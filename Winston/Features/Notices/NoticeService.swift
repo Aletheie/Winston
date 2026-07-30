@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 import SwiftData
 
 nonisolated private struct NoticeSeriesSource: Sendable {
@@ -44,6 +45,7 @@ final class NoticeService {
     private let toasts: ToastCenter
     private let wishlist: WishlistService
     private let catalogService: any SeriesCatalogFetching
+    private let mutations: CatalogMutationService
 
     @ObservationIgnored private var cachedBooksByID: [UUID: Book] = [:]
     @ObservationIgnored private var cachedBooksRevision: Int?
@@ -51,6 +53,7 @@ final class NoticeService {
     private(set) var notices: [LibraryNotice]
     private(set) var isChecking = false
     private(set) var lastCheckFailed = false
+    private(set) var lastLoadError: String?
 
     nonisolated private static let finishFanoutLimit = 3
     nonisolated private static let releaseWindowMonths = 12
@@ -60,6 +63,7 @@ final class NoticeService {
         settings: AppSettings,
         toasts: ToastCenter,
         wishlist: WishlistService,
+        mutations: CatalogMutationService? = nil,
         catalogService: any SeriesCatalogFetching = HardcoverSeriesService.shared
     ) {
         self.modelContext = modelContext
@@ -67,10 +71,20 @@ final class NoticeService {
         self.toasts = toasts
         self.wishlist = wishlist
         self.catalogService = catalogService
+        self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
         let descriptor = FetchDescriptor<LibraryNotice>(
             sortBy: [SortDescriptor(\LibraryNotice.dateCreated, order: .reverse)]
         )
-        self.notices = (try? modelContext.fetch(descriptor)) ?? []
+        do {
+            self.notices = try modelContext.fetch(descriptor)
+            self.lastLoadError = nil
+        } catch {
+            self.notices = []
+            self.lastLoadError = error.localizedDescription
+            Log.persistence.error(
+                "Initial notice fetch failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     var unreadCount: Int { notices.count { $0.readAt == nil } }
@@ -102,7 +116,16 @@ final class NoticeService {
         isChecking = true
         defer { isChecking = false }
         let token = settings.hardcoverToken
-        let books = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
+        let books: [Book]
+        do {
+            books = try modelContext.fetchAllBooksForGlobalAnalysis()
+        } catch {
+            lastCheckFailed = true
+            if announce {
+                toasts.error(String(localized: "Couldn\u{2019}t read the library catalog."))
+            }
+            return
+        }
         prune(existingBookUUIDs: Set(books.map(\.uuid)))
         let seriesSources = books.compactMap { book -> NoticeSeriesSource? in
             guard let series = book.series, !series.isEmpty else { return nil }
@@ -126,8 +149,17 @@ final class NoticeService {
         }
         do {
             let catalogs = try await catalogService.refreshCatalogs(matching: lookups, token: token)
-            let inserted = applyCatalogs(catalogs, lookups: lookups)
-            modelContext.saveQuietly(catalogChanged: false)
+            var inserted = 0
+            try mutations.commitPrepared(
+                .updateAuxiliaryStore(operation: "noticeCatalogRefresh"),
+                catalogChanged: false
+            ) { writeContext in
+                inserted = try self.applyCatalogs(
+                    catalogs,
+                    lookups: lookups,
+                    context: writeContext
+                )
+            }
             reload()
             settings.lastReleaseCheckAt = .now
             lastCheckFailed = false
@@ -146,23 +178,26 @@ final class NoticeService {
 
     private func applyCatalogs(
         _ catalogs: [String: HardcoverSeriesCatalog],
-        lookups: [SeriesLookup]
-    ) -> Int {
+        lookups: [SeriesLookup],
+        context: ModelContext
+    ) throws -> Int {
         var inserted = 0
         let cutoff = Self.releaseWindowCutoff()
         var snapshotsByKey = Dictionary(
-            (try? modelContext.fetch(FetchDescriptor<SeriesCatalogSnapshot>()))?.map {
+            try context.fetch(FetchDescriptor<SeriesCatalogSnapshot>()).map {
                 ($0.seriesKey, $0)
-            } ?? [],
+            },
             uniquingKeysWith: { first, _ in first }
         )
-        var knownNoticeKeys = Set(notices.map(\.dedupeKey))
+        var knownNoticeKeys = Set(
+            try context.fetch(FetchDescriptor<LibraryNotice>()).map(\.dedupeKey)
+        )
         for lookup in lookups {
             guard let catalog = catalogs[lookup.id] else { continue }
             let currentIDs = Set(catalog.books.map(\.id))
             guard let snapshot = snapshotsByKey[lookup.id] else {
                 let snapshot = SeriesCatalogSnapshot(seriesKey: lookup.id, knownBookIDs: currentIDs)
-                modelContext.insert(snapshot)
+                context.insert(snapshot)
                 snapshotsByKey[lookup.id] = snapshot
                 continue
             }
@@ -173,7 +208,12 @@ final class NoticeService {
                     guard Self.isWithinReleaseWindow(book.releaseDate, cutoff: cutoff) else { continue }
                     let key = "release:\(book.id)"
                     guard knownNoticeKeys.insert(key).inserted else { continue }
-                    insertReleaseNotice(for: book, in: catalog, dedupeKey: key)
+                    insertReleaseNotice(
+                        for: book,
+                        in: catalog,
+                        dedupeKey: key,
+                        context: context
+                    )
                     inserted += 1
                 }
             }
@@ -203,7 +243,8 @@ final class NoticeService {
     private func insertReleaseNotice(
         for book: HardcoverSeriesBook,
         in catalog: HardcoverSeriesCatalog,
-        dedupeKey: String
+        dedupeKey: String,
+        context: ModelContext
     ) {
         let notice = LibraryNotice(dedupeKey: dedupeKey, kind: .newRelease, bookTitle: book.title)
         notice.seriesName = catalog.name
@@ -213,7 +254,7 @@ final class NoticeService {
         notice.hardcoverURLString = book.hardcoverURL.absoluteString
         notice.coverURLString = book.coverURL?.absoluteString
         notice.releaseDateRaw = book.releaseDate?.iso8601
-        modelContext.insert(notice)
+        context.insert(notice)
     }
 
     private nonisolated static func formatPosition(_ position: Double) -> String {
@@ -224,47 +265,93 @@ final class NoticeService {
 
     func booksDidFinish(_ books: [Book]) {
         guard !books.isEmpty, books.count <= Self.finishFanoutLimit else { return }
+        let bookIDs = Set(books.map(\.uuid))
         var changed = false
-        for book in books {
-            if book.rating == nil, insertRatingPrompt(for: book) { changed = true }
-            if let next = nextUnreadInOwnedSeries(after: book),
-               insertNextInSeries(after: book, next: next) {
-                changed = true
+        do {
+            try mutations.commitPrepared(
+                .updateAuxiliaryStore(operation: "finishedBookNotices"),
+                affectedBookIDs: bookIDs,
+                catalogChanged: false
+            ) { writeContext in
+                let requestedBookIDs = Array(bookIDs)
+                let storedBooks = try writeContext.fetch(FetchDescriptor<Book>(
+                    predicate: #Predicate {
+                        requestedBookIDs.contains($0.uuid)
+                    }
+                ))
+                let booksByID = Dictionary(uniqueKeysWithValues:
+                    storedBooks.map { ($0.uuid, $0) }
+                )
+                for bookID in bookIDs {
+                    guard let book = booksByID[bookID] else { continue }
+                    if book.rating == nil,
+                       try self.insertRatingPrompt(
+                           for: book,
+                           context: writeContext
+                       ) {
+                        changed = true
+                    }
+                    if let next = try self.nextUnreadInOwnedSeries(
+                        after: book,
+                        context: writeContext
+                    ), try self.insertNextInSeries(
+                        after: book,
+                        next: next,
+                        context: writeContext
+                    ) {
+                        changed = true
+                    }
+                }
             }
+        } catch {
+            return
         }
         guard changed else { return }
-        modelContext.saveQuietly(catalogChanged: false)
         reload()
     }
 
-    private func insertRatingPrompt(for book: Book) -> Bool {
+    private func insertRatingPrompt(
+        for book: Book,
+        context: ModelContext
+    ) throws -> Bool {
         let key = "rate:\(book.uuid.uuidString)"
-        guard !noticeExists(dedupeKey: key) else { return false }
+        guard try !noticeExists(dedupeKey: key, context: context) else {
+            return false
+        }
         let notice = LibraryNotice(dedupeKey: key, kind: .ratingPrompt, bookTitle: book.displayTitle)
         notice.author = book.displayAuthor
         notice.seriesName = book.series
         notice.bookUUID = book.uuid
-        modelContext.insert(notice)
+        context.insert(notice)
         return true
     }
 
-    private func insertNextInSeries(after finished: Book, next: Book) -> Bool {
+    private func insertNextInSeries(
+        after finished: Book,
+        next: Book,
+        context: ModelContext
+    ) throws -> Bool {
         let key = "next:\(next.uuid.uuidString)"
-        guard !noticeExists(dedupeKey: key) else { return false }
+        guard try !noticeExists(dedupeKey: key, context: context) else {
+            return false
+        }
         let notice = LibraryNotice(dedupeKey: key, kind: .nextInSeries, bookTitle: next.displayTitle)
         notice.author = next.displayAuthor
         notice.seriesName = next.series ?? finished.series
         notice.positionText = next.seriesIndex
         notice.bookUUID = next.uuid
-        modelContext.insert(notice)
+        context.insert(notice)
         return true
     }
 
-    private func nextUnreadInOwnedSeries(after book: Book) -> Book? {
+    private func nextUnreadInOwnedSeries(
+        after book: Book,
+        context: ModelContext
+    ) throws -> Book? {
         guard let series = book.series, !series.isEmpty,
               let index = book.seriesIndex.flatMap(Double.init) else { return nil }
         let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.series == series })
-        let candidates = ((try? modelContext.fetch(descriptor)) ?? [])
+        let candidates = try context.fetch(descriptor)
             .compactMap { candidate -> (book: Book, position: Double)? in
                 guard candidate.uuid != book.uuid,
                       let position = candidate.seriesIndex.flatMap(Double.init),
@@ -282,13 +369,28 @@ final class NoticeService {
         guard let uuid = notice.bookUUID else { return nil }
         let revision = LibraryMutationLog.shared.catalogRevision
         if cachedBooksRevision != revision {
-            cachedBooksByID = Dictionary(
-                ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []).map { ($0.uuid, $0) },
-                uniquingKeysWith: { first, _ in first }
-            )
+            cachedBooksByID = [:]
             cachedBooksRevision = revision
         }
-        return cachedBooksByID[uuid]
+        if let cached = cachedBooksByID[uuid] { return cached }
+
+        var descriptor = FetchDescriptor<Book>(
+            predicate: #Predicate { $0.uuid == uuid }
+        )
+        descriptor.fetchLimit = 1
+        do {
+            guard let book = try modelContext.fetch(descriptor).first else {
+                return nil
+            }
+            cachedBooksByID[uuid] = book
+            return book
+        } catch {
+            lastLoadError = error.localizedDescription
+            Log.persistence.error(
+                "Notice book lookup failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
     }
 
     func isWishlisted(_ notice: LibraryNotice) -> Bool {
@@ -319,36 +421,75 @@ final class NoticeService {
 
     func markRead(_ notice: LibraryNotice) {
         guard notice.readAt == nil else { return }
-        notice.readAt = .now
-        modelContext.saveQuietly(catalogChanged: false)
+        guard updateNotice(
+            id: notice.id,
+            operation: "noticeMarkRead",
+            applying: { $0.readAt = .now }
+        ) else { return }
+        reload()
     }
 
     func markUnread(_ notice: LibraryNotice) {
         guard notice.readAt != nil else { return }
-        notice.readAt = nil
-        modelContext.saveQuietly(catalogChanged: false)
+        guard updateNotice(
+            id: notice.id,
+            operation: "noticeMarkUnread",
+            applying: { $0.readAt = nil }
+        ) else { return }
+        reload()
     }
 
     func markAllRead() {
         let unread = notices.filter { $0.readAt == nil }
         guard !unread.isEmpty else { return }
-        for notice in unread { notice.readAt = .now }
-        modelContext.saveQuietly(catalogChanged: false)
+        let unreadIDs = Set(unread.map(\.id))
+        do {
+            try mutations.commitPrepared(
+                .updateAuxiliaryStore(operation: "noticeMarkAllRead"),
+                catalogChanged: false
+            ) { writeContext in
+                let stored = try writeContext.fetch(FetchDescriptor<LibraryNotice>())
+                for notice in stored where unreadIDs.contains(notice.id) {
+                    notice.readAt = .now
+                }
+            }
+        } catch {
+            return
+        }
+        reload()
     }
 
     func delete(_ notice: LibraryNotice) {
-        notices.removeAll { $0.id == notice.id }
-        modelContext.delete(notice)
-        modelContext.saveQuietly(catalogChanged: false)
+        let noticeID = notice.id
+        do {
+            try mutations.commitPrepared(
+                .updateAuxiliaryStore(operation: "noticeDelete"),
+                catalogChanged: false
+            ) { writeContext in
+                let matches = try writeContext.fetch(FetchDescriptor<LibraryNotice>(
+                    predicate: #Predicate { $0.id == noticeID }
+                ))
+                guard let stored = matches.first else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                writeContext.delete(stored)
+            }
+        } catch {
+            return
+        }
+        reload()
     }
 
     // MARK: - Support
 
-    private func noticeExists(dedupeKey key: String) -> Bool {
+    private func noticeExists(
+        dedupeKey key: String,
+        context: ModelContext
+    ) throws -> Bool {
         let descriptor = FetchDescriptor<LibraryNotice>(
             predicate: #Predicate { $0.dedupeKey == key }
         )
-        return ((try? modelContext.fetchCount(descriptor)) ?? 0) > 0
+        return try context.fetchCount(descriptor) > 0
     }
 
     private func prune(existingBookUUIDs: Set<UUID>) {
@@ -359,15 +500,59 @@ final class NoticeService {
             return !existingBookUUIDs.contains(bookUUID)
         }
         guard !stale.isEmpty else { return }
-        for notice in stale { modelContext.delete(notice) }
-        modelContext.saveQuietly(catalogChanged: false)
+        let staleIDs = Set(stale.map(\.id))
+        do {
+            try mutations.commitPrepared(
+                .updateAuxiliaryStore(operation: "noticePrune"),
+                catalogChanged: false
+            ) { writeContext in
+                let stored = try writeContext.fetch(FetchDescriptor<LibraryNotice>())
+                stored
+                    .filter { staleIDs.contains($0.id) }
+                    .forEach(writeContext.delete)
+            }
+        } catch {
+            return
+        }
         reload()
+    }
+
+    private func updateNotice(
+        id noticeID: UUID,
+        operation: String,
+        applying mutation: (LibraryNotice) -> Void
+    ) -> Bool {
+        do {
+            try mutations.commitPrepared(
+                .updateAuxiliaryStore(operation: operation),
+                catalogChanged: false
+            ) { writeContext in
+                let matches = try writeContext.fetch(FetchDescriptor<LibraryNotice>(
+                    predicate: #Predicate { $0.id == noticeID }
+                ))
+                guard let notice = matches.first else {
+                    throw CatalogMutationError.modelNotFound
+                }
+                mutation(notice)
+            }
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func reload() {
         let descriptor = FetchDescriptor<LibraryNotice>(
             sortBy: [SortDescriptor(\LibraryNotice.dateCreated, order: .reverse)]
         )
-        notices = (try? modelContext.fetch(descriptor)) ?? []
+        do {
+            notices = try modelContext.fetch(descriptor)
+            lastLoadError = nil
+        } catch {
+            lastLoadError = error.localizedDescription
+            Log.persistence.error(
+                "Notice reload failed; preserving the last published list: \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 }

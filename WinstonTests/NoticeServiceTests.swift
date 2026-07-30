@@ -91,7 +91,7 @@ struct NoticeServiceTests {
         let third = insertBook(
             title: "Third", series: "Trilogy", position: "3", rating: 5, into: harness.context
         )
-        harness.context.saveQuietly()
+        harness.context.fixtureSaveBestEffort()
 
         harness.service.booksDidFinish([first])
 
@@ -119,6 +119,7 @@ struct NoticeServiceTests {
         notice.hardcoverURLString = "https://hardcover.app/books/wish"
         notice.coverURLString = "https://img.hardcover.app/wish.jpg"
         harness.context.insert(notice)
+        try harness.context.save()
 
         harness.service.toggleWishlist(from: notice)
 
@@ -159,7 +160,7 @@ struct NoticeServiceTests {
         #expect(service.unreadCount == 1)
 
         context.delete(linkedBook)
-        context.saveQuietly()
+        context.fixtureSaveBestEffort()
         await service.checkForNewReleases()
         #expect(service.notices.map(\.id) == [second.id])
     }
@@ -238,7 +239,7 @@ struct NoticeServiceTests {
         book.seriesIndex = position
         book.rating = rating
         context.insert(book)
-        context.saveQuietly()
+        context.fixtureSaveBestEffort()
         return book
     }
 
