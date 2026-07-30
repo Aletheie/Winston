@@ -5,9 +5,23 @@ import SwiftData
 @MainActor
 struct CatalogSaveAdapter {
     var save: (ModelContext) throws -> Void
+    fileprivate let permitsStoreScopedSharing: Bool
 
-    static let live = CatalogSaveAdapter { context in
-        try context.save()
+    init(_ save: @escaping (ModelContext) throws -> Void) {
+        self.save = save
+        permitsStoreScopedSharing = false
+    }
+
+    private init(
+        permitsStoreScopedSharing: Bool,
+        save: @escaping (ModelContext) throws -> Void
+    ) {
+        self.save = save
+        self.permitsStoreScopedSharing = permitsStoreScopedSharing
+    }
+
+    static let live = CatalogSaveAdapter(permitsStoreScopedSharing: true) {
+        try $0.save()
     }
 }
 
@@ -19,8 +33,22 @@ nonisolated enum CatalogMutationCheckpoint: Equatable, Sendable {
 @MainActor
 struct CatalogMutationHooks {
     var reach: (CatalogMutationCheckpoint) throws -> Void
+    fileprivate let permitsStoreScopedSharing: Bool
 
-    static let live = CatalogMutationHooks { _ in }
+    init(_ reach: @escaping (CatalogMutationCheckpoint) throws -> Void) {
+        self.reach = reach
+        permitsStoreScopedSharing = false
+    }
+
+    private init(
+        permitsStoreScopedSharing: Bool,
+        reach: @escaping (CatalogMutationCheckpoint) throws -> Void
+    ) {
+        self.reach = reach
+        self.permitsStoreScopedSharing = permitsStoreScopedSharing
+    }
+
+    static let live = CatalogMutationHooks(permitsStoreScopedSharing: true) { _ in }
 }
 
 enum CatalogMutationCommand {
@@ -51,7 +79,9 @@ enum CatalogMutationCommand {
     case updateAssetValidation(assetIDs: [UUID], bookIDs: [UUID])
     case importHighlights(bookIDs: [UUID])
     case maintenanceCleanup(workIDs: [UUID])
+    case repairCatalogInvariants(bookIDs: [UUID], workIDs: [UUID])
     case restoreBook(bookID: UUID, fields: CatalogChangeFields, createsBook: Bool)
+    case updateAuxiliaryStore(operation: String)
 
     var changesBookMembership: Bool {
         switch self {
@@ -114,8 +144,14 @@ enum CatalogMutationCommand {
         case .maintenanceCleanup:
             [.workMembership]
 
+        case .repairCatalogInvariants:
+            .all
+
         case .restoreBook(_, let fields, _):
             fields
+
+        case .updateAuxiliaryStore:
+            []
 
         case .addPhysicalBook, .importBooks, .calibreImport, .removeBooks, .legacyMigration,
              .reconcileEditions:
@@ -135,7 +171,8 @@ enum CatalogMutationCommand {
              .removeBooks,
              .conversionOutput,
              .legacyMigration,
-             .updateAssetValidation:
+             .updateAssetValidation,
+             .repairCatalogInvariants:
             true
 
         case .applyAnalysis(_, let kind),
@@ -164,7 +201,8 @@ enum CatalogMutationCommand {
              .addPhysicalBook,
              .updateCover,
              .importHighlights,
-             .maintenanceCleanup:
+             .maintenanceCleanup,
+             .updateAuxiliaryStore:
             false
         }
     }
@@ -572,6 +610,7 @@ struct CatalogBookMetadataPreimage {
     let coverScopeRaw: String?
     let coverAssetUUID: UUID?
     let pageCount: Int?
+    let work: Work?
 
     init(_ book: Book) {
         self.book = book
@@ -603,6 +642,7 @@ struct CatalogBookMetadataPreimage {
         coverScopeRaw = book.coverScopeRaw
         coverAssetUUID = book.coverAssetUUID
         pageCount = book.pageCount
+        work = book.work
     }
 
     func restore() {
@@ -634,11 +674,13 @@ struct CatalogBookMetadataPreimage {
         book.coverScopeRaw = coverScopeRaw
         book.coverAssetUUID = coverAssetUUID
         book.pageCount = pageCount
+        book.work = work
     }
 }
 
 struct CatalogBookAssetPreimage {
     let asset: BookAsset
+    let book: Book?
     let fileName: String
     let formatRaw: String?
     let contentHash: String?
@@ -655,6 +697,7 @@ struct CatalogBookAssetPreimage {
 
     init(_ asset: BookAsset) {
         self.asset = asset
+        book = asset.book
         fileName = asset.fileName
         formatRaw = asset.formatRaw
         contentHash = asset.contentHash
@@ -671,6 +714,7 @@ struct CatalogBookAssetPreimage {
     }
 
     func restore() {
+        asset.book = book
         asset.fileName = fileName
         asset.formatRaw = formatRaw
         asset.contentHash = contentHash
@@ -689,6 +733,7 @@ struct CatalogBookAssetPreimage {
 
 struct CatalogWorkPreimage {
     let work: Work
+    let editions: [Book]
     let title: String?
     let author: String?
     let originalTitle: String?
@@ -702,6 +747,7 @@ struct CatalogWorkPreimage {
 
     init(_ work: Work) {
         self.work = work
+        editions = work.editions
         title = work.title
         author = work.author
         originalTitle = work.originalTitle
@@ -715,6 +761,7 @@ struct CatalogWorkPreimage {
     }
 
     func restore() {
+        work.editions = editions
         work.title = title
         work.author = author
         work.originalTitle = originalTitle
@@ -803,27 +850,229 @@ private struct CatalogCollectionPreimage {
     }
 }
 
+/// Proof that one short, no-suspension catalog transaction reached durable
+/// storage. File publication may continue asynchronously after this receipt.
+struct CatalogCommitReceipt {
+    let operationID: UUID
+    let changeSet: CatalogChangeSet
+}
+
+/// The single owner of write ordering for one ModelContainer.
+///
+/// The coordinator is MainActor-isolated deliberately: SwiftData models never
+/// cross an actor boundary, and `commit` contains no suspension point. A clean
+/// context at entry therefore proves that every pending change on failure was
+/// created by the current operation and may be rolled back safely.
+@MainActor
+final class CatalogWriteCoordinator {
+    let modelContext: ModelContext
+
+    private let saveAdapter: CatalogSaveAdapter
+    private let hooks: CatalogMutationHooks
+    private var activeOperationID: UUID?
+
+    init(
+        modelContext: ModelContext,
+        saveAdapter: CatalogSaveAdapter = .live,
+        hooks: CatalogMutationHooks = .live
+    ) {
+        self.modelContext = modelContext
+        self.saveAdapter = saveAdapter
+        self.hooks = hooks
+    }
+
+    func commit(
+        operationID: UUID = UUID(),
+        command: CatalogMutationCommand,
+        affectedBookIDs: Set<UUID>,
+        affectedWorkIDs: Set<UUID>,
+        affectedAssetIDs: Set<UUID>?,
+        affectedCollectionIDs: Set<UUID>,
+        revertingOnFailure rollbackMutation: () -> Void,
+        repairingInvariants repairInvariants: () throws -> Void,
+        applying mutation: () throws -> Void
+    ) throws -> CatalogCommitReceipt {
+        precondition(
+            activeOperationID == nil,
+            "CatalogWriteCoordinator transaction re-entered without suspension"
+        )
+
+        modelContext.processPendingChanges()
+        guard !modelContext.hasChanges else {
+            Log.persistence.error(
+                "Catalog operation \(operationID.uuidString, privacy: .public) refused unknown pending changes without rolling them back"
+            )
+            throw CatalogMutationError.dirtyContext
+        }
+
+        activeOperationID = operationID
+        defer { activeOperationID = nil }
+
+        do {
+            try reach(.beforeMutation)
+            try mutation()
+            try reach(.afterMutation)
+            modelContext.processPendingChanges()
+            try repairInvariants()
+            modelContext.processPendingChanges()
+            try saveAdapter.save(modelContext)
+            return CatalogCommitReceipt(
+                operationID: operationID,
+                changeSet: CatalogChangeSet(
+                    command: command,
+                    affectedBookIDs: affectedBookIDs,
+                    affectedWorkIDs: affectedWorkIDs,
+                    affectedAssetIDs: affectedAssetIDs,
+                    affectedCollectionIDs: affectedCollectionIDs
+                )
+            )
+        } catch let error as CatalogMutationError {
+            rollbackOwnedChanges(
+                operationID: operationID,
+                reverting: rollbackMutation
+            )
+            Log.persistence.error(
+                "Catalog operation \(operationID.uuidString, privacy: .public) rolled back: \(String(describing: error), privacy: .public)"
+            )
+            throw error
+        } catch {
+            rollbackOwnedChanges(
+                operationID: operationID,
+                reverting: rollbackMutation
+            )
+            Log.persistence.error(
+                "Catalog operation \(operationID.uuidString, privacy: .public) save failed and rolled back: \(error.localizedDescription, privacy: .public)"
+            )
+            throw CatalogMutationError.saveFailed(error.localizedDescription)
+        }
+    }
+
+    private func rollbackOwnedChanges(
+        operationID: UUID,
+        reverting rollbackMutation: () -> Void
+    ) {
+        precondition(activeOperationID == operationID)
+        rollbackMutation()
+        modelContext.processPendingChanges()
+        modelContext.rollback()
+        modelContext.processPendingChanges()
+        if modelContext.hasChanges {
+            // Any inverse updates queued here were produced synchronously by
+            // this operation; no other MainActor work could interleave.
+            modelContext.rollback()
+        }
+    }
+
+    private func reach(_ checkpoint: CatalogMutationCheckpoint) throws {
+        do {
+            try hooks.reach(checkpoint)
+        } catch {
+            throw CatalogMutationError.checkpointFailed(error.localizedDescription)
+        }
+    }
+}
+
+@MainActor
+private final class CatalogWriteCoordinatorRegistryEntry {
+    weak var container: ModelContainer?
+    weak var coordinator: CatalogWriteCoordinator?
+
+    init(container: ModelContainer, coordinator: CatalogWriteCoordinator) {
+        self.container = container
+        self.coordinator = coordinator
+    }
+}
+
+/// Production services resolving the same ModelContainer share one coordinator.
+/// Custom save adapters and checkpoint hooks are test seams and intentionally
+/// receive an isolated coordinator so one test's injected behavior cannot leak
+/// into another service.
+@MainActor
+private enum CatalogWriteCoordinatorRegistry {
+    private static var entries: [ObjectIdentifier: CatalogWriteCoordinatorRegistryEntry] = [:]
+
+    static func resolve(
+        modelContext: ModelContext,
+        saveAdapter: CatalogSaveAdapter,
+        hooks: CatalogMutationHooks
+    ) -> CatalogWriteCoordinator {
+        guard saveAdapter.permitsStoreScopedSharing,
+              hooks.permitsStoreScopedSharing else {
+            return CatalogWriteCoordinator(
+                modelContext: modelContext,
+                saveAdapter: saveAdapter,
+                hooks: hooks
+            )
+        }
+
+        let container = modelContext.container
+        let key = ObjectIdentifier(container)
+        if let entry = entries[key],
+           entry.container === container,
+           let coordinator = entry.coordinator {
+            return coordinator
+        }
+
+        entries = entries.filter {
+            $0.value.container != nil && $0.value.coordinator != nil
+        }
+        let coordinator = CatalogWriteCoordinator(
+            modelContext: modelContext,
+            saveAdapter: saveAdapter,
+            hooks: hooks
+        )
+        entries[key] = CatalogWriteCoordinatorRegistryEntry(
+            container: container,
+            coordinator: coordinator
+        )
+        return coordinator
+    }
+}
+
+nonisolated struct ManagedFileVerificationMetrics: Sendable, Equatable {
+    let transactionCount: Int
+    let fetchCount: Int
+    let requestedBookCount: Int
+    let requestedFileNameCount: Int
+    let requestedWorkOwnerCount: Int
+    let requestedAssetOwnerCount: Int
+}
+
+nonisolated struct ManagedFileVerificationSnapshot: Sendable, Equatable {
+    let catalog: ManagedFileCatalogSnapshot
+    let metrics: ManagedFileVerificationMetrics
+}
+
 @MainActor
 final class CatalogMutationService {
     private let modelContext: ModelContext
-    private let saveAdapter: CatalogSaveAdapter
+    private let writeCoordinator: CatalogWriteCoordinator
     let managedFiles: ManagedFileCoordinator
-    private let hooks: CatalogMutationHooks
     let analysisCoordinator: CatalogAnalysisCoordinator
     let editionIdentity = EditionIdentityCoordinator()
+
+    var storeWriteOwnerIdentifier: ObjectIdentifier {
+        ObjectIdentifier(writeCoordinator)
+    }
 
     init(
         modelContext: ModelContext,
         saveAdapter: CatalogSaveAdapter = .live,
         managedFiles: ManagedFileCoordinator = .shared,
         analysisCoordinator: CatalogAnalysisCoordinator? = nil,
-        hooks: CatalogMutationHooks = .live
+        hooks: CatalogMutationHooks = .live,
+        writeCoordinator: CatalogWriteCoordinator? = nil
     ) {
-        self.modelContext = modelContext
-        self.saveAdapter = saveAdapter
+        let resolvedWriteCoordinator = writeCoordinator
+            ?? CatalogWriteCoordinatorRegistry.resolve(
+                modelContext: modelContext,
+                saveAdapter: saveAdapter,
+                hooks: hooks
+            )
+        self.modelContext = resolvedWriteCoordinator.modelContext
+        self.writeCoordinator = resolvedWriteCoordinator
         self.managedFiles = managedFiles
         self.analysisCoordinator = analysisCoordinator ?? CatalogAnalysisCoordinator()
-        self.hooks = hooks
     }
 
     func execute(
@@ -1333,76 +1582,58 @@ final class CatalogMutationService {
         revertingOnFailure rollbackMutation: () -> Void = {},
         applying mutation: () throws -> Void
     ) throws -> CatalogChangeSet {
-        guard !modelContext.hasChanges else {
-            modelContext.rollback()
-            Log.persistence.error("Catalog mutation refused a dirty context and rolled it back")
-            throw CatalogMutationError.dirtyContext
-        }
-
-        do {
-            try reach(.beforeMutation)
-            try mutation()
-            try reach(.afterMutation)
-            modelContext.processPendingChanges()
-            repairInvariants(
-                for: command,
-                affectedBookIDs: affectedBookIDs,
-                affectedWorkIDs: affectedWorkIDs
-            )
-            modelContext.processPendingChanges()
-            try saveAdapter.save(modelContext)
-            return publish(CatalogChangeSet(
-                command: command,
-                affectedBookIDs: affectedBookIDs,
-                affectedWorkIDs: affectedWorkIDs,
-                affectedAssetIDs: affectedAssetIDs,
-                affectedCollectionIDs: affectedCollectionIDs
-            ), catalogChanged: catalogChanged)
-        } catch let error as CatalogMutationError {
-            rollbackMutation()
-            discardPendingChanges()
-            Log.persistence.error("Catalog mutation rolled back: \(String(describing: error), privacy: .public)")
-            throw error
-        } catch {
-            rollbackMutation()
-            discardPendingChanges()
-            Log.persistence.error("Catalog mutation save failed and rolled back: \(error.localizedDescription, privacy: .public)")
-            throw CatalogMutationError.saveFailed(error.localizedDescription)
-        }
+        let receipt = try writeCoordinator.commit(
+            command: command,
+            affectedBookIDs: affectedBookIDs,
+            affectedWorkIDs: affectedWorkIDs,
+            affectedAssetIDs: affectedAssetIDs,
+            affectedCollectionIDs: affectedCollectionIDs,
+            revertingOnFailure: rollbackMutation,
+            repairingInvariants: {
+                try self.repairInvariants(
+                    for: command,
+                    affectedBookIDs: affectedBookIDs,
+                    affectedWorkIDs: affectedWorkIDs
+                )
+            },
+            applying: mutation
+        )
+        return publish(receipt.changeSet, catalogChanged: catalogChanged)
     }
 
-    /// Commits a deliberately staged batch, such as a bounded import chunk.
-    /// Unlike `commit`, the caller has already inserted or changed the models.
+    /// Runs a prepared value-only batch in the coordinator's store-scoped
+    /// context. Callers may inspect and prepare IDs before this method, but all
+    /// SwiftData changes must happen inside `mutation`.
     @discardableResult
-    func commitStaged(
+    func commitPrepared(
         _ command: CatalogMutationCommand,
         affectedBookIDs: Set<UUID> = [],
         affectedWorkIDs: Set<UUID> = [],
         affectedAssetIDs: Set<UUID>? = nil,
         affectedCollectionIDs: Set<UUID> = [],
-        catalogChanged: Bool = true
+        catalogChanged: Bool = true,
+        revertingOnFailure rollbackMutation: () -> Void = {},
+        applying mutation: (ModelContext) throws -> Void
     ) throws -> CatalogChangeSet {
-        do {
-            modelContext.processPendingChanges()
-            repairInvariants(
-                for: command,
-                affectedBookIDs: affectedBookIDs,
-                affectedWorkIDs: affectedWorkIDs
-            )
-            modelContext.processPendingChanges()
-            try saveAdapter.save(modelContext)
-            return publish(CatalogChangeSet(
-                command: command,
-                affectedBookIDs: affectedBookIDs,
-                affectedWorkIDs: affectedWorkIDs,
-                affectedAssetIDs: affectedAssetIDs,
-                affectedCollectionIDs: affectedCollectionIDs
-            ), catalogChanged: catalogChanged)
-        } catch {
-            discardPendingChanges()
-            Log.persistence.error("Staged catalog mutation save failed and rolled back: \(error.localizedDescription, privacy: .public)")
-            throw CatalogMutationError.saveFailed(error.localizedDescription)
-        }
+        let receipt = try writeCoordinator.commit(
+            command: command,
+            affectedBookIDs: affectedBookIDs,
+            affectedWorkIDs: affectedWorkIDs,
+            affectedAssetIDs: affectedAssetIDs,
+            affectedCollectionIDs: affectedCollectionIDs,
+            revertingOnFailure: rollbackMutation,
+            repairingInvariants: {
+                try self.repairInvariants(
+                    for: command,
+                    affectedBookIDs: affectedBookIDs,
+                    affectedWorkIDs: affectedWorkIDs
+                )
+            },
+            applying: {
+                try mutation(self.modelContext)
+            }
+        )
+        return publish(receipt.changeSet, catalogChanged: catalogChanged)
     }
 
     /// Commits the SwiftData half of a managed-file transaction, then publishes
@@ -1420,53 +1651,38 @@ final class CatalogMutationService {
         revertingOnFailure rollbackMutation: () -> Void = {},
         applying mutation: () throws -> Void
     ) async throws -> CatalogFileCommitResult {
-        guard !modelContext.hasChanges else {
-            discardPendingChanges()
-            await managedFiles.abort(transaction)
-            discardPendingChanges()
-            Log.persistence.error("Managed catalog mutation refused a dirty context and rolled it back")
-            throw CatalogMutationError.dirtyContext
-        }
-
-        var mutationStarted = false
+        let receipt: CatalogCommitReceipt
         do {
             try await managedFiles.willCommitCatalog(transaction)
-            mutationStarted = true
-            try reach(.beforeMutation)
-            try mutation()
-            try reach(.afterMutation)
-            modelContext.processPendingChanges()
-            repairInvariants(
-                for: command,
+            receipt = try writeCoordinator.commit(
+                operationID: transaction.id,
+                command: command,
                 affectedBookIDs: affectedBookIDs,
-                affectedWorkIDs: affectedWorkIDs
+                affectedWorkIDs: affectedWorkIDs,
+                affectedAssetIDs: affectedAssetIDs,
+                affectedCollectionIDs: affectedCollectionIDs,
+                revertingOnFailure: rollbackMutation,
+                repairingInvariants: {
+                    try self.repairInvariants(
+                        for: command,
+                        affectedBookIDs: affectedBookIDs,
+                        affectedWorkIDs: affectedWorkIDs
+                    )
+                },
+                applying: mutation
             )
-            modelContext.processPendingChanges()
-            try saveAdapter.save(modelContext)
         } catch let error as CatalogMutationError {
-            if mutationStarted { rollbackMutation() }
-            discardPendingChanges()
             await managedFiles.abort(transaction)
-            discardPendingChanges()
             throw error
         } catch {
-            if mutationStarted { rollbackMutation() }
-            discardPendingChanges()
             await managedFiles.abort(transaction)
-            discardPendingChanges()
             Log.persistence.error(
-                "Managed catalog mutation failed before commit and rolled back: \(error.localizedDescription, privacy: .public)"
+                "Managed catalog preflight failed before operation \(transaction.id.uuidString, privacy: .public) could commit: \(error.localizedDescription, privacy: .public)"
             )
-            throw CatalogMutationError.saveFailed(error.localizedDescription)
+            throw CatalogMutationError.fileTransactionFailed(error.localizedDescription)
         }
 
-        let changeSet = publish(CatalogChangeSet(
-            command: command,
-            affectedBookIDs: affectedBookIDs,
-            affectedWorkIDs: affectedWorkIDs,
-            affectedAssetIDs: affectedAssetIDs,
-            affectedCollectionIDs: affectedCollectionIDs
-        ), catalogChanged: catalogChanged)
+        let changeSet = publish(receipt.changeSet, catalogChanged: catalogChanged)
         let pending = await finalizeCommittedTransactions(
             [transaction],
             progress: progress
@@ -1482,41 +1698,52 @@ final class CatalogMutationService {
         transactions: [ManagedFileTransaction],
         affectedBookIDs: Set<UUID> = [],
         affectedWorkIDs: Set<UUID> = [],
+        affectedAssetIDs: Set<UUID>? = nil,
         affectedCollectionIDs: Set<UUID> = [],
         catalogChanged: Bool = true,
-        revertingOnFailure rollbackMutation: () -> Void = {}
+        revertingOnFailure rollbackMutation: () -> Void = {},
+        applying mutation: () throws -> Void
     ) async throws -> CatalogFileCommitResult {
+        let operationID = transactions.first?.id ?? UUID()
+        let receipt: CatalogCommitReceipt
         do {
             for transaction in transactions {
                 try await managedFiles.willCommitCatalog(transaction)
             }
-            modelContext.processPendingChanges()
-            repairInvariants(
-                for: command,
+            try Task.checkCancellation()
+            receipt = try writeCoordinator.commit(
+                operationID: operationID,
+                command: command,
                 affectedBookIDs: affectedBookIDs,
-                affectedWorkIDs: affectedWorkIDs
+                affectedWorkIDs: affectedWorkIDs,
+                affectedAssetIDs: affectedAssetIDs,
+                affectedCollectionIDs: affectedCollectionIDs,
+                revertingOnFailure: rollbackMutation,
+                repairingInvariants: {
+                    try self.repairInvariants(
+                        for: command,
+                        affectedBookIDs: affectedBookIDs,
+                        affectedWorkIDs: affectedWorkIDs
+                    )
+                },
+                applying: mutation
             )
-            modelContext.processPendingChanges()
-            try saveAdapter.save(modelContext)
-        } catch {
-            rollbackMutation()
-            discardPendingChanges()
+        } catch let error as CatalogMutationError {
             for transaction in transactions {
                 await managedFiles.abort(transaction)
             }
-            discardPendingChanges()
+            throw error
+        } catch {
+            for transaction in transactions {
+                await managedFiles.abort(transaction)
+            }
             Log.persistence.error(
-                "Staged managed catalog mutation failed before commit and rolled back: \(error.localizedDescription, privacy: .public)"
+                "Managed catalog preflight failed before operation \(operationID.uuidString, privacy: .public) could commit: \(error.localizedDescription, privacy: .public)"
             )
-            throw CatalogMutationError.saveFailed(error.localizedDescription)
+            throw CatalogMutationError.fileTransactionFailed(error.localizedDescription)
         }
 
-        let changeSet = publish(CatalogChangeSet(
-            command: command,
-            affectedBookIDs: affectedBookIDs,
-            affectedWorkIDs: affectedWorkIDs,
-            affectedCollectionIDs: affectedCollectionIDs
-        ), catalogChanged: catalogChanged)
+        let changeSet = publish(receipt.changeSet, catalogChanged: catalogChanged)
         let pending = await finalizeCommittedTransactions(transactions)
         return CatalogFileCommitResult(changeSet: changeSet, pendingTransactionIDs: pending)
     }
@@ -1525,32 +1752,118 @@ final class CatalogMutationService {
         for command: CatalogMutationCommand,
         affectedBookIDs: Set<UUID>,
         affectedWorkIDs: Set<UUID>
-    ) {
+    ) throws {
         var workIDs = affectedWorkIDs
         // Every catalog write is an opportunity to converge legacy rows. This
         // keeps compatibility mirrors and explicit cover ownership correct even
         // when an older caller only updates Book-level fields.
-        for bookID in affectedBookIDs {
-            guard let book = try? book(id: bookID), book.modelContext != nil else {
-                continue
-            }
+        let books: [Book]
+        if affectedBookIDs.isEmpty {
+            books = []
+        } else {
+            let requestedBookIDs = Array(affectedBookIDs)
+            books = try modelContext.fetch(FetchDescriptor<Book>(
+                predicate: #Predicate {
+                    requestedBookIDs.contains($0.uuid)
+                }
+            ))
+        }
+        for book in books where book.modelContext != nil {
             CatalogModelInvariantService.repair(book: book)
             if let workID = book.work?.uuid { workIDs.insert(workID) }
         }
-        if command.changeFields.contains(.workMembership)
-            || command.changesBookMembership {
-            for workID in workIDs {
-                guard let work = try? work(id: workID), work.modelContext != nil else {
-                    continue
+        if !workIDs.isEmpty {
+            let requestedWorkIDs = Array(workIDs)
+            let works = try modelContext.fetch(FetchDescriptor<Work>(
+                predicate: #Predicate {
+                    requestedWorkIDs.contains($0.uuid)
                 }
-                WorkService.repairPreferredEditionInvariant(work)
+            ))
+            for work in works where work.modelContext != nil {
+                WorkService.repairCatalogInvariant(work)
             }
         }
     }
 
-    func managedFileSnapshot() throws -> ManagedFileCatalogSnapshot {
+    /// Repairs only model-derived catalog state for a targeted integrity
+    /// snapshot. Missing Work rows receive pre-generated identities inside the
+    /// same short store-scoped commit; no filesystem work or suspension occurs.
+    @discardableResult
+    func repairCatalogInvariants(
+        bookIDs: Set<UUID>,
+        workIDs: Set<UUID>
+    ) throws -> CatalogChangeSet {
+        guard !bookIDs.isEmpty || !workIDs.isEmpty else {
+            throw CatalogMutationError.invalidRequest
+        }
+
+        let storedBooks = try books(ids: bookIDs)
+        var resolvedWorkIDs = workIDs
+        resolvedWorkIDs.formUnion(storedBooks.compactMap { $0.work?.uuid })
+        let storedWorks = try works(ids: resolvedWorkIDs)
+        let newWorkIDs = Dictionary(uniqueKeysWithValues:
+            storedBooks.compactMap { book in
+                book.work == nil ? (book.uuid, UUID()) : nil
+            }
+        )
+        let affectedWorkIDs = resolvedWorkIDs.union(newWorkIDs.values)
+        let affectedBookIDs = bookIDs.union(
+            storedWorks.flatMap { $0.editions.map(\.uuid) }
+        )
+        let affectedAssetIDs = Set(storedBooks.flatMap { $0.assets.map(\.uuid) })
+        let bookPreimages = storedBooks.map(CatalogBookMetadataPreimage.init)
+        let assetPreimages = storedBooks
+            .flatMap(\.assets)
+            .map(CatalogBookAssetPreimage.init)
+        let workPreimages = storedWorks.map(CatalogWorkPreimage.init)
+        var insertedWorks: [Work] = []
+
+        return try commit(
+            .repairCatalogInvariants(
+                bookIDs: Array(affectedBookIDs),
+                workIDs: Array(affectedWorkIDs)
+            ),
+            affectedBookIDs: affectedBookIDs,
+            affectedWorkIDs: affectedWorkIDs,
+            affectedAssetIDs: affectedAssetIDs,
+            revertingOnFailure: {
+                for work in insertedWorks where work.modelContext != nil {
+                    self.modelContext.delete(work)
+                }
+                workPreimages.forEach { $0.restore() }
+                bookPreimages.forEach { $0.restore() }
+                assetPreimages.forEach { $0.restore() }
+            }
+        ) {
+            for book in storedBooks {
+                if book.work == nil, let workID = newWorkIDs[book.uuid] {
+                    let work = Work(
+                        uuid: workID,
+                        title: book.displayTitle,
+                        author: book.author,
+                        dateCreated: book.dateAdded
+                    )
+                    self.modelContext.insert(work)
+                    book.work = work
+                    work.preferredEditionUUID = book.uuid
+                    insertedWorks.append(work)
+                }
+                CatalogModelInvariantService.repair(book: book)
+            }
+            for work in storedWorks + insertedWorks {
+                WorkService.repairCatalogInvariant(work)
+            }
+        }
+    }
+
+    /// Full-library evidence is intentionally reserved for startup recovery
+    /// and explicit integrity work. Normal commits use
+    /// `managedFileVerificationSnapshot(for:)` below.
+    func managedFileRecoverySnapshot() throws -> ManagedFileCatalogSnapshot {
         let books = try modelContext.fetch(FetchDescriptor<Book>())
         var fileNames: Set<String> = []
+        var coverOwnerVersions: [CoverOwner: Int] = [:]
+        var coverReferencesByBookID: [UUID: CoverReference] = [:]
         for book in books {
             if ManagedLeafName(rawValue: book.fileName) != nil {
                 fileNames.insert(book.fileName)
@@ -1558,17 +1871,168 @@ final class CatalogMutationService {
             fileNames.formUnion(
                 book.assets.lazy.map(\.fileName).filter { ManagedLeafName(rawValue: $0) != nil }
             )
+            coverOwnerVersions[.edition(book.uuid)] = book.coverVersion
+            if let work = book.work {
+                coverOwnerVersions[.work(work.uuid)] = work.coverVersion
+            }
+            for asset in book.assets {
+                coverOwnerVersions[.generatedAsset(asset.uuid)] = asset.coverVersion
+            }
+            coverReferencesByBookID[book.uuid] = book.coverReference
         }
         return ManagedFileCatalogSnapshot(
             presentBookIDs: Set(books.map(\.uuid)),
             referencedBookFileNames: fileNames,
-            coverVersions: Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0.coverVersion) })
+            coverVersions: Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0.coverVersion) }),
+            coverReferencesByBookID: coverReferencesByBookID,
+            coverOwnerVersions: coverOwnerVersions
+        )
+    }
+
+    /// Builds only the durable evidence mentioned by the committed journals.
+    /// The number of fetches is bounded by model type, not catalog size.
+    func managedFileVerificationSnapshot(
+        for transactions: [ManagedFileTransaction]
+    ) throws -> ManagedFileVerificationSnapshot {
+        var bookIDs: Set<UUID> = []
+        var fileNames: Set<String> = []
+        var legacyCoverBookIDs: Set<UUID> = []
+        var selectedCoverBookIDs: Set<UUID> = []
+        var editionOwnerIDs: Set<UUID> = []
+        var workOwnerIDs: Set<UUID> = []
+        var assetOwnerIDs: Set<UUID> = []
+
+        for transaction in transactions {
+            let requirement = transaction.requirement
+            bookIDs.formUnion(requirement.presentBookIDs)
+            bookIDs.formUnion(requirement.absentBookIDs)
+            bookIDs.formUnion(requirement.coverVersions.keys)
+            legacyCoverBookIDs.formUnion(requirement.coverVersions.keys)
+            fileNames.formUnion(requirement.referencedBookFileNames)
+            fileNames.formUnion(requirement.unreferencedBookFileNames)
+
+            for coverRequirement in requirement.coverRequirements ?? [] {
+                selectedCoverBookIDs.formUnion(coverRequirement.selectedBookIDs)
+                bookIDs.formUnion(coverRequirement.selectedBookIDs)
+                switch coverRequirement.owner {
+                case .edition(let id):
+                    editionOwnerIDs.insert(id)
+                    bookIDs.insert(id)
+                case .work(let id):
+                    workOwnerIDs.insert(id)
+                case .generatedAsset(let id):
+                    assetOwnerIDs.insert(id)
+                }
+            }
+        }
+
+        let requestedBookIDs = Array(bookIDs)
+        let requestedFileNames = Array(fileNames)
+        let requestedWorkIDs = Array(workOwnerIDs)
+        let requestedAssetIDs = Array(assetOwnerIDs)
+        var fetchCount = 0
+
+        let books: [Book]
+        if requestedBookIDs.isEmpty && requestedFileNames.isEmpty {
+            books = []
+        } else {
+            let descriptor = FetchDescriptor<Book>(
+                predicate: #Predicate {
+                    requestedBookIDs.contains($0.uuid)
+                        || requestedFileNames.contains($0.fileName)
+                }
+            )
+            books = try modelContext.fetch(descriptor)
+            fetchCount += 1
+        }
+
+        let assets: [BookAsset]
+        if requestedAssetIDs.isEmpty && requestedFileNames.isEmpty {
+            assets = []
+        } else {
+            let descriptor = FetchDescriptor<BookAsset>(
+                predicate: #Predicate {
+                    requestedAssetIDs.contains($0.uuid)
+                        || requestedFileNames.contains($0.fileName)
+                }
+            )
+            assets = try modelContext.fetch(descriptor)
+            fetchCount += 1
+        }
+
+        let works: [Work]
+        if requestedWorkIDs.isEmpty {
+            works = []
+        } else {
+            let descriptor = FetchDescriptor<Work>(
+                predicate: #Predicate { requestedWorkIDs.contains($0.uuid) }
+            )
+            works = try modelContext.fetch(descriptor)
+            fetchCount += 1
+        }
+
+        var presentBookIDs: Set<UUID> = []
+        var referencedBookFileNames: Set<String> = []
+        var coverVersions: [UUID: Int] = [:]
+        var coverReferencesByBookID: [UUID: CoverReference] = [:]
+        var coverOwnerVersions: [CoverOwner: Int] = [:]
+
+        for book in books {
+            if bookIDs.contains(book.uuid) {
+                presentBookIDs.insert(book.uuid)
+            }
+            if fileNames.contains(book.fileName),
+               ManagedLeafName(rawValue: book.fileName) != nil {
+                referencedBookFileNames.insert(book.fileName)
+            }
+            if legacyCoverBookIDs.contains(book.uuid) {
+                coverVersions[book.uuid] = book.coverVersion
+            }
+            if editionOwnerIDs.contains(book.uuid) {
+                coverOwnerVersions[.edition(book.uuid)] = book.coverVersion
+            }
+            if selectedCoverBookIDs.contains(book.uuid) {
+                coverReferencesByBookID[book.uuid] = book.coverReference
+            }
+        }
+
+        for asset in assets {
+            if fileNames.contains(asset.fileName),
+               ManagedLeafName(rawValue: asset.fileName) != nil {
+                referencedBookFileNames.insert(asset.fileName)
+            }
+            if assetOwnerIDs.contains(asset.uuid) {
+                coverOwnerVersions[.generatedAsset(asset.uuid)] = asset.coverVersion
+            }
+        }
+
+        for work in works where workOwnerIDs.contains(work.uuid) {
+            coverOwnerVersions[.work(work.uuid)] = work.coverVersion
+        }
+
+        let catalog = ManagedFileCatalogSnapshot(
+            presentBookIDs: presentBookIDs,
+            referencedBookFileNames: referencedBookFileNames,
+            coverVersions: coverVersions,
+            coverReferencesByBookID: coverReferencesByBookID,
+            coverOwnerVersions: coverOwnerVersions
+        )
+        return ManagedFileVerificationSnapshot(
+            catalog: catalog,
+            metrics: ManagedFileVerificationMetrics(
+                transactionCount: transactions.count,
+                fetchCount: fetchCount,
+                requestedBookCount: bookIDs.count,
+                requestedFileNameCount: fileNames.count,
+                requestedWorkOwnerCount: workOwnerIDs.count,
+                requestedAssetOwnerCount: assetOwnerIDs.count
+            )
         )
     }
 
     func recoverManagedFiles() async -> ManagedFileRecoveryReport {
         do {
-            return await managedFiles.recover(against: try managedFileSnapshot())
+            return await managedFiles.recover(against: try managedFileRecoverySnapshot())
         } catch {
             Log.persistence.error("Could not snapshot the catalog for managed-file recovery: \(error.localizedDescription, privacy: .public)")
             var report = ManagedFileRecoveryReport()
@@ -1581,26 +2045,32 @@ final class CatalogMutationService {
         _ transactions: [ManagedFileTransaction],
         progress: ManagedFileProgressHandler? = nil
     ) async -> [UUID] {
-        let snapshot: ManagedFileCatalogSnapshot
+        let verification: ManagedFileVerificationSnapshot
         do {
-            snapshot = try managedFileSnapshot()
+            verification = try managedFileVerificationSnapshot(for: transactions)
         } catch {
             Log.persistence.error(
-                "Managed file publication deferred because catalog snapshot failed: \(error.localizedDescription, privacy: .public)"
+                "Managed file publication deferred because targeted catalog verification failed: \(error.localizedDescription, privacy: .public)"
             )
             return transactions.map(\.id)
         }
 
+        let metrics = verification.metrics
+        Log.persistence.debug(
+            "Targeted managed-file verification used \(metrics.fetchCount) fetches for \(metrics.transactionCount) transactions, \(metrics.requestedBookCount) books, and \(metrics.requestedFileNameCount) file names"
+        )
         var pending: [UUID] = []
         for transaction in transactions {
             do {
                 try await managedFiles.catalogDidCommit(transaction)
                 let outcome = try await managedFiles.reconcile(
                     transaction,
-                    against: snapshot,
+                    against: verification.catalog,
                     progress: progress
                 )
-                if outcome != .completed { pending.append(transaction.id) }
+                if outcome == .abortedCatalogDidNotCommit {
+                    pending.append(transaction.id)
+                }
             } catch {
                 pending.append(transaction.id)
                 Log.persistence.error(
@@ -1609,25 +2079,6 @@ final class CatalogMutationService {
             }
         }
         return pending
-    }
-
-    /// SwiftData can enqueue inverse-relationship updates while a compensator
-    /// removes freshly inserted models. Flush those callbacks before and after
-    /// rollback so the main context cannot become dirty again on the next run
-    /// loop turn and leak a failed mutation into an unrelated save.
-    private func discardPendingChanges() {
-        modelContext.processPendingChanges()
-        modelContext.rollback()
-        modelContext.processPendingChanges()
-        if modelContext.hasChanges { modelContext.rollback() }
-    }
-
-    private func reach(_ checkpoint: CatalogMutationCheckpoint) throws {
-        do {
-            try hooks.reach(checkpoint)
-        } catch {
-            throw CatalogMutationError.checkpointFailed(error.localizedDescription)
-        }
     }
 
     private func publish(
@@ -1694,7 +2145,8 @@ final class CatalogMutationService {
              .calibreImport(let commandBookIDs),
              .removeBooks(let commandBookIDs),
              .legacyMigration(let commandBookIDs),
-             .applyAnalysisBatch(let commandBookIDs, _):
+             .applyAnalysisBatch(let commandBookIDs, _),
+             .repairCatalogInvariants(let commandBookIDs, _):
             bookIDs.formUnion(commandBookIDs)
 
         case .addPhysicalBook(let bookID, _):
@@ -1719,7 +2171,8 @@ final class CatalogMutationService {
 
         case .setReadingStatus, .setReadingProgress,
              .createCollection, .updateCollection, .deleteCollection,
-             .updateCover, .importHighlights, .maintenanceCleanup:
+             .updateCover, .importHighlights, .maintenanceCleanup,
+             .updateAuxiliaryStore:
             break
         }
         return bookIDs
@@ -1741,6 +2194,9 @@ final class CatalogMutationService {
             }
 
         case .assignEdition(let bookIDs, _):
+            invalidatedBookIDs.formUnion(bookIDs)
+
+        case .repairCatalogInvariants(let bookIDs, _):
             invalidatedBookIDs.formUnion(bookIDs)
 
         case .reconcileEditions(let survivorID, let removedID, _):
@@ -1773,7 +2229,8 @@ final class CatalogMutationService {
              .createCollection, .updateCollection, .deleteCollection,
              .addPhysicalBook, .importBooks, .calibreImport, .conversionOutput, .legacyMigration,
              .updateCover, .applyAnalysis, .applyAnalysisBatch,
-             .updateAssetValidation, .importHighlights, .maintenanceCleanup:
+             .updateAssetValidation, .importHighlights, .maintenanceCleanup,
+             .updateAuxiliaryStore:
             break
         }
 

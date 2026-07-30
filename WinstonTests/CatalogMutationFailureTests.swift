@@ -45,6 +45,34 @@ struct CatalogMutationFailureTests {
         #expect(LibraryMutationLog.shared.catalogRevision == revision)
     }
 
+    @Test func unknownPendingChangesAreRefusedWithoutGlobalRollback() async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library, title: "Original")
+        let mutations = CatalogMutationService(modelContext: library.context)
+        book.notes = "Owned by another operation"
+
+        let result = mutations.execute(.updateBook(
+            CatalogBookUpdate(
+                bookID: book.uuid,
+                patch: CatalogBookPatch(fields: [.title], title: "Changed")
+            ),
+            source: .manual
+        ))
+
+        guard case .failure(.dirtyContext) = result else {
+            Issue.record("Expected the coordinator to reject a dirty context")
+            return
+        }
+        #expect(book.title == "Original")
+        #expect(book.notes == "Owned by another operation")
+        #expect(library.context.hasChanges)
+
+        try library.context.save()
+        let stored = try #require(try fetchBook(book.uuid, from: library.container))
+        #expect(stored.title == "Original")
+        #expect(stored.notes == "Owned by another operation")
+    }
+
     @Test func typedCommandReturnsOnlyAChangeSetAfterDurableSave() async throws {
         let library = try await TestLibrary()
         let book = try seedBook(in: library, title: "Original")
