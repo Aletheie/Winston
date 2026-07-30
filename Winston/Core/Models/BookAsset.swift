@@ -41,10 +41,15 @@ nonisolated enum CoverScope: String, CaseIterable, Codable, Sendable {
 
 /// Explicit owner of a cover payload. Edition filenames retain the legacy
 /// layout; the prefixes make work and generated-asset covers collision-free.
-nonisolated enum CoverOwner: Hashable, Sendable {
+nonisolated enum CoverOwner: Hashable, Codable, Sendable {
     case work(UUID)
     case edition(UUID)
     case generatedAsset(UUID)
+
+    private enum CodingKeys: String, CodingKey {
+        case scope
+        case id
+    }
 
     var scope: CoverScope {
         switch self {
@@ -76,9 +81,26 @@ nonisolated enum CoverOwner: Hashable, Sendable {
     var generationKey: String {
         "\(scope.rawValue):\(id.uuidString.lowercased())"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let scope = try container.decode(CoverScope.self, forKey: .scope)
+        let id = try container.decode(UUID.self, forKey: .id)
+        self = switch scope {
+        case .work: .work(id)
+        case .edition: .edition(id)
+        case .generatedAsset: .generatedAsset(id)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(scope, forKey: .scope)
+        try container.encode(id, forKey: .id)
+    }
 }
 
-nonisolated struct CoverReference: Equatable, Sendable {
+nonisolated struct CoverReference: Codable, Equatable, Hashable, Sendable {
     let owner: CoverOwner
     let version: Int
 }

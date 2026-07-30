@@ -179,6 +179,37 @@ struct ModelRoundTripTests {
         #expect(try context.fetchCount(FetchDescriptor<BookAsset>()) == 0)
     }
 
+    @Test func workDerivedIdentityAndPreferredEditionRepairWithoutOverwritingEditionMetadata() throws {
+        let (container, context) = makeContext()
+        _ = container
+        let work = Work(title: "Shared Title", author: "Shared Author")
+        let edition = Book(
+            fileName: "translation.epub",
+            originalFileName: "Translation.epub"
+        )
+        edition.title = "Edition-specific Translation"
+        edition.author = "Edition Credit"
+        context.insert(work)
+        context.insert(edition)
+        edition.work = work
+        work.matchKey = "stale"
+        work.preferredEditionUUID = UUID()
+
+        #expect(!WorkService.violations(in: work).isEmpty)
+        #expect(WorkService.repairCatalogInvariant(work))
+        #expect(work.matchKey == work.expectedMatchKey)
+        #expect(work.preferredEditionUUID == edition.uuid)
+        #expect(edition.title == "Edition-specific Translation")
+        #expect(edition.author == "Edition Credit")
+        #expect(WorkService.violations(in: work).isEmpty)
+
+        try context.save()
+        let fetched = try #require(try fetchBook(uuid: edition.uuid, in: context))
+        #expect(fetched.work?.title == "Shared Title")
+        #expect(fetched.title == "Edition-specific Translation")
+        #expect(fetched.author == "Edition Credit")
+    }
+
     @Test func explicitPrimaryAssetIsAuthoritativeAndRepairsCompatibilityMirror() throws {
         let (container, context) = makeContext()
         _ = container

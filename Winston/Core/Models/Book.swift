@@ -23,6 +23,9 @@ final class Book {
     var primaryAssetUUID: UUID?
     var originalFileName: String
 
+    // Edition metadata. Title and author may intentionally differ from the
+    // shared Work identity (translation title, credited editor, and so on).
+    // File facts below are compatibility mirrors; BookAsset is authoritative.
     var title: String?
     var author: String?
     var publisher: String?

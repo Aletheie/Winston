@@ -4,8 +4,8 @@ import SwiftData
 @Model
 final class Work {
     @Attribute(.unique) var uuid: UUID
-    // Canonical work identity. Edition identifiers such as ISBN deliberately
-    // live on Book and must not be copied here.
+    // Shared bibliographic identity. Edition-specific wording, identifiers,
+    // publication facts and reading state deliberately remain on Book.
     var title: String?
     var author: String?
     var originalTitle: String?
@@ -52,11 +52,15 @@ final class Work {
     }
 
     func refreshMatchKey() {
-        guard let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            matchKey = nil
-            return
+        matchKey = expectedMatchKey
+    }
+
+    var expectedMatchKey: String? {
+        guard let title,
+              !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
         }
         let key = BookMatchKey(title: title, author: author)
-        matchKey = key.isComplete ? key.storageValue : nil
+        return key.isComplete ? key.storageValue : nil
     }
 }
