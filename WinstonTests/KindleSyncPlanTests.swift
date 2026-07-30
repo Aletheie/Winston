@@ -112,7 +112,7 @@ struct KindleSyncPlanTests {
         let targetFormat = EbookConverter.kindleTarget(forFormat: "epub").ext
         let staleSource = library.root.appending(path: "old.\(targetFormat)")
         try Data("old conversion".utf8).write(to: staleSource)
-        let staleName = try BookFileStore.importCopy(of: staleSource, uuid: UUID())
+        let staleName = try TestManagedFileFixtureStore.importCopy(of: staleSource, uuid: UUID())
         let stale = BookAsset(
             fileName: staleName,
             origin: .generated,
@@ -463,5 +463,62 @@ struct KindleSyncPlanTests {
         #expect(receipt.transportIdentifier == nil)
         #expect(receipt.coverIdentity == nil)
         #expect(receipt.sourceFingerprint == "legacy-source")
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(
+                [LegacyProfile].self,
+                from: try #require(defaults.data(forKey: storageKey))
+            )
+        }
+    }
+
+    @Test func corruptProfilePayloadIsQuarantinedWithoutLosingItsBytes() throws {
+        let suiteName = "KindleSyncCorrupt-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storageKey = "profiles"
+        let corrupt = Data("{ definitely-not-json".utf8)
+        defaults.set(corrupt, forKey: storageKey)
+        let fixedNow = Date(timeIntervalSince1970: 1_725_000_000)
+
+        let store = KindleSyncProfileStore(
+            defaults: defaults,
+            storageKey: storageKey,
+            now: { fixedNow }
+        )
+
+        #expect(store.profiles.isEmpty)
+        let quarantineKey: String
+        switch store.lastLoadIssue {
+        case .corruptDataQuarantined(let key):
+            quarantineKey = key
+        default:
+            Issue.record("Expected corrupt profile data to be quarantined")
+            return
+        }
+        #expect(defaults.data(forKey: storageKey) == nil)
+        #expect(defaults.data(forKey: quarantineKey) == corrupt)
+        #expect(quarantineKey.contains("1725000000000"))
+    }
+
+    @Test func injectedProfileClockControlsLastSeenAt() throws {
+        let suiteName = "KindleSyncClock-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let fixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+        let store = KindleSyncProfileStore(
+            defaults: defaults,
+            storageKey: "profiles",
+            now: { fixedNow }
+        )
+        let info = DeviceInfo(
+            name: "Clock Kindle",
+            model: "Paperwhite",
+            kind: .mtp,
+            totalBytes: 1,
+            freeBytes: 1,
+            identifier: "clock-device"
+        )
+
+        #expect(store.ensureProfile(for: info).lastSeenAt == fixedNow)
     }
 }

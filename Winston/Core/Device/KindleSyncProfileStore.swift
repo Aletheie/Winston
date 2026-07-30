@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 
 nonisolated struct KindleSyncReceipt: Codable, Equatable, Identifiable, Sendable {
     var bookID: UUID
@@ -109,33 +110,90 @@ nonisolated struct KindleSyncTransferRecord: Equatable, Sendable {
     }
 }
 
+nonisolated enum KindleSyncProfileLoadIssue: Equatable, Sendable {
+    case corruptDataQuarantined(key: String)
+    case unsupportedSchemaQuarantined(version: Int, key: String)
+}
+
 @MainActor
 @Observable
 final class KindleSyncProfileStore {
     private static let defaultStorageKey = "kindleSyncProfiles.v1"
+    private static let currentSchemaVersion = 1
+
+    private struct Envelope: Codable {
+        let schemaVersion: Int
+        let profiles: [KindleSyncProfile]
+    }
 
     private(set) var profiles: [KindleSyncProfile]
+    private(set) var lastLoadIssue: KindleSyncProfileLoadIssue?
 
     private let defaults: UserDefaults
     private let storageKey: String
+    private let now: @Sendable () -> Date
 
     init(
         defaults: UserDefaults = .standard,
-        storageKey: String = KindleSyncProfileStore.defaultStorageKey
+        storageKey: String = KindleSyncProfileStore.defaultStorageKey,
+        now: @escaping @Sendable () -> Date = { .now }
     ) {
         self.defaults = defaults
         self.storageKey = storageKey
-        if let data = defaults.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode([KindleSyncProfile].self, from: data) {
-            profiles = decoded
-        } else {
-            profiles = []
+        self.now = now
+
+        var loadedProfiles: [KindleSyncProfile] = []
+        var loadIssue: KindleSyncProfileLoadIssue?
+        var shouldPersistMigratedData = false
+        if let data = defaults.data(forKey: storageKey) {
+            do {
+                let envelope = try JSONDecoder().decode(Envelope.self, from: data)
+                if envelope.schemaVersion == Self.currentSchemaVersion {
+                    loadedProfiles = envelope.profiles
+                } else {
+                    let key = Self.quarantine(
+                        data,
+                        storageKey: storageKey,
+                        defaults: defaults,
+                        now: now()
+                    )
+                    loadIssue = .unsupportedSchemaQuarantined(
+                        version: envelope.schemaVersion,
+                        key: key
+                    )
+                }
+            } catch {
+                if let legacy = try? JSONDecoder().decode(
+                    [KindleSyncProfile].self,
+                    from: data
+                ) {
+                    loadedProfiles = legacy
+                    shouldPersistMigratedData = true
+                } else {
+                    let key = Self.quarantine(
+                        data,
+                        storageKey: storageKey,
+                        defaults: defaults,
+                        now: now()
+                    )
+                    loadIssue = .corruptDataQuarantined(key: key)
+                }
+            }
+        }
+        profiles = loadedProfiles
+        lastLoadIssue = loadIssue
+        if shouldPersistMigratedData {
+            persist()
         }
     }
 
     @discardableResult
-    func ensureProfile(for info: DeviceInfo, now: Date = .now) -> KindleSyncProfile {
-        ensureProfile(deviceIdentifier: info.identifier, deviceName: info.name, now: now)
+    func ensureProfile(for info: DeviceInfo, now: Date? = nil) -> KindleSyncProfile {
+        ensureProfile(
+            deviceIdentifier: info.identifier,
+            deviceName: info.name,
+            now: now ?? self.now()
+        )
     }
 
     func profile(for info: DeviceInfo) -> KindleSyncProfile? {
@@ -155,7 +213,12 @@ final class KindleSyncProfileStore {
     }
 
     @discardableResult
-    func createProfile(named proposedName: String, for info: DeviceInfo, now: Date = .now) -> KindleSyncProfile {
+    func createProfile(
+        named proposedName: String,
+        for info: DeviceInfo,
+        now: Date? = nil
+    ) -> KindleSyncProfile {
+        let now = now ?? self.now()
         detach(info.identifier)
         let profile = KindleSyncProfile(
             id: UUID(),
@@ -169,8 +232,9 @@ final class KindleSyncProfileStore {
         return profile
     }
 
-    func assign(profileID: UUID, to info: DeviceInfo, now: Date = .now) {
+    func assign(profileID: UUID, to info: DeviceInfo, now: Date? = nil) {
         guard let targetIndex = profiles.firstIndex(where: { $0.id == profileID }) else { return }
+        let now = now ?? self.now()
         detach(info.identifier, persisting: false)
         profiles[targetIndex].deviceIdentifiers.append(info.identifier)
         profiles[targetIndex].deviceIdentifiers.sort()
@@ -224,8 +288,9 @@ final class KindleSyncProfileStore {
         coverVersion: Int,
         coverIdentity: String? = nil,
         on info: DeviceInfo,
-        now: Date = .now
+        now: Date? = nil
     ) {
+        let now = now ?? self.now()
         record(KindleSyncTransferRecord(
             deviceIdentifier: info.identifier,
             deviceName: info.name,
@@ -292,7 +357,35 @@ final class KindleSyncProfileStore {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(profiles) else { return }
-        defaults.set(data, forKey: storageKey)
+        do {
+            let data = try JSONEncoder().encode(Envelope(
+                schemaVersion: Self.currentSchemaVersion,
+                profiles: profiles
+            ))
+            defaults.set(data, forKey: storageKey)
+        } catch {
+            Log.persistence.error(
+                "Could not encode Kindle sync profiles: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private static func quarantine(
+        _ data: Data,
+        storageKey: String,
+        defaults: UserDefaults,
+        now: Date
+    ) -> String {
+        let timestamp = Int64(now.timeIntervalSince1970 * 1_000)
+        let base = "\(storageKey).corrupt.\(timestamp)"
+        var key = base
+        var suffix = 2
+        while defaults.object(forKey: key) != nil {
+            key = "\(base).\(suffix)"
+            suffix += 1
+        }
+        defaults.set(data, forKey: key)
+        defaults.removeObject(forKey: storageKey)
+        return key
     }
 }
