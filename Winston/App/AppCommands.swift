@@ -75,13 +75,8 @@ struct AppCommands: Commands {
     @FocusedValue(\.libraryCommandContext) var library
     @Bindable var themeManager: ThemeManager
     let settings: AppSettings
-    let updater: SoftwareUpdater
 
     var body: some Commands {
-        CommandGroup(after: .appInfo) {
-            CheckForUpdatesCommand(updater: updater)
-        }
-
         CommandGroup(replacing: .newItem) {
             Button("Import Books\u{2026}") { library?.perform(.importBooks) }
                 .keyboardShortcut("o")

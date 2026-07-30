@@ -2,6 +2,95 @@ import Foundation
 import OSLog
 import SwiftData
 
+nonisolated enum LibraryIntegrityIssueCategory: String, CaseIterable, Sendable {
+    case catalog
+    case files
+    case recovery
+}
+
+nonisolated enum LibraryIntegrityIssueSeverity: Int, Sendable {
+    case warning
+    case error
+}
+
+nonisolated struct LibraryIntegrityIssue: Identifiable, Sendable, Equatable {
+    let id: String
+    let category: LibraryIntegrityIssueCategory
+    let severity: LibraryIntegrityIssueSeverity
+    let title: String
+    let detail: String
+    let bookID: UUID?
+    let workID: UUID?
+    let assetID: UUID?
+    let transactionID: UUID?
+    let isAutomaticallyRepairable: Bool
+}
+
+nonisolated struct LibraryIntegrityReport: Sendable, Equatable {
+    let scannedAt: Date
+    let bookCount: Int
+    let workCount: Int
+    let assetCount: Int
+    let metadataSuggestionCount: Int
+    let issues: [LibraryIntegrityIssue]
+
+    var catalogIssueCount: Int {
+        issues.count { $0.category == .catalog }
+    }
+
+    var fileIssueCount: Int {
+        issues.count { $0.category == .files }
+    }
+
+    var recoveryIssueCount: Int {
+        issues.count { $0.category == .recovery }
+    }
+
+    var repairableBookIDs: Set<UUID> {
+        Set(issues.compactMap {
+            $0.category == .catalog && $0.isAutomaticallyRepairable
+                ? $0.bookID
+                : nil
+        })
+    }
+
+    var repairableWorkIDs: Set<UUID> {
+        Set(issues.compactMap {
+            $0.category == .catalog && $0.isAutomaticallyRepairable
+                ? $0.workID
+                : nil
+        })
+    }
+
+    var hasRepairableCatalogIssues: Bool {
+        !repairableBookIDs.isEmpty || !repairableWorkIDs.isEmpty
+    }
+}
+
+nonisolated struct LibraryIntegrityRepairResult: Sendable, Equatable {
+    let repairedBookCount: Int
+    let repairedWorkCount: Int
+}
+
+nonisolated private struct LibraryIntegrityFileInput: Sendable {
+    let id: String
+    let bookID: UUID?
+    let assetID: UUID?
+    let title: String
+    let fileName: String
+    let isPrimary: Bool
+}
+
+nonisolated private enum LibraryIntegrityFileFailure: Sendable {
+    case missing
+    case unreadable
+}
+
+nonisolated private struct LibraryIntegrityFileIssue: Sendable {
+    let input: LibraryIntegrityFileInput
+    let failure: LibraryIntegrityFileFailure
+}
+
 @MainActor
 @Observable
 final class LibraryHealthService {
@@ -10,6 +99,7 @@ final class LibraryHealthService {
     private let mutations: CatalogMutationService
     private let managedFiles: ManagedFileCoordinator
     private(set) var missingFileUUIDs: Set<UUID> = []
+    private(set) var lastCatalogReadFailed = false
     private var cachedMetadataAnalysis: MetadataFixAnalysis?
     private var cachedMetadataAnalysisRevision = -1
     private var metadataAnalysisTask: (revision: Int, task: Task<MetadataFixAnalysis, Never>)?
@@ -41,6 +131,499 @@ final class LibraryHealthService {
         await metadataAnalysis().seriesSuggestions
     }
 
+    /// Explicit full-library diagnostic. All SwiftData models are reduced to
+    /// Sendable values before filesystem and journal inspection suspend.
+    func integrityReport() async throws -> LibraryIntegrityReport {
+        while true {
+            guard !modelContext.hasChanges else {
+                throw MaintenanceSchedulerError.dirtyContext
+            }
+            let revision = LibraryMutationLog.shared.catalogRevision
+            let books: [Book]
+            let works: [Work]
+            let assets: [BookAsset]
+            do {
+                var bookDescriptor = FetchDescriptor<Book>(
+                    sortBy: [
+                        SortDescriptor(\Book.dateAdded),
+                        SortDescriptor(\Book.uuid),
+                    ]
+                )
+                bookDescriptor.relationshipKeyPathsForPrefetching = [
+                    \Book.assets,
+                    \Book.work,
+                ]
+                var workDescriptor = FetchDescriptor<Work>(
+                    sortBy: [SortDescriptor(\Work.uuid)]
+                )
+                workDescriptor.relationshipKeyPathsForPrefetching = [\Work.editions]
+                var assetDescriptor = FetchDescriptor<BookAsset>(
+                    sortBy: [SortDescriptor(\BookAsset.uuid)]
+                )
+                assetDescriptor.relationshipKeyPathsForPrefetching = [\BookAsset.book]
+                books = try modelContext.fetch(bookDescriptor)
+                works = try modelContext.fetch(workDescriptor)
+                assets = try modelContext.fetch(assetDescriptor)
+                lastCatalogReadFailed = false
+            } catch {
+                lastCatalogReadFailed = true
+                Log.persistence.error(
+                    "Library integrity scan failed to read the catalog: \(error.localizedDescription, privacy: .public)"
+                )
+                throw error
+            }
+
+            var issues: [LibraryIntegrityIssue] = []
+            var fileInputs: [LibraryIntegrityFileInput] = []
+            var metadataRows: [MetadataFixRow] = []
+            let titlesByBookID = Dictionary(uniqueKeysWithValues:
+                books.map { ($0.uuid, $0.displayTitle) }
+            )
+
+            issues.reserveCapacity(books.count / 8)
+            fileInputs.reserveCapacity(assets.count + books.count)
+            metadataRows.reserveCapacity(books.count)
+
+            for (index, book) in books.enumerated() {
+                try Task.checkCancellation()
+                metadataRows.append(MetadataFixRow(
+                    bookID: book.uuid,
+                    title: book.displayTitle,
+                    originalFileName: book.originalFileName,
+                    author: book.displayAuthor,
+                    series: book.series,
+                    seriesIndex: book.seriesIndex
+                ))
+
+                if book.work == nil {
+                    issues.append(LibraryIntegrityIssue(
+                        id: "catalog:book:\(book.uuid.uuidString):missing-work",
+                        category: .catalog,
+                        severity: .warning,
+                        title: book.displayTitle,
+                        detail: String(localized: "This edition is not attached to a bibliographic work."),
+                        bookID: book.uuid,
+                        workID: nil,
+                        assetID: nil,
+                        transactionID: nil,
+                        isAutomaticallyRepairable: true
+                    ))
+                }
+                for violation in CatalogModelInvariantService.violations(in: book) {
+                    issues.append(Self.issue(for: violation, book: book))
+                }
+
+                if book.assets.isEmpty,
+                   !book.fileName.isEmpty {
+                    if ManagedLeafName(rawValue: book.fileName) == nil {
+                        issues.append(Self.unsafeFileNameIssue(
+                            id: "legacy-\(book.uuid.uuidString)",
+                            bookID: book.uuid,
+                            assetID: nil,
+                            title: book.displayTitle,
+                            fileName: book.fileName
+                        ))
+                    } else {
+                        fileInputs.append(LibraryIntegrityFileInput(
+                            id: "legacy-\(book.uuid.uuidString)",
+                            bookID: book.uuid,
+                            assetID: nil,
+                            title: book.displayTitle,
+                            fileName: book.fileName,
+                            isPrimary: true
+                        ))
+                    }
+                }
+                if index > 0, index.isMultiple(of: 256) {
+                    await Task.yield()
+                }
+            }
+
+            for (index, asset) in assets.enumerated() {
+                try Task.checkCancellation()
+                let bookID = asset.book?.uuid
+                let title = bookID.flatMap { titlesByBookID[$0] }
+                    ?? String(localized: "Unattached book file")
+                if bookID == nil {
+                    issues.append(LibraryIntegrityIssue(
+                        id: "catalog:asset:\(asset.uuid.uuidString):orphan",
+                        category: .catalog,
+                        severity: .warning,
+                        title: title,
+                        detail: String(localized: "A catalog file record is not attached to an edition."),
+                        bookID: nil,
+                        workID: nil,
+                        assetID: asset.uuid,
+                        transactionID: nil,
+                        isAutomaticallyRepairable: false
+                    ))
+                }
+                if ManagedLeafName(rawValue: asset.fileName) == nil {
+                    issues.append(Self.unsafeFileNameIssue(
+                        id: "asset-\(asset.uuid.uuidString)",
+                        bookID: bookID,
+                        assetID: asset.uuid,
+                        title: title,
+                        fileName: asset.fileName
+                    ))
+                } else {
+                    fileInputs.append(LibraryIntegrityFileInput(
+                        id: "asset-\(asset.uuid.uuidString)",
+                        bookID: bookID,
+                        assetID: asset.uuid,
+                        title: title,
+                        fileName: asset.fileName,
+                        isPrimary: asset.book?.primaryAsset?.uuid == asset.uuid
+                    ))
+                }
+                if index > 0, index.isMultiple(of: 256) {
+                    await Task.yield()
+                }
+            }
+
+            for (index, work) in works.enumerated() {
+                try Task.checkCancellation()
+                if work.editions.isEmpty {
+                    issues.append(LibraryIntegrityIssue(
+                        id: "catalog:work:\(work.uuid.uuidString):orphan",
+                        category: .catalog,
+                        severity: .warning,
+                        title: work.displayTitle,
+                        detail: String(localized: "This work has no editions. It is retained for manual review."),
+                        bookID: nil,
+                        workID: work.uuid,
+                        assetID: nil,
+                        transactionID: nil,
+                        isAutomaticallyRepairable: false
+                    ))
+                }
+                for violation in WorkService.violations(in: work) {
+                    issues.append(Self.issue(for: violation, work: work))
+                }
+                if index > 0, index.isMultiple(of: 256) {
+                    await Task.yield()
+                }
+            }
+
+            async let fileIssues = Self.inspectFiles(fileInputs)
+            async let pendingInspection = managedFiles.inspectPendingTransactions()
+            async let metadata = Self.computeMetadataAnalysis(rows: metadataRows)
+            let (resolvedFileIssues, resolvedPending, resolvedMetadata) =
+                try await (fileIssues, pendingInspection, metadata)
+            try Task.checkCancellation()
+            guard revision == LibraryMutationLog.shared.catalogRevision else {
+                continue
+            }
+
+            let primaryMissingBookIDs = Set(resolvedFileIssues.compactMap {
+                $0.input.isPrimary ? $0.input.bookID : nil
+            })
+            missingFileUUIDs = primaryMissingBookIDs
+            for fileIssue in resolvedFileIssues {
+                let failureLabel: String
+                let severity: LibraryIntegrityIssueSeverity
+                switch fileIssue.failure {
+                case .missing:
+                    failureLabel = String(localized: "The managed file is missing: \(fileIssue.input.fileName)")
+                    severity = .error
+                case .unreadable:
+                    failureLabel = String(localized: "The managed file cannot be read: \(fileIssue.input.fileName)")
+                    severity = .error
+                }
+                issues.append(LibraryIntegrityIssue(
+                    id: "files:\(fileIssue.input.id)",
+                    category: .files,
+                    severity: severity,
+                    title: fileIssue.input.title,
+                    detail: failureLabel,
+                    bookID: fileIssue.input.bookID,
+                    workID: nil,
+                    assetID: fileIssue.input.assetID,
+                    transactionID: nil,
+                    isAutomaticallyRepairable: false
+                ))
+            }
+
+            for item in resolvedPending.items {
+                issues.append(LibraryIntegrityIssue(
+                    id: "recovery:\(item.id.uuidString)",
+                    category: .recovery,
+                    severity: .warning,
+                    title: Self.label(for: item.intent),
+                    detail: String(
+                        localized: "\(item.stagedFileCount) staged files and \(item.cleanupCount) cleanups are waiting for reconciliation."
+                    ),
+                    bookID: nil,
+                    workID: nil,
+                    assetID: nil,
+                    transactionID: item.id,
+                    isAutomaticallyRepairable: false
+                ))
+            }
+            for (index, url) in resolvedPending.unreadableJournalURLs.enumerated() {
+                let detail = resolvedPending.failureMessages.indices.contains(index)
+                    ? resolvedPending.failureMessages[index]
+                    : String(localized: "The recovery journal could not be decoded.")
+                issues.append(LibraryIntegrityIssue(
+                    id: "recovery:unreadable:\(url.lastPathComponent)",
+                    category: .recovery,
+                    severity: .error,
+                    title: String(localized: "Unreadable recovery journal"),
+                    detail: "\(url.lastPathComponent): \(detail)",
+                    bookID: nil,
+                    workID: nil,
+                    assetID: nil,
+                    transactionID: nil,
+                    isAutomaticallyRepairable: false
+                ))
+            }
+
+            issues.sort(by: Self.issuePrecedes)
+            cachedMetadataAnalysis = resolvedMetadata
+            cachedMetadataAnalysisRevision = revision
+            return LibraryIntegrityReport(
+                scannedAt: .now,
+                bookCount: books.count,
+                workCount: works.count,
+                assetCount: assets.count,
+                metadataSuggestionCount: resolvedMetadata.fixes.count,
+                issues: issues
+            )
+        }
+    }
+
+    /// Safe repairs are committed in bounded store-scoped transactions. A
+    /// later chunk failure never rolls back an earlier durable chunk.
+    func repairCatalogInvariants(
+        from report: LibraryIntegrityReport,
+        chunkSize: Int = 64
+    ) async throws -> LibraryIntegrityRepairResult {
+        let boundedChunkSize = max(1, chunkSize)
+        let bookIDs = report.repairableBookIDs.sorted {
+            $0.uuidString < $1.uuidString
+        }
+        let workIDs = report.repairableWorkIDs.sorted {
+            $0.uuidString < $1.uuidString
+        }
+        var repairedBooks = 0
+        var repairedWorks = 0
+
+        for start in stride(from: 0, to: bookIDs.count, by: boundedChunkSize) {
+            try Task.checkCancellation()
+            let end = min(start + boundedChunkSize, bookIDs.count)
+            let chunk = Set(bookIDs[start..<end])
+            _ = try mutations.repairCatalogInvariants(
+                bookIDs: chunk,
+                workIDs: []
+            )
+            repairedBooks += chunk.count
+            await Task.yield()
+        }
+        for start in stride(from: 0, to: workIDs.count, by: boundedChunkSize) {
+            try Task.checkCancellation()
+            let end = min(start + boundedChunkSize, workIDs.count)
+            let chunk = Set(workIDs[start..<end])
+            _ = try mutations.repairCatalogInvariants(
+                bookIDs: [],
+                workIDs: chunk
+            )
+            repairedWorks += chunk.count
+            await Task.yield()
+        }
+        cachedMetadataAnalysis = nil
+        cachedMetadataAnalysisRevision = -1
+        return LibraryIntegrityRepairResult(
+            repairedBookCount: repairedBooks,
+            repairedWorkCount: repairedWorks
+        )
+    }
+
+    @concurrent
+    private static func inspectFiles(
+        _ inputs: [LibraryIntegrityFileInput]
+    ) async throws -> [LibraryIntegrityFileIssue] {
+        var issues: [LibraryIntegrityFileIssue] = []
+        issues.reserveCapacity(inputs.count / 8)
+        for input in inputs {
+            try Task.checkCancellation()
+            let url = BookFileStore.url(for: input.fileName)
+            let path = url.path(percentEncoded: false)
+            if !FileManager.default.fileExists(atPath: path) {
+                issues.append(LibraryIntegrityFileIssue(
+                    input: input,
+                    failure: .missing
+                ))
+            } else if !FileManager.default.isReadableFile(atPath: path) {
+                issues.append(LibraryIntegrityFileIssue(
+                    input: input,
+                    failure: .unreadable
+                ))
+            }
+        }
+        return issues
+    }
+
+    private static func issue(
+        for violation: CatalogModelInvariantViolation,
+        book: Book
+    ) -> LibraryIntegrityIssue {
+        let key: String
+        let detail: String
+        let assetID: UUID?
+        switch violation {
+        case .missingPrimaryAsset:
+            key = "missing-primary"
+            detail = String(localized: "No primary file is selected for this edition.")
+            assetID = nil
+        case .danglingPrimaryAsset(let id):
+            key = "dangling-primary-\(id.uuidString)"
+            detail = String(localized: "The selected primary file no longer belongs to this edition.")
+            assetID = id
+        case .assetBelongsToAnotherEdition(let id):
+            key = "foreign-asset-\(id.uuidString)"
+            detail = String(localized: "A file relationship points to another edition.")
+            assetID = id
+        case .staleAssetFormat(let id, let expected):
+            key = "stale-format-\(id.uuidString)"
+            detail = String(localized: "A file format mirror should be \(expected).")
+            assetID = id
+        case .missingAssetProvenance(let id):
+            key = "missing-provenance-\(id.uuidString)"
+            detail = String(localized: "A file is missing its import provenance.")
+            assetID = id
+        case .inconsistentAssetAvailability(let id):
+            key = "availability-\(id.uuidString)"
+            detail = String(localized: "File availability conflicts with its validation status.")
+            assetID = id
+        case .primaryFileNameMirror:
+            key = "primary-name-mirror"
+            detail = String(localized: "The edition filename mirror differs from its primary file.")
+            assetID = book.primaryAssetUUID
+        case .primarySizeMirror:
+            key = "primary-size-mirror"
+            detail = String(localized: "The edition size mirror differs from its primary file.")
+            assetID = book.primaryAssetUUID
+        case .primaryDRMMirror:
+            key = "primary-drm-mirror"
+            detail = String(localized: "The edition DRM mirror differs from its primary file.")
+            assetID = book.primaryAssetUUID
+        case .missingCoverScope:
+            key = "missing-cover-scope"
+            detail = String(localized: "The cover does not have an explicit owner scope.")
+            assetID = nil
+        case .invalidCoverOwner:
+            key = "invalid-cover-owner"
+            detail = String(localized: "The selected cover owner is not valid for this edition.")
+            assetID = book.coverAssetUUID
+        }
+        return LibraryIntegrityIssue(
+            id: "catalog:book:\(book.uuid.uuidString):\(key)",
+            category: .catalog,
+            severity: .warning,
+            title: book.displayTitle,
+            detail: detail,
+            bookID: book.uuid,
+            workID: book.work?.uuid,
+            assetID: assetID,
+            transactionID: nil,
+            isAutomaticallyRepairable: true
+        )
+    }
+
+    private static func issue(
+        for violation: CatalogWorkInvariantViolation,
+        work: Work
+    ) -> LibraryIntegrityIssue {
+        let key: String
+        let detail: String
+        let bookID: UUID?
+        switch violation {
+        case .staleMatchKey:
+            key = "stale-match-key"
+            detail = String(localized: "The work identity key does not match its title and author.")
+            bookID = nil
+        case .danglingPreferredEdition(let id):
+            key = "dangling-preferred-\(id.uuidString)"
+            detail = String(localized: "The preferred edition no longer belongs to this work.")
+            bookID = id
+        case .editionPointsToAnotherWork(let id):
+            key = "foreign-edition-\(id.uuidString)"
+            detail = String(localized: "An inverse edition relationship points to another work.")
+            bookID = id
+        }
+        return LibraryIntegrityIssue(
+            id: "catalog:work:\(work.uuid.uuidString):\(key)",
+            category: .catalog,
+            severity: .warning,
+            title: work.displayTitle,
+            detail: detail,
+            bookID: bookID,
+            workID: work.uuid,
+            assetID: nil,
+            transactionID: nil,
+            isAutomaticallyRepairable: true
+        )
+    }
+
+    private static func unsafeFileNameIssue(
+        id: String,
+        bookID: UUID?,
+        assetID: UUID?,
+        title: String,
+        fileName: String
+    ) -> LibraryIntegrityIssue {
+        LibraryIntegrityIssue(
+            id: "catalog:unsafe-file:\(id)",
+            category: .catalog,
+            severity: .error,
+            title: title,
+            detail: String(localized: "The managed filename is unsafe and needs manual review: \(fileName)"),
+            bookID: bookID,
+            workID: nil,
+            assetID: assetID,
+            transactionID: nil,
+            isAutomaticallyRepairable: false
+        )
+    }
+
+    private static func issuePrecedes(
+        _ lhs: LibraryIntegrityIssue,
+        _ rhs: LibraryIntegrityIssue
+    ) -> Bool {
+        if lhs.severity != rhs.severity {
+            return lhs.severity.rawValue > rhs.severity.rawValue
+        }
+        if lhs.category != rhs.category {
+            return lhs.category.rawValue < rhs.category.rawValue
+        }
+        let titleOrder = lhs.title.localizedStandardCompare(rhs.title)
+        if titleOrder != .orderedSame {
+            return titleOrder == .orderedAscending
+        }
+        return lhs.id < rhs.id
+    }
+
+    private static func label(for intent: ManagedFileIntent) -> String {
+        switch intent {
+        case .importBook:
+            String(localized: "Book import awaiting recovery")
+        case .replaceBookFile:
+            String(localized: "Replacement file awaiting recovery")
+        case .conversionOutput:
+            String(localized: "Conversion output awaiting recovery")
+        case .deleteBook, .deleteBookFile:
+            String(localized: "File cleanup awaiting recovery")
+        case .calibreImport:
+            String(localized: "Calibre import awaiting recovery")
+        case .legacyMigration:
+            String(localized: "Library migration awaiting recovery")
+        case .coverUpdate:
+            String(localized: "Cover update awaiting recovery")
+        case .restore:
+            String(localized: "Library restore awaiting recovery")
+        }
+    }
+
     private func metadataAnalysis() async -> MetadataFixAnalysis {
         while true {
             let revision = LibraryMutationLog.shared.catalogRevision
@@ -52,7 +635,18 @@ final class LibraryHealthService {
             if let inFlight = metadataAnalysisTask, inFlight.revision == revision {
                 task = inFlight.task
             } else {
-                let books = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
+                let books: [Book]
+                do {
+                    books = try modelContext.fetchAllBooksForGlobalAnalysis()
+                    lastCatalogReadFailed = false
+                } catch {
+                    lastCatalogReadFailed = true
+                    Log.persistence.error(
+                        "Metadata analysis retained its previous result because the catalog fetch failed: \(error.localizedDescription, privacy: .public)"
+                    )
+                    return cachedMetadataAnalysis
+                        ?? MetadataFixAnalysis(fixes: [], seriesSuggestions: [])
+                }
                 var rows: [MetadataFixRow] = []
                 rows.reserveCapacity(books.count)
                 for (index, book) in books.enumerated() {
@@ -91,8 +685,19 @@ final class LibraryHealthService {
 
     @discardableResult
     func scanForMissingFiles() async -> Int {
-        let books = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
-        let assets = (try? modelContext.fetch(FetchDescriptor<BookAsset>())) ?? []
+        let books: [Book]
+        let assets: [BookAsset]
+        do {
+            books = try modelContext.fetchAllBooksForGlobalAnalysis()
+            assets = try modelContext.fetch(FetchDescriptor<BookAsset>())
+            lastCatalogReadFailed = false
+        } catch {
+            lastCatalogReadFailed = true
+            Log.persistence.error(
+                "Missing-file scan retained its previous result because the catalog fetch failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return missingFileUUIDs.count
+        }
         var primaryEntries: [(uuid: UUID, fileName: String)] = []
         primaryEntries.reserveCapacity(books.count)
         for (index, book) in books.enumerated() {
@@ -168,7 +773,6 @@ final class LibraryHealthService {
         let primaryAssetDateAdded = asset?.dateAdded
         let oldFileName = asset?.fileName ?? book.fileName
         let replacementUUID = asset?.uuid ?? bookID
-        let originalCoverVersion = book.coverVersion
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
@@ -197,8 +801,7 @@ final class LibraryHealthService {
                 requirement: ManagedFileRequirement(
                     presentBookIDs: [bookID],
                     referencedBookFileNames: [fileName],
-                    unreferencedBookFileNames: [oldFileName],
-                    coverVersions: [bookID: originalCoverVersion + 1]
+                    unreferencedBookFileNames: [oldFileName]
                 ),
                 cleanups: [.file(previousIdentity)]
             )
@@ -217,7 +820,6 @@ final class LibraryHealthService {
             book.assets.isEmpty && book.fileName == oldFileName
         }
         guard book.modelContext != nil,
-              book.coverVersion == originalCoverVersion,
               primaryIsCurrent else {
             await managedFiles.abort(transaction)
             return
@@ -253,15 +855,13 @@ final class LibraryHealthService {
                 } else {
                     storedBook.assets.isEmpty && storedBook.fileName == oldFileName
                 }
-                guard sourceIsCurrent,
-                      storedBook.coverVersion == originalCoverVersion else {
+                guard sourceIsCurrent else {
                     throw CatalogMutationError.staleGeneration
                 }
 
                 storedBook.fileName = fileName
                 storedBook.fileSizeBytes = staged.byteCount
                 storedBook.drmProtected = drmProtected
-                storedBook.coverVersion = originalCoverVersion + 1
 
                 let updatedAsset: BookAsset
                 if let primaryAssetID,
