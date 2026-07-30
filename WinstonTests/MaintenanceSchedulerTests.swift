@@ -112,6 +112,31 @@ struct MaintenanceSchedulerTests {
         #expect(book.fileSizeBytes == asset.sizeBytes)
     }
 
+    @Test func catalogStructureRepairsWorkDerivedFields() async throws {
+        let library = try await TestLibrary()
+        let book = Book(fileName: "work.epub", originalFileName: "Work.epub")
+        let work = Work(title: "Canonical", author: "Author")
+        let asset = BookAsset(fileName: book.fileName, book: book)
+        library.context.insert(book)
+        library.context.insert(work)
+        library.context.insert(asset)
+        book.work = work
+        book.primaryAssetUUID = asset.uuid
+        work.matchKey = "stale"
+        work.preferredEditionUUID = UUID()
+        try library.context.save()
+
+        _ = try CatalogStructureBackfill.processChunk(
+            context: library.context,
+            offset: 0,
+            limit: 10
+        )
+
+        #expect(work.matchKey == work.expectedMatchKey)
+        #expect(work.preferredEditionUUID == book.uuid)
+        #expect(WorkService.violations(in: work).isEmpty)
+    }
+
     @Test func catalogCleanupPrunesOrphansInChunksAndRemainsIdempotent() async throws {
         let library = try await TestLibrary()
         for index in 0 ..< 3 {

@@ -39,6 +39,13 @@ nonisolated enum MaintenancePhase: Equatable, Sendable {
     case completed
 }
 
+nonisolated enum ManualBackupPhase: Equatable, Sendable {
+    case idle
+    case running
+    case succeeded(URL)
+    case failed(String)
+}
+
 @MainActor
 final class MaintenanceCheckpointStore {
     private let defaults: UserDefaults
@@ -417,6 +424,11 @@ enum CatalogStructureBackfill {
         let nextOffset: Int
     }
 
+    private struct StructurePlan {
+        let bookID: UUID
+        let newWorkID: UUID?
+    }
+
     static func processChunk(
         context: ModelContext,
         mutations: CatalogMutationService? = nil,
@@ -438,72 +450,134 @@ enum CatalogStructureBackfill {
         descriptor.fetchOffset = max(0, offset)
         descriptor.fetchLimit = max(1, limit)
         let books = try context.fetch(descriptor)
+        let plans = books.compactMap { book -> StructurePlan? in
+            let needsPrimaryRepair =
+                !CatalogModelInvariantService.violations(in: book).isEmpty
+            let needsAsset = book.assets.isEmpty
+                && !book.fileName.isEmpty
+                && ManagedLeafName(rawValue: book.fileName) != nil
+            let needsWork = book.work == nil
+            let needsWorkInvariantRepair = book.work.map {
+                !WorkService.violations(in: $0).isEmpty
+            } ?? false
+            let needsReadingSession =
+                book.readingSessions.isEmpty && book.readingStatus != .unread
+            guard needsPrimaryRepair
+                    || needsAsset
+                    || needsWork
+                    || needsWorkInvariantRepair
+                    || needsReadingSession else {
+                return nil
+            }
+            return StructurePlan(
+                bookID: book.uuid,
+                newWorkID: needsWork ? UUID() : nil
+            )
+        }
         var changedBookIDs: Set<UUID> = []
         var changedWorkIDs: Set<UUID> = []
         var changedAssetIDs: Set<UUID> = []
 
-        for book in books {
-            if book.repairPrimaryAssetInvariant() {
-                changedBookIDs.insert(book.uuid)
-                if let primaryAssetID = book.primaryAssetUUID {
-                    changedAssetIDs.insert(primaryAssetID)
+        if !plans.isEmpty {
+            let writer = mutations ?? CatalogMutationService(modelContext: context)
+            let planBookIDs = Set(plans.map(\.bookID))
+            let plannedBooks = books.filter { planBookIDs.contains($0.uuid) }
+            let affectedBookIDs = planBookIDs.union(
+                plannedBooks.flatMap { $0.work?.editions.map(\.uuid) ?? [] }
+            )
+            let affectedWorkIDs = Set(plannedBooks.compactMap { $0.work?.uuid })
+                .union(plans.compactMap(\.newWorkID))
+            let affectedAssetIDs = Set(
+                plannedBooks.flatMap { $0.assets.map(\.uuid) }
+            ).union(
+                plannedBooks
+                    .filter {
+                        $0.assets.isEmpty
+                            && !$0.fileName.isEmpty
+                            && ManagedLeafName(rawValue: $0.fileName) != nil
+                    }
+                    .map(\.uuid)
+            )
+            try writer.commitPrepared(
+                .legacyMigration(bookIDs: Array(affectedBookIDs)),
+                affectedBookIDs: affectedBookIDs,
+                affectedWorkIDs: affectedWorkIDs,
+                affectedAssetIDs: affectedAssetIDs,
+                catalogChanged: true
+            ) { writeContext in
+                let requestedBookIDs = Array(planBookIDs)
+                var writeDescriptor = FetchDescriptor<Book>(
+                    predicate: #Predicate {
+                        requestedBookIDs.contains($0.uuid)
+                    }
+                )
+                writeDescriptor.relationshipKeyPathsForPrefetching = [
+                    \Book.assets,
+                    \Book.work,
+                    \Book.readingSessions,
+                ]
+                let booksByID = Dictionary(uniqueKeysWithValues:
+                    try writeContext.fetch(writeDescriptor)
+                        .map { ($0.uuid, $0) }
+                )
+
+                for plan in plans {
+                    guard let book = booksByID[plan.bookID] else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    if book.repairPrimaryAssetInvariant() {
+                        changedBookIDs.insert(book.uuid)
+                        if let primaryAssetID = book.primaryAssetUUID {
+                            changedAssetIDs.insert(primaryAssetID)
+                        }
+                    }
+
+                    if book.assets.isEmpty,
+                       !book.fileName.isEmpty,
+                       ManagedLeafName(rawValue: book.fileName) != nil {
+                        let asset = BookAsset(
+                            uuid: book.uuid,
+                            fileName: book.fileName,
+                            origin: .original,
+                            sourceProvenance: .legacyMigration,
+                            sizeBytes: book.fileSizeBytes,
+                            drmProtected: book.drmProtected,
+                            dateAdded: book.dateAdded,
+                            book: book
+                        )
+                        writeContext.insert(asset)
+                        book.primaryAssetUUID = asset.uuid
+                        changedBookIDs.insert(book.uuid)
+                        changedAssetIDs.insert(asset.uuid)
+                    }
+
+                    if let workID = plan.newWorkID, book.work == nil {
+                        let work = Work(
+                            uuid: workID,
+                            title: book.displayTitle,
+                            author: book.author,
+                            dateCreated: book.dateAdded
+                        )
+                        writeContext.insert(work)
+                        book.work = work
+                        work.preferredEditionUUID = book.uuid
+                        changedBookIDs.insert(book.uuid)
+                        changedWorkIDs.insert(work.uuid)
+                    }
+
+                    if let work = book.work,
+                       WorkService.repairCatalogInvariant(work) {
+                        changedBookIDs.formUnion(work.editions.map(\.uuid))
+                        changedWorkIDs.insert(work.uuid)
+                    }
+
+                    if book.readingSessions.isEmpty,
+                       let session = readingSession(for: book) {
+                        writeContext.insert(session)
+                        changedBookIDs.insert(book.uuid)
+                    }
                 }
             }
-
-            if book.assets.isEmpty,
-               !book.fileName.isEmpty,
-               ManagedLeafName(rawValue: book.fileName) != nil {
-                let asset = BookAsset(
-                    uuid: book.uuid,
-                    fileName: book.fileName,
-                    origin: .original,
-                    sourceProvenance: .legacyMigration,
-                    sizeBytes: book.fileSizeBytes,
-                    drmProtected: book.drmProtected,
-                    dateAdded: book.dateAdded,
-                    book: book
-                )
-                context.insert(asset)
-                book.primaryAssetUUID = asset.uuid
-                changedBookIDs.insert(book.uuid)
-                changedAssetIDs.insert(asset.uuid)
-            }
-
-            if book.work == nil {
-                let work = Work(
-                    title: book.displayTitle,
-                    author: book.author,
-                    dateCreated: book.dateAdded
-                )
-                context.insert(work)
-                book.work = work
-                work.preferredEditionUUID = book.uuid
-                changedBookIDs.insert(book.uuid)
-                changedWorkIDs.insert(work.uuid)
-            }
-
-            if let work = book.work,
-               WorkService.repairPreferredEditionInvariant(work) {
-                changedBookIDs.formUnion(work.editions.map(\.uuid))
-                changedWorkIDs.insert(work.uuid)
-            }
-
-            if book.readingSessions.isEmpty,
-               let session = readingSession(for: book) {
-                context.insert(session)
-                changedBookIDs.insert(book.uuid)
-            }
-        }
-
-        if !changedBookIDs.isEmpty {
-            let writer = mutations ?? CatalogMutationService(modelContext: context)
-            try writer.commitStaged(
-                .legacyMigration(bookIDs: Array(changedBookIDs)),
-                affectedBookIDs: changedBookIDs,
-                affectedWorkIDs: changedWorkIDs,
-                affectedAssetIDs: changedAssetIDs,
-                catalogChanged: true
-            )
         }
         return ChunkResult(
             visited: books.count,
@@ -526,20 +600,30 @@ enum CatalogStructureBackfill {
         descriptor.fetchOffset = max(0, offset)
         descriptor.fetchLimit = max(1, limit)
         let works = try context.fetch(descriptor)
-        let orphaned = works.filter(\.editions.isEmpty)
-        orphaned.forEach(context.delete)
-        if !orphaned.isEmpty {
-            let workIDs = Set(orphaned.map(\.uuid))
+        let workIDs = Set(works.lazy.filter(\.editions.isEmpty).map(\.uuid))
+        var deleted = 0
+        if !workIDs.isEmpty {
             let writer = mutations ?? CatalogMutationService(modelContext: context)
-            try writer.commitStaged(
+            try writer.commitPrepared(
                 .maintenanceCleanup(workIDs: Array(workIDs)),
                 affectedWorkIDs: workIDs
-            )
+            ) { writeContext in
+                for workID in workIDs {
+                    let matches = try writeContext.fetch(FetchDescriptor<Work>(
+                        predicate: #Predicate { $0.uuid == workID }
+                    ))
+                    guard let work = matches.first, work.editions.isEmpty else {
+                        continue
+                    }
+                    writeContext.delete(work)
+                    deleted += 1
+                }
+            }
         }
         return CleanupChunkResult(
             visited: works.count,
-            deleted: orphaned.count,
-            nextOffset: max(0, offset) + works.count - orphaned.count
+            deleted: deleted,
+            nextOffset: max(0, offset) + works.count - deleted
         )
     }
 
@@ -769,6 +853,8 @@ final class MaintenanceScheduler {
     private static let chunkSize = 64
 
     private(set) var phase: MaintenancePhase = .idle
+    private(set) var manualBackupPhase: ManualBackupPhase = .idle
+    private(set) var isBackupInProgress = false
 
     @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private let mutations: CatalogMutationService
@@ -779,6 +865,7 @@ final class MaintenanceScheduler {
     @ObservationIgnored private let toasts: ToastCenter
     @ObservationIgnored private let checkpoints: MaintenanceCheckpointStore
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let backupStoreURL: URL
     @ObservationIgnored private var pauseRequested = false
     @ObservationIgnored private var runGeneration = 0
     @ObservationIgnored private var runTask: Task<Void, Never>?
@@ -792,7 +879,8 @@ final class MaintenanceScheduler {
         settings: AppSettings,
         toasts: ToastCenter,
         defaults: UserDefaults = .standard,
-        restoreApplied: Bool = PersistenceController.restoreAppliedAtLaunch
+        restoreApplied: Bool = PersistenceController.restoreAppliedAtLaunch,
+        backupStoreURL: URL = PersistenceController.storeURL
     ) {
         self.context = context
         self.mutations = mutations
@@ -802,6 +890,7 @@ final class MaintenanceScheduler {
         self.settings = settings
         self.toasts = toasts
         self.defaults = defaults
+        self.backupStoreURL = backupStoreURL
         checkpoints = MaintenanceCheckpointStore(defaults: defaults)
         if restoreApplied {
             checkpoints.resetAll()
@@ -1085,16 +1174,16 @@ final class MaintenanceScheduler {
         let progress = MaintenanceProgress(job: .automaticBackup, completed: 0, total: 1)
         try await waitUntilRunnable(progress)
         guard settings.autoBackupEnabled,
-              let path = settings.backupFolderPath else { return }
+              let path = settings.backupFolderPath,
+              !isBackupInProgress else { return }
         let due = settings.lastBackupAt.map {
             Date.now.timeIntervalSince($0) > 24 * 3600
         } ?? true
         guard due else { return }
+        isBackupInProgress = true
+        defer { isBackupInProgress = false }
         do {
-            _ = try await managedFiles.createBackup(
-                storeURL: PersistenceController.storeURL,
-                to: URL(fileURLWithPath: path)
-            )
+            _ = try await createBackup(in: URL(fileURLWithPath: path))
             settings.lastBackupAt = .now
             toasts.info(String(localized: "Library backed up."))
         } catch {
@@ -1105,6 +1194,42 @@ final class MaintenanceScheduler {
             completed: 1,
             total: 1
         ))
+    }
+
+    @discardableResult
+    func backUpNow() async -> Bool {
+        guard !isBackupInProgress else { return false }
+        guard let path = settings.backupFolderPath else {
+            let message = String(localized: "Choose a backup folder first.")
+            manualBackupPhase = .failed(message)
+            toasts.error(message)
+            return false
+        }
+
+        isBackupInProgress = true
+        manualBackupPhase = .running
+        defer { isBackupInProgress = false }
+        do {
+            let backup = try await createBackup(in: URL(fileURLWithPath: path))
+            settings.lastBackupAt = .now
+            manualBackupPhase = .succeeded(backup)
+            toasts.info(String(localized: "Library backed up."))
+            return true
+        } catch {
+            let message = String(
+                localized: "Backup failed: \(error.localizedDescription)"
+            )
+            manualBackupPhase = .failed(message)
+            toasts.error(message)
+            return false
+        }
+    }
+
+    private func createBackup(in folder: URL) async throws -> URL {
+        try await managedFiles.createBackup(
+            storeURL: backupStoreURL,
+            to: folder
+        )
     }
 
     private func waitUntilRunnable(_ progress: MaintenanceProgress) async throws {
