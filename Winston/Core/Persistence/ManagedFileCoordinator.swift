@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import OSLog
 
-nonisolated enum ManagedFileIntent: String, Codable, Sendable {
+nonisolated enum ManagedFileIntent: String, Codable, Sendable, Equatable {
     case importBook
     case replaceBookFile
     case conversionOutput
@@ -33,7 +33,11 @@ nonisolated struct ManagedFileReference: Codable, Sendable, Equatable, Hashable 
     }
 
     static func cover(bookID: UUID) -> ManagedFileReference {
-        ManagedFileReference(kind: .cover, relativeName: "\(bookID.uuidString).jpg")
+        cover(owner: .edition(bookID))
+    }
+
+    static func cover(owner: CoverOwner) -> ManagedFileReference {
+        ManagedFileReference(kind: .cover, relativeName: owner.storageFileName)
     }
 }
 
@@ -109,11 +113,19 @@ nonisolated struct ManagedFileSource: Sendable {
         bookID: UUID,
         replacing identity: ManagedFileIdentitySnapshot? = nil
     ) -> ManagedFileSource {
+        cover(data: data, owner: .edition(bookID), replacing: identity)
+    }
+
+    static func cover(
+        data: Data,
+        owner: CoverOwner,
+        replacing identity: ManagedFileIdentitySnapshot? = nil
+    ) -> ManagedFileSource {
         ManagedFileSource(
             kind: .cover,
             sourceURL: nil,
             data: data,
-            finalRelativeName: "\(bookID.uuidString).jpg",
+            finalRelativeName: owner.storageFileName,
             replacesExisting: identity != nil,
             expectedDestinationIdentity: identity
         )
@@ -170,6 +182,19 @@ nonisolated struct ManagedFileCleanup: Identifiable, Codable, Sendable, Hashable
 
 }
 
+/// Durable catalog evidence authorizing publication of one authoritative
+/// cover payload. Owner version is the crash-recovery epoch; selected book IDs
+/// make ownership changes explicit and let Work covers invalidate siblings.
+nonisolated struct ManagedCoverRequirement: Codable, Sendable, Equatable, Hashable {
+    let owner: CoverOwner
+    let version: Int
+    let selectedBookIDs: Set<UUID>
+
+    var reference: CoverReference {
+        CoverReference(owner: owner, version: version)
+    }
+}
+
 /// Conditions that must be true in the durable catalog before staged files are
 /// published or retired files are removed.
 nonisolated struct ManagedFileRequirement: Codable, Sendable, Equatable {
@@ -178,19 +203,24 @@ nonisolated struct ManagedFileRequirement: Codable, Sendable, Equatable {
     var referencedBookFileNames: Set<String>
     var unreferencedBookFileNames: Set<String>
     var coverVersions: [UUID: Int]
+    /// Optional preserves decoding of journals created before full CoverOwner
+    /// requirements existed.
+    var coverRequirements: [ManagedCoverRequirement]?
 
     init(
         presentBookIDs: Set<UUID> = [],
         absentBookIDs: Set<UUID> = [],
         referencedBookFileNames: Set<String> = [],
         unreferencedBookFileNames: Set<String> = [],
-        coverVersions: [UUID: Int] = [:]
+        coverVersions: [UUID: Int] = [:],
+        coverRequirements: [ManagedCoverRequirement] = []
     ) {
         self.presentBookIDs = presentBookIDs
         self.absentBookIDs = absentBookIDs
         self.referencedBookFileNames = referencedBookFileNames
         self.unreferencedBookFileNames = unreferencedBookFileNames
         self.coverVersions = coverVersions
+        self.coverRequirements = coverRequirements.isEmpty ? nil : coverRequirements
     }
 }
 
@@ -198,24 +228,77 @@ nonisolated struct ManagedFileCatalogSnapshot: Sendable, Equatable {
     let presentBookIDs: Set<UUID>
     let referencedBookFileNames: Set<String>
     let coverVersions: [UUID: Int]
+    let coverReferencesByBookID: [UUID: CoverReference]
+    let coverOwnerVersions: [CoverOwner: Int]
 
     init(
         presentBookIDs: Set<UUID>,
         referencedBookFileNames: Set<String>,
-        coverVersions: [UUID: Int]
+        coverVersions: [UUID: Int],
+        coverReferencesByBookID: [UUID: CoverReference] = [:],
+        coverOwnerVersions: [CoverOwner: Int] = [:]
     ) {
         self.presentBookIDs = presentBookIDs
         self.referencedBookFileNames = referencedBookFileNames
         self.coverVersions = coverVersions
+        self.coverReferencesByBookID = coverReferencesByBookID
+        self.coverOwnerVersions = coverOwnerVersions
     }
 
     func satisfies(_ requirement: ManagedFileRequirement) -> Bool {
+        satisfiesNonCoverRequirements(requirement)
+            && (requirement.coverRequirements ?? []).allSatisfy { coverRequirement in
+                coverOwnerVersions[coverRequirement.owner] == coverRequirement.version
+                    && coverRequirement.selectedBookIDs.allSatisfy {
+                        coverReferencesByBookID[$0] == coverRequirement.reference
+                    }
+            }
+    }
+
+    fileprivate func satisfiesNonCoverRequirements(
+        _ requirement: ManagedFileRequirement
+    ) -> Bool {
         requirement.presentBookIDs.isSubset(of: presentBookIDs)
             && requirement.absentBookIDs.isDisjoint(with: presentBookIDs)
             && requirement.referencedBookFileNames.isSubset(of: referencedBookFileNames)
             && requirement.unreferencedBookFileNames.isDisjoint(with: referencedBookFileNames)
             && requirement.coverVersions.allSatisfy { coverVersions[$0.key] == $0.value }
     }
+
+    fileprivate func coverPublicationDisposition(
+        for requirements: [ManagedCoverRequirement]
+    ) -> ManagedCoverPublicationDisposition {
+        var hasSelectedReference = false
+        for requirement in requirements {
+            guard let currentVersion = coverOwnerVersions[requirement.owner] else {
+                return .catalogMismatch
+            }
+            if currentVersion > requirement.version {
+                return .superseded
+            }
+            guard currentVersion == requirement.version else {
+                return .catalogMismatch
+            }
+
+            let references = requirement.selectedBookIDs.compactMap {
+                coverReferencesByBookID[$0]
+            }
+            if references.contains(requirement.reference) {
+                hasSelectedReference = true
+            } else if references.contains(where: {
+                $0.owner == requirement.owner && $0.version != requirement.version
+            }) {
+                return .catalogMismatch
+            }
+        }
+        return hasSelectedReference ? .authorized : .superseded
+    }
+}
+
+private enum ManagedCoverPublicationDisposition {
+    case authorized
+    case superseded
+    case catalogMismatch
 }
 
 nonisolated struct StagedManagedFile: Identifiable, Codable, Sendable, Equatable {
@@ -247,11 +330,13 @@ nonisolated struct ManagedFileTransaction: Identifiable, Codable, Sendable, Equa
 nonisolated enum ManagedFileReconcileOutcome: Sendable, Equatable {
     case completed
     case abortedCatalogDidNotCommit
+    case superseded
 }
 
 nonisolated struct ManagedFileRecoveryReport: Sendable, Equatable {
     var completedTransactionIDs: [UUID] = []
     var abortedTransactionIDs: [UUID] = []
+    var supersededTransactionIDs: [UUID] = []
     var failedTransactionIDs: [UUID] = []
     var unreadableJournalURLs: [URL] = []
     var removedOrphanStagingURLs: [URL] = []
@@ -261,6 +346,24 @@ nonisolated struct ManagedFileRecoveryReport: Sendable, Equatable {
         !failedTransactionIDs.isEmpty
             || !unreadableJournalURLs.isEmpty
             || !failureMessages.isEmpty
+    }
+}
+
+nonisolated struct ManagedFilePendingItem: Identifiable, Sendable, Equatable {
+    let id: UUID
+    let intent: ManagedFileIntent
+    let createdAt: Date
+    let stagedFileCount: Int
+    let cleanupCount: Int
+}
+
+nonisolated struct ManagedFilePendingInspection: Sendable, Equatable {
+    let items: [ManagedFilePendingItem]
+    let unreadableJournalURLs: [URL]
+    let failureMessages: [String]
+
+    var hasUnreadableState: Bool {
+        !unreadableJournalURLs.isEmpty || !failureMessages.isEmpty
     }
 }
 
@@ -282,6 +385,7 @@ nonisolated enum ManagedFileCoordinatorError: Error, Equatable {
     case journalNotFound(UUID)
     case catalogRequirementMismatch(UUID)
     case cleanupContentChanged(String)
+    case cleanupHashFailed(String)
     case fileGenerationChanged(String)
     case unsupportedManagedFile(String)
     case injectedFailure(ManagedFileFaultPoint)
@@ -371,6 +475,10 @@ typealias ManagedFileProgressHandler = @Sendable (ManagedFileProgress) -> Void
 
 actor ManagedFileCoordinator {
     typealias FaultInjector = @Sendable (ManagedFileFaultPoint) throws -> Void
+    typealias CatalogCommitGate = @Sendable () async throws -> Void
+    typealias CatalogDidCommitGate = @Sendable () async throws -> Void
+    typealias DestructiveHasher = @Sendable (URL) throws -> String
+    typealias BookTrashHandler = @Sendable (FileManager, URL) throws -> Void
 
     static let shared = ManagedFileCoordinator()
 
@@ -388,7 +496,11 @@ actor ManagedFileCoordinator {
     private let configuredCoversDirectory: URL?
     private let configuredStateDirectory: URL?
     private let fileManager: FileManager
+    private let catalogCommitGate: CatalogCommitGate
+    private let catalogDidCommitGate: CatalogDidCommitGate
     private let faultInjector: FaultInjector
+    private let destructiveHasher: DestructiveHasher
+    private let trashBook: BookTrashHandler
     private let executor = DispatchQueueSerialExecutor(label: "cz.annajung.Winston.managed-files")
 
     nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -420,13 +532,25 @@ actor ManagedFileCoordinator {
         coversDirectory: URL? = nil,
         stateDirectory: URL? = nil,
         fileManager: FileManager = .default,
-        faultInjector: @escaping FaultInjector = { _ in }
+        catalogCommitGate: @escaping CatalogCommitGate = {},
+        catalogDidCommitGate: @escaping CatalogDidCommitGate = {},
+        faultInjector: @escaping FaultInjector = { _ in },
+        destructiveHasher: @escaping DestructiveHasher = {
+            try ContentHasher.sha256Cancellable(of: $0)
+        },
+        trashBook: @escaping BookTrashHandler = { fileManager, url in
+            _ = try fileManager.trashItem(at: url, resultingItemURL: nil)
+        }
     ) {
         self.configuredBooksDirectory = booksDirectory
         self.configuredCoversDirectory = coversDirectory
         self.configuredStateDirectory = stateDirectory
         self.fileManager = fileManager
+        self.catalogCommitGate = catalogCommitGate
+        self.catalogDidCommitGate = catalogDidCommitGate
         self.faultInjector = faultInjector
+        self.destructiveHasher = destructiveHasher
+        self.trashBook = trashBook
     }
 
     func captureIdentity(
@@ -535,21 +659,26 @@ actor ManagedFileCoordinator {
         )
     }
 
-    func willCommitCatalog(_ transaction: ManagedFileTransaction) throws {
+    func willCommitCatalog(_ transaction: ManagedFileTransaction) async throws {
         guard fileManager.fileExists(atPath: journalURL(for: transaction.id).path(percentEncoded: false)) else {
             throw ManagedFileCoordinatorError.journalNotFound(transaction.id)
         }
+        try await catalogCommitGate()
         try faultInjector(.beforeCatalogSave)
         for file in transaction.files {
             try verifyStagedGeneration(file)
-            try verifyPublishDestination(for: file)
+            try verifyPublishDestinationPrecondition(for: file)
         }
         for cleanup in transaction.cleanups {
-            try verifyContentGuard(for: cleanup, allowMissingTarget: false)
+            try verifyCleanupMetadataGuard(
+                for: cleanup,
+                allowMissingTarget: false
+            )
         }
     }
 
-    func catalogDidCommit(_ transaction: ManagedFileTransaction) throws {
+    func catalogDidCommit(_ transaction: ManagedFileTransaction) async throws {
+        try await catalogDidCommitGate()
         var journal = try readJournal(id: transaction.id)
         journal.catalogCommitConfirmed = true
         try write(journal)
@@ -566,7 +695,27 @@ actor ManagedFileCoordinator {
         progress: ManagedFileProgressHandler? = nil
     ) throws -> ManagedFileReconcileOutcome {
         var journal = try readJournal(id: transaction.id)
-        guard snapshot.satisfies(transaction.requirement) else {
+        let coverRequirements = transaction.requirement.coverRequirements ?? []
+        let baseRequirementsSatisfied = snapshot.satisfiesNonCoverRequirements(
+            transaction.requirement
+        )
+        let catalogAuthorizesPublication: Bool
+        if coverRequirements.isEmpty {
+            catalogAuthorizesPublication = snapshot.satisfies(transaction.requirement)
+        } else if baseRequirementsSatisfied {
+            switch snapshot.coverPublicationDisposition(for: coverRequirements) {
+            case .authorized:
+                catalogAuthorizesPublication = true
+            case .superseded:
+                removeTransactionFiles(transaction.id)
+                return .superseded
+            case .catalogMismatch:
+                catalogAuthorizesPublication = false
+            }
+        } else {
+            catalogAuthorizesPublication = false
+        }
+        guard catalogAuthorizesPublication else {
             if journal.catalogCommitConfirmed == true {
                 throw ManagedFileCoordinatorError.catalogRequirementMismatch(transaction.id)
             }
@@ -683,6 +832,8 @@ actor ManagedFileCoordinator {
                         report.completedTransactionIDs.append(journal.transaction.id)
                     case .abortedCatalogDidNotCommit:
                         report.abortedTransactionIDs.append(journal.transaction.id)
+                    case .superseded:
+                        report.supersededTransactionIDs.append(journal.transaction.id)
                     }
                 } catch {
                     report.failedTransactionIDs.append(journal.transaction.id)
@@ -709,6 +860,48 @@ actor ManagedFileCoordinator {
                   let journal = try? JSONDecoder().decode(Journal.self, from: data) else { return nil }
             return journal.transaction
         }
+    }
+
+    /// Explicit diagnostic path used by recovery UI. Unlike the compatibility
+    /// `pendingTransactions` helper it never turns a directory read failure
+    /// into an empty queue, and it reports unreadable journals individually.
+    func inspectPendingTransactions() throws -> ManagedFilePendingInspection {
+        try ensureDirectories()
+        let urls = try fileManager.contentsOfDirectory(
+            at: journalDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        .filter { $0.pathExtension == "json" }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        var items: [ManagedFilePendingItem] = []
+        var unreadable: [URL] = []
+        var failures: [String] = []
+        for url in urls {
+            do {
+                let journal = try JSONDecoder().decode(
+                    Journal.self,
+                    from: Data(contentsOf: url)
+                )
+                let transaction = journal.transaction
+                items.append(ManagedFilePendingItem(
+                    id: transaction.id,
+                    intent: transaction.intent,
+                    createdAt: transaction.createdAt,
+                    stagedFileCount: transaction.files.count,
+                    cleanupCount: transaction.cleanups.count
+                ))
+            } catch {
+                unreadable.append(url)
+                failures.append(error.localizedDescription)
+            }
+        }
+        return ManagedFilePendingInspection(
+            items: items,
+            unreadableJournalURLs: unreadable,
+            failureMessages: failures
+        )
     }
 
     func createBackup(
@@ -1010,7 +1203,8 @@ actor ManagedFileCoordinator {
         let stagedURL = resolvedStagedURL(for: file)
         let stagedPath = stagedURL.path(percentEncoded: false)
         if fileManager.fileExists(atPath: destinationPath) {
-            if (try? ContentHasher.sha256(of: destination)) == file.sha256 {
+            if try verifyPublishDestinationAtDestructiveCheckpoint(for: file)
+                == .alreadyPublished {
                 if fileManager.fileExists(atPath: stagedPath) {
                     try fileManager.removeItem(at: stagedURL)
                 }
@@ -1021,7 +1215,6 @@ actor ManagedFileCoordinator {
                 throw ManagedFileCoordinatorError.destinationConflict(file.finalRelativeName)
             }
             try verifyStagedGeneration(file)
-            try verifyPublishDestination(for: file)
             _ = try fileManager.replaceItemAt(
                 destination,
                 withItemAt: stagedURL,
@@ -1058,9 +1251,8 @@ actor ManagedFileCoordinator {
         guard fileManager.fileExists(atPath: target.path(percentEncoded: false)) else { return }
         try verifyContentGuard(for: cleanup, allowMissingTarget: true)
         if cleanup.disposition == .trash,
-           cleanup.kind == .book,
-           BookFileStore.trashesRemovedBooks {
-            _ = try fileManager.trashItem(at: target, resultingItemURL: nil)
+           cleanup.kind == .book {
+            try trashBook(fileManager, target)
         } else {
             try fileManager.removeItem(at: target)
         }
@@ -1071,7 +1263,7 @@ actor ManagedFileCoordinator {
         allowMissingTarget: Bool
     ) throws {
         if let expected = cleanup.expectedIdentity {
-            try verifyIdentity(expected)
+            try verifyExactIdentity(expected)
             if !expected.exists {
                 return
             }
@@ -1094,9 +1286,34 @@ actor ManagedFileCoordinator {
            !fileManager.fileExists(atPath: target.path(percentEncoded: false)) {
             return
         }
-        guard fileManager.fileExists(atPath: target.path(percentEncoded: false)),
-              (try? ContentHasher.sha256(of: target)) == expectedSHA256 else {
+        guard fileManager.fileExists(atPath: target.path(percentEncoded: false))
+        else {
+            throw ManagedFileCoordinatorError.cleanupContentChanged(
+                cleanup.relativeName
+            )
+        }
+        let before = try physicalMetadata(at: target)
+        guard before.isRegularFile else {
             throw ManagedFileCoordinatorError.cleanupContentChanged(cleanup.relativeName)
+        }
+        let digest: String
+        do {
+            digest = try destructiveHasher(target).lowercased()
+        } catch {
+            throw ManagedFileCoordinatorError.cleanupHashFailed(
+                cleanup.relativeName
+            )
+        }
+        let after = try physicalMetadata(at: target)
+        guard before == after else {
+            throw ManagedFileCoordinatorError.fileGenerationChanged(
+                cleanup.relativeName
+            )
+        }
+        guard digest == expectedSHA256 else {
+            throw ManagedFileCoordinatorError.cleanupContentChanged(
+                cleanup.relativeName
+            )
         }
         if let retainedName = cleanup.retainedEquivalentRelativeName {
             try verifyRetainedEquivalent(
@@ -1107,7 +1324,42 @@ actor ManagedFileCoordinator {
         }
     }
 
-    private func verifyIdentity(_ expected: ManagedFileIdentitySnapshot) throws {
+    /// Cheap pre-commit validation. Exact content verification is intentionally
+    /// deferred until immediately before destructive cleanup.
+    private func verifyCleanupMetadataGuard(
+        for cleanup: ManagedFileCleanup,
+        allowMissingTarget: Bool
+    ) throws {
+        if let expected = cleanup.expectedIdentity {
+            try verifyIdentityMetadata(expected)
+            return
+        }
+        guard cleanup.expectedSHA256 != nil else { return }
+        let target = try destinationURL(
+            kind: cleanup.kind,
+            relativeName: cleanup.relativeName
+        )
+        if allowMissingTarget,
+           !fileManager.fileExists(atPath: target.path(percentEncoded: false)) {
+            return
+        }
+        guard fileManager.fileExists(atPath: target.path(percentEncoded: false))
+        else {
+            throw ManagedFileCoordinatorError.fileGenerationChanged(
+                cleanup.relativeName
+            )
+        }
+        let metadata = try physicalMetadata(at: target)
+        guard metadata.isRegularFile else {
+            throw ManagedFileCoordinatorError.unsupportedManagedFile(
+                cleanup.relativeName
+            )
+        }
+    }
+
+    private func verifyIdentityMetadata(
+        _ expected: ManagedFileIdentitySnapshot
+    ) throws {
         let url = try destinationURL(
             kind: expected.reference.kind,
             relativeName: expected.reference.relativeName
@@ -1138,6 +1390,42 @@ actor ManagedFileCoordinator {
         }
     }
 
+    private func verifyExactIdentity(
+        _ expected: ManagedFileIdentitySnapshot
+    ) throws {
+        try verifyIdentityMetadata(expected)
+        guard let generation = expected.generation else { return }
+        let url = try destinationURL(
+            kind: expected.reference.kind,
+            relativeName: expected.reference.relativeName
+        )
+        let before = try physicalMetadata(at: url)
+        let digest: String
+        do {
+            digest = try destructiveHasher(url).lowercased()
+        } catch {
+            throw ManagedFileCoordinatorError.cleanupHashFailed(
+                expected.reference.relativeName
+            )
+        }
+        let after = try physicalMetadata(at: url)
+        guard before == after,
+              after.isRegularFile,
+              after.volumeNumber == generation.volumeNumber,
+              after.fileNumber == generation.fileNumber,
+              after.byteCount == generation.byteCount,
+              after.modificationDate == generation.modificationDate else {
+            throw ManagedFileCoordinatorError.fileGenerationChanged(
+                expected.reference.relativeName
+            )
+        }
+        guard digest == generation.sha256.lowercased() else {
+            throw ManagedFileCoordinatorError.cleanupContentChanged(
+                expected.reference.relativeName
+            )
+        }
+    }
+
     private func verifyRetainedEquivalent(
         relativeName: String,
         expectedSHA256: String,
@@ -1147,8 +1435,23 @@ actor ManagedFileCoordinator {
             throw ManagedFileCoordinatorError.cleanupContentChanged(removedName)
         }
         let retained = try destinationURL(kind: .book, relativeName: relativeName)
-        guard fileManager.fileExists(atPath: retained.path(percentEncoded: false)),
-              (try? ContentHasher.sha256(of: retained)) == expectedSHA256 else {
+        guard fileManager.fileExists(atPath: retained.path(percentEncoded: false))
+        else {
+            throw ManagedFileCoordinatorError.cleanupContentChanged(removedName)
+        }
+        let before = try physicalMetadata(at: retained)
+        guard before.isRegularFile else {
+            throw ManagedFileCoordinatorError.cleanupContentChanged(removedName)
+        }
+        let digest: String
+        do {
+            digest = try destructiveHasher(retained).lowercased()
+        } catch {
+            throw ManagedFileCoordinatorError.cleanupHashFailed(removedName)
+        }
+        let after = try physicalMetadata(at: retained)
+        guard before == after,
+              digest == expectedSHA256.lowercased() else {
             throw ManagedFileCoordinatorError.cleanupContentChanged(removedName)
         }
     }
@@ -1284,7 +1587,14 @@ actor ManagedFileCoordinator {
         }
     }
 
-    private func verifyPublishDestination(for file: StagedManagedFile) throws {
+    private enum PublishDestinationDisposition {
+        case alreadyPublished
+        case replace
+    }
+
+    private func verifyPublishDestinationPrecondition(
+        for file: StagedManagedFile
+    ) throws {
         let destination = try destinationURL(
             kind: file.kind,
             relativeName: file.finalRelativeName
@@ -1292,15 +1602,73 @@ actor ManagedFileCoordinator {
         guard fileManager.fileExists(
             atPath: destination.path(percentEncoded: false)
         ) else { return }
-        if try ContentHasher.sha256Cancellable(of: destination) == file.sha256 {
+        if let expected = file.expectedDestinationIdentity {
+            try verifyIdentityMetadata(expected)
             return
         }
-        guard file.replacesExisting == true else {
+        if file.replacesExisting == true {
+            // Compatibility for an old staged journal without a captured
+            // destination generation. Final publication still validates a
+            // stable metadata/hash snapshot before replacement.
+            return
+        }
+        guard try ContentHasher.sha256Cancellable(of: destination)
+                == file.sha256 else {
             throw ManagedFileCoordinatorError.destinationConflict(file.finalRelativeName)
         }
-        if let expected = file.expectedDestinationIdentity {
-            try verifyIdentity(expected)
+    }
+
+    private func verifyPublishDestinationAtDestructiveCheckpoint(
+        for file: StagedManagedFile
+    ) throws -> PublishDestinationDisposition {
+        let destination = try destinationURL(
+            kind: file.kind,
+            relativeName: file.finalRelativeName
+        )
+        let before = try physicalMetadata(at: destination)
+        guard before.isRegularFile else {
+            throw ManagedFileCoordinatorError.unsupportedManagedFile(
+                file.finalRelativeName
+            )
         }
+        let digest: String
+        do {
+            digest = try destructiveHasher(destination).lowercased()
+        } catch {
+            throw ManagedFileCoordinatorError.cleanupHashFailed(
+                file.finalRelativeName
+            )
+        }
+        let after = try physicalMetadata(at: destination)
+        guard before == after else {
+            throw ManagedFileCoordinatorError.fileGenerationChanged(
+                file.finalRelativeName
+            )
+        }
+        if digest == file.sha256.lowercased() {
+            return .alreadyPublished
+        }
+        guard file.replacesExisting == true else {
+            throw ManagedFileCoordinatorError.destinationConflict(
+                file.finalRelativeName
+            )
+        }
+        if let generation = file.expectedDestinationIdentity?.generation {
+            guard after.volumeNumber == generation.volumeNumber,
+                  after.fileNumber == generation.fileNumber,
+                  after.byteCount == generation.byteCount,
+                  after.modificationDate == generation.modificationDate else {
+                throw ManagedFileCoordinatorError.fileGenerationChanged(
+                    file.finalRelativeName
+                )
+            }
+            guard digest == generation.sha256.lowercased() else {
+                throw ManagedFileCoordinatorError.cleanupContentChanged(
+                    file.finalRelativeName
+                )
+            }
+        }
+        return .replace
     }
 
     private func removeOrphanedStagingDirectories(retaining journalIDs: Set<UUID>) -> [URL] {
