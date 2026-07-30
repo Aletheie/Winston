@@ -1,5 +1,28 @@
 import Foundation
 
+nonisolated struct DeviceProjectionRevision: Hashable, Sendable {
+    let catalog: Int
+    let readModelIsReady: Bool
+    let device: Int
+}
+
+nonisolated enum DeviceProjectionPublicationPolicy {
+    static func shouldPublish(
+        captured: DeviceProjectionRevision,
+        current: DeviceProjectionRevision,
+        isCancelled: Bool
+    ) -> Bool {
+        !isCancelled && captured == current
+    }
+
+    static func pruneSelection(
+        _ selection: Set<DeviceBook.ID>,
+        to rows: [DeviceBookRow]
+    ) -> Set<DeviceBook.ID> {
+        selection.intersection(rows.lazy.map(\.id))
+    }
+}
+
 nonisolated struct DeviceBookRow: Identifiable, Sendable, Hashable {
     let book: DeviceBook
     let author: String?

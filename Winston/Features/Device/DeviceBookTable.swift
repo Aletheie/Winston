@@ -3,6 +3,7 @@ import SwiftUI
 struct DeviceLibrarySection: View {
     let rows: [DeviceBookRow]
     let authors: [String]
+    let isBusy: Bool
     @Binding var selection: Set<DeviceBook.ID>
     let onCopy: (Set<DeviceBook.ID>) -> Void
     let onDelete: (Set<DeviceBook.ID>) -> Void
@@ -31,6 +32,7 @@ struct DeviceLibrarySection: View {
             } else {
                 DeviceBookTable(
                     rows: displayedRows,
+                    isBusy: isBusy,
                     selection: $selection,
                     sortOrder: $sortOrder,
                     onCopy: onCopy,
@@ -262,6 +264,7 @@ private struct AuthorFilterButton: View {
 
 struct DeviceBookTable: View {
     let rows: [DeviceBookRow]
+    let isBusy: Bool
     @Binding var selection: Set<DeviceBook.ID>
     @Binding var sortOrder: [KeyPathComparator<DeviceBookRow>]
     let onCopy: (Set<DeviceBook.ID>) -> Void
@@ -332,15 +335,18 @@ struct DeviceBookTable: View {
                 Button { onCopy(target) } label: {
                     Label("Copy \(target.count) to Library", systemImage: "square.and.arrow.down")
                 }
+                .disabled(isBusy)
                 Divider()
                 Button(role: .destructive) { onDelete(target) } label: {
                     Label("Remove \(target.count) from Device", systemImage: "trash")
                 }
+                .disabled(isBusy)
                 let authors = Set(rows.filter { target.contains($0.id) }.compactMap(\.author))
                 if authors.count == 1, let author = authors.first {
                     Button(role: .destructive) { onDeleteByAuthor(author) } label: {
                         Label("Remove all by \(author)", systemImage: "person.crop.circle.badge.xmark")
                     }
+                    .disabled(isBusy)
                 }
             }
         }

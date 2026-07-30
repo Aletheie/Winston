@@ -16,6 +16,7 @@ struct DeviceView: View {
     @State private var sidecarSummary: String?
     @State private var projection = DeviceProjection.unbuilt
     @State private var showsSyncPlan = false
+    @State private var pendingDeletion: DeviceDeletionRequest?
 
     private struct DeviceProjection {
         let rows: [DeviceBookRow]
@@ -40,6 +41,49 @@ struct DeviceView: View {
         case cleaningSidecars
         case deleting
         case ejecting
+    }
+
+    private struct DeviceDeletionRequest: Identifiable {
+        enum Scope {
+            case selection
+            case author(String)
+        }
+
+        let id = UUID()
+        let bookIDs: Set<DeviceBook.ID>
+        let scope: Scope
+
+        var count: Int { bookIDs.count }
+
+        var title: String {
+            switch scope {
+            case .selection where count == 1:
+                String(localized: "Remove this book from the Kindle?")
+            case .selection:
+                String(localized: "Remove \(count) books from the Kindle?")
+            case .author(let author):
+                String(
+                    localized: "Remove all \(count) books by \(author) from the Kindle?"
+                )
+            }
+        }
+
+        var message: String {
+            if count == 1 {
+                return String(
+                    localized: "This removes 1 book from the Kindle. Winston will preserve its library copy."
+                )
+            }
+            return String(
+                localized: "This removes \(count) books from the Kindle. Winston will preserve their library copies."
+            )
+        }
+
+        var confirmationLabel: String {
+            count == 1
+                ? String(localized: "Remove Book")
+                : String(localized: "Remove \(count) Books")
+        }
     }
 
     private var projectionRevision: DeviceProjectionRevision {
@@ -82,7 +126,28 @@ struct DeviceView: View {
         .sheet(isPresented: $showsSyncPlan) {
             KindleSyncPlanSheet(books: books, readModel: readModel)
         }
+        .alert(
+            Text(verbatim: pendingDeletion?.title ?? ""),
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            presenting: pendingDeletion
+        ) { request in
+            Button(role: .destructive) {
+                pendingDeletion = nil
+                performDeletion(request.bookIDs)
+            } label: {
+                Text(verbatim: request.confirmationLabel)
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDeletion = nil
+            }
+        } message: { request in
+            Text(verbatim: request.message)
+        }
         .onChange(of: monitor.info?.identifier) {
+            pendingDeletion = nil
             cancelSidecarCleanup()
         }
         .onDisappear {
@@ -178,10 +243,11 @@ struct DeviceView: View {
                 DeviceLibrarySection(
                     rows: projection.rows,
                     authors: projection.authors,
+                    isBusy: isDeviceBusy,
                     selection: $selectedDeviceBooks,
                     onCopy: copyToLibrary,
-                    onDelete: deleteFromDevice,
-                    onDeleteByAuthor: deleteByAuthor
+                    onDelete: requestDeletion,
+                    onDeleteByAuthor: requestDeletionByAuthor
                 )
             }
         }
@@ -194,6 +260,7 @@ struct DeviceView: View {
             || transferQueue.isTransferring
             || viewModel.isImportingHighlights
             || monitor.isEjecting
+            || monitor.isDeletingBooks
     }
 
     private func begin(_ operation: DeviceOperation) -> Bool {
@@ -212,11 +279,24 @@ struct DeviceView: View {
         copyToLibrary(Set(projection.deviceOnlyBooks.map(\.id)))
     }
 
-    private func deleteByAuthor(_ author: String) {
+    private func requestDeletionByAuthor(_ author: String) {
+        guard !isDeviceBusy else { return }
         let ids = Set(monitor.books.filter {
             projection.authorByDeviceKey[$0.matchKey] == author
         }.map(\.id))
-        deleteFromDevice(ids)
+        guard !ids.isEmpty else { return }
+        pendingDeletion = DeviceDeletionRequest(
+            bookIDs: ids,
+            scope: .author(author)
+        )
+    }
+
+    private func requestDeletion(_ ids: Set<DeviceBook.ID>) {
+        guard !isDeviceBusy, !ids.isEmpty else { return }
+        pendingDeletion = DeviceDeletionRequest(
+            bookIDs: ids,
+            scope: .selection
+        )
     }
 
     private func copyToLibrary(_ ids: Set<DeviceBook.ID>) {
@@ -225,9 +305,11 @@ struct DeviceView: View {
         Task {
             guard begin(.copyingToLibrary) else { return }
             defer { finish(.copyingToLibrary) }
-            for book in books {
-                guard let lease = await transferQueue.copyToLibrary(book, via: monitor) else { break }
-                viewModel.addBooks(from: [.winstonOwned(lease)])
+            let leases = await transferQueue.copyToLibrary(books, via: monitor)
+            if !leases.isEmpty {
+                viewModel.reviewAndAddBooks(
+                    from: leases.map(ImportSource.winstonOwned)
+                )
             }
         }
     }
@@ -287,6 +369,9 @@ struct DeviceView: View {
             defer { finish(.ejecting) }
             do {
                 try await monitor.userDisconnect()
+                toasts.success(
+                    String(localized: "Kindle ejected — safe to disconnect.")
+                )
             } catch {
                 toasts.error(String(
                     localized: "Couldn’t eject the Kindle. \(error.localizedDescription)"
@@ -295,18 +380,26 @@ struct DeviceView: View {
         }
     }
 
-    private func deleteFromDevice(_ ids: Set<DeviceBook.ID>) {
+    private func performDeletion(_ ids: Set<DeviceBook.ID>) {
         Task {
             guard begin(.deleting) else { return }
             defer { finish(.deleting) }
             let result = await monitor.removeFromDevice(ids: ids)
             let deleted = Set(result.appliedTargetIDs.compactMap(\.deviceBookID))
-            if result.completion == .failed || result.conflictCount > 0 {
-                toasts.error(String(
-                    localized: "Some books couldn\u{2019}t be deleted from the Kindle (\(result.conflictCount + result.pendingTargetIDs.count))."
-                ))
-            }
             selectedDeviceBooks.subtract(deleted)
+            announceDeletionResult(result)
+        }
+    }
+
+    private func announceDeletionResult(_ result: BulkOperationResult) {
+        let feedback = KindleRemovalFeedback.make(for: result)
+        switch feedback.style {
+        case .success:
+            toasts.success(feedback.message)
+        case .info:
+            toasts.info(feedback.message)
+        case .error:
+            toasts.error(feedback.message)
         }
     }
 }
