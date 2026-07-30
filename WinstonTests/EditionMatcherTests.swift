@@ -71,6 +71,26 @@ struct EditionMatcherTests {
         #expect(result.confidence == .high)
     }
 
+    @Test func validISBN10AndEquivalentISBN13AreTheSameEdition() throws {
+        let lhs = candidate(isbn: "ISBN-10: 0-306-40615-2")
+        let rhs = candidate(isbn: "9780306406157", format: "pdf")
+
+        let result = try #require(
+            EditionMatcher.proposals(for: lhs, against: [rhs]).first
+        )
+
+        #expect(result.verdict == .sameEditionOtherFormat)
+        #expect(result.confidence == .high)
+        #expect(result.signals == [.sameISBN])
+    }
+
+    @Test func matchingInvalidISBNValuesAreNeverAStrongSignal() {
+        let lhs = candidate(title: "First", isbn: "978-0-306-40615-8")
+        let rhs = candidate(title: "Second", isbn: "9780306406158")
+
+        #expect(EditionMatcher.proposals(for: lhs, against: [rhs]).isEmpty)
+    }
+
     @Test func workKeyIsHighConfidenceOtherEdition() throws {
         let lhs = candidate(title: "Dune", openLibraryKey: "/works/OL1W")
         let rhs = candidate(title: "Duna", language: "cs", translator: "Jan", openLibraryKey: "/works/OL1W")
@@ -96,6 +116,38 @@ struct EditionMatcherTests {
         #expect(result.verdict == .similarItem)
         #expect(result.confidence == .uncertain)
         #expect(!result.canApply)
+    }
+
+    @Test func normalizationOnlyNameMatchAlwaysRemainsReviewOnly() throws {
+        let lhs = candidate(
+            title: "  Dune ",
+            author: "Frank  Herbert"
+        )
+        let rhs = candidate(
+            title: "dune",
+            author: "frank herbert",
+            format: "pdf"
+        )
+
+        let result = try #require(
+            EditionMatcher.proposals(for: lhs, against: [rhs]).first
+        )
+
+        #expect(result.verdict == .similarItem)
+        #expect(result.confidence == .uncertain)
+        #expect(!result.canApply)
+        #expect(result.changePlan.assetPolicy == .reviewOnly)
+    }
+
+    @Test func punctuationAndDiacriticsRemainPartOfCandidateIdentity() {
+        let punctuation = EditionMatcher.proposals(
+            for: candidate(title: "Dune: Messiah", author: "José L. Writer"),
+            against: [
+                candidate(title: "Dune Messiah", author: "Jose L Writer"),
+            ]
+        )
+
+        #expect(punctuation.isEmpty)
     }
 
     @Test func titleOnlyWithMissingAuthorIsUncertain() throws {
@@ -181,7 +233,7 @@ struct EditionMatcherTests {
             candidate(
                 title: "Unique Title \(index)",
                 author: "Unique Author \(index)",
-                isbn: "978-0-00-000000-1"
+                isbn: "978-0-441-01359-3"
             )
         }
 

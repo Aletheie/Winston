@@ -130,12 +130,14 @@ nonisolated struct EditionCandidate: Hashable, Sendable {
         self.workUUID = workUUID
         self.title = (title ?? "").normalizedMatchKey
         self.author = (author ?? "").normalizedMatchKey
-        self.language = (language ?? "").normalizedMatchKey
+        let normalizedLanguage = MetadataNormalizer.language(language)
+        self.language = normalizedLanguage.canonicalTag
+            ?? MetadataNormalizer.comparisonKey(language)
         self.translator = (translator ?? "").normalizedMatchKey
         self.isbn = EditionMatcher.normalizedISBN(isbn)
         self.publisher = (publisher ?? "").normalizedMatchKey
         self.year = (year ?? "").normalizedMatchKey
-        self.format = format.lowercased()
+        self.format = MetadataNormalizer.comparisonKey(format)
         self.sizeBytes = sizeBytes
         self.contentHashes = Set(contentHashes.map { $0.lowercased() }.filter { !$0.isEmpty })
         self.openLibraryWorkKey = (openLibraryWorkKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -415,9 +417,7 @@ nonisolated enum EditionMatcher {
     static let maximumManualReviewMembers = 64
 
     static func normalizedISBN(_ value: String?) -> String {
-        (value ?? "")
-            .uppercased()
-            .filter { $0.isNumber || $0 == "X" }
+        MetadataNormalizer.canonicalISBN13(value) ?? ""
     }
 
     static func proposals(

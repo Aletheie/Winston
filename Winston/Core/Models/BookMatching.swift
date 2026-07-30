@@ -2,9 +2,7 @@ import Foundation
 
 extension String {
     nonisolated var normalizedMatchKey: String {
-        folding(options: .diacriticInsensitive, locale: nil)
-            .lowercased()
-            .filter { $0.isLetter || $0.isNumber }
+        MetadataNormalizer.comparisonKey(self)
     }
 }
 
