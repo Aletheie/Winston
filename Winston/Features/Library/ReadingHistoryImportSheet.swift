@@ -1,4 +1,5 @@
 import Observation
+import OSLog
 import SwiftData
 import SwiftUI
 
@@ -54,8 +55,10 @@ final class ReadingHistoryImportViewModel {
     private(set) var readyCount = 0
     private(set) var reviewCount = 0
     private(set) var unmatchedCount = 0
+    private(set) var catalogProjectionCount = 0
+    private(set) var catalogPageCount = 0
 
-    @ObservationIgnored private var booksByID: [UUID: Book] = [:]
+    @ObservationIgnored private var booksByID: [UUID: ReadingHistoryBookProjection] = [:]
     @ObservationIgnored private var rowIndexByID: [String: Int] = [:]
 
     var selectedRow: ReadingHistoryImportPreviewRow? {
@@ -88,11 +91,11 @@ final class ReadingHistoryImportViewModel {
         set {
             guard let index = rowIndexByID[rowID] else { return }
             rows[index].matchedBookID = newValue
-            if let newValue, let book = booksByID[newValue] {
+            if let newValue, let projection = booksByID[newValue] {
                 rows[index].matchKind = .manual
                 rows[index].impact = ReadingHistoryImportImpactBuilder.impact(
                     record: rows[index].record,
-                    book: book
+                    projection: projection
                 )
                 rows[index].isIncluded = rows[index].impact?.hasChanges == true
             } else {
@@ -104,7 +107,11 @@ final class ReadingHistoryImportViewModel {
         }
     }
 
-    func load(fileURL: URL, books: [Book]) async {
+    func load(
+        fileURL: URL,
+        modelContainer: ModelContainer,
+        pageSize: Int = 256
+    ) async {
         phase = .loading
         document = nil
         rows = []
@@ -115,15 +122,33 @@ final class ReadingHistoryImportViewModel {
         readyCount = 0
         reviewCount = 0
         unmatchedCount = 0
-        booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
+        catalogProjectionCount = 0
+        catalogPageCount = 0
+        booksByID = [:]
 
         do {
-            let loaded = try await Task.detached(priority: .userInitiated) {
-                try ReadingHistoryExportParser.parse(url: fileURL)
-            }.value
+            let loader = ReadingHistoryCatalogProjectionLoader(
+                modelContainer: modelContainer
+            )
+            async let loadedDocument = Self.parse(fileURL: fileURL)
+            async let catalog = loader.loadAll(pageSize: pageSize)
+            let (loaded, snapshot) = try await (loadedDocument, catalog)
             guard !Task.isCancelled else { return }
+
+            let matchedRows = await Self.match(
+                records: loaded.records,
+                projections: snapshot.books
+            )
+            guard !Task.isCancelled else { return }
+
             document = loaded
-            rows = ReadingHistoryImportMatcher.match(records: loaded.records, books: books)
+            rows = matchedRows
+            catalogProjectionCount = snapshot.books.count
+            catalogPageCount = snapshot.pageCount
+            booksByID = Dictionary(
+                snapshot.books.map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
             rebuildRowIndex()
             recomputeVisibleRows()
             phase = .loaded
@@ -152,20 +177,65 @@ final class ReadingHistoryImportViewModel {
         phase = .importing
         await Task.yield()
         do {
+            let selectedBookIDs = Set(
+                rows
+                    .filter(\.isIncluded)
+                    .compactMap(\.matchedBookID)
+            )
+            let modelContainer = modelContext.container
             let result = try ReadingHistoryImporter(modelContext: modelContext).apply(rows)
             phase = .completed(result)
             for index in rows.indices {
-                guard let bookID = rows[index].matchedBookID, let book = booksByID[bookID] else { continue }
-                rows[index].impact = ReadingHistoryImportImpactBuilder.impact(
-                    record: rows[index].record,
-                    book: book
-                )
                 rows[index].isIncluded = false
             }
             recomputeVisibleRows()
+
+            do {
+                let loader = ReadingHistoryCatalogProjectionLoader(
+                    modelContainer: modelContainer
+                )
+                let refreshed = try await loader.load(bookIDs: selectedBookIDs)
+                guard !Task.isCancelled else { return }
+                for projection in refreshed {
+                    booksByID[projection.id] = projection
+                }
+                for index in rows.indices {
+                    guard let bookID = rows[index].matchedBookID,
+                          let projection = booksByID[bookID] else { continue }
+                    rows[index].impact = ReadingHistoryImportImpactBuilder.impact(
+                        record: rows[index].record,
+                        projection: projection
+                    )
+                }
+                recomputeVisibleRows()
+            } catch {
+                // The catalog mutation is already durable. A projection refresh
+                // must not turn a successful import into a reported failure.
+                Log.persistence.error(
+                    "Reading history post-import projection refresh failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         } catch {
             phase = .failed(error.localizedDescription)
         }
+    }
+
+    @concurrent
+    private static func parse(
+        fileURL: URL
+    ) async throws -> ReadingHistoryImportDocument {
+        try ReadingHistoryExportParser.parse(url: fileURL)
+    }
+
+    @concurrent
+    private static func match(
+        records: [ReadingHistoryImportRecord],
+        projections: [ReadingHistoryBookProjection]
+    ) async -> [ReadingHistoryImportPreviewRow] {
+        ReadingHistoryImportMatcher.match(
+            records: records,
+            projections: projections
+        )
     }
 
     private func recomputeVisibleRows() {
@@ -229,7 +299,6 @@ struct ReadingHistoryImportSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \Book.dateAdded, order: .reverse) private var books: [Book]
     @State private var model = ReadingHistoryImportViewModel()
 
     var body: some View {
@@ -252,7 +321,14 @@ struct ReadingHistoryImportSheet: View {
                     selection: $model.selectedRowID,
                     included: { rowID in $model[included: rowID] },
                     phase: model.phase,
-                    onRetry: { Task { await model.load(fileURL: fileURL, books: books) } }
+                    onRetry: {
+                        Task {
+                            await model.load(
+                                fileURL: fileURL,
+                                modelContainer: modelContext.container
+                            )
+                        }
+                    }
                 )
                 .frame(minWidth: 340, idealWidth: 390, maxWidth: 460)
 
@@ -283,7 +359,10 @@ struct ReadingHistoryImportSheet: View {
         .frame(minWidth: 920, idealWidth: 1040, maxWidth: 1260, minHeight: 620, idealHeight: 700)
         .background { ThemedBackground() }
         .task(id: fileURL) {
-            await model.load(fileURL: fileURL, books: books)
+            await model.load(
+                fileURL: fileURL,
+                modelContainer: modelContext.container
+            )
         }
         .accessibilityIdentifier("readingHistoryImport.sheet")
     }
