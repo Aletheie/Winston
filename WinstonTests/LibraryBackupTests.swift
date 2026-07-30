@@ -136,6 +136,66 @@ struct LibraryBackupTests {
         ])
     }
 
+    @MainActor
+    @Test func manualBackupUsesManagedFileCoordinatorSnapshot() async throws {
+        let library = try await TestLibrary()
+        let fileManager = FileManager.default
+        let store = library.root.appending(path: "Winston.store")
+        let destination = library.root.appending(
+            path: "manual-backups",
+            directoryHint: .isDirectory
+        )
+        let bookURL = AppPaths.booksDirectory.appending(path: "manual.epub")
+        let coverURL = AppPaths.coversDirectory.appending(path: "manual.jpg")
+        let journalURL = AppPaths.managedFilesDirectory
+            .appending(path: "Journal", directoryHint: .isDirectory)
+            .appending(path: "manual.json")
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        try makeDatabase(at: store, value: "manual")
+        try Data("book".utf8).write(to: bookURL)
+        try Data("cover".utf8).write(to: coverURL)
+        try Data("journal".utf8).write(to: journalURL)
+
+        let settings = AppSettings(secretStore: VolatileSecretStore())
+        let previousBackupPath = settings.backupFolderPath
+        let previousLastBackupAt = settings.lastBackupAt
+        defer {
+            settings.backupFolderPath = previousBackupPath
+            settings.lastBackupAt = previousLastBackupAt
+        }
+        settings.backupFolderPath = destination.path(percentEncoded: false)
+        let viewModel = LibraryViewModel(
+            modelContext: library.context,
+            settings: settings,
+            toasts: ToastCenter(),
+            managedFiles: library.managedFiles,
+            backupStoreURL: store
+        )
+
+        #expect(await viewModel.maintenance.backUpNow())
+        let backup = try #require(LibraryBackup.availableBackups(in: destination).first)
+        #expect(try databaseValue(at: backup.appending(path: "Winston.store")) == "manual")
+        #expect(fileManager.fileExists(
+            atPath: backup.appending(path: "Books/manual.epub").path(percentEncoded: false)
+        ))
+        #expect(fileManager.fileExists(
+            atPath: backup.appending(path: "covers/manual.jpg").path(percentEncoded: false)
+        ))
+        #expect(fileManager.fileExists(
+            atPath: backup
+                .appending(path: "ManagedFiles/Journal/manual.json")
+                .path(percentEncoded: false)
+        ))
+        if case .succeeded(let createdURL) = viewModel.maintenance.manualBackupPhase {
+            #expect(
+                createdURL.resolvingSymlinksInPath().standardizedFileURL
+                    == backup.resolvingSymlinksInPath().standardizedFileURL
+            )
+        } else {
+            Issue.record("Expected manual backup success state")
+        }
+    }
+
     @Test func snapshotIncludesCommittedWALStateWithoutCopyingSidecars() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appending(path: "BackupWAL-\(UUID().uuidString)", directoryHint: .isDirectory)
