@@ -7,10 +7,12 @@ struct BookActions {
     var showAuthorInLibrary: (String) -> Void
     var quickLook: (Book) -> Void
     var showInFinder: (Book) -> Void
+    var share: (Book) -> Void
     var edit: (Book) -> Void
     var editSelection: () -> Void
     var fetchMetadata: (Book) -> Void
     var fetchMetadataSelection: () -> Void
+    var reviewMetadataCleanup: (Book) -> Void
     var setStatus: (Book, ReadingStatus) -> Void
     var readingHistory: (Book) -> Void
     var addToCollection: (Book, BookCollection) -> Void
@@ -32,21 +34,17 @@ struct BookActions {
 
 struct BookContextMenu: View {
     let book: Book
-    let selectionCount: Int
+    let availability: BookActionAvailability
     let isInSelection: Bool
-    let convertibleInSelection: Int
     let collections: [BookCollection]
     let isOnDevice: Bool
-    let onDeviceInSelection: Int
     let actions: BookActions
 
-    @Environment(AppSettings.self) private var settings
-
-    private var isMultiSelection: Bool { selectionCount > 1 && isInSelection }
+    private var isMultiSelection: Bool { availability.selectionCount > 1 && isInSelection }
     private var manualCollections: [BookCollection] { collections.filter { !$0.isSmart } }
 
     var body: some View {
-        if book.hasDigitalFile {
+        if availability.primaryHasPersistedDigitalFile {
             Button { actions.open(book) } label: {
                 Label("Open in Books", systemImage: "book")
             }
@@ -56,14 +54,14 @@ struct BookContextMenu: View {
                 Label("Open Work", systemImage: "books.vertical")
             }
         }
-        if let fileURL = book.primaryFileURL {
+        if availability.primaryHasPersistedDigitalFile {
             Button { actions.quickLook(book) } label: {
                 Label("Quick Look", systemImage: "eye")
             }
             Button { actions.showInFinder(book) } label: {
                 Label("Show in Finder", systemImage: "folder")
             }
-            ShareLink(item: fileURL) {
+            Button { actions.share(book) } label: {
                 Label("Share\u{2026}", systemImage: "square.and.arrow.up")
             }
             Button { actions.relink(book) } label: {
@@ -109,7 +107,7 @@ struct BookContextMenu: View {
         Divider()
         if isMultiSelection {
             Button { actions.editSelection() } label: {
-                Label("Edit Metadata for \(selectionCount)\u{2026}", systemImage: "pencil")
+                Label("Edit Metadata for \(availability.selectionCount)\u{2026}", systemImage: "pencil")
             }
         } else {
             Button { actions.edit(book) } label: {
@@ -117,10 +115,10 @@ struct BookContextMenu: View {
             }
         }
 
-        if settings.onlineMetadataEnabled {
+        if availability.canFetchMetadata {
             if isMultiSelection {
                 Button { actions.fetchMetadataSelection() } label: {
-                    Label("Fetch Metadata for \(selectionCount)", systemImage: "globe")
+                    Label("Fetch Metadata for \(availability.selectionCount)", systemImage: "globe")
                 }
             } else {
                 Button { actions.fetchMetadata(book) } label: {
@@ -129,22 +127,37 @@ struct BookContextMenu: View {
             }
         }
 
+        Button { actions.reviewMetadataCleanup(book) } label: {
+            Label(
+                isMultiSelection
+                    ? "Review Metadata Cleanup for \(availability.selectionCount)…"
+                    : "Review Metadata Cleanup…",
+                systemImage: "wand.and.sparkles"
+            )
+        }
+
         if isMultiSelection {
-            if EbookConverter.isCalibreAvailable {
+            if availability.canConvertForKindle && availability.calibreAvailable {
                 Menu {
                     ForEach(EbookConverter.OutputFormat.allCases) { format in
                         Button(format.label) { actions.convertSelectionTo(format) }
                     }
                 } label: {
-                    Label("Convert \(selectionCount) to", systemImage: "arrow.triangle.2.circlepath")
+                    Label(
+                        "Convert \(availability.conversionEligibleCount) to",
+                        systemImage: "arrow.triangle.2.circlepath"
+                    )
                 }
             }
-        } else if book.hasDigitalFile
-                    && (EbookConverter.isCalibreAvailable || EbookConverter.canConvertForKindle(book.format)) {
+        } else if availability.canUsePrimaryFile && hasAvailableConversionFormat {
             Menu {
                 ForEach(EbookConverter.OutputFormat.allCases.filter { $0.ext != book.format.lowercased() }) { format in
                     Button(format.label) { actions.convertTo(book, format) }
-                        .disabled(!EbookConverter.canConvert(from: book.format, to: format))
+                        .disabled(!EbookConverter.canConvert(
+                            from: book.format,
+                            to: format,
+                            calibreAvailable: availability.calibreAvailable
+                        ))
                 }
             } label: {
                 Label("Convert to", systemImage: "arrow.triangle.2.circlepath")
@@ -152,9 +165,12 @@ struct BookContextMenu: View {
         }
 
         if isMultiSelection {
-            if onDeviceInSelection > 0 {
+            if availability.canRemoveFromDevice {
                 Button(role: .destructive) { actions.removeSelectionFromDevice() } label: {
-                    Label("Remove \(onDeviceInSelection) from Kindle", systemImage: "externaldrive.badge.minus")
+                    Label(
+                        "Remove \(availability.onDeviceSelectionCount) from Kindle",
+                        systemImage: "externaldrive.badge.minus"
+                    )
                 }
             }
         } else if isOnDevice {
@@ -166,12 +182,22 @@ struct BookContextMenu: View {
         Divider()
         if isMultiSelection {
             Button(role: .destructive) { actions.deleteSelection() } label: {
-                Label("Delete \(selectionCount) Books", systemImage: "trash")
+                Label("Delete \(availability.selectionCount) Books", systemImage: "trash")
             }
         } else {
             Button(role: .destructive) { actions.delete(book) } label: {
                 Label("Delete", systemImage: "trash")
             }
+        }
+    }
+
+    private var hasAvailableConversionFormat: Bool {
+        EbookConverter.OutputFormat.allCases.contains { format in
+            EbookConverter.canConvert(
+                from: book.format,
+                to: format,
+                calibreAvailable: availability.calibreAvailable
+            )
         }
     }
 }

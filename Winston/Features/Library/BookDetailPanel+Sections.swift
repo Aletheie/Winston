@@ -4,6 +4,28 @@ import AppKit
 import CoreTransferable
 import UniformTypeIdentifiers
 
+struct BookDetailPanel: View {
+    let book: Book?
+    let multiCount: Int
+    var convertibleSelectionCount: Int = 0
+    let viewModel: LibraryViewModel
+    let actions: BookActions
+
+    var body: some View {
+        if multiCount > 1 {
+            DetailMultiSelection(
+                count: multiCount,
+                convertibleCount: convertibleSelectionCount,
+                actions: actions
+            )
+        } else if let book {
+            DetailSingleBook(book: book, viewModel: viewModel, actions: actions)
+        } else {
+            DetailEmptyState()
+        }
+    }
+}
+
 // MARK: - Empty / multi
 
 struct DetailEmptyState: View {
@@ -81,7 +103,12 @@ struct DetailSingleBook: View {
                         DetailSampleNotice(book: book, viewModel: viewModel)
                     }
                     DetailStatusRow(book: book, actions: actions)
-                    DetailActions(book: book, actions: actions, isConverting: viewModel.isConverting(book))
+                    DetailActions(
+                        book: book,
+                        actions: actions,
+                        isConverting: viewModel.isConverting(book),
+                        canConvertForKindle: viewModel.conversion.canConvertForKindle(book.format)
+                    )
                     if let work = book.work {
                         DetailWork(work: work, actions: actions)
                     }
@@ -382,12 +409,13 @@ struct DetailActions: View {
     let book: Book
     let actions: BookActions
     let isConverting: Bool
+    let canConvertForKindle: Bool
 
     @Environment(\.theme) private var theme
 
     var body: some View {
         VStack(spacing: 6) {
-            if book.hasDigitalFile {
+            if book.hasCatalogDigitalFile {
                 HStack(spacing: 6) {
                     DetailActionButton(title: theme.styledText(terminal: "OPEN", native: "Open"),
                                        icon: "book", color: theme.accentSecondary) {
@@ -414,7 +442,7 @@ struct DetailActions: View {
                     actions.delete(book)
                 }
             }
-            if book.hasDigitalFile && EbookConverter.needsConversion(format: book.format) {
+            if book.hasCatalogDigitalFile && EbookConverter.needsConversion(format: book.format) {
                 if isConverting {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
@@ -429,9 +457,9 @@ struct DetailActions: View {
                                        icon: "arrow.triangle.2.circlepath", color: theme.accent) {
                         actions.convert(book)
                     }
-                    .disabled(!EbookConverter.canConvertForKindle(book.format))
-                    .help(EbookConverter.canConvertForKindle(book.format) ? "Convert to a Kindle-friendly format"
-                                                                          : "Install calibre to convert books")
+                    .disabled(!canConvertForKindle)
+                    .help(canConvertForKindle ? "Convert to a Kindle-friendly format"
+                                              : "Install calibre to convert books")
                 }
             }
             DetailActionButton(
@@ -455,38 +483,84 @@ struct DetailMetadataList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            DetailMetaRow(key: "FORMAT", value: book.format.isEmpty ? "\u{2014}" : book.format)
+            DetailMetaRow(
+                label: DetailMetadataField.format.label(for: theme),
+                value: Text(verbatim: book.format.isEmpty ? "\u{2014}" : book.format)
+            )
             if book.hasPhysicalCopy {
-                DetailMetaRow(key: theme.usesTerminalCopy ? "KOPIE" : String(localized: "Copy"),
-                              value: String(localized: "Physical"))
+                DetailMetaRow(
+                    label: DetailMetadataField.copy.label(for: theme),
+                    value: Text("Physical")
+                )
                 if let shelf = book.shelfLocation, !shelf.isEmpty {
-                    DetailMetaRow(key: theme.usesTerminalCopy ? "POLICE" : String(localized: "Shelf"), value: shelf)
+                    DetailMetaRow(
+                        label: DetailMetadataField.shelf.label(for: theme),
+                        value: Text(verbatim: shelf)
+                    )
                 }
             }
-            if book.hasDigitalFile { DetailMetaRow(key: "SIZE", value: book.fileSizeDisplay) }
-            if let pages = book.pageCount {
-                DetailMetaRow(key: "PAGES", value: book.format == "PDF" ? "\(pages)" : "~\(pages)")
+            if book.hasCatalogDigitalFile {
+                DetailMetaRow(
+                    label: DetailMetadataField.size.label(for: theme),
+                    value: Text(verbatim: book.fileSizeDisplay)
+                )
             }
-            if let publisher = book.publisher, !publisher.isEmpty { DetailMetaRow(key: "PUB", value: publisher) }
-            if let year = book.year, !year.isEmpty { DetailMetaRow(key: "YEAR", value: year) }
-            if let language = book.language, !language.isEmpty { DetailMetaRow(key: "LANG", value: language) }
+            if let pages = book.pageCount {
+                DetailMetaRow(
+                    label: DetailMetadataField.pages.label(for: theme),
+                    value: book.format == "PDF"
+                        ? Text(pages, format: .number)
+                        : Text(verbatim: "~\(pages.formatted(.number))")
+                )
+            }
+            if let publisher = book.publisher, !publisher.isEmpty {
+                DetailMetaRow(
+                    label: DetailMetadataField.publisher.label(for: theme),
+                    value: Text(verbatim: publisher)
+                )
+            }
+            if let year = book.year, !year.isEmpty {
+                DetailMetaRow(
+                    label: DetailMetadataField.year.label(for: theme),
+                    value: Text(verbatim: year)
+                )
+            }
+            if let language = book.language, !language.isEmpty {
+                DetailMetaRow(
+                    label: DetailMetadataField.language.label(for: theme),
+                    value: Text(verbatim: language)
+                )
+            }
             if let translator = book.translator, !translator.isEmpty {
                 DetailMetaRow(
-                    key: theme.usesTerminalCopy ? "PREKLAD" : String(localized: "Translator"),
-                    value: translator
+                    label: DetailMetadataField.translator.label(for: theme),
+                    value: Text(verbatim: translator)
                 )
             }
             if let statement = book.editionStatement, !statement.isEmpty {
                 DetailMetaRow(
-                    key: theme.usesTerminalCopy ? "VYDANI" : String(localized: "Edition"),
-                    value: statement
+                    label: DetailMetadataField.edition.label(for: theme),
+                    value: Text(verbatim: statement)
                 )
             }
-            if let isbn = book.isbn, !isbn.isEmpty { DetailMetaRow(key: "ISBN", value: isbn) }
-            if let series = book.series, !series.isEmpty {
-                DetailMetaRow(key: "SERIES", value: book.seriesIndex.map { "\(series) #\($0)" } ?? series)
+            if let isbn = book.isbn, !isbn.isEmpty {
+                DetailMetaRow(
+                    label: DetailMetadataField.isbn.label(for: theme),
+                    value: Text(verbatim: isbn)
+                )
             }
-            if !book.tags.isEmpty { DetailMetaRow(key: "TAGS", value: book.tags.joined(separator: ", ")) }
+            if let series = book.series, !series.isEmpty {
+                DetailMetaRow(
+                    label: DetailMetadataField.series.label(for: theme),
+                    value: Text(verbatim: book.seriesIndex.map { "\(series) #\($0)" } ?? series)
+                )
+            }
+            if !book.tags.isEmpty {
+                DetailMetaRow(
+                    label: DetailMetadataField.tags.label(for: theme),
+                    value: Text(verbatim: book.tags.joined(separator: ", "))
+                )
+            }
         }
     }
 }
@@ -709,8 +783,16 @@ struct DetailSeries: View {
     init(book: Book, actions: BookActions) {
         self.book = book
         self.actions = actions
-        let series = book.series ?? ""
-        _members = Query(filter: #Predicate<Book> { $0.series == series })
+        let trimmedSeries = book.series?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // An empty string is common legacy data. Querying it would materialize
+        // every ungrouped book even though this section is not rendered.
+        let queriedSeries: String
+        if let trimmedSeries, !trimmedSeries.isEmpty {
+            queriedSeries = trimmedSeries
+        } else {
+            queriedSeries = "__winston_no_series__\(book.uuid.uuidString)"
+        }
+        _members = Query(filter: #Predicate<Book> { $0.series == queriedSeries })
     }
 
     var body: some View {
@@ -1071,18 +1153,144 @@ private struct DetailFileRow: View {
 
 // MARK: - Meta row
 
+enum DetailMetadataField: CaseIterable {
+    case format
+    case copy
+    case shelf
+    case size
+    case pages
+    case publisher
+    case year
+    case language
+    case translator
+    case edition
+    case isbn
+    case series
+    case tags
+
+    var terminalLabel: String {
+        switch self {
+        case .format: "FORMAT"
+        case .copy: "KOPIE"
+        case .shelf: "POLICE"
+        case .size: "SIZE"
+        case .pages: "PAGES"
+        case .publisher: "PUB"
+        case .year: "YEAR"
+        case .language: "LANG"
+        case .translator: "PREKLAD"
+        case .edition: "VYDANI"
+        case .isbn: "ISBN"
+        case .series: "SERIES"
+        case .tags: "TAGS"
+        }
+    }
+
+    func localizedLabel(locale: Locale? = nil) -> String {
+        let bundle = locale.map(WinstonLocalization.bundle(for:))
+            ?? WinstonLocalization.bundle
+        let locale = locale ?? .current
+        return switch self {
+        case .format:
+            String(
+                localized: "Format",
+                bundle: bundle,
+                locale: locale
+            )
+        case .copy:
+            String(
+                localized: "Copy",
+                bundle: bundle,
+                locale: locale
+            )
+        case .shelf:
+            String(
+                localized: "Shelf",
+                bundle: bundle,
+                locale: locale
+            )
+        case .size:
+            String(
+                localized: "Size",
+                bundle: bundle,
+                locale: locale
+            )
+        case .pages:
+            String(
+                localized: "Pages",
+                bundle: bundle,
+                locale: locale
+            )
+        case .publisher:
+            String(
+                localized: "Publisher",
+                bundle: bundle,
+                locale: locale
+            )
+        case .year:
+            String(
+                localized: "Year",
+                bundle: bundle,
+                locale: locale
+            )
+        case .language:
+            String(
+                localized: "Language",
+                bundle: bundle,
+                locale: locale
+            )
+        case .translator:
+            String(
+                localized: "Translator",
+                bundle: bundle,
+                locale: locale
+            )
+        case .edition:
+            String(
+                localized: "Edition",
+                bundle: bundle,
+                locale: locale
+            )
+        case .isbn:
+            String(
+                localized: "ISBN",
+                bundle: bundle,
+                locale: locale
+            )
+        case .series:
+            String(
+                localized: "Series",
+                bundle: bundle,
+                locale: locale
+            )
+        case .tags:
+            String(
+                localized: "Tags",
+                bundle: bundle,
+                locale: locale
+            )
+        }
+    }
+
+    func label(for theme: Theme) -> Text {
+        theme.usesTerminalCopy
+            ? Text(verbatim: terminalLabel)
+            : Text(verbatim: localizedLabel())
+    }
+}
+
 struct DetailMetaRow: View {
-    let key: String
-    let value: String
+    let label: Text
+    let value: Text
 
     @Environment(\.theme) private var theme
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            Text(key)
+            label
                 .frame(width: 52, alignment: .leading)
                 .foregroundStyle(theme.textTertiary)
-            Text(value)
+            value
                 .foregroundStyle(theme.textSecondary)
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)

@@ -3,6 +3,7 @@ import SwiftUI
 extension Notification.Name {
     static let showDiscoverDestination = Notification.Name("showDiscoverDestination")
     static let showCatalogsDestination = Notification.Name("showCatalogsDestination")
+    static let showImportedBooks = Notification.Name("showImportedBooks")
 }
 
 // MARK: - Focused values
@@ -40,11 +41,59 @@ enum LibraryCommand: Equatable {
     case inspectSelected
 }
 
-struct LibraryCommandAvailability: Equatable {
-    var hasSelection = false
-    var canConvert = false
-    var canFetchMetadata = false
-    var canSaveSearch = false
+nonisolated struct BookActionAvailability: Equatable, Sendable {
+    var selectionCount = 0
+    var hasPrimarySelection = false
+    var primaryHasPersistedDigitalFile = false
+    var persistedDigitalFileCount = 0
+    var sendableDigitalFileCount = 0
+    var drmProtectedDigitalFileCount = 0
+    var conversionEligibleCount = 0
+    var calibreAvailable = false
+    var onlineMetadataEnabled = false
+    var onDeviceSelectionCount = 0
+    var hasMeaningfulSearch = false
+
+    var hasSelection: Bool {
+        selectionCount > 0
+    }
+
+    var canUsePrimaryFile: Bool {
+        hasPrimarySelection && primaryHasPersistedDigitalFile
+    }
+
+    var canReplaceOrAttachFile: Bool {
+        hasPrimarySelection
+    }
+
+    var canEditMetadata: Bool {
+        hasSelection
+    }
+
+    var canFetchMetadata: Bool {
+        hasSelection && onlineMetadataEnabled
+    }
+
+    var canConvertForKindle: Bool {
+        conversionEligibleCount > 0
+    }
+
+    var canRemoveFromDevice: Bool {
+        onDeviceSelectionCount > 0
+    }
+
+    var canTransmit: Bool {
+        sendableDigitalFileCount > 0
+    }
+
+    var hasDRMOnlyDigitalSelection: Bool {
+        persistedDigitalFileCount > 0
+            && drmProtectedDigitalFileCount == persistedDigitalFileCount
+    }
+
+    var canSaveSearch: Bool {
+        hasMeaningfulSearch
+    }
 }
 
 @Observable
@@ -52,14 +101,14 @@ struct LibraryCommandAvailability: Equatable {
 final class LibraryCommandContext {
     private(set) var request: LibraryCommand?
     private(set) var requestGeneration = 0
-    private(set) var availability = LibraryCommandAvailability()
+    private(set) var availability = BookActionAvailability()
 
     func perform(_ command: LibraryCommand) {
         request = command
         requestGeneration &+= 1
     }
 
-    func updateAvailability(_ newValue: LibraryCommandAvailability) {
+    func updateAvailability(_ newValue: BookActionAvailability) {
         guard availability != newValue else { return }
         availability = newValue
     }
@@ -199,27 +248,33 @@ struct AppCommands: Commands {
         CommandMenu("Book") {
             Button("Open in Reader") { library?.perform(.openInReader) }
                 .keyboardShortcut(.return)
-                .disabled(library?.availability.hasSelection != true)
+                .disabled(library?.availability.canUsePrimaryFile != true)
 
             Button("Quick Look") { library?.perform(.quickLook) }
                 .keyboardShortcut("y")
-                .disabled(library?.availability.hasSelection != true)
+                .disabled(library?.availability.canUsePrimaryFile != true)
 
             Button("Show in Finder") { library?.perform(.showInFinder) }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
-                .disabled(library?.availability.hasSelection != true)
+                .disabled(library?.availability.canUsePrimaryFile != true)
 
-            Button("Replace File\u{2026}") { library?.perform(.replaceSelected) }
-                .disabled(library?.availability.hasSelection != true)
+            Button(
+                library?.availability.primaryHasPersistedDigitalFile == true
+                    ? "Replace File\u{2026}"
+                    : "Attach Digital File\u{2026}"
+            ) {
+                library?.perform(.replaceSelected)
+            }
+                .disabled(library?.availability.canReplaceOrAttachFile != true)
 
             Button("Inspect with Book Doctor\u{2026}") { library?.perform(.inspectSelected) }
-                .disabled(library?.availability.hasSelection != true)
+                .disabled(library?.availability.canUsePrimaryFile != true)
 
             Divider()
 
             Button("Edit Metadata\u{2026}") { library?.perform(.editMetadata) }
                 .keyboardShortcut("e")
-                .disabled(library?.availability.hasSelection != true)
+                .disabled(library?.availability.canEditMetadata != true)
 
             Menu("Mark as") {
                 ForEach(ReadingStatus.allCases) { status in
@@ -231,8 +286,8 @@ struct AppCommands: Commands {
             Button("Fetch Metadata Online") { library?.perform(.fetchMetadata) }
                 .disabled(library?.availability.canFetchMetadata != true)
 
-            Button("Convert to AZW3") { library?.perform(.convertSelected) }
-                .disabled(library?.availability.canConvert != true)
+            Button("Convert for Kindle") { library?.perform(.convertSelected) }
+                .disabled(library?.availability.canConvertForKindle != true)
 
             Divider()
 
