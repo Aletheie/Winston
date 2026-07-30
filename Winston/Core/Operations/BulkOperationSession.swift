@@ -55,6 +55,7 @@ nonisolated struct BulkOperationConflict: Equatable, Sendable {
 
 nonisolated enum BulkOperationWarningReason: String, Equatable, Sendable {
     case publicationPending
+    case postProcessingFailed
 }
 
 nonisolated struct BulkOperationWarning: Equatable, Sendable {
@@ -270,6 +271,29 @@ nonisolated enum BulkOperationCompletion: String, Equatable, Sendable {
     case failed
 }
 
+nonisolated struct BulkOperationProgress: Equatable, Sendable {
+    let sessionID: UUID
+    let operation: BulkOperationKind
+    let completedTargetCount: Int
+    let totalTargetCount: Int
+
+    var fraction: Double {
+        guard totalTargetCount > 0 else { return 1 }
+        return min(
+            max(Double(completedTargetCount) / Double(totalTargetCount), 0),
+            1
+        )
+    }
+}
+
+nonisolated enum BulkOperationOutcomeKind: Equatable, Sendable {
+    case success
+    case partialSuccess
+    case cancelled
+    case conflict
+    case failure
+}
+
 nonisolated struct BulkOperationResult: Equatable, Sendable {
     let sessionID: UUID
     let plan: BulkOperationPlan
@@ -295,6 +319,19 @@ nonisolated struct BulkOperationResult: Equatable, Sendable {
             .union(conflicts.map(\.targetID))
         return plan.actionableTargetIDs.filter { !terminal.contains($0) }
     }
+
+    var outcomeKind: BulkOperationOutcomeKind {
+        if completion == .cancelled {
+            return .cancelled
+        }
+        if completion == .failed {
+            return appliedTargetIDs.isEmpty ? .failure : .partialSuccess
+        }
+        if !conflicts.isEmpty || !pendingTargetIDs.isEmpty {
+            return appliedTargetIDs.isEmpty ? .conflict : .partialSuccess
+        }
+        return .success
+    }
 }
 
 /// Executes a prevalidated plan exactly once. Each callback is main-actor
@@ -307,17 +344,29 @@ actor BulkOperationSession {
     private var cancellationRequested = false
     private var isExecuting = false
     private var storedResult: BulkOperationResult?
+    private var currentProgress: BulkOperationProgress
 
     init(plan: BulkOperationPlan, id: UUID = UUID()) {
         self.id = id
         self.plan = plan
+        currentProgress = BulkOperationProgress(
+            sessionID: id,
+            operation: plan.operation,
+            completedTargetCount: 0,
+            totalTargetCount: plan.actionableTargetIDs.count
+        )
     }
 
     func cancel() {
         cancellationRequested = true
     }
 
+    func progress() -> BulkOperationProgress {
+        currentProgress
+    }
+
     func execute(
+        onProgress: (@MainActor @Sendable (BulkOperationProgress) -> Void)? = nil,
         applying applyChunk: @escaping @MainActor @Sendable (
             BulkOperationChunk
         ) async throws -> BulkOperationChunkOutcome
@@ -344,9 +393,13 @@ actor BulkOperationSession {
         }
         isExecuting = true
         defer { isExecuting = false }
+        if let onProgress {
+            await onProgress(currentProgress)
+        }
 
         var completion: BulkOperationCompletion = .completed
         var completedChunkCount = 0
+        var completedTargetCount = 0
         var applied: Set<BulkOperationTargetID> = []
         var unchanged = Set(plan.unchangedTargetIDs)
         var conflicts = plan.conflicts
@@ -382,6 +435,16 @@ actor BulkOperationSession {
                     ))
                 }
                 completedChunkCount += 1
+                completedTargetCount += chunk.targetIDs.count
+                currentProgress = BulkOperationProgress(
+                    sessionID: id,
+                    operation: plan.operation,
+                    completedTargetCount: completedTargetCount,
+                    totalTargetCount: plan.actionableTargetIDs.count
+                )
+                if let onProgress {
+                    await onProgress(currentProgress)
+                }
             } catch is CancellationError {
                 completion = .cancelled
                 break

@@ -41,8 +41,11 @@ struct BulkOperationSessionTests {
         )
         let session = BulkOperationSession(plan: plan)
         var appliedChunks = 0
+        var progress: [BulkOperationProgress] = []
 
-        let result = await session.execute { chunk in
+        let result = await session.execute(onProgress: {
+            progress.append($0)
+        }) { chunk in
             appliedChunks += 1
             if appliedChunks == 1 { await session.cancel() }
             return .applied(chunk.targetIDs)
@@ -52,6 +55,11 @@ struct BulkOperationSessionTests {
         #expect(result.completedChunkCount == 1)
         #expect(result.appliedTargetIDs == [targets[0]])
         #expect(result.pendingTargetIDs == Array(targets.dropFirst()))
+        #expect(result.outcomeKind == .cancelled)
+        #expect(progress.map(\.completedTargetCount) == [0, 1])
+        #expect(progress.allSatisfy { $0.totalTargetCount == 3 })
+        let latestProgress = await session.progress()
+        #expect(latestProgress == progress.last)
     }
 
     @Test func durableFailureStopsBeforeLaterChunks() async {
@@ -79,6 +87,49 @@ struct BulkOperationSessionTests {
         #expect(result.durableFailure?.code == .catalogSave)
         #expect(result.durableFailure?.targetIDs == [targets[1]])
         #expect(result.pendingTargetIDs == [targets[1], targets[2]])
+        #expect(result.outcomeKind == .partialSuccess)
+    }
+
+    @Test func resultClassificationSeparatesSuccessConflictAndFailure() async {
+        let successTarget = BulkOperationTargetID.deviceBook("success")
+        let successPlan = await BulkOperationPlanner.shared.makePlan(
+            operation: .deviceDelete,
+            requestedTargetIDs: [successTarget],
+            candidates: [.change(successTarget)],
+            chunkSize: 1
+        )
+        let success = await BulkOperationSession(plan: successPlan).execute {
+            .applied($0.targetIDs)
+        }
+
+        let conflictTarget = BulkOperationTargetID.deviceBook("conflict")
+        let conflictPlan = await BulkOperationPlanner.shared.makePlan(
+            operation: .deviceDelete,
+            requestedTargetIDs: [conflictTarget],
+            candidates: [
+                .conflict(conflictTarget, reason: .sourceChanged),
+            ],
+            chunkSize: 1
+        )
+        let conflict = await BulkOperationSession(plan: conflictPlan).execute { _ in
+            Issue.record("A conflict-only plan must not execute a chunk")
+            return BulkOperationChunkOutcome()
+        }
+
+        let failureTarget = BulkOperationTargetID.deviceBook("failure")
+        let failurePlan = await BulkOperationPlanner.shared.makePlan(
+            operation: .deviceDelete,
+            requestedTargetIDs: [failureTarget],
+            candidates: [.change(failureTarget)],
+            chunkSize: 1
+        )
+        let failure = await BulkOperationSession(plan: failurePlan).execute { _ in
+            throw BulkOperationDurableError(.deviceDisconnected)
+        }
+
+        #expect(success.outcomeKind == .success)
+        #expect(conflict.outcomeKind == .conflict)
+        #expect(failure.outcomeKind == .failure)
     }
 
     @Test func metadataBulkCommitStopsAfterTheFirstDurableSaveFailure() async throws {
@@ -96,6 +147,10 @@ struct BulkOperationSessionTests {
             book.hasPhysicalCopy = true
             lib.context.insert(book)
         }
+        lib.context.insert(BookCollection(
+            name: "Wishlist",
+            systemKind: .wishlist
+        ))
         try lib.context.save()
 
         var saveCount = 0
