@@ -81,6 +81,7 @@ actor OnlineMetadataService: OnlineMetadataFetching {
     }
 
     private let session: URLSession
+    private let hardcoverClient: HardcoverAPIClient
     private let cacheCapacity: Int
     private let cacheTTL: TimeInterval
     private let providerConfigurationGeneration: Int
@@ -96,13 +97,23 @@ actor OnlineMetadataService: OnlineMetadataFetching {
 
     init(
         session: URLSession? = nil,
+        hardcoverClient: HardcoverAPIClient? = nil,
         cacheCapacity: Int = 256,
         cacheTTL: TimeInterval = 30 * 60,
         minInterval: TimeInterval = 0.34,
         providerConfigurationGeneration: Int = 1,
         now: @escaping @Sendable () -> Date = { .now }
     ) {
-        self.session = session ?? Self.makeSession()
+        let resolvedSession = session ?? Self.makeSession()
+        self.session = resolvedSession
+        self.hardcoverClient = hardcoverClient
+            ?? session.map {
+                HardcoverAPIClient(
+                    session: $0,
+                    minimumRequestInterval: minInterval
+                )
+            }
+            ?? .shared
         self.cacheCapacity = max(1, cacheCapacity)
         self.cacheTTL = max(0, cacheTTL)
         self.minInterval = max(0, minInterval)
@@ -281,12 +292,10 @@ actor OnlineMetadataService: OnlineMetadataFetching {
         language: MetadataLanguage,
         hardcoverToken: String?
     ) -> CacheKey {
-        let normalizedISBN = (isbn ?? "")
-            .uppercased()
-            .filter { $0.isNumber || $0 == "X" }
-        let lookup = normalizedISBN.isEmpty
+        let canonicalISBN13 = MetadataNormalizer.canonicalISBN13(isbn)
+        let lookup = canonicalISBN13 == nil
             ? "t:\(title.normalizedMatchKey)|a:\((author ?? "").normalizedMatchKey)"
-            : "isbn:\(normalizedISBN)"
+            : "isbn:\(canonicalISBN13!)"
         let tokenConfiguration = hardcoverToken.map(Self.tokenDigest) ?? "none"
         return CacheKey(
             lookup: lookup,
@@ -480,23 +489,21 @@ actor OnlineMetadataService: OnlineMetadataFetching {
                                  token: String) async -> NetworkResult<HardcoverRating> {
         let queryText = [title, author].compactMap { $0 }.joined(separator: " ")
         let gql = "query Ratings($q: String!) { search(query: $q, query_type: \"Book\", per_page: 5) { results } }"
-        let body: [String: Any] = ["query": gql, "variables": ["q": queryText]]
-        guard let url = URL(string: "https://api.hardcover.app/v1/graphql"),
-              let payload = try? JSONSerialization.data(withJSONObject: body) else {
+        let data: Data
+        do {
+            data = try await hardcoverClient.post(
+                query: gql,
+                variables: ["q": queryText],
+                token: token
+            )
+        } catch is CancellationError {
+            return NetworkResult(value: nil, reachedNetwork: false)
+        } catch is HardcoverAPIError {
+            return NetworkResult(value: nil, reachedNetwork: true)
+        } catch {
             return NetworkResult(value: nil, reachedNetwork: false)
         }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(token.hasPrefix("Bearer ") ? token : "Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.httpBody = payload
-
-        guard await throttle() else { return NetworkResult(value: nil, reachedNetwork: false) }
-        guard let (data, response) = try? await session.data(for: request) else {
-            return NetworkResult(value: nil, reachedNetwork: false)
-        }
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let decoded = try? JSONDecoder().decode(HardcoverResponse.self, from: data),
+        guard let decoded = try? JSONDecoder().decode(HardcoverResponse.self, from: data),
               let documents = decoded.data?.search?.results?.hits?.compactMap(\.document) else {
             return NetworkResult(value: nil, reachedNetwork: true)
         }
