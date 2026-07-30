@@ -1,33 +1,89 @@
 import Foundation
 import SwiftData
 import AppKit
+import OSLog
 
 @MainActor
 @Observable
 final class ExportService {
+    typealias RevealHandler = @MainActor (URL) -> Void
+
     private let modelContext: ModelContext
+    private let toasts: ToastCenter?
+    @ObservationIgnored private let revealExport: RevealHandler
 
     private(set) var isExporting = false
+    private(set) var lastError: String?
+    private(set) var lastResult: LibraryExporter.Result?
 
-    init(modelContext: ModelContext) {
+    init(
+        modelContext: ModelContext,
+        toasts: ToastCenter? = nil,
+        revealExport: @escaping RevealHandler = {
+            NSWorkspace.shared.activateFileViewerSelecting([$0])
+        }
+    ) {
         self.modelContext = modelContext
+        self.toasts = toasts
+        self.revealExport = revealExport
     }
 
-    func exportLibrary(to folder: URL) {
+    func exportLibrary(to parentFolder: URL) {
         guard !isExporting else { return }
         isExporting = true
+        lastError = nil
+        lastResult = nil
         Task {
-            let rows = await Self.rowsYielding(
-                for: (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
-            )
-            guard !rows.isEmpty else {
-                isExporting = false
+            defer { isExporting = false }
+            let books: [Book]
+            do {
+                books = try modelContext.fetchAllBooksForGlobalAnalysis()
+            } catch {
+                lastError = error.localizedDescription
+                Log.persistence.error(
+                    "Library export catalog fetch failed: \(error.localizedDescription, privacy: .public)"
+                )
+                toasts?.error(String(localized: "Couldn’t read the library for export."))
                 return
             }
-            _ = await Task.detached(priority: .utility) { LibraryExporter.export(rows, to: folder) }.value
-            isExporting = false
-            NSWorkspace.shared.activateFileViewerSelecting([folder])
+            let rows = await Self.rowsYielding(for: books)
+            let result = await Task.detached(priority: .utility) {
+                LibraryExporter.export(rows, to: parentFolder)
+            }.value
+            lastResult = result
+            guard let finalURL = result.finalURL else {
+                let details = Self.failureDetails(result.failures)
+                lastError = details
+                toasts?.error(String(
+                    localized: "The library export couldn’t be completed. \(details)"
+                ))
+                return
+            }
+
+            if result.failures.isEmpty {
+                toasts?.success(String(
+                    localized: "Exported \(result.copied) files and \(result.skipped) metadata-only entries."
+                ))
+            } else {
+                let details = Self.failureDetails(result.failures)
+                lastError = details
+                toasts?.error(String(
+                    localized: "Exported \(result.copied) files; \(result.failed) items failed. \(details)"
+                ))
+            }
+            revealExport(finalURL)
         }
+    }
+
+    private static func failureDetails(
+        _ failures: [LibraryExporter.Failure]
+    ) -> String {
+        let names = failures.compactMap(\.itemName)
+        if !names.isEmpty {
+            return Array(names.prefix(3)).formatted()
+        }
+        return failures.first?.detail
+            ?? String(localized: "No additional error details are available.")
     }
 
     static func rows(for books: [Book]) -> [ExportRow] {
