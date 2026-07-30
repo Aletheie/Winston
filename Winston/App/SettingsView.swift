@@ -4,6 +4,7 @@ import AppKit
 struct SettingsView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppSettings.self) private var settings
+    @Bindable var maintenance: MaintenanceScheduler
 
     @State private var showRelaunchPrompt = false
     @State private var backups: [URL] = []
@@ -162,6 +163,16 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Imports") {
+                Toggle(
+                    "Always review imports before adding them",
+                    isOn: $settings.alwaysReviewImports
+                )
+                Text("Multiple selections and files with duplicate, matching, damaged, unsupported, or DRM-protected content are always reviewed. Leave this off to add a single clean new book immediately.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             KindleTransferSettingsSection(
                 inspectBeforeTransfer: $settings.inspectBeforeKindleTransfer
             )
@@ -190,7 +201,10 @@ struct SettingsView: View {
             )
 
             Section("Auto-Import") {
-                Toggle("Watch a folder for new books", isOn: $settings.watchFolderEnabled)
+                Toggle(
+                    "Watch a folder for new books",
+                    isOn: watchFolderEnabledBinding
+                )
                 HStack {
                     Text(settings.watchFolderPath.map { URL(fileURLWithPath: $0).path } ?? "No folder chosen")
                         .foregroundStyle(.secondary)
@@ -199,13 +213,16 @@ struct SettingsView: View {
                     Spacer()
                     Button("Choose\u{2026}") { chooseWatchFolder() }
                 }
-                Text("EPUB/MOBI/AZW3/PDF files added to this folder are imported automatically (duplicates are skipped).")
+                Text("EPUB, MOBI, AZW, AZW3, PDF, TXT, HTML, and HTM files added to this folder are imported automatically (duplicates are skipped).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section("Backup") {
-                Toggle("Automatic backup", isOn: $settings.autoBackupEnabled)
+                Toggle(
+                    "Automatic backup",
+                    isOn: automaticBackupEnabledBinding
+                )
                 HStack {
                     Text(settings.backupFolderPath.map { URL(fileURLWithPath: $0).path } ?? "No folder chosen")
                         .foregroundStyle(.secondary)
@@ -214,9 +231,46 @@ struct SettingsView: View {
                     Spacer()
                     Button("Choose\u{2026}") { chooseBackupFolder() }
                 }
-                Text("Copies the library catalog and covers to this folder about once a day, keeping the most recent backups. A safety net separate from Export Library.")
+                Text("Copies the library catalog, books, covers, and pending file operations to this folder about once a day, keeping the most recent backups. A safety net separate from Export Library.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                HStack {
+                    Button {
+                        Task {
+                            if await maintenance.backUpNow() {
+                                reloadBackups()
+                            }
+                        }
+                    } label: {
+                        Label("Back Up Now", systemImage: "externaldrive.badge.timemachine")
+                    }
+                    .disabled(
+                        settings.backupFolderPath == nil
+                            || maintenance.isBackupInProgress
+                    )
+
+                    if maintenance.manualBackupPhase == .running {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Backing up…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                switch maintenance.manualBackupPhase {
+                case .idle, .running:
+                    EmptyView()
+                case .succeeded:
+                    Label("Backup created.", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                case .failed(let message):
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
 
                 if !backups.isEmpty {
                     Button {
@@ -275,6 +329,42 @@ struct SettingsView: View {
             settings.backupFolderPath = url.path
             settings.autoBackupEnabled = true
         }
+    }
+
+    private var watchFolderEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.watchFolderEnabled },
+            set: { enabled in
+                guard enabled else {
+                    settings.watchFolderEnabled = false
+                    return
+                }
+                guard settings.watchFolderPath != nil else {
+                    settings.watchFolderEnabled = false
+                    chooseWatchFolder()
+                    return
+                }
+                settings.watchFolderEnabled = true
+            }
+        )
+    }
+
+    private var automaticBackupEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { settings.autoBackupEnabled },
+            set: { enabled in
+                guard enabled else {
+                    settings.autoBackupEnabled = false
+                    return
+                }
+                guard settings.backupFolderPath != nil else {
+                    settings.autoBackupEnabled = false
+                    chooseBackupFolder()
+                    return
+                }
+                settings.autoBackupEnabled = true
+            }
+        )
     }
 }
 
@@ -348,10 +438,4 @@ private struct ExternalBookWebsiteSettingsSection: View {
             }
         }
     }
-}
-
-#Preview {
-    SettingsView()
-        .environment(ThemeManager())
-        .environment(AppSettings())
 }

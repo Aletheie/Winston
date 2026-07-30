@@ -5,6 +5,7 @@ struct PluginsSettingsPane: View {
     @Environment(PluginService.self) private var pluginService
 
     @State private var consentCandidate: PluginService.PluginState?
+    @State private var quarantineResetCandidate: PluginService.PluginState?
 
     var body: some View {
         Form {
@@ -31,6 +32,15 @@ struct PluginsSettingsPane: View {
                     Button("Refresh") {
                         Task { await pluginService.refresh() }
                     }
+                    .disabled(
+                        pluginService.isRefreshing
+                            || !pluginService.busyPluginIDs.isEmpty
+                    )
+                    if pluginService.isRefreshing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("Refreshing plugins")
+                    }
                 }
             }
         }
@@ -51,6 +61,26 @@ struct PluginsSettingsPane: View {
         } message: { plugin in
             Text(verbatim: consentMessage(for: plugin))
         }
+        .alert(
+            Text("Reset and re-enable “\(quarantineResetCandidate?.name ?? "")”?"),
+            isPresented: Binding(
+                get: { quarantineResetCandidate != nil },
+                set: { if !$0 { quarantineResetCandidate = nil } }
+            ),
+            presenting: quarantineResetCandidate
+        ) { plugin in
+            Button("Reset & Re-enable") {
+                Task {
+                    guard pluginService.resetQuarantine(plugin.id) else { return }
+                    await pluginService.enable(plugin.id, grantingPermissions: true)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { plugin in
+            Text(
+                "Winston stopped this plugin after repeated errors. Reset it only after reviewing its log and confirming that you trust the plugin. Re-enabling grants its listed permissions."
+            )
+        }
     }
 
     // MARK: - Rows
@@ -68,10 +98,20 @@ struct PluginsSettingsPane: View {
                 }
             }
             Spacer()
-            Toggle("", isOn: toggleBinding(for: plugin))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .disabled(plugin.manifest == nil)
+            if pluginService.busyPluginIDs.contains(plugin.id) {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Updating \(plugin.name)")
+            } else {
+                Toggle("", isOn: toggleBinding(for: plugin))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .disabled(
+                        plugin.manifest == nil
+                            || plugin.status == .quarantined
+                            || operationIsBusy(for: plugin)
+                    )
+            }
         }
 
         statusText(for: plugin)
@@ -96,6 +136,17 @@ struct PluginsSettingsPane: View {
             .font(.callout)
         }
 
+        if plugin.status == .quarantined {
+            Text("Winston disabled this plugin to protect the library after repeated runtime errors. Review the log before resetting it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Reset and Re-enable…") {
+                quarantineResetCandidate = plugin
+            }
+            .disabled(operationIsBusy(for: plugin))
+        }
+
         Button("Show in Finder") {
             NSWorkspace.shared.activateFileViewerSelecting([plugin.folderURL])
         }
@@ -114,7 +165,7 @@ struct PluginsSettingsPane: View {
         case .failed(let reason):
             Text("Failed: \(reason)").foregroundStyle(.red)
         case .quarantined:
-            Text("Quarantined after repeated errors").foregroundStyle(.red)
+            Text("Quarantined — disabled after repeated errors").foregroundStyle(.red)
         }
     }
 
@@ -129,10 +180,15 @@ struct PluginsSettingsPane: View {
                         Task { await pluginService.enable(plugin.id) }
                     }
                 } else {
-                    pluginService.disable(plugin.id)
+                    Task { await pluginService.disable(plugin.id) }
                 }
             }
         )
+    }
+
+    private func operationIsBusy(for plugin: PluginService.PluginState) -> Bool {
+        pluginService.isRefreshing
+            || pluginService.busyPluginIDs.contains(plugin.id)
     }
 
     private func consentMessage(for plugin: PluginService.PluginState) -> String {
