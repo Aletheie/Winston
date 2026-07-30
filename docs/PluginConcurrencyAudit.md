@@ -33,17 +33,21 @@ uses the app's executable and code-signing identity. If that stronger attacker
 model becomes required, the wire protocol is ready to move unchanged into a
 separately signed, sandboxed helper/XPC target.
 
-## Time, CPU, memory, and IPC bounds
+## Time, memory, and IPC bounds
 
 `PluginRuntime` arms a wall-time watchdog for every synchronous JavaScript turn,
 including initial evaluation, `activate`, promise continuations, and
 `deactivate`. Expiry sends `SIGTERM`, then `SIGKILL` after a short grace period.
 The process is reaped; no wedged queue or thread remains in Winston.
 
-The worker also installs a process CPU rlimit. The host samples the worker's
-physical footprint and terminates it when the per-session memory budget is
-exceeded. Memory enforcement lives in the parent because macOS may reject a
-low `RLIMIT_AS`/`RLIMIT_DATA` after the executable and frameworks are mapped.
+There is deliberately no low process-wide CPU rlimit. CPU accounting is
+cumulative for a process, so deriving `RLIMIT_CPU` from a per-turn deadline
+eventually killed healthy long-lived plugins whose individual turns were
+bounded. The per-turn parent watchdog remains the CPU-runaway containment
+mechanism. The host separately samples the worker's physical footprint and
+terminates it when the per-session memory budget is exceeded. Memory
+enforcement lives in the parent because macOS may reject a low
+`RLIMIT_AS`/`RLIMIT_DATA` after the executable and frameworks are mapped.
 
 Additional bounds prevent moving a denial of service across IPC:
 
@@ -111,6 +115,8 @@ The focused suites verify:
 - entry-point and bundle symlinks are rejected;
 - infinite loops are actually killed and repeated runaway sessions leave no
   live worker PIDs;
+- repeated bounded turns may cumulatively exceed the former CPU allowance
+  without terminating a healthy worker;
 - a memory bomb is killed by the footprint watchdog;
 - host writes cannot commit after disable;
 - paginated list decoding, permission gating, storage quotas, fault quarantine,

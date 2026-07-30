@@ -42,7 +42,6 @@ nonisolated struct PluginWorkerConfiguration: Codable, Sendable {
     let granted: Set<PluginPermission>
     let appVersion: String
     let locale: String
-    let maximumCPUSeconds: Int
 }
 
 nonisolated struct PluginHostResponse: Codable, Sendable {
@@ -143,11 +142,14 @@ actor PluginRuntime {
     private let maximumMemoryBytes: UInt64
     private let outputFramer = PluginLineFramer()
     private let errorFramer = PluginLineFramer()
+    private let outputEvents: AsyncStream<[Data]>
+    private let outputEventsContinuation: AsyncStream<[Data]>.Continuation
 
     private var process: Process?
     private var inputHandle: FileHandle?
     private var outputHandle: FileHandle?
     private var errorHandle: FileHandle?
+    private var outputEventTask: Task<Void, Never>?
     private var handler: PluginHostHandler?
     private var hostTasks: [UInt64: Task<Void, Never>] = [:]
     private var lastHostCallID: UInt64 = 0
@@ -176,6 +178,7 @@ actor PluginRuntime {
         self.maximumMemoryBytes = max(32 * 1_024 * 1_024, maximumMemoryBytes)
         self.workerExecutableURL = workerExecutableURL
         self.onFault = onFault
+        (outputEvents, outputEventsContinuation) = AsyncStream.makeStream(of: [Data].self)
     }
 
     deinit {
@@ -210,8 +213,7 @@ actor PluginRuntime {
             appVersion: Bundle.main.object(
                 forInfoDictionaryKey: "CFBundleShortVersionString"
             ) as? String ?? "0",
-            locale: Locale.current.identifier,
-            maximumCPUSeconds: max(1, Int(ceil(executionDeadline * 2)))
+            locale: Locale.current.identifier
         )
 
         try await withCheckedThrowingContinuation { continuation in
@@ -278,6 +280,13 @@ actor PluginRuntime {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
+        outputEventTask?.cancel()
+        outputEventTask = Task { [weak self, outputEvents] in
+            for await lines in outputEvents {
+                guard let self else { return }
+                await self.receive(lines: lines)
+            }
+        }
         let output = outputPipe.fileHandleForReading
         output.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
@@ -292,7 +301,7 @@ actor PluginRuntime {
                 return
             }
             guard !lines.isEmpty else { return }
-            Task { await self.receive(lines: lines) }
+            self.outputEventsContinuation.yield(lines)
         }
         let standardErrorHandle = errorPipe.fileHandleForReading
         standardErrorHandle.readabilityHandler = { [weak self] handle in
@@ -326,6 +335,15 @@ actor PluginRuntime {
         outputHandle = output
         errorHandle = standardErrorHandle
         do {
+            guard fcntl(
+                inputPipe.fileHandleForWriting.fileDescriptor,
+                F_SETNOSIGPIPE,
+                1
+            ) != -1 else {
+                throw POSIXError(
+                    POSIXErrorCode(rawValue: errno) ?? .EIO
+                )
+            }
             try process.run()
             armMemoryWatchdog(pid: process.processIdentifier)
         } catch {
@@ -333,6 +351,8 @@ actor PluginRuntime {
             inputHandle = nil
             outputHandle = nil
             errorHandle = nil
+            outputEventTask?.cancel()
+            outputEventTask = nil
             output.readabilityHandler = nil
             standardErrorHandle.readabilityHandler = nil
             try? inputPipe.fileHandleForWriting.close()
@@ -397,12 +417,24 @@ actor PluginRuntime {
                 ))
                 return
             }
-            guard id > lastHostCallID,
-                  hostTasks.count < Self.maximumPendingHostCalls else {
+            guard id > lastHostCallID else {
                 await terminateForProtocolFailure("plugin worker sent an invalid host call")
                 return
             }
             lastHostCallID = id
+            guard hostTasks.count < Self.maximumPendingHostCalls else {
+                do {
+                    try send(.hostResponse(
+                        id: id,
+                        response: PluginHostResponse(
+                            .failure(.unavailable("too many pending host calls"))
+                        )
+                    ))
+                } catch {
+                    await terminateForProtocolFailure("plugin worker IPC failed")
+                }
+                return
+            }
             let task = Task { @MainActor [weak self, handler] in
                 let result = await handler(call)
                 await self?.completeHostCall(id: id, result: result)
@@ -505,6 +537,8 @@ actor PluginRuntime {
         outputHandle = nil
         errorHandle = nil
         process = nil
+        outputEventTask?.cancel()
+        outputEventTask = nil
         cancelOutstandingWork()
 
         if let forcedTerminationError {

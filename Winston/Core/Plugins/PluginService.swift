@@ -36,6 +36,8 @@ final class PluginService {
     }
 
     private(set) var plugins: [PluginState] = []
+    private(set) var isRefreshing = false
+    private(set) var busyPluginIDs: Set<String> = []
     private var runtimes: [String: ActiveRuntime] = [:]
 
     private let settings: AppSettings
@@ -58,6 +60,10 @@ final class PluginService {
     // MARK: - Discovery
 
     func refresh() async {
+        guard !isRefreshing, busyPluginIDs.isEmpty else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
         let discovered = await PluginDiscovery.scan(directory: AppPaths.pluginsDirectory)
 
         var next: [PluginState] = []
@@ -114,6 +120,38 @@ final class PluginService {
     }
 
     func enable(_ id: String, grantingPermissions: Bool = false) async {
+        guard !isRefreshing, busyPluginIDs.insert(id).inserted else { return }
+        defer { busyPluginIDs.remove(id) }
+        await enableUnlocked(id, grantingPermissions: grantingPermissions)
+    }
+
+    func disable(_ id: String) async {
+        guard !isRefreshing, busyPluginIDs.insert(id).inserted else { return }
+        defer { busyPluginIDs.remove(id) }
+        settings.enabledPluginIDs.remove(id)
+        await shutdownRuntimeAndWait(for: id)
+        update(id) { state in
+            state.status = .disabled
+            state.faultCount = 0
+        }
+    }
+
+    @discardableResult
+    func resetQuarantine(_ id: String) -> Bool {
+        guard !isRefreshing,
+              !busyPluginIDs.contains(id),
+              state(of: id)?.status == .quarantined else { return false }
+        update(id) { state in
+            state.status = .disabled
+            state.faultCount = 0
+        }
+        return true
+    }
+
+    private func enableUnlocked(
+        _ id: String,
+        grantingPermissions: Bool
+    ) async {
         guard let state = state(of: id), state.status != .quarantined,
               let manifest = state.manifest,
               let contentDigest = state.contentDigest else { return }
@@ -125,15 +163,6 @@ final class PluginService {
         guard !needsConsent(id) else { return }
         settings.enabledPluginIDs.insert(id)
         await activate(id)
-    }
-
-    func disable(_ id: String) {
-        settings.enabledPluginIDs.remove(id)
-        shutdownRuntime(for: id)
-        update(id) { state in
-            state.status = .disabled
-            state.faultCount = 0
-        }
     }
 
     // MARK: - Loading
@@ -243,11 +272,6 @@ final class PluginService {
             manifest.grantKey(contentDigest: contentDigest)
         ] ?? []
         return manifest.permissions.filter { stored.contains($0.rawValue) }
-    }
-
-    func activeWorkerPIDForTesting(_ id: String) async -> Int32? {
-        guard let runtime = runtimes[id]?.runtime else { return nil }
-        return await runtime.workerProcessIdentifier()
     }
 
     // MARK: - State helpers

@@ -54,7 +54,7 @@ struct PluginServiceTests {
             book.title = title
             book.publisher = publisher
             library.context.insert(book)
-            library.context.saveQuietly()
+            library.context.fixtureSaveBestEffort()
             return book
         }
 
@@ -200,6 +200,47 @@ struct PluginServiceTests {
         #expect(harness.state("cz.test.sample")?.status == .quarantined)
         #expect(!harness.settings.enabledPluginIDs.contains("cz.test.sample"))
         #expect(Date.now.timeIntervalSince(startedAt) < 1.2)
+
+        await harness.service.enable("cz.test.sample", grantingPermissions: true)
+        #expect(harness.state("cz.test.sample")?.status == .quarantined)
+        #expect(harness.service.resetQuarantine("cz.test.sample"))
+        #expect(harness.state("cz.test.sample")?.status == .disabled)
+        #expect(!harness.service.resetQuarantine("cz.test.sample"))
+    }
+
+    @Test func repeatedEnableIsIgnoredWhilePluginOperationIsBusy() async throws {
+        let harness = try await Harness()
+        harness.service.loadDeadline = 0.3
+        try harness.installPlugin(permissions: [], source: """
+            exports.activate = () => {
+                const end = Date.now() + 1500;
+                while (Date.now() < end) {}
+            };
+            """)
+        await harness.service.refresh()
+
+        let firstEnable = Task { @MainActor in
+            await harness.service.enable(
+                "cz.test.sample",
+                grantingPermissions: true
+            )
+        }
+        let deadline = ContinuousClock.now + .seconds(1)
+        while !harness.service.busyPluginIDs.contains("cz.test.sample"),
+              ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        #expect(harness.service.busyPluginIDs.contains("cz.test.sample"))
+
+        await harness.service.enable(
+            "cz.test.sample",
+            grantingPermissions: true
+        )
+        #expect(harness.service.busyPluginIDs.contains("cz.test.sample"))
+
+        await firstEnable.value
+        #expect(harness.service.busyPluginIDs.isEmpty)
+        #expect(harness.state("cz.test.sample")?.status == .quarantined)
     }
 
     @Test func refreshReplacesChangedManifestAndRequiresFreshConsent() async throws {
@@ -278,7 +319,7 @@ struct PluginServiceTests {
         await harness.service.enable("cz.test.sample", grantingPermissions: true)
         await gate.waitUntilStarted()
 
-        harness.service.disable("cz.test.sample")
+        await harness.service.disable("cz.test.sample")
         await gate.resume()
         try? await Task.sleep(for: .milliseconds(100))
 

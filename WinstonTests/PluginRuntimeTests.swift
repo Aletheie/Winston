@@ -3,16 +3,49 @@ import Foundation
 import Testing
 @testable import Winston
 
+private actor PendingPluginHostCallGate {
+    private var enteredCount = 0
+    private var enteredWaiters: [
+        (count: Int, continuation: CheckedContinuation<Void, Never>)
+    ] = []
+    private var blocked: [CheckedContinuation<Void, Never>] = []
+
+    func suspend() async {
+        enteredCount += 1
+        let ready = enteredWaiters.filter { $0.count <= enteredCount }
+        enteredWaiters.removeAll { $0.count <= enteredCount }
+        ready.forEach { $0.continuation.resume() }
+        await withCheckedContinuation { blocked.append($0) }
+    }
+
+    func waitUntilEntered(count: Int) async {
+        guard enteredCount < count else { return }
+        await withCheckedContinuation {
+            enteredWaiters.append((count: count, continuation: $0))
+        }
+    }
+
+    func releaseAll() {
+        let continuations = blocked
+        blocked.removeAll()
+        continuations.forEach { $0.resume() }
+    }
+}
+
 @MainActor
 struct PluginRuntimeTests {
     @MainActor
     private final class HostRecorder {
         private(set) var calls: [PluginAPICall] = []
         var result: Result<Data?, PluginError> = .success(nil)
+        var gate: PendingPluginHostCallGate?
 
         func handler() -> PluginHostHandler {
             { call in
                 self.calls.append(call)
+                if let gate = self.gate {
+                    await gate.suspend()
+                }
                 return self.result
             }
         }
@@ -200,6 +233,8 @@ struct PluginRuntimeTests {
 
     @Test func pendingHostCallsAreBounded() async throws {
         let recorder = HostRecorder()
+        let gate = PendingPluginHostCallGate()
+        recorder.gate = gate
         let total = PluginRuntime.maximumPendingHostCalls + 6
         let runtime = try makeRuntime(source: """
             exports.activate = () => {
@@ -215,6 +250,9 @@ struct PluginRuntimeTests {
             """, permissions: [.uiToast])
         try await runtime.load(granted: [.uiToast], handler: recorder.handler())
 
+        await gate.waitUntilEntered(count: PluginRuntime.maximumPendingHostCalls)
+        #expect(recorder.calls.count == PluginRuntime.maximumPendingHostCalls)
+        await gate.releaseAll()
         #expect(await logged("rejected:6", in: runtime))
         #expect(recorder.calls.count == PluginRuntime.maximumPendingHostCalls)
     }
@@ -289,6 +327,61 @@ struct PluginRuntimeTests {
     }
 
     // MARK: - Lifecycle
+
+    @Test func workerConfigurationRoundTripsWithinTheCurrentWireBuild() throws {
+        let manifest = PluginManifest(
+            id: "cz.test.plugin",
+            name: "Test",
+            version: "1.0.0",
+            api: "1",
+            entry: "index.js",
+            permissions: [.libraryRead],
+            description: nil,
+            author: nil
+        )
+        let configuration = PluginWorkerConfiguration(
+            manifest: manifest,
+            entrySource: "console.log('ready')",
+            granted: [.libraryRead],
+            appVersion: "2",
+            locale: "cs_CZ"
+        )
+
+        let decoded = try JSONDecoder().decode(
+            PluginWorkerConfiguration.self,
+            from: JSONEncoder().encode(configuration)
+        )
+
+        #expect(decoded.manifest == manifest)
+        #expect(decoded.entrySource == configuration.entrySource)
+        #expect(decoded.granted == configuration.granted)
+        #expect(decoded.appVersion == configuration.appVersion)
+        #expect(decoded.locale == configuration.locale)
+    }
+
+    @Test func cumulativeCPUAcrossBoundedTurnsDoesNotKillWorker() async throws {
+        let recorder = HostRecorder()
+        let runtime = try makeRuntime(
+            source: """
+                exports.activate = async () => {
+                    for (let i = 0; i < 18; i++) {
+                        await Winston.storage.get("turn-" + i);
+                        const end = Date.now() + 75;
+                        while (Date.now() < end) {}
+                    }
+                    console.log("cumulative-complete");
+                };
+                """,
+            executionDeadline: 0.3
+        )
+
+        try await runtime.load(granted: [], handler: recorder.handler())
+
+        #expect(await logged("cumulative-complete", in: runtime, timeout: 5))
+        #expect(recorder.calls.count == 18)
+        #expect(await runtime.isWorkerRunning())
+        await runtime.shutdown()
+    }
 
     @Test func infiniteLoopWorkerIsActuallyTerminatedAtTheDeadline() async throws {
         let recorder = HostRecorder()

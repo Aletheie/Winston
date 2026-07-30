@@ -438,20 +438,30 @@ final class PluginHostAPI {
 
         case .libraryGet(let uuid):
             if let denied = require(.libraryRead) { return .failure(denied) }
-            return encode(
-                libraryReadModel?.pluginBook(uuid: uuid)
-                    ?? book(with: uuid).map(PluginBookDTO.init)
-            )
+            if let projected = libraryReadModel?.pluginBook(uuid: uuid) {
+                return encode(projected)
+            }
+            do {
+                return encode(try book(with: uuid).map(PluginBookDTO.init))
+            } catch {
+                return .failure(.unavailable("could not read the library"))
+            }
 
         case .libraryUpdate(let uuid, let patch):
             if let denied = require(.libraryWrite) { return .failure(denied) }
             guard PluginValueLimits.accepts(patch: patch) else {
                 return .failure(.invalidArgument("library.update patch exceeds its size limit"))
             }
-            guard let book = book(with: uuid) else {
-                return .failure(.invalidArgument("no book with uuid \(uuid.uuidString)"))
+            let storedBook: Book
+            do {
+                guard let fetched = try book(with: uuid) else {
+                    return .failure(.invalidArgument("no book with uuid \(uuid.uuidString)"))
+                }
+                storedBook = fetched
+            } catch {
+                return .failure(.unavailable("could not read the library"))
             }
-            switch apply(patch, to: book, session: session) {
+            switch apply(patch, to: storedBook, session: session) {
             case .success(let result): return encode(result)
             case .failure(let error): return .failure(error)
             }
@@ -604,10 +614,10 @@ final class PluginHostAPI {
         return offset
     }
 
-    private func book(with uuid: UUID) -> Book? {
+    private func book(with uuid: UUID) throws -> Book? {
         var descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == uuid })
         descriptor.fetchLimit = 1
-        return (try? modelContext.fetch(descriptor))?.first
+        return try modelContext.fetch(descriptor).first
     }
 
     private func apply(

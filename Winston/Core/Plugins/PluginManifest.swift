@@ -94,23 +94,6 @@ nonisolated enum PluginDiscovery {
         }
     }
 
-    static func validationFailure(of manifest: PluginManifest, folder: URL) -> String? {
-        if let reason = manifestValidationFailure(of: manifest, folder: folder) { return reason }
-        let entryURL = folder.appending(path: manifest.entry)
-        guard let values = try? entryURL.resourceValues(forKeys: [
-            .isRegularFileKey,
-            .isSymbolicLinkKey,
-            .fileSizeKey,
-        ]), values.isRegularFile == true, values.isSymbolicLink != true,
-              let size = values.fileSize else {
-            return "entry file \"\(manifest.entry)\" is missing or is not a regular file"
-        }
-        guard size <= maxEntryBytes else {
-            return "entry file is \(size) bytes; the limit is \(maxEntryBytes)"
-        }
-        return nil
-    }
-
     static func bundleSnapshot(
         in folder: URL,
         expectedManifest: PluginManifest? = nil,

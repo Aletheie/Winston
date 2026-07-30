@@ -63,14 +63,6 @@ private nonisolated final class PluginWorkerEngine: @unchecked Sendable {
     func receive(_ command: PluginWorkerCommand) {
         switch command {
         case .start(let configuration):
-            do {
-                try PluginWorkerResourceLimits.apply(configuration)
-            } catch {
-                writer.send(.loadFailed(
-                    "could not apply plugin resource limits: \(error.localizedDescription)"
-                ))
-                return
-            }
             queue.async {
                 do {
                     try self.loadOnQueue(configuration)
@@ -472,45 +464,5 @@ private nonisolated final class PluginWorkerEngine: @unchecked Sendable {
             throw PluginError.invalidArgument(complaint)
         }
         return uuid
-    }
-}
-
-private nonisolated enum PluginWorkerResourceLimits {
-    static func apply(_ configuration: PluginWorkerConfiguration) throws {
-        signal(SIGXCPU, SIG_DFL)
-        try lower(
-            name: "CPU",
-            resource: RLIMIT_CPU,
-            soft: rlim_t(configuration.maximumCPUSeconds),
-            hard: rlim_t(configuration.maximumCPUSeconds + 1)
-        )
-    }
-
-    private static func lower(
-        name: String,
-        resource: Int32,
-        soft requestedSoft: rlim_t,
-        hard requestedHard: rlim_t
-    ) throws {
-        var current = rlimit()
-        guard getrlimit(resource, &current) == 0 else {
-            throw LimitError(name: name, operation: "read", code: errno)
-        }
-        let hard = min(current.rlim_max, requestedHard)
-        let soft = min(requestedSoft, hard)
-        var proposed = rlimit(rlim_cur: soft, rlim_max: hard)
-        guard setrlimit(resource, &proposed) == 0 else {
-            throw LimitError(name: name, operation: "set", code: errno)
-        }
-    }
-
-    private struct LimitError: LocalizedError {
-        let name: String
-        let operation: String
-        let code: Int32
-
-        var errorDescription: String? {
-            "could not \(operation) \(name) limit (errno \(code))"
-        }
     }
 }
