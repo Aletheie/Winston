@@ -521,6 +521,9 @@ struct CalibreLibraryReaderTests {
 struct ImportReconcilerTests {
     private let existingBookID = UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
     private let existingWorkID = UUID(uuidString: "20000000-0000-0000-0000-000000000001")!
+    private let firstISBN = "9780441013593"
+    private let secondISBN = "9780306406157"
+    private let unrelatedISBN = "9780261103344"
 
     @Test func unifiedReconcilerProducesEveryModelProposalWithoutWriting() async {
         let record = ImportCatalogRecord(
@@ -530,7 +533,7 @@ struct ImportReconcilerTests {
             identity: ImportIdentityRecord(
                 title: "The Book",
                 author: "Ada Author",
-                isbn: "111",
+                isbn: firstISBN,
                 language: "eng",
                 publisher: "Press",
                 year: "2024"
@@ -540,18 +543,18 @@ struct ImportReconcilerTests {
 
         #expect(reconciler.reconcile(
             fingerprint: ImportFingerprint(contentHash: "epub-bytes", format: "epub"),
-            identity: identity(isbn: "999")
+            identity: identity(isbn: unrelatedISBN)
         ) == .exactDuplicate(existingBookID: existingBookID))
         #expect(reconciler.reconcile(
             fingerprint: ImportFingerprint(contentHash: "pdf-bytes", format: "pdf"),
-            identity: identity(isbn: "111")
+            identity: identity(isbn: firstISBN)
         ) == .addFormatToEdition(
             existingBookID: existingBookID,
             workID: existingWorkID
         ))
         #expect(reconciler.reconcile(
             fingerprint: ImportFingerprint(contentHash: "second-edition", format: "epub"),
-            identity: identity(isbn: "222")
+            identity: identity(isbn: secondISBN)
         ) == .createAnotherEdition(workID: existingWorkID))
         #expect(reconciler.reconcile(
             fingerprint: ImportFingerprint(contentHash: "uncertain", format: "pdf"),
@@ -617,21 +620,90 @@ struct ImportReconcilerTests {
     }
 
     @Test func onlyAnExactContentHashCanSkipAnItem() {
-        let reconciler = ImportReconciler(records: [existing(hash: "same", isbn: "111")])
+        let reconciler = ImportReconciler(records: [
+            existing(hash: "same", isbn: firstISBN),
+        ])
 
-        #expect(decision(of: candidate(hash: "same", isbn: "999"), using: reconciler)
+        #expect(decision(
+            of: candidate(hash: "same", isbn: unrelatedISBN),
+            using: reconciler
+        )
             == .exactDuplicate(existingBookID: existingBookID))
-        #expect(decision(of: candidate(hash: "different", isbn: "111"), using: reconciler)
+        #expect(decision(
+            of: candidate(hash: "different", isbn: firstISBN),
+            using: reconciler
+        )
             == .addFormatToEdition(
                 existingBookID: existingBookID,
                 workID: existingWorkID
             ))
     }
 
-    @Test func titleAndAuthorNeverSilentlySkipAnotherEdition() {
-        let reconciler = ImportReconciler(records: [existing(hash: "old", isbn: "111")])
+    @Test func hashesDistributedAcrossEditionsAreNotAnExactDuplicate() {
+        let secondBookID = UUID(
+            uuidString: "10000000-0000-0000-0000-000000000002"
+        )!
+        let reconciler = ImportReconciler(records: [
+            existing(hash: "epub-hash", isbn: firstISBN),
+            ImportCatalogRecord(
+                bookID: secondBookID,
+                workID: existingWorkID,
+                fingerprint: ImportFingerprint(
+                    contentHash: "pdf-hash",
+                    format: "pdf"
+                ),
+                identity: identity(isbn: firstISBN)
+            )
+        ])
 
-        #expect(decision(of: candidate(hash: "new", isbn: "222"), using: reconciler)
+        let decision = reconciler.reconcile(
+            fingerprint: ImportFingerprint(
+                contentHashes: ["epub-hash", "pdf-hash"],
+                formats: ["epub", "pdf"]
+            ),
+            identity: identity(isbn: firstISBN)
+        )
+
+        #expect(decision == .ambiguousReview(candidateWorkIDs: [existingWorkID]))
+    }
+
+    @Test func exactMultiFileDuplicateSelectsTheEditionContainingEveryHash() {
+        let completeBookID = UUID(
+            uuidString: "10000000-0000-0000-0000-000000000002"
+        )!
+        let reconciler = ImportReconciler(records: [
+            existing(hash: "epub-hash", isbn: firstISBN),
+            ImportCatalogRecord(
+                bookID: completeBookID,
+                workID: existingWorkID,
+                fingerprint: ImportFingerprint(
+                    contentHashes: ["epub-hash", "pdf-hash"],
+                    formats: ["epub", "pdf"]
+                ),
+                identity: identity(isbn: firstISBN)
+            )
+        ])
+
+        let decision = reconciler.reconcile(
+            fingerprint: ImportFingerprint(
+                contentHashes: ["epub-hash", "pdf-hash"],
+                formats: ["epub", "pdf"]
+            ),
+            identity: identity(isbn: firstISBN)
+        )
+
+        #expect(decision == .exactDuplicate(existingBookID: completeBookID))
+    }
+
+    @Test func titleAndAuthorNeverSilentlySkipAnotherEdition() {
+        let reconciler = ImportReconciler(records: [
+            existing(hash: "old", isbn: firstISBN),
+        ])
+
+        #expect(decision(
+            of: candidate(hash: "new", isbn: secondISBN),
+            using: reconciler
+        )
             == .createAnotherEdition(workID: existingWorkID))
     }
 
@@ -1063,6 +1135,10 @@ struct CalibreImportSessionIntegrationTests {
             managedFiles: managedFiles,
             sessionDirectory: sessionDirectory
         )
+        try CalibreSessionFixture.execute(
+            "UPDATE identifiers SET val='9780306406157' WHERE book=1 AND type='isbn';",
+            in: fixture.database
+        )
 
         service.importLibrary(at: fixture.root)
         await service.waitForCurrentImport()
@@ -1129,6 +1205,10 @@ struct CalibreImportSessionIntegrationTests {
             managedFiles: managedFiles,
             sessionDirectory: sessionDirectory
         )
+        try CalibreSessionFixture.execute(
+            "UPDATE identifiers SET val='9780306406157' WHERE book=1 AND type='isbn';",
+            in: fixture.database
+        )
 
         service.importLibrary(at: fixture.root)
         await service.waitForCurrentImport()
@@ -1137,7 +1217,7 @@ struct CalibreImportSessionIntegrationTests {
         let source = fixture.root.appending(path: "Author/Book 1/book.epub")
         try Data("another-edition".utf8).write(to: source, options: .atomic)
         try CalibreSessionFixture.execute(
-            "UPDATE identifiers SET val='9789999999999' WHERE book=1 AND type='isbn';",
+            "UPDATE identifiers SET val='9780441013593' WHERE book=1 AND type='isbn';",
             in: fixture.database
         )
 

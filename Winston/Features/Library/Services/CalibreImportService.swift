@@ -1,6 +1,6 @@
-import AppKit
 import Foundation
 import Observation
+import OSLog
 import SwiftData
 
 nonisolated enum CalibreImportSummaryStyle: Sendable, Equatable {
@@ -21,20 +21,16 @@ final class CalibreImportService {
         let item: CalibreImportManifest.Item
         let decision: CalibreImportDecision
         let sources: [PreparedSource]
-        let coverData: Data?
-        let coverTransaction: ManagedFileTransaction?
+        let coverMutation: PreparedCoverMutation?
 
         var transactions: [ManagedFileTransaction] {
-            sources.map(\.transaction) + [coverTransaction].compactMap { $0 }
+            sources.map(\.transaction) + [coverMutation?.transaction].compactMap { $0 }
         }
     }
 
     private struct BookPreimage {
         let book: Book
         let assets: [BookAsset]
-        let coverVersion: Int
-        let coverScopeRaw: String?
-        let coverAssetUUID: UUID?
     }
 
     private struct WorkPreimage {
@@ -51,6 +47,8 @@ final class CalibreImportService {
     private let editions: CatalogReconciliationService?
     private let mutations: CatalogMutationService
     private let managedFiles: ManagedFileCoordinator
+    private let coverMutations: CoverMutationCoordinator
+    private let identityIndex: CatalogIdentityIndex
     private let sessionDirectory: URL
     private let chunkSize: Int
     private let maximumConcurrentInspections: Int
@@ -79,6 +77,7 @@ final class CalibreImportService {
         editions: CatalogReconciliationService? = nil,
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared,
+        identityIndex: CatalogIdentityIndex? = nil,
         sessionDirectory: URL? = nil,
         chunkSize: Int = 25,
         maximumConcurrentInspections: Int = 2
@@ -89,11 +88,20 @@ final class CalibreImportService {
         self.wishlist = wishlist
         self.toasts = toasts
         self.editions = editions
-        self.mutations = mutations ?? CatalogMutationService(
+        let resolvedManagedFiles = mutations?.managedFiles ?? managedFiles
+        let resolvedMutations = mutations ?? CatalogMutationService(
             modelContext: modelContext,
-            managedFiles: managedFiles
+            managedFiles: resolvedManagedFiles
         )
-        self.managedFiles = managedFiles
+        self.mutations = resolvedMutations
+        self.managedFiles = resolvedManagedFiles
+        coverMutations = CoverMutationCoordinator.resolve(
+            modelContext: modelContext,
+            mutations: resolvedMutations,
+            managedFiles: resolvedManagedFiles
+        )
+        self.identityIndex = identityIndex
+            ?? CatalogIdentityIndexRegistry.resolve(modelContext: modelContext)
         self.sessionDirectory = sessionDirectory ?? AppPaths.calibreImportSessionsDirectory
         self.chunkSize = max(1, chunkSize)
         self.maximumConcurrentInspections = max(1, maximumConcurrentInspections)
@@ -229,7 +237,17 @@ final class CalibreImportService {
             return
         }
 
-        activeReconciler = makeReconciler()
+        do {
+            activeReconciler = try makeReconciler()
+        } catch {
+            Log.persistence.error(
+                "Calibre reconciliation index failed: \(String(describing: error), privacy: .public)"
+            )
+            toasts.error(String(
+                localized: "Couldn\u{2019}t verify the existing catalog for import."
+            ))
+            return
+        }
         let finalSummary = await journal.run(
             chunkSize: chunkSize,
             progressHandler: { [weak self] progress in
@@ -292,7 +310,17 @@ final class CalibreImportService {
             guard let decision = item.decision else { return nil }
             return Self.targetBookID(for: decision, item: item)
         })
-        let books = recoveryBookIDs.compactMap { try? mutations.book(id: $0) }
+        let books: [Book]
+        if recoveryBookIDs.isEmpty {
+            books = []
+        } else {
+            let requestedBookIDs = Array(recoveryBookIDs)
+            books = try modelContext.fetch(FetchDescriptor<Book>(
+                predicate: #Predicate {
+                    requestedBookIDs.contains($0.uuid)
+                }
+            ))
+        }
         let booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
         let assetsByID = Dictionary(
             books.flatMap(\.assets).map { ($0.uuid, $0) },
@@ -356,25 +384,18 @@ final class CalibreImportService {
         }
     }
 
-    private func makeReconciler() -> ImportReconciler {
-        ImportReconciler(records: ((try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []).map { book in
-            ImportCatalogRecord(
-                bookID: book.uuid,
-                workID: book.work?.uuid,
-                fingerprint: ImportFingerprint(
-                    contentHashes: Set(book.assets.compactMap(\.contentHash)),
-                    formats: Set(book.assets.map(\.format) + [book.format])
-                ),
-                identity: ImportIdentityRecord(
-                    title: book.displayTitle,
-                    author: book.displayAuthor,
-                    isbn: book.isbn,
-                    language: book.language,
-                    publisher: book.publisher,
-                    year: book.year
-                )
-            )
-        })
+    private func makeReconciler() throws -> ImportReconciler {
+        let signposter = Log.librarySignposter
+        let interval = signposter.beginInterval(
+            "CalibreCatalogIndex",
+            id: signposter.makeSignpostID()
+        )
+        LibraryPerformanceDiagnostics.beginSQLScope("calibre_catalog_index")
+        defer {
+            LibraryPerformanceDiagnostics.endSQLScope("calibre_catalog_index")
+            signposter.endInterval("CalibreCatalogIndex", interval)
+        }
+        return try identityIndex.reconciler()
     }
 
     private func process(
@@ -406,11 +427,16 @@ final class CalibreImportService {
         )
         var preparedCandidates: [PreparedCandidate] = []
         var stagedTransactions: [ManagedFileTransaction] = []
+        var preparedCoverMutations: [PreparedCoverMutation] = []
         var coveredBookIDs: Set<UUID> = []
+        var createdBookIDs: Set<UUID> = []
 
         for item in items {
             if await cancellationRequested(in: journal) {
-                await abort(stagedTransactions)
+                await abort(
+                    stagedTransactions,
+                    coverMutations: preparedCoverMutations
+                )
                 result.resetItemIDs.formUnion(preparedCandidates.map { $0.item.calibreID })
                 result.failure = CalibreImportChunkFailure(
                     calibreID: nil,
@@ -421,7 +447,10 @@ final class CalibreImportService {
                 return result
             }
             guard let inspection = inspections[item.calibreID], !inspection.sources.isEmpty else {
-                await abort(stagedTransactions)
+                await abort(
+                    stagedTransactions,
+                    coverMutations: preparedCoverMutations
+                )
                 result.failure = CalibreImportChunkFailure(
                     calibreID: item.calibreID,
                     message: "No validated source file remains for this Calibre item.",
@@ -465,7 +494,10 @@ final class CalibreImportService {
                     ))
                 }
             } catch {
-                await abort(stagedTransactions)
+                await abort(
+                    stagedTransactions,
+                    coverMutations: preparedCoverMutations
+                )
                 result.failure = CalibreImportChunkFailure(
                     calibreID: item.calibreID,
                     message: error.localizedDescription,
@@ -514,27 +546,64 @@ final class CalibreImportService {
             }
 
             let targetBookID = Self.targetBookID(for: decision, item: item)
-            var coverTransaction: ManagedFileTransaction?
-            var coverData: Data?
-            if let data = inspection.coverData,
-               !coveredBookIDs.contains(targetBookID),
-               shouldImportCover(for: targetBookID, decision: decision) {
-                let version = (book(withID: targetBookID)?.coverVersion ?? 0) + 1
+            var coverMutation: PreparedCoverMutation?
+            let existingReference: CoverReference?
+            do {
+                existingReference = switch decision {
+                case .merge:
+                    if createdBookIDs.contains(targetBookID) {
+                        nil
+                    } else {
+                        try mutations.book(id: targetBookID).coverReference
+                    }
+                case .skipExact, .addEdition, .newWork, .needsReview:
+                    nil
+                }
+            } catch {
+                await abort(
+                    stagedTransactions,
+                    coverMutations: preparedCoverMutations
+                )
+                result.failure = CalibreImportChunkFailure(
+                    calibreID: item.calibreID,
+                    message: error.localizedDescription,
+                    isCancellation: false,
+                    preservePreparedItems: false
+                )
+                return result
+            }
+            let editionOwner = CoverOwner.edition(targetBookID)
+            let shouldPublishCover = inspection.coverData != nil
+                && !coveredBookIDs.contains(targetBookID)
+                && (existingReference == nil
+                    || existingReference == CoverReference(
+                        owner: editionOwner,
+                        version: 0
+                    ))
+            if let data = inspection.coverData, shouldPublishCover {
                 do {
-                    let transaction = try await managedFiles.stage(
+                    let prepared = try await coverMutations.prepare(
+                        payload: data,
+                        targetReference: CoverReference(
+                            owner: editionOwner,
+                            version: (existingReference?.version ?? 0) + 1
+                        ),
+                        selectedBookIDs: [targetBookID],
+                        expectedBookReferences: existingReference.map {
+                            [targetBookID: $0]
+                        } ?? [:],
+                        priority: .system,
                         intent: .calibreImport,
-                        sources: [.cover(data: data, bookID: targetBookID)],
-                        requirement: ManagedFileRequirement(
-                            presentBookIDs: [targetBookID],
-                            coverVersions: [targetBookID: version]
-                        )
+                        targetMayBeCreated: existingReference == nil
                     )
-                    coverTransaction = transaction
-                    coverData = data
+                    coverMutation = prepared
                     coveredBookIDs.insert(targetBookID)
-                    stagedTransactions.append(transaction)
+                    preparedCoverMutations.append(prepared)
                 } catch {
-                    await abort(stagedTransactions)
+                    await abort(
+                        stagedTransactions,
+                        coverMutations: preparedCoverMutations
+                    )
                     result.failure = CalibreImportChunkFailure(
                         calibreID: item.calibreID,
                         message: error.localizedDescription,
@@ -549,9 +618,14 @@ final class CalibreImportService {
                 item: item,
                 decision: decision,
                 sources: keptSources,
-                coverData: coverData,
-                coverTransaction: coverTransaction
+                coverMutation: coverMutation
             ))
+            switch decision {
+            case .addEdition, .newWork, .needsReview:
+                createdBookIDs.insert(targetBookID)
+            case .skipExact, .merge:
+                break
+            }
             tentativeReconciler.record(
                 candidate,
                 reconciliation: proposal.reconciliation
@@ -560,7 +634,10 @@ final class CalibreImportService {
 
         guard !preparedCandidates.isEmpty else { return result }
         if await cancellationRequested(in: journal) {
-            await abort(stagedTransactions)
+            await abort(
+                stagedTransactions,
+                coverMutations: preparedCoverMutations
+            )
             result.failure = CalibreImportChunkFailure(
                 calibreID: nil,
                 message: "Calibre import was paused.",
@@ -579,7 +656,10 @@ final class CalibreImportService {
                 )
             })
         } catch {
-            await abort(stagedTransactions)
+            await abort(
+                stagedTransactions,
+                coverMutations: preparedCoverMutations
+            )
             result.failure = CalibreImportChunkFailure(
                 calibreID: preparedCandidates.first?.item.calibreID,
                 message: error.localizedDescription,
@@ -626,15 +706,6 @@ final class CalibreImportService {
                 for: candidate.item,
                 decision: candidate.decision
             ))
-            let coverURL = book(withID: Self.targetBookID(
-                for: candidate.decision,
-                item: candidate.item
-            ))?.coverCacheURL
-            if let data = candidate.coverData,
-               let image = NSImage(data: data),
-               let coverURL {
-                await CoverCache.shared.replace(image, for: coverURL)
-            }
         }
         return result
     }
@@ -658,12 +729,6 @@ final class CalibreImportService {
             return existingBookID
         })
         requiredBookIDs.subtract(createdBookIDs)
-        var booksByID = Dictionary(
-            uniqueKeysWithValues: try requiredBookIDs.map {
-                let book = try mutations.book(id: $0)
-                return (book.uuid, book)
-            }
-        )
         let createdWorkIDs = Set(candidates.compactMap { candidate -> UUID? in
             switch candidate.decision {
             case .newWork, .needsReview:
@@ -679,129 +744,148 @@ final class CalibreImportService {
             return workID
         })
         requiredWorkIDs.subtract(createdWorkIDs)
-        var worksByID = Dictionary(
-            uniqueKeysWithValues: try requiredWorkIDs.map {
-                let work = try mutations.work(id: $0)
-                return (work.uuid, work)
-            }
-        )
-
-        var collectionDescriptor = FetchDescriptor<BookCollection>(
-            predicate: #Predicate { $0.id == manifest.collectionID }
-        )
-        collectionDescriptor.fetchLimit = 1
-        let existingCollection = try modelContext.fetch(collectionDescriptor).first
-        let collection = existingCollection ?? BookCollection(
-            id: manifest.collectionID,
-            name: manifest.collectionName
-        )
-        let collectionBooksPreimage = existingCollection?.books
-        if existingCollection == nil { modelContext.insert(collection) }
-
         var bookPreimages: [UUID: BookPreimage] = [:]
         var workPreimages: [UUID: WorkPreimage] = [:]
-        var affectedBookIDs: Set<UUID> = []
-        var affectedWorkIDs: Set<UUID> = []
-
-        for candidate in candidates {
-            let targetBook: Book
+        var collection: BookCollection?
+        var collectionBooksPreimage: [Book]?
+        let affectedBookIDs = Set(candidates.compactMap { candidate -> UUID? in
             switch candidate.decision {
             case .skipExact:
-                continue
-
-            case .merge(let existingBookID, let workID):
-                guard let existing = booksByID[existingBookID] else {
-                    throw CatalogMutationError.modelNotFound
-                }
-                if bookPreimages[existingBookID] == nil {
-                    bookPreimages[existingBookID] = BookPreimage(
-                        book: existing,
-                        assets: existing.assets,
-                        coverVersion: existing.coverVersion,
-                        coverScopeRaw: existing.coverScopeRaw,
-                        coverAssetUUID: existing.coverAssetUUID
-                    )
-                }
-                targetBook = existing
-                if let workID { affectedWorkIDs.insert(workID) }
-
+                nil
+            case .merge(let existingBookID, _):
+                existingBookID
+            case .addEdition, .newWork, .needsReview:
+                candidate.item.bookID
+            }
+        })
+        let affectedWorkIDs = Set(candidates.compactMap { candidate -> UUID? in
+            switch candidate.decision {
+            case .skipExact:
+                nil
+            case .merge(_, let workID):
+                workID
             case .addEdition(let workID):
-                guard let work = worksByID[workID] else {
-                    throw CatalogMutationError.modelNotFound
-                }
-                if workPreimages[workID] == nil {
-                    workPreimages[workID] = WorkPreimage(
-                        work: work,
-                        editions: work.editions,
-                        preferredEditionUUID: work.preferredEditionUUID
-                    )
-                }
-                targetBook = makeBook(from: candidate, work: work)
-                booksByID[targetBook.uuid] = targetBook
-
+                workID
             case .newWork, .needsReview:
-                let work = Work(
-                    uuid: candidate.item.workID,
-                    title: candidate.item.book.title,
-                    author: Self.author(for: candidate.item.book),
-                    dateCreated: candidate.item.book.dateAdded ?? .now
-                )
-                modelContext.insert(work)
-                worksByID[work.uuid] = work
-                targetBook = makeBook(from: candidate, work: work)
-                booksByID[targetBook.uuid] = targetBook
+                candidate.item.workID
             }
+        })
 
-            for source in candidate.sources {
-                let asset = BookAsset(
-                    uuid: source.inspection.assetID,
-                    fileName: source.inspection.managedFileName,
-                    origin: .imported,
-                    sourceProvenance: .calibreImport,
-                    sourceIdentifier: "calibre:\(candidate.item.calibreID)",
-                    contentHash: source.inspection.sha256,
-                    sizeBytes: source.inspection.sizeBytes,
-                    drmProtected: source.inspection.drmProtected,
-                    dateAdded: targetBook.dateAdded,
-                    validationStatus: .ok,
-                    book: targetBook
-                )
-                modelContext.insert(asset)
-            }
-            if candidate.coverTransaction != nil {
-                targetBook.coverVersion += 1
-                _ = targetBook.selectCoverOwner(.edition(targetBook.uuid))
-            }
-            if !collection.books.contains(where: { $0.uuid == targetBook.uuid }) {
-                collection.books.append(targetBook)
-            }
-            affectedBookIDs.insert(targetBook.uuid)
-            if let workID = targetBook.work?.uuid { affectedWorkIDs.insert(workID) }
-        }
-
-        let transactions = candidates.flatMap(\.transactions)
-        return try await mutations.commitStagedFiles(
-            .calibreImport(bookIDs: Array(affectedBookIDs)),
-            transactions: transactions,
+        let preparedCovers = candidates.compactMap(\.coverMutation)
+        return try await coverMutations.commit(
+            preparedCovers,
+            command: .calibreImport(bookIDs: Array(affectedBookIDs)),
+            additionalTransactions: candidates.flatMap { $0.sources.map(\.transaction) },
             affectedBookIDs: affectedBookIDs,
             affectedWorkIDs: affectedWorkIDs,
             affectedCollectionIDs: [manifest.collectionID],
             revertingOnFailure: {
                 for preimage in bookPreimages.values {
                     preimage.book.assets = preimage.assets
-                    preimage.book.coverVersion = preimage.coverVersion
-                    preimage.book.coverScopeRaw = preimage.coverScopeRaw
-                    preimage.book.coverAssetUUID = preimage.coverAssetUUID
                 }
                 for preimage in workPreimages.values {
                     preimage.work.editions = preimage.editions
                     preimage.work.preferredEditionUUID = preimage.preferredEditionUUID
                 }
-                if let collectionBooksPreimage {
+                if let collection, let collectionBooksPreimage {
                     collection.books = collectionBooksPreimage
                 }
             }
-        )
+        ) {
+            var booksByID = Dictionary(
+                uniqueKeysWithValues: try requiredBookIDs.map {
+                    let book = try self.mutations.book(id: $0)
+                    return (book.uuid, book)
+                }
+            )
+            var worksByID = Dictionary(
+                uniqueKeysWithValues: try requiredWorkIDs.map {
+                    let work = try self.mutations.work(id: $0)
+                    return (work.uuid, work)
+                }
+            )
+
+            var collectionDescriptor = FetchDescriptor<BookCollection>(
+                predicate: #Predicate { $0.id == manifest.collectionID }
+            )
+            collectionDescriptor.fetchLimit = 1
+            let existingCollection = try self.modelContext.fetch(collectionDescriptor).first
+            let liveCollection = existingCollection ?? BookCollection(
+                id: manifest.collectionID,
+                name: manifest.collectionName
+            )
+            collection = liveCollection
+            collectionBooksPreimage = existingCollection?.books
+            if existingCollection == nil {
+                self.modelContext.insert(liveCollection)
+            }
+
+            for candidate in candidates {
+                let targetBook: Book
+                switch candidate.decision {
+                case .skipExact:
+                    continue
+
+                case .merge(let existingBookID, _):
+                    guard let existing = booksByID[existingBookID] else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    if bookPreimages[existingBookID] == nil {
+                        bookPreimages[existingBookID] = BookPreimage(
+                            book: existing,
+                            assets: existing.assets
+                        )
+                    }
+                    targetBook = existing
+
+                case .addEdition(let workID):
+                    guard let work = worksByID[workID] else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    if workPreimages[workID] == nil {
+                        workPreimages[workID] = WorkPreimage(
+                            work: work,
+                            editions: work.editions,
+                            preferredEditionUUID: work.preferredEditionUUID
+                        )
+                    }
+                    targetBook = self.makeBook(from: candidate, work: work)
+                    booksByID[targetBook.uuid] = targetBook
+
+                case .newWork, .needsReview:
+                    let work = Work(
+                        uuid: candidate.item.workID,
+                        title: candidate.item.book.title,
+                        author: Self.author(for: candidate.item.book),
+                        dateCreated: candidate.item.book.dateAdded ?? .now
+                    )
+                    self.modelContext.insert(work)
+                    worksByID[work.uuid] = work
+                    targetBook = self.makeBook(from: candidate, work: work)
+                    booksByID[targetBook.uuid] = targetBook
+                }
+
+                for source in candidate.sources {
+                    let asset = BookAsset(
+                        uuid: source.inspection.assetID,
+                        fileName: source.inspection.managedFileName,
+                        origin: .imported,
+                        sourceProvenance: .calibreImport,
+                        sourceIdentifier: "calibre:\(candidate.item.calibreID)",
+                        contentHash: source.inspection.sha256,
+                        sizeBytes: source.inspection.sizeBytes,
+                        drmProtected: source.inspection.drmProtected,
+                        dateAdded: targetBook.dateAdded,
+                        validationStatus: .ok,
+                        book: targetBook
+                    )
+                    self.modelContext.insert(asset)
+                }
+                if !liveCollection.books.contains(where: { $0.uuid == targetBook.uuid }) {
+                    liveCollection.books.append(targetBook)
+                }
+            }
+        }
     }
 
     private func makeBook(from candidate: PreparedCandidate, work: Work) -> Book {
@@ -823,28 +907,18 @@ final class CalibreImportService {
         return book
     }
 
-    private func shouldImportCover(
-        for targetBookID: UUID,
-        decision: CalibreImportDecision
-    ) -> Bool {
-        switch decision {
-        case .merge:
-            return book(withID: targetBookID)?.coverVersion == 0
-        case .skipExact:
-            return false
-        case .addEdition, .newWork, .needsReview:
-            return true
-        }
-    }
-
-    private func book(withID id: UUID) -> Book? {
-        var descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == id })
-        descriptor.fetchLimit = 1
-        return try? modelContext.fetch(descriptor).first
-    }
-
     private func abort(_ transactions: [ManagedFileTransaction]) async {
         for transaction in transactions { await managedFiles.abort(transaction) }
+    }
+
+    private func abort(
+        _ transactions: [ManagedFileTransaction],
+        coverMutations preparedCovers: [PreparedCoverMutation]
+    ) async {
+        await abort(transactions)
+        for prepared in preparedCovers {
+            await coverMutations.abort(prepared)
+        }
     }
 
     private func cancellationRequested(in journal: CalibreImportJournal) async -> Bool {
@@ -892,7 +966,8 @@ final class CalibreImportService {
                 )
             }
         }
-        if settings.onlineMetadataEnabled {
+        if settings.onlineMetadataEnabled,
+           !LibraryPerformanceConfiguration.isScenarioEnabled {
             await metadata.backfillMissingOnlineMetadata()
         }
     }

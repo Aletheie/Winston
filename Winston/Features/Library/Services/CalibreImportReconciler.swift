@@ -104,14 +104,14 @@ nonisolated struct ImportReconciler: Sendable {
         let hashMatches = orderedRecords(with: hashMatchIDs)
 
         if !fingerprint.contentHashes.isEmpty {
-            let knownHashes = hashMatches.reduce(into: Set<String>()) {
-                $0.formUnion($1.fingerprint.contentHashes)
-            }
-            if fingerprint.contentHashes.isSubset(of: knownHashes),
-               let target = bestHashTarget(
-                   for: fingerprint.contentHashes,
-                   matches: hashMatches
-               ) {
+            // Exactness belongs to one concrete edition. Never combine hash
+            // evidence from multiple records: doing so can silently skip a
+            // multi-file import that no existing edition actually contains.
+            if let target = hashMatches.first(where: {
+                fingerprint.contentHashes.isSubset(
+                    of: $0.fingerprint.contentHashes
+                )
+            }) {
                 return .exactDuplicate(existingBookID: target.bookID)
             }
             if hashMatches.count == 1, let target = hashMatches.first {
@@ -198,15 +198,22 @@ nonisolated struct ImportReconciler: Sendable {
         }
     }
 
-    private func bestHashTarget(
-        for hashes: Set<String>,
-        matches: [ImportCatalogRecord]
-    ) -> ImportCatalogRecord? {
-        matches.max { lhs, rhs in
-            let left = lhs.fingerprint.contentHashes.intersection(hashes).count
-            let right = rhs.fingerprint.contentHashes.intersection(hashes).count
-            if left == right { return lhs.bookID.uuidString > rhs.bookID.uuidString }
-            return left < right
+    /// Applies a durable catalog change set without rebuilding the complete
+    /// in-memory index. IDs are removed first so deletions and updates share
+    /// one deterministic path.
+    mutating func synchronize(
+        records changedRecords: [ImportCatalogRecord],
+        removingBookIDs: Set<UUID>
+    ) {
+        var idsToRemove = removingBookIDs
+        idsToRemove.formUnion(changedRecords.map(\.bookID))
+        for bookID in idsToRemove {
+            remove(bookID: bookID)
+        }
+        for record in changedRecords.sorted(by: {
+            $0.bookID.uuidString < $1.bookID.uuidString
+        }) {
+            insert(record)
         }
     }
 
@@ -223,9 +230,9 @@ nonisolated struct ImportReconciler: Sendable {
             return true
         }
 
-        let language = normalizedValue(identity.language)
+        let language = normalizedLanguageValue(identity.language)
         let existingLanguages = Set(matches.map {
-            normalizedValue($0.identity.language)
+            normalizedLanguageValue($0.identity.language)
         }.filter { !$0.isEmpty })
         if !language.isEmpty, !existingLanguages.isEmpty,
            !existingLanguages.contains(language) {
@@ -269,6 +276,33 @@ nonisolated struct ImportReconciler: Sendable {
         }
     }
 
+    private mutating func remove(bookID: UUID) {
+        guard let record = records.removeValue(forKey: bookID) else { return }
+        for hash in record.fingerprint.contentHashes {
+            bookIDsByHash[hash]?.remove(bookID)
+            if bookIDsByHash[hash]?.isEmpty == true {
+                bookIDsByHash.removeValue(forKey: hash)
+            }
+        }
+        let isbn = EditionMatcher.normalizedISBN(record.identity.isbn)
+        if !isbn.isEmpty {
+            bookIDsByISBN[isbn]?.remove(bookID)
+            if bookIDsByISBN[isbn]?.isEmpty == true {
+                bookIDsByISBN.removeValue(forKey: isbn)
+            }
+        }
+        let identity = BookMatchKey(
+            title: record.identity.title,
+            author: record.identity.author
+        )
+        if identity.isComplete {
+            bookIDsByIdentity[identity]?.remove(bookID)
+            if bookIDsByIdentity[identity]?.isEmpty == true {
+                bookIDsByIdentity.removeValue(forKey: identity)
+            }
+        }
+    }
+
     private func catalogRecord(
         from candidate: ImportReconciliationCandidate,
         workID: UUID
@@ -283,6 +317,12 @@ nonisolated struct ImportReconciler: Sendable {
 
     private func normalizedValue(_ value: String?) -> String {
         (value ?? "").normalizedMatchKey
+    }
+
+    private func normalizedLanguageValue(_ value: String?) -> String {
+        let language = MetadataNormalizer.language(value)
+        return language.canonicalTag
+            ?? MetadataNormalizer.comparisonKey(value)
     }
 }
 
