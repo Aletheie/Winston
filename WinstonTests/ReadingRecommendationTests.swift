@@ -144,6 +144,22 @@ struct ReadingRecommendationTests {
         #expect(reasons.contains(.matchesLanguage("CS")))
     }
 
+    @Test func languagePreferenceUsesCanonicalBaseGroups() {
+        let american = candidate(title: "American", language: "en-US")
+        let british = candidate(title: "British", language: "en-GB")
+        let czech = candidate(title: "Czech", language: "cs")
+        var preferences = ReadingRecommendationPreferences.default
+        preferences.language = "eng"
+
+        let result = ReadingRecommendationService.rank(
+            [american, czech, british],
+            preferences: preferences,
+            now: now
+        )
+
+        #expect(Set(result.map(\.bookID)) == [american.id, british.id])
+    }
+
     @Test func continuingSeriesPicksTheNextUnreadVolumeNotALaterOne() throws {
         let finished = candidate(
             title: "Volume One",

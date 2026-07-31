@@ -190,8 +190,13 @@ nonisolated enum ReadingRecommendationService {
                 candidate.tags.contains { normalized($0) == requestedTag }
             }
         }
-        if let requestedLanguage = normalized(preferences.language) {
-            eligible = eligible.filter { normalized($0.language) == requestedLanguage }
+        if let requestedLanguage = nonempty(preferences.language) {
+            eligible = eligible.filter {
+                MetadataNormalizer.languageMatches(
+                    actual: $0.language,
+                    operand: requestedLanguage
+                )
+            }
         }
 
         switch preferences.seriesPreference {
@@ -345,7 +350,10 @@ nonisolated enum ReadingRecommendationService {
         }
 
         if let requestedLanguage = preferences.language,
-           normalized(candidate.language) == normalized(requestedLanguage) {
+           MetadataNormalizer.languageMatches(
+               actual: candidate.language,
+               operand: requestedLanguage
+           ) {
             reasons.append(WeightedReason(weight: 10, reason: .matchesLanguage(requestedLanguage)))
         }
 
@@ -460,5 +468,13 @@ nonisolated enum ReadingRecommendationService {
                 locale: Locale(identifier: "en_US_POSIX")
             )
             .lowercased()
+    }
+
+    private static func nonempty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 }

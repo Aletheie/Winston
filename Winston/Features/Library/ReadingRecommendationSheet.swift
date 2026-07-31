@@ -1,5 +1,4 @@
 import Observation
-import SwiftData
 import SwiftUI
 
 nonisolated private struct ReadingRecommendationCandidateSource: Sendable {
@@ -69,7 +68,9 @@ nonisolated private enum ReadingRecommendationPreparer {
                         || $0.readingStatus == .paused)
             },
             availableTags: uniqueSorted(candidates.flatMap(\.tags)),
-            availableLanguages: uniqueSorted(candidates.compactMap(\.language))
+            availableLanguages: uniqueSortedLanguages(
+                candidates.compactMap(\.language)
+            )
         )
     }
 
@@ -77,7 +78,7 @@ nonisolated private enum ReadingRecommendationPreparer {
         var displayValueByKey: [String: String] = [:]
         for value in values {
             guard let display = nonempty(value) else { continue }
-            let key = normalized(display)
+            let key = MetadataNormalizer.tagComparisonKey(display)
             if displayValueByKey[key] == nil {
                 displayValueByKey[key] = display
             }
@@ -87,11 +88,25 @@ nonisolated private enum ReadingRecommendationPreparer {
         }
     }
 
-    private static func normalized(_ value: String) -> String {
-        value.folding(
-            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-            locale: Locale(identifier: "en_US_POSIX")
-        ).lowercased()
+    private static func uniqueSortedLanguages(_ values: [String]) -> [String] {
+        var tags: Set<String> = []
+        for value in values {
+            let language = MetadataNormalizer.language(value)
+            if language.status == .unrecognized {
+                if let raw = nonempty(value) { tags.insert(raw) }
+                continue
+            }
+            if let base = language.baseLanguageCode {
+                tags.insert(base)
+            }
+            if let canonicalTag = language.canonicalTag,
+               canonicalTag != language.baseLanguageCode {
+                tags.insert(canonicalTag)
+            }
+        }
+        return tags.sorted {
+            $0.localizedStandardCompare($1) == .orderedAscending
+        }
     }
 
     private static func nonempty(_ value: String?) -> String? {
@@ -171,7 +186,9 @@ final class ReadingRecommendationViewModel {
             updated.moodTag = nil
         }
         if let language = updated.language,
-           !availableLanguages.contains(where: { Self.sameText($0, language) }) {
+           !availableLanguages.contains(where: {
+               MetadataNormalizer.languageMatches(actual: $0, operand: language)
+           }) {
             updated.language = nil
         }
 
@@ -259,7 +276,8 @@ final class ReadingRecommendationViewModel {
 
     private static func candidateSource(from book: Book) -> ReadingRecommendationCandidateSource {
         let primaryAsset = book.primaryAsset
-        let validationAllowsReading = primaryAsset?.isUsable ?? true
+        let validationAllowsReading = book.hasCatalogDigitalFile
+            && (primaryAsset?.isUsable ?? true)
         return ReadingRecommendationCandidateSource(
             id: book.uuid,
             title: book.displayTitle,
@@ -274,7 +292,7 @@ final class ReadingRecommendationViewModel {
             personalRating: book.rating,
             communityRating: book.communityRating,
             dateAdded: book.dateAdded,
-            fileURL: book.primaryFileURL ?? book.coverCacheURL,
+            fileURL: book.fileURL,
             validationAllowsReading: validationAllowsReading
         )
     }
@@ -303,7 +321,6 @@ struct ReadingRecommendationSheet: View {
     let onShowInLibrary: (UUID) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
     @Environment(\.theme) private var theme
     @AppStorage("readingRecommendation.lastBookID") private var lastRecommendationBookID = ""
     @State private var model = ReadingRecommendationViewModel()
@@ -351,11 +368,8 @@ struct ReadingRecommendationSheet: View {
                 try? await Task.sleep(for: .milliseconds(120))
                 guard !Task.isCancelled else { return }
             }
-            var descriptor = FetchDescriptor<Book>()
-            descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.readingSessions]
-            let candidateBooks = (try? modelContext.fetch(descriptor)) ?? books
             await model.prepare(
-                books: candidateBooks,
+                books: books,
                 after: UUID(uuidString: lastRecommendationBookID)
             )
         }
@@ -498,6 +512,8 @@ private struct ReadingMoodPreference: View {
     let tags: [String]
     let languages: [String]
 
+    @Environment(\.locale) private var locale
+
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             PreferenceSectionTitle(
@@ -513,10 +529,20 @@ private struct ReadingMoodPreference: View {
             Picker("Language", selection: $language) {
                 Text("Any language").tag(nil as String?)
                 ForEach(languages, id: \.self) { language in
-                    Text(verbatim: language).tag(Optional(language))
+                    Text(verbatim: languageLabel(language))
+                        .tag(Optional(language))
                 }
             }
         }
+    }
+
+    private func languageLabel(_ raw: String) -> String {
+        let identifier = locale.language.languageCode?.identifier == "cs"
+            ? "cs"
+            : "en"
+        return MetadataNormalizer.language(raw).localizedDisplayName(
+            displayLocaleIdentifier: identifier
+        )
     }
 }
 
