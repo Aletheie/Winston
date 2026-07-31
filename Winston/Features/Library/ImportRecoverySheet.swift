@@ -86,11 +86,12 @@ struct ImportRecoverySheet: View {
 
     @ViewBuilder
     private var content: some View {
-        if isLoading, totalItemCount == 0 {
+        if isLoading, totalItemCount == 0, viewModel.lastImportSummary == nil {
             ProgressView("Loading recovery state…")
                 .controlSize(.large)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if totalItemCount == 0,
+                  viewModel.lastImportSummary == nil,
                   pending.unreadableJournalURLs.isEmpty,
                   errorMessage == nil {
             ContentUnavailableView {
@@ -101,6 +102,18 @@ struct ImportRecoverySheet: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List {
+                if let summary = viewModel.lastImportSummary {
+                    Section("Last Import") {
+                        ImportSummaryOverview(summary: summary)
+                        ForEach(
+                            Array(summary.failures.enumerated()),
+                            id: \.offset
+                        ) { _, failure in
+                            LastImportFailureRow(failure: failure)
+                        }
+                    }
+                }
+
                 if let errorMessage {
                     Section {
                         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
@@ -228,6 +241,77 @@ struct ImportRecoverySheet: View {
     }
 }
 
+private struct ImportSummaryOverview: View {
+    let summary: ImportSummary
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 5) {
+            summaryRow("Requested", value: summary.requestedCount)
+            summaryRow("Imported", value: summary.importedItemCount)
+            summaryRow("Skipped", value: summary.skippedCount)
+            summaryRow("Failed", value: summary.failedCount)
+            summaryRow("Cancelled", value: summary.cancelledCount)
+            summaryRow("Recovery deferred", value: summary.recoveryDeferredCount)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func summaryRow(
+        _ label: LocalizedStringKey,
+        value: Int
+    ) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(theme.textSecondary)
+            Text(value, format: .number)
+                .foregroundStyle(theme.textPrimary)
+                .monospacedDigit()
+        }
+        .font(theme.label(size: 11))
+    }
+}
+
+private struct LastImportFailureRow: View {
+    let failure: ImportFailure
+
+    @Environment(\.theme) private var theme
+
+    private var presentation: ImportFailurePresentation {
+        ImportFailurePresentation(failure: failure)
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: presentation.systemImage)
+                .foregroundStyle(.orange)
+                .frame(width: 18)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(presentation.title)
+                    .font(theme.body(size: 12, weight: .semibold))
+                    .foregroundStyle(theme.textPrimary)
+                if let sourcePath = presentation.sourcePath {
+                    Text(sourcePath)
+                        .font(theme.label(size: 9))
+                        .foregroundStyle(theme.textTertiary)
+                        .textSelection(.enabled)
+                }
+                Text(presentation.reason)
+                    .font(theme.label(size: 10, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                Text(presentation.detail)
+                    .font(theme.label(size: 10))
+                    .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 private struct PendingManagedFileRow: View {
     let item: ManagedFilePendingItem
 
@@ -311,19 +395,6 @@ private extension ManagedFileIntent {
         case .legacyMigration: String(localized: "Legacy migration")
         case .coverUpdate: String(localized: "Cover update")
         case .restore: String(localized: "Library restore")
-        }
-    }
-}
-
-private extension ImportFailureReason {
-    var systemImage: String {
-        switch self {
-        case .unsupportedFormat: "doc.badge.ellipsis"
-        case .unreadableSource: "doc.badge.xmark"
-        case .staging: "square.and.arrow.down.badge.xmark"
-        case .validation: "checkmark.seal.text.page"
-        case .catalog: "books.vertical.circle"
-        case .recoveryDeferred: "arrow.trianglehead.2.clockwise.rotate.90"
         }
     }
 }
