@@ -1091,6 +1091,146 @@ final class CatalogMutationService {
         }
     }
 
+    func applyMetadataCleanup(
+        _ changes: [MetadataCleanupChange],
+        operation: String = "metadataCleanup"
+    ) -> Result<MetadataCleanupApplyResult, CatalogMutationError> {
+        guard !changes.isEmpty else {
+            return .success(MetadataCleanupApplyResult(
+                requestedChangeCount: 0,
+                appliedChanges: [],
+                conflicts: [],
+                missingBookIDs: []
+            ))
+        }
+
+        do {
+            let requestedBookIDs = Set(changes.map(\.bookID))
+            let requestedIDs = Array(requestedBookIDs)
+            let storedBooks = try modelContext.fetch(FetchDescriptor<Book>(
+                predicate: #Predicate { requestedIDs.contains($0.uuid) }
+            ))
+            let booksByID = Dictionary(
+                uniqueKeysWithValues: storedBooks.map { ($0.uuid, $0) }
+            )
+            let missingBookIDs = requestedBookIDs.subtracting(
+                Set(booksByID.keys)
+            )
+            var applicable: [MetadataCleanupChange] = []
+            var conflicts: [MetadataCleanupConflict] = []
+
+            for change in changes {
+                guard let book = booksByID[change.bookID] else { continue }
+                let current = metadataCleanupValue(
+                    field: change.field,
+                    in: book
+                )
+                if current == change.before {
+                    if change.before != change.after {
+                        applicable.append(change)
+                    }
+                } else {
+                    conflicts.append(MetadataCleanupConflict(
+                        change: change,
+                        currentValue: current
+                    ))
+                }
+            }
+
+            guard !applicable.isEmpty else {
+                return .success(MetadataCleanupApplyResult(
+                    requestedChangeCount: changes.count,
+                    appliedChanges: [],
+                    conflicts: conflicts,
+                    missingBookIDs: missingBookIDs
+                ))
+            }
+
+            let affectedBookIDs = Set(applicable.map(\.bookID))
+            let preimages = affectedBookIDs.compactMap {
+                booksByID[$0].map(CatalogBookMetadataPreimage.init)
+            }
+            let fields = Set(applicable.map { $0.field.rawValue })
+            try commit(
+                .updateMetadataBatch(
+                    bookIDs: Array(affectedBookIDs),
+                    operation: operation,
+                    fields: fields
+                ),
+                affectedBookIDs: affectedBookIDs,
+                revertingOnFailure: {
+                    preimages.forEach { $0.restore() }
+                }
+            ) {
+                for change in applicable {
+                    guard let book = booksByID[change.bookID] else {
+                        throw CatalogMutationError.modelNotFound
+                    }
+                    guard self.metadataCleanupValue(
+                        field: change.field,
+                        in: book
+                    ) == change.before else {
+                        throw CatalogMutationError.staleGeneration
+                    }
+                    try self.applyMetadataCleanupValue(change.after, to: book, field: change.field)
+                }
+            }
+            return .success(MetadataCleanupApplyResult(
+                requestedChangeCount: changes.count,
+                appliedChanges: applicable,
+                conflicts: conflicts,
+                missingBookIDs: missingBookIDs
+            ))
+        } catch let error as CatalogMutationError {
+            return .failure(error)
+        } catch {
+            return .failure(.saveFailed(error.localizedDescription))
+        }
+    }
+
+    private func metadataCleanupValue(
+        field: MetadataCleanupField,
+        in book: Book
+    ) -> MetadataCleanupValue {
+        switch field {
+        case .title: .text(book.title)
+        case .author: .text(book.author)
+        case .publisher: .text(book.publisher)
+        case .language: .text(book.language)
+        case .isbn: .text(book.isbn)
+        case .series: .text(book.series)
+        case .seriesIndex: .text(book.seriesIndex)
+        case .tags: .tags(book.tags)
+        }
+    }
+
+    private func applyMetadataCleanupValue(
+        _ value: MetadataCleanupValue,
+        to book: Book,
+        field: MetadataCleanupField
+    ) throws {
+        switch (field, value) {
+        case (.title, .text(let value)):
+            book.title = value
+        case (.author, .text(let value)):
+            book.author = value
+        case (.publisher, .text(let value)):
+            book.publisher = value
+        case (.language, .text(let value)):
+            book.language = value
+        case (.isbn, .text(let value)):
+            book.isbn = value
+        case (.series, .text(let value)):
+            book.series = value
+        case (.seriesIndex, .text(let value)):
+            book.seriesIndex = value
+        case (.tags, .tags(let values)):
+            book.tags = values
+        default:
+            throw CatalogMutationError.invalidRequest
+        }
+    }
+
     private func executeThrowing(
         _ request: CatalogMutationRequest,
         validatingGeneration generationIsCurrent: () -> Bool

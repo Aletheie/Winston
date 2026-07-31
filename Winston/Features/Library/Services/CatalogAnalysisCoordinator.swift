@@ -153,7 +153,7 @@ nonisolated struct BookIdentityRevision: Hashable, Sendable {
         workAuthor = book.work?.author
         workOriginalTitle = book.work?.originalTitle
         workOriginalLanguage = book.work?.originalLanguage
-        workMatchKey = book.work?.matchKey
+        workMatchKey = book.work?.expectedMatchKey
         openLibraryWorkKey = book.work?.openLibraryWorkKey
         hardcoverBookID = book.work?.hardcoverBookID
     }
