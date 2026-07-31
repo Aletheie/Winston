@@ -38,7 +38,16 @@ struct WishlistView: View {
                                     author: item.author
                                 ),
                                 isWishlisted: true,
-                                onToggleWishlist: { wishlist.remove(item) }
+                                onToggleWishlist: {
+                                    wishlist.remove(item)
+                                },
+                                onFindInCatalogs: {
+                                    CatalogSearchRouter.open(
+                                        CatalogSearchSeed(
+                                            wishlistItem: item
+                                        )
+                                    )
+                                }
                             )
                         }
                     }

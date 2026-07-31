@@ -5,11 +5,26 @@ struct DiscoveryCardView: View {
     let externalBookURL: URL?
     let isWishlisted: Bool
     let onToggleWishlist: () -> Void
+    let onFindInCatalogs: (() -> Void)?
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
     @State private var isShowingActions = false
+
+    init(
+        book: DiscoveryBook,
+        externalBookURL: URL?,
+        isWishlisted: Bool,
+        onToggleWishlist: @escaping () -> Void,
+        onFindInCatalogs: (() -> Void)? = nil
+    ) {
+        self.book = book
+        self.externalBookURL = externalBookURL
+        self.isWishlisted = isWishlisted
+        self.onToggleWishlist = onToggleWishlist
+        self.onFindInCatalogs = onFindInCatalogs
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,7 +52,8 @@ struct DiscoveryCardView: View {
                 hardcoverURL: book.hardcoverURL,
                 externalBookURL: externalBookURL,
                 isWishlisted: isWishlisted,
-                onToggleWishlist: onToggleWishlist
+                onToggleWishlist: onToggleWishlist,
+                onFindInCatalogs: onFindInCatalogs
             )
         }
         .contextMenu {
@@ -45,7 +61,8 @@ struct DiscoveryCardView: View {
                 hardcoverURL: book.hardcoverURL,
                 externalBookURL: externalBookURL,
                 isWishlisted: isWishlisted,
-                onToggleWishlist: onToggleWishlist
+                onToggleWishlist: onToggleWishlist,
+                onFindInCatalogs: onFindInCatalogs
             )
         }
         .glassCard(cornerRadius: WinstonLayout.cornerLarge)
@@ -74,6 +91,7 @@ private struct DiscoveryCardActionPopover: View {
     let externalBookURL: URL?
     let isWishlisted: Bool
     let onToggleWishlist: () -> Void
+    let onFindInCatalogs: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -95,6 +113,16 @@ private struct DiscoveryCardActionPopover: View {
                 ) {
                     dismiss()
                     openURL(externalBookURL)
+                }
+            }
+
+            if let onFindInCatalogs {
+                DiscoveryPopoverActionButton(
+                    title: "Find in Catalogs",
+                    systemImage: "books.vertical"
+                ) {
+                    dismiss()
+                    onFindInCatalogs()
                 }
             }
 
@@ -151,6 +179,7 @@ private struct DiscoveryCardActions: View {
     let externalBookURL: URL?
     let isWishlisted: Bool
     let onToggleWishlist: () -> Void
+    let onFindInCatalogs: (() -> Void)?
 
     @Environment(\.openURL) private var openURL
 
@@ -162,6 +191,12 @@ private struct DiscoveryCardActions: View {
         if let externalBookURL {
             Button { openURL(externalBookURL) } label: {
                 Label("Search External Website", systemImage: "magnifyingglass")
+            }
+        }
+
+        if let onFindInCatalogs {
+            Button(action: onFindInCatalogs) {
+                Label("Find in Catalogs", systemImage: "books.vertical")
             }
         }
 
