@@ -134,10 +134,14 @@ private struct WorkEditionMenu: View {
     let onShowInLibrary: (Book) -> Void
     let onDelete: (Book) -> Void
 
+    @Environment(ToastCenter.self) private var toasts
+
     var body: some View {
         Menu {
-            if book.hasDigitalFile {
-                Button("Open") { LibraryExternalActions.openInReader(book) }
+            if book.hasCatalogDigitalFile {
+                Button("Open") {
+                    LibraryExternalActions.openInReader(book, toasts: toasts)
+                }
             }
             Button("Show in Library") { onShowInLibrary(book) }
             Button("Make Preferred") { service.setPreferred(book, in: work) }

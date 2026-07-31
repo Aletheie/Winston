@@ -132,27 +132,72 @@ actor HardcoverSeriesService: SeriesCatalogFetching {
         let task: Task<[String: HardcoverSeriesCatalog], any Error>
     }
 
-    private static let endpoint = URL(string: "https://api.hardcover.app/v1/graphql")!
-    private static let batchSize = 20
-    private static let minimumRequestInterval: TimeInterval = 0.34
+    private struct SeriesRequestVariables: Encodable, Sendable {
+        let names: [String]
 
-    private let session: URLSession
+        private struct Key: CodingKey {
+            let stringValue: String
+            let intValue: Int? = nil
+
+            init(_ stringValue: String) {
+                self.stringValue = stringValue
+            }
+
+            init?(stringValue: String) {
+                self.init(stringValue)
+            }
+
+            init?(intValue: Int) {
+                return nil
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var root = encoder.container(keyedBy: Key.self)
+            var whereClause = root.nestedContainer(
+                keyedBy: Key.self,
+                forKey: Key("where")
+            )
+            var conditions = whereClause.nestedUnkeyedContainer(forKey: Key("_and"))
+
+            var nameCondition = conditions.nestedContainer(keyedBy: Key.self)
+            var alternatives = nameCondition.nestedUnkeyedContainer(forKey: Key("_or"))
+            for name in names {
+                var alternative = alternatives.nestedContainer(keyedBy: Key.self)
+                var nameMatch = alternative.nestedContainer(
+                    keyedBy: Key.self,
+                    forKey: Key("name")
+                )
+                try nameMatch.encode(name, forKey: Key("_ilike"))
+            }
+
+            var canonicalCondition = conditions.nestedContainer(keyedBy: Key.self)
+            var canonicalMatch = canonicalCondition.nestedContainer(
+                keyedBy: Key.self,
+                forKey: Key("canonical_id")
+            )
+            try canonicalMatch.encode(true, forKey: Key("_is_null"))
+        }
+    }
+
+    private static let batchSize = 20
+
+    private let hardcoverClient: HardcoverAPIClient
     private var cache: [String: CacheEntry] = [:]
     private var inFlight: [String: InFlightRequest] = [:]
-    private var nextRequestAt = Date.distantPast
 
-    init(session: URLSession? = nil) {
-        if let session {
-            self.session = session
-        } else {
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.timeoutIntervalForRequest = 12
-            configuration.timeoutIntervalForResource = 20
-            configuration.httpAdditionalHeaders = [
-                "User-Agent": "Winston/1.0 (macOS eBook manager)"
-            ]
-            self.session = URLSession(configuration: configuration)
-        }
+    init(
+        session: URLSession? = nil,
+        hardcoverClient: HardcoverAPIClient? = nil
+    ) {
+        self.hardcoverClient = hardcoverClient
+            ?? session.map {
+                HardcoverAPIClient(
+                    session: $0,
+                    minimumRequestInterval: 0
+                )
+            }
+            ?? .shared
     }
 
     func cacheStatus(for lookup: SeriesLookup) -> SeriesCatalogCacheStatus {
@@ -286,45 +331,21 @@ actor HardcoverSeriesService: SeriesCatalogFetching {
     }
 
     private func request(batch: [SeriesLookup], token: String) async throws -> Data {
-        let comparisons: [[String: Any]] = batch.map {
-            ["name": ["_ilike": Self.escapedILikeLiteral($0.name)]]
-        }
-        let variables: [String: Any] = [
-            "where": [
-                "_and": [
-                    ["_or": comparisons],
-                    ["canonical_id": ["_is_null": true]],
-                ]
-            ]
-        ]
-        let body = try JSONSerialization.data(withJSONObject: [
-            "query": Self.query,
-            "variables": variables,
-        ])
-
-        var request = URLRequest(url: Self.endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(
-            token.hasPrefix("Bearer ") ? token : "Bearer \(token)",
-            forHTTPHeaderField: "Authorization"
-        )
-        request.httpBody = body
-
-        try await reserveRequestSlot()
-        let (data, response) = try await session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+        do {
+            return try await hardcoverClient.post(
+                query: Self.query,
+                variables: SeriesRequestVariables(
+                    names: batch.map {
+                        Self.escapedILikeLiteral($0.name)
+                    }
+                ),
+                token: token
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
             throw SeriesCatalogError.requestFailed
         }
-        return data
-    }
-
-    private func reserveRequestSlot() async throws {
-        let now = Date.now
-        let scheduled = max(now, nextRequestAt)
-        nextRequestAt = scheduled.addingTimeInterval(Self.minimumRequestInterval)
-        let delay = scheduled.timeIntervalSince(now)
-        if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
     }
 
     private nonisolated static func escapedILikeLiteral(_ value: String) -> String {
