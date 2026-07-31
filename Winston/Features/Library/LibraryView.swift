@@ -10,7 +10,7 @@ enum LibrarySheet: Identifiable {
     case bulkEdit(Set<UUID>)
     case libraryIntegrity
     case importRecovery
-    case metadataFixes
+    case metadataFixes(scope: MetadataCleanupScope)
     case statistics
     case highlights
     case series(name: String?)
@@ -29,7 +29,13 @@ enum LibrarySheet: Identifiable {
         case .bulkEdit(let ids): "bulkEdit-\(ids.count)-\(ids.hashValue)"
         case .libraryIntegrity: "libraryIntegrity"
         case .importRecovery: "importRecovery"
-        case .metadataFixes:  "metadataFixes"
+        case .metadataFixes(let scope):
+            switch scope {
+            case .wholeLibrary:
+                "metadataFixes-all"
+            case .books(let ids, let label):
+                "metadataFixes-\(label)-\(ids.count)"
+            }
         case .statistics:     "statistics"
         case .highlights:     "highlights"
         case .series(let name): "series-\(name ?? "all")"
@@ -77,11 +83,15 @@ struct LibraryView: View {
     @State private var displayedIDs: [UUID] = []
     @State private var displayedReadModelGeneration = 0
     @State private var displayedQuery: LibraryQuerySpec?
+    @State private var temporaryRevealIDs: Set<UUID> = []
     @State private var animateNextDisplayChange = false
-    @State private var sortOrder: [KeyPathComparator<Book>] = [BookSort.dateAdded.comparator(ascending: false)]
+    @SceneStorage("library.sortPreference")
+    private var sortPreference = LibrarySortPreference.defaultValue
     @State private var showDeleteConfirm = false
     @State private var pendingDeletion: [Book] = []
     @State private var pendingDeletionPlan: BulkOperationPlan?
+    @State private var pendingKindleRemovalIDs: Set<DeviceBook.ID> = []
+    @State private var showKindleRemovalConfirm = false
     @State private var quickLookURL: URL?
     @State private var showNewCollectionAlert = false
     @State private var newCollectionName = ""
@@ -121,6 +131,7 @@ struct LibraryView: View {
         let readModelIsReady: Bool
         let query: LibraryQuerySpec
         let hasInvalidSmartShelf: Bool
+        let temporaryRevealIDs: Set<UUID>
     }
 
     private var smartShelfDisplayConfiguration: SmartShelfDisplayConfiguration? {
@@ -142,7 +153,7 @@ struct LibraryView: View {
             query: LibraryQuerySpec(
                 filter: filter,
                 searchText: debouncedSearch,
-                sort: LibraryQuery.displaySort(for: sortOrder),
+                sort: sortPreference.displaySort,
                 savedSearch: smartShelf?.savedSearch,
                 smartShelf: smartShelf?.definition,
                 deviceFileNames: deviceMonitor.deviceFileNames,
@@ -151,24 +162,48 @@ struct LibraryView: View {
             ),
             hasInvalidSmartShelf: smartShelf != nil
                 && smartShelf?.savedSearch == nil
-                && smartShelf?.definition == nil
+                && smartShelf?.definition == nil,
+            temporaryRevealIDs: temporaryRevealIDs
         )
     }
 
     private var bookActions: BookActions {
         BookActions(
-            open: { LibraryExternalActions.openInReader($0) },
+            open: openBook,
             openWork: { activeSheet = .work($0) },
             openSeries: { activeSheet = .series(name: $0) },
             showAuthorInLibrary: showAuthorInLibrary,
-            quickLook: { quickLookURL = $0.primaryFileURL },
-            showInFinder: { LibraryExternalActions.showInFinder($0) },
+            quickLook: { book in
+                quickLookURL = validatedPrimaryURL(for: book)
+            },
+            showInFinder: { book in
+                guard let url = validatedPrimaryURL(for: book) else { return }
+                LibraryExternalActions.showInFinder(url)
+            },
+            share: { book in
+                guard let url = validatedPrimaryURL(for: book) else { return }
+                LibraryExternalActions.share(url)
+            },
             edit: { activeSheet = .edit($0) },
             editSelection: {
                 activeSheet = .bulkEdit(Set(selectedBooks.map(\.uuid)))
             },
             fetchMetadata: { book in viewModel.fetchOnlineMetadata(for: book) },
             fetchMetadataSelection: { viewModel.fetchOnlineMetadata(for: selectedBooks) },
+            reviewMetadataCleanup: { book in
+                let ids = Set(targetBooks(for: book).map(\.uuid))
+                activeSheet = .metadataFixes(
+                    scope: .books(
+                        ids: ids,
+                        label: String(
+                            localized: "\(ids.count) Selected Books"
+                        )
+                    )
+                )
+            },
+            findOtherEditions: { book in
+                CatalogSearchRouter.open(CatalogSearchSeed(book: book))
+            },
             setStatus: { book, status in
                 let ids = Set(targetBooks(for: book).map(\.uuid))
                 Task { await viewModel.setReadingStatus(status, bookIDs: ids) }
@@ -188,18 +223,28 @@ struct LibraryView: View {
             resetCover: { book in viewModel.resetCover(for: book) },
             relink: { book in Task { await LibraryExternalActions.relink(book, via: viewModel) } },
             inspect: { book in presentBookDoctor(for: [book], purpose: .review) },
-            convert: { book in viewModel.convert(book) },
-            convertTo: { book, format in viewModel.convert(book, to: format) },
+            convert: { book in
+                guard validatedPrimaryURL(for: book) != nil else { return }
+                viewModel.convert(book)
+            },
+            convertTo: { book, format in
+                guard validatedPrimaryURL(for: book) != nil else { return }
+                viewModel.convert(book, to: format)
+            },
             convertSelection: convertSelectedBooks,
-            convertSelectionTo: { format in viewModel.convertBooks(selectedBooks, to: format) },
+            convertSelectionTo: { format in
+                let available = booksWithValidatedFiles(selectedBooks)
+                guard !available.isEmpty else { return }
+                viewModel.convertBooks(available, to: format)
+            },
             delete: { book in
                 prepareDeletion([book])
             },
             deleteSelection: {
                 prepareDeletion(selectedBooks)
             },
-            removeFromDevice: { book in deleteFromDevice(targetBooks(for: book)) },
-            removeSelectionFromDevice: { deleteFromDevice(selectedBooks) }
+            removeFromDevice: { book in prepareDeviceDeletion(targetBooks(for: book)) },
+            removeSelectionFromDevice: { prepareDeviceDeletion(selectedBooks) }
         )
     }
 
@@ -213,7 +258,10 @@ struct LibraryView: View {
 
     private var convertibleSelectionCount: Int {
         selectedBooks.filter {
-            $0.hasCatalogDigitalFile && EbookConverter.needsConversion(format: $0.format)
+            $0.hasCatalogDigitalFile
+                && $0.primaryDRMProtected != true
+                && EbookConverter.needsConversion(format: $0.format)
+                && viewModel.conversion.canConvertForKindle($0.format)
         }.count
     }
 
@@ -237,13 +285,15 @@ struct LibraryView: View {
             .toolbar {
                 LibraryToolbar(
                     viewMode: $viewMode,
-                    sortOrder: $sortOrder,
+                    sortPreference: $sortPreference,
                     showInspector: $showInspector,
                     kindlePresenceFilter: $kindlePresenceFilter,
                     showsKindleFilter: deviceMonitor.isConnected,
-                    transmitEnabled: deviceMonitor.isConnected
-                        && selectedBooks.contains(where: \.hasCatalogDigitalFile)
-                        && !transferQueue.isTransferring,
+                    availability: commandAvailability,
+                    deviceIsConnected: deviceMonitor.isConnected,
+                    kindleOperationIsActive: transferQueue.isTransferring
+                        || deviceMonitor.isDeletingBooks
+                        || deviceMonitor.isEjecting,
                     onImport: { isImporting = true },
                     onAddPhysicalBook: { activeSheet = .addPhysicalBook },
                     onTransmit: transmitSelected
@@ -258,9 +308,7 @@ struct LibraryView: View {
                 allowedContentTypes: [.item],
                 allowsMultipleSelection: true
             ) { result in
-                if case .success(let urls) = result, !urls.isEmpty {
-                    viewModel.addBooks(from: urls)
-                }
+                handleFileImporterResult(result)
             }
             .sheet(item: $activeSheet) { sheet in
                 switch sheet {
@@ -282,7 +330,9 @@ struct LibraryView: View {
                         viewModel: viewModel,
                         onShowBook: showBookInLibrary,
                         onReviewMetadata: {
-                            presentAfterDismissingSheet(.metadataFixes)
+                            presentAfterDismissingSheet(
+                                .metadataFixes(scope: .wholeLibrary)
+                            )
                         },
                         onOpenRecovery: {
                             presentAfterDismissingSheet(.importRecovery)
@@ -290,8 +340,11 @@ struct LibraryView: View {
                     )
                 case .importRecovery:
                     ImportRecoverySheet(viewModel: viewModel)
-                case .metadataFixes:
-                    MetadataFixesSheet(viewModel: viewModel)
+                case .metadataFixes(let scope):
+                    MetadataFixesSheet(
+                        viewModel: viewModel,
+                        scope: scope
+                    )
                 case .statistics:
                     StatisticsView(books: books)
                 case .highlights:
@@ -299,7 +352,8 @@ struct LibraryView: View {
                 case .series(let name):
                     SeriesView(
                         books: books,
-                        onOpen: { LibraryExternalActions.openInReader($0) },
+                        wishlist: viewModel.wishlist,
+                        onOpen: openBook,
                         onShowInLibrary: showSeriesInLibrary,
                         seriesName: name
                     )
@@ -341,23 +395,43 @@ struct LibraryView: View {
             } message: {
                 DeleteBooksPlanMessage(plan: pendingDeletionPlan)
             }
+            .alert(
+                kindleRemovalConfirmationTitle,
+                isPresented: $showKindleRemovalConfirm
+            ) {
+                Button(role: .destructive) {
+                    performPendingDeviceDeletion()
+                } label: {
+                    Text(verbatim: kindleRemovalConfirmationLabel)
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingKindleRemovalIDs = []
+                }
+            } message: {
+                Text(verbatim: kindleRemovalConfirmationMessage)
+            }
             .alert("New Collection", isPresented: $showNewCollectionAlert) {
                 TextField("Name", text: $newCollectionName)
                 Button("Create") {
-                    let name = newCollectionName.trimmingCharacters(in: .whitespaces)
+                    let name = newCollectionName.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !name.isEmpty { viewModel.createCollection(named: name, adding: newCollectionTargets) }
                 }
+                .disabled(newCollectionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("Cancel", role: .cancel) { }
             }
             .alert("Save Search as Collection", isPresented: $showSaveSearchAlert) {
                 TextField("Name", text: $saveSearchName)
                 Button("Save") {
-                    let name = saveSearchName.trimmingCharacters(in: .whitespaces)
-                    let query = searchText.trimmingCharacters(in: .whitespaces)
+                    let name = saveSearchName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !name.isEmpty, !query.isEmpty {
                         viewModel.createCollection(named: name, savedSearch: query)
                     }
                 }
+                .disabled(
+                    saveSearchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
                 Button("Cancel", role: .cancel) { }
             }
             .focusedSceneValue(\.libraryCommandContext, commandContext)
@@ -382,8 +456,15 @@ struct LibraryView: View {
                 restoredViewMode = mode.rawValue
             }
             .onChange(of: deviceMonitor.isConnected) { _, isConnected in
-                if !isConnected { kindlePresenceFilter = .all }
+                if !isConnected {
+                    kindlePresenceFilter = .all
+                    pendingKindleRemovalIDs = []
+                    showKindleRemovalConfirm = false
+                }
             }
+            .modifier(
+                ImportedBooksRevealModifier(onReveal: revealImportedBooks)
+            )
     }
 
     private func showInLibrary(_ book: Book) {
@@ -399,6 +480,37 @@ struct LibraryView: View {
             await refreshDisplayed(for: displayRevision)
             guard !Task.isCancelled, displayed.contains(where: { $0.id == book.id }) else { return }
             scrollTarget = book.id
+        }
+    }
+
+    private func revealImportedBooks(_ ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        temporaryRevealIDs = Set(ids)
+        let bookIDs = ids.compactMap { readModel.book(uuid: $0)?.id }
+        selection.selectedBookIDs = Set(bookIDs)
+        selection.lastClickedBookID = bookIDs.first
+        scrollTarget = bookIDs.first
+    }
+
+    private func handleFileImporterResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard !urls.isEmpty else { return }
+            viewModel.reviewAndAddBooks(from: urls)
+        case .failure(let error):
+            if error is CancellationError {
+                return
+            }
+            let cocoaError = error as NSError
+            if cocoaError.domain == NSCocoaErrorDomain,
+               cocoaError.code == CocoaError.Code.userCancelled.rawValue {
+                return
+            }
+            toasts.error(
+                String(
+                    localized: "Couldn’t open the import picker: \(error.localizedDescription)"
+                )
+            )
         }
     }
 
@@ -422,12 +534,36 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var topBar: some View {
-        LibraryDropZone(isTargeted: $isDropTargeted,
-                        onDrop: { LibraryExternalActions.handleDrop(providers: $0, viewModel: viewModel) })
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
-            .background(.ultraThinMaterial)
+        VStack(spacing: 6) {
+            if !temporaryRevealIDs.isEmpty {
+                HStack {
+                    Label(
+                        "Showing \(temporaryRevealIDs.count) imported books",
+                        systemImage: "checkmark.circle"
+                    )
+                    .font(.caption)
+                    Spacer()
+                    Button("Back to Current View") {
+                        temporaryRevealIDs = []
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 4)
+            }
+            LibraryDropZone(
+                isTargeted: $isDropTargeted,
+                onDrop: {
+                    LibraryExternalActions.handleDrop(
+                        providers: $0,
+                        viewModel: viewModel
+                    )
+                }
+            )
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
+        .background(.ultraThinMaterial)
     }
 
     // MARK: - Content (grid or table)
@@ -459,7 +595,7 @@ struct LibraryView: View {
                     editions: viewModel.editions,
                     collections: collections,
                     actions: bookActions,
-                    sortOrder: $sortOrder
+                    sortPreference: $sortPreference
                 )
             }
         }
@@ -484,12 +620,27 @@ struct LibraryView: View {
 
     // MARK: - Menu actions
 
-    private var commandAvailability: LibraryCommandAvailability {
-        LibraryCommandAvailability(
-            hasSelection: selection.hasSelection,
-            canConvert: convertibleSelectionCount > 0,
-            canFetchMetadata: viewModel.onlineMetadataEnabled && selection.hasSelection,
-            canSaveSearch: !searchText.trimmingCharacters(in: .whitespaces).isEmpty
+    private var commandAvailability: BookActionAvailability {
+        BookActionAvailability(
+            selectionCount: selection.count,
+            hasPrimarySelection: primarySelectedBook != nil,
+            primaryHasPersistedDigitalFile: primarySelectedBook?.hasCatalogDigitalFile == true,
+            persistedDigitalFileCount: selectedBooks.filter(\.hasCatalogDigitalFile).count,
+            sendableDigitalFileCount: selectedBooks.filter {
+                $0.hasCatalogDigitalFile && $0.primaryDRMProtected != true
+            }.count,
+            drmProtectedDigitalFileCount: selectedBooks.filter {
+                $0.hasCatalogDigitalFile && $0.primaryDRMProtected == true
+            }.count,
+            conversionEligibleCount: convertibleSelectionCount,
+            calibreAvailable: viewModel.conversion.isCalibreAvailable,
+            onlineMetadataEnabled: viewModel.onlineMetadataEnabled,
+            onDeviceSelectionCount: selectedBooks.filter {
+                $0.isOnDevice(fileNames: deviceMonitor.deviceFileNames)
+            }.count,
+            hasMeaningfulSearch: !searchText
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
         )
     }
 
@@ -506,11 +657,16 @@ struct LibraryView: View {
                 activeSheet = .readingHistoryImport(url)
             }
         case .openInReader:
-            if let book = primarySelectedBook { LibraryExternalActions.openInReader(book) }
+            if let book = primarySelectedBook { openBook(book) }
         case .quickLook:
-            if let book = primarySelectedBook { quickLookURL = book.primaryFileURL }
+            if let book = primarySelectedBook {
+                quickLookURL = validatedPrimaryURL(for: book)
+            }
         case .showInFinder:
-            if let book = primarySelectedBook { LibraryExternalActions.showInFinder(book) }
+            if let book = primarySelectedBook,
+               let url = validatedPrimaryURL(for: book) {
+                LibraryExternalActions.showInFinder(url)
+            }
         case .editMetadata:
             if selection.count > 1 {
                 activeSheet = .bulkEdit(Set(selectedBooks.map(\.uuid)))
@@ -543,7 +699,19 @@ struct LibraryView: View {
         case .showImportRecovery:
             activeSheet = .importRecovery
         case .showMetadataFixes:
-            activeSheet = .metadataFixes
+            let displayedBookIDs = Set(displayed.map(\.uuid))
+            if displayedBookIDs.count == readModel.bookCount,
+               searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               kindlePresenceFilter == .all {
+                activeSheet = .metadataFixes(scope: .wholeLibrary)
+            } else {
+                activeSheet = .metadataFixes(
+                    scope: .books(
+                        ids: displayedBookIDs,
+                        label: String(localized: "Current Filter")
+                    )
+                )
+            }
         case .reviewEditions:
             activeSheet = .editionReview
         case .showStatistics:
@@ -574,12 +742,45 @@ struct LibraryView: View {
     }
 
     private func convertSelectedBooks() {
-        viewModel.convertBooks(selectedBooks)
+        let available = booksWithValidatedFiles(selectedBooks)
+        guard !available.isEmpty else { return }
+        viewModel.convertBooks(available)
+    }
+
+    private func openBook(_ book: Book) {
+        guard let url = validatedPrimaryURL(for: book) else { return }
+        LibraryExternalActions.openInReader(url)
     }
 
     private func openBook(_ bookID: UUID) {
         guard let book = readModel.book(uuid: bookID) else { return }
-        LibraryExternalActions.openInReader(book)
+        openBook(book)
+    }
+
+    private func validatedPrimaryURL(
+        for book: Book,
+        reportFailure: Bool = true
+    ) -> URL? {
+        if let url = book.primaryFileURL {
+            return url
+        }
+        guard reportFailure else { return nil }
+        LibraryExternalActions.postUnavailableFile(for: book, toasts: toasts)
+        return nil
+    }
+
+    private func booksWithValidatedFiles(_ books: [Book]) -> [Book] {
+        var reportedFailure = false
+        return books.filter { book in
+            if validatedPrimaryURL(for: book, reportFailure: false) != nil {
+                return true
+            }
+            if !reportedFailure {
+                _ = validatedPrimaryURL(for: book)
+                reportedFailure = true
+            }
+            return false
+        }
     }
 
     private func showBookInLibrary(_ bookID: UUID) {
@@ -601,7 +802,7 @@ struct LibraryView: View {
     }
 
     private func transmitSelected() {
-        let toSend = selectedBooks
+        let toSend = booksWithValidatedFiles(selectedBooks)
         guard !toSend.isEmpty else { return }
         if settings.inspectBeforeKindleTransfer {
             presentBookDoctor(for: toSend, purpose: .sendToKindle)
@@ -632,8 +833,11 @@ struct LibraryView: View {
     }
 
     private func presentBookDoctor(for books: [Book], purpose: BookDoctorRequest.Purpose) {
-        let sources = books.compactMap { book in
-            book.primaryFileURL.map { BookDoctorSource(id: book.uuid, title: book.displayTitle, url: $0) }
+        let available = booksWithValidatedFiles(books)
+        let sources = available.compactMap { book in
+            book.primaryFileURL.map {
+                BookDoctorSource(id: book.uuid, title: book.displayTitle, url: $0)
+            }
         }
         guard !sources.isEmpty else { return }
         activeSheet = .bookDoctor(BookDoctorRequest(sources: sources, purpose: purpose))
@@ -644,7 +848,7 @@ struct LibraryView: View {
         switch request.purpose {
         case .sendToKindle:
             let paths = Set(urls.map { $0.standardizedFileURL.path(percentEncoded: false) })
-            let ready = books.filter { book in
+            let ready = booksWithValidatedFiles(books).filter { book in
                 guard let url = book.primaryFileURL else { return false }
                 return paths.contains(url.standardizedFileURL.path(percentEncoded: false))
             }
@@ -683,7 +887,8 @@ struct LibraryView: View {
     }
 
     private func refreshDisplayed(for revision: DisplayRevision) async {
-        if revision.hasInvalidSmartShelf {
+        if revision.hasInvalidSmartShelf
+            && revision.temporaryRevealIDs.isEmpty {
             displayedIDs = []
             displayed = []
             displayedReadModelGeneration = revision.readModelGeneration
@@ -696,7 +901,14 @@ struct LibraryView: View {
         let ids: [UUID]
         let requiresBookResolution: Bool
         let resultGeneration: Int
-        if displayedQuery == revision.query,
+        if !revision.temporaryRevealIDs.isEmpty {
+            let revealed = readModel.books(
+                for: Array(revision.temporaryRevealIDs)
+            ).sorted(using: sortPreference.comparator)
+            ids = revealed.map(\.uuid)
+            requiresBookResolution = true
+            resultGeneration = revision.readModelGeneration
+        } else if displayedQuery == revision.query,
            let incremental = readModel.incrementallyUpdatingDisplayIDs(
                displayedIDs,
                with: delta,
@@ -735,7 +947,35 @@ struct LibraryView: View {
         }
     }
 
-    private func deleteFromDevice(_ booksToRemove: [Book]) {
+    private var kindleRemovalConfirmationTitle: String {
+        if pendingKindleRemovalIDs.count == 1 {
+            return String(localized: "Remove this book from the Kindle?")
+        }
+        return String(
+            localized: "Remove \(pendingKindleRemovalIDs.count) books from the Kindle?"
+        )
+    }
+
+    private var kindleRemovalConfirmationMessage: String {
+        if pendingKindleRemovalIDs.count == 1 {
+            return String(
+                localized: "This removes 1 book from the Kindle. Winston will preserve its library copy."
+            )
+        }
+        return String(
+            localized: "This removes \(pendingKindleRemovalIDs.count) books from the Kindle. Winston will preserve their library copies."
+        )
+    }
+
+    private var kindleRemovalConfirmationLabel: String {
+        pendingKindleRemovalIDs.count == 1
+            ? String(localized: "Remove Book")
+            : String(
+                localized: "Remove \(pendingKindleRemovalIDs.count) Books"
+            )
+    }
+
+    private func prepareDeviceDeletion(_ booksToRemove: [Book]) {
         let keys = Set(booksToRemove.flatMap(\.deviceMatchKeys))
             .intersection(deviceMonitor.deviceFileNames)
         guard !keys.isEmpty else { return }
@@ -743,18 +983,40 @@ struct LibraryView: View {
             .filter { keys.contains($0.matchKey) }
             .map(\.id))
         guard !deviceBookIDs.isEmpty else { return }
+        pendingKindleRemovalIDs = deviceBookIDs
+        showKindleRemovalConfirm = true
+    }
+
+    private func performPendingDeviceDeletion() {
+        let deviceBookIDs = pendingKindleRemovalIDs
+        pendingKindleRemovalIDs = []
+        guard !deviceBookIDs.isEmpty else { return }
         Task {
             let result = await deviceMonitor.removeFromDevice(ids: deviceBookIDs)
-            if result.appliedTargetCount > 0 {
-                toasts.success(String(
-                    localized: "Removed \(result.appliedTargetCount) from Kindle."
-                ))
+            let feedback = KindleRemovalFeedback.make(for: result)
+            switch feedback.style {
+            case .success:
+                toasts.success(feedback.message)
+            case .info:
+                toasts.info(feedback.message)
+            case .error:
+                toasts.error(feedback.message)
             }
-            if result.completion == .failed || result.conflictCount > 0 {
-                toasts.error(String(
-                    localized: "Some books couldn’t be deleted from the Kindle (\(result.conflictCount + result.pendingTargetIDs.count))."
-                ))
+        }
+    }
+}
+
+private struct ImportedBooksRevealModifier: ViewModifier {
+    let onReveal: ([UUID]) -> Void
+
+    func body(content: Content) -> some View {
+        content.onReceive(
+            NotificationCenter.default.publisher(for: .showImportedBooks)
+        ) { notification in
+            guard let ids = notification.userInfo?["bookIDs"] as? [UUID] else {
+                return
             }
+            onReveal(ids)
         }
     }
 }

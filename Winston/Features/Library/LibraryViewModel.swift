@@ -39,7 +39,8 @@ final class LibraryViewModel {
     init(modelContext: ModelContext, settings: AppSettings, toasts: ToastCenter,
          online: any OnlineMetadataFetching = OnlineMetadataService(),
          saveAdapter: CatalogSaveAdapter = .live,
-         managedFiles: ManagedFileCoordinator = .shared) {
+         managedFiles: ManagedFileCoordinator = .shared,
+         backupStoreURL: URL = PersistenceController.storeURL) {
         self.modelContext = modelContext
         self.settings = settings
         self.toasts = toasts
@@ -128,7 +129,8 @@ final class LibraryViewModel {
             importer: importer,
             editions: editions,
             settings: settings,
-            toasts: toasts
+            toasts: toasts,
+            backupStoreURL: backupStoreURL
         )
     }
 
@@ -137,6 +139,13 @@ final class LibraryViewModel {
     var pendingMetadataUUIDs: Set<UUID> { importer.pendingMetadataUUIDs }
     var importRecoveryItems: [ImportRecoveryItem] { importer.importRecoveryItems }
     var importRecoveryQueueError: String? { importer.lastRecoveryQueueError }
+    var lastImportSummary: ImportSummary? { importer.lastImportSummary }
+    var preparedImportBatch: PreparedImportBatch? {
+        importer.preparedImportBatch
+    }
+    var standardImportProgress: ImportSessionProgress? {
+        importer.activeStandardImportSession.map(ImportSessionProgress.init)
+    }
     var convertingUUIDs: Set<UUID> { conversion.convertingUUIDs }
     var enrichingUUIDs: Set<UUID> { metadata.enrichingUUIDs }
     var isExtracting: Bool { importer.isExtracting }
@@ -153,6 +162,12 @@ final class LibraryViewModel {
     var highlightImportSummary: String? { highlights.highlightImportSummary }
     var isExporting: Bool { exporter.isExporting }
     var metadataFetchSummary: String? { metadata.metadataFetchSummary }
+    var metadataCleanupProgress: MetadataCleanupProgress? {
+        health.metadataCleanupProgress
+    }
+    var canUndoMetadataCleanup: Bool {
+        health.canUndoMetadataCleanup
+    }
     private(set) var activeBulkOperationPlan: BulkOperationPlan?
     private(set) var lastBulkOperationResult: BulkOperationResult?
     @ObservationIgnored private var activeBulkOperationSession: BulkOperationSession?
@@ -186,11 +201,71 @@ final class LibraryViewModel {
         importer.addBooks(from: sources, completion: completion)
     }
     @discardableResult
+    func reviewAndAddBooks(
+        from urls: [URL],
+        completion: ImportService.ImportCompletion? = nil
+    ) -> ImportSession? {
+        importer.beginImportReview(
+            from: urls,
+            automaticallyCommitCleanSingle: urls.count == 1
+                && !settings.alwaysReviewImports,
+            completion: completion
+        )
+    }
+    @discardableResult
+    func reviewAndAddBooks(
+        from sources: [ImportSource],
+        completion: ImportService.ImportCompletion? = nil
+    ) -> ImportSession? {
+        importer.beginImportReview(
+            from: sources,
+            automaticallyCommitCleanSingle: sources.count == 1
+                && !settings.alwaysReviewImports,
+            completion: completion
+        )
+    }
+    @discardableResult
+    func reviewCatalogBook(
+        from source: ImportSource,
+        context: CatalogImportContext,
+        completion: ImportService.ImportCompletion? = nil
+    ) -> ImportSession? {
+        importer.beginCatalogImportReview(
+            from: source,
+            context: context,
+            completion: completion
+        )
+    }
+    func setImportReviewSelection(itemID: UUID, isSelected: Bool) {
+        importer.setImportReviewSelection(itemID: itemID, isSelected: isSelected)
+    }
+    func setAllImportReviewSelections(_ isSelected: Bool) {
+        importer.setAllImportReviewSelections(isSelected)
+    }
+    func setImportReviewAction(itemID: UUID, action: ImportReviewAction) {
+        importer.setImportReviewAction(itemID: itemID, action: action)
+    }
+    func updateImportReviewMetadata(itemID: UUID, metadata: BookMetadata) {
+        importer.updateImportReviewMetadata(itemID: itemID, metadata: metadata)
+    }
+    func commitImportReview() {
+        importer.commitImportReview()
+    }
+    func cancelImportReview() {
+        importer.cancelImportReview()
+    }
+    func dismissImportReviewResult() {
+        importer.dismissImportReviewResult()
+    }
+    @discardableResult
     func addEditions(from urls: [URL], to work: Work) -> ImportSession? {
         importer.addBooks(from: urls, assigningTo: work)
     }
     func importCalibreLibrary(at root: URL) { calibreImporter.importLibrary(at: root) }
     func cancelCalibreImport() { calibreImporter.cancelImport() }
+    func cancelImportSession(id: UUID) {
+        importer.cancelImportSession(id: id)
+    }
 
     @discardableResult
     func addPhysicalBook(_ draft: PhysicalBookDraft) -> Book? {
@@ -482,14 +557,6 @@ final class LibraryViewModel {
         await mutations.recoverManagedFiles()
     }
 
-    func migrateLegacyLibraryIfNeeded() async -> Bool {
-        await LegacyLibraryMigrator.migrateIfNeeded(
-            context: modelContext,
-            mutations: mutations,
-            managedFiles: managedFiles
-        )
-    }
-
     // MARK: - Metadata (forwarded)
 
     @discardableResult
@@ -599,26 +666,29 @@ final class LibraryViewModel {
     func resetCover(for book: Book) { covers.resetCover(for: book) }
     func metadataFixes() async -> [MetadataFix] { await health.metadataFixes() }
     func seriesSuggestions() async -> [String] { await health.seriesSuggestions() }
+    func metadataCleanup(
+        scope: MetadataCleanupScope
+    ) async -> MetadataCleanupAnalysis {
+        await health.metadataCleanup(scope: scope)
+    }
+    func cancelMetadataCleanupAnalysis() {
+        health.cancelMetadataCleanupAnalysis()
+    }
+    func applyMetadataCleanup(
+        _ changes: [MetadataCleanupChange]
+    ) -> Result<MetadataCleanupApplyResult, CatalogMutationError> {
+        health.applyMetadataCleanup(changes)
+    }
+    func undoLastMetadataCleanup()
+        -> Result<MetadataCleanupApplyResult, CatalogMutationError> {
+        health.undoLastMetadataCleanup()
+    }
 
     // MARK: - Maintenance (forwarded)
 
     func backfillMissingSizes() async { await importer.backfillMissingSizes() }
     func rescanMissingMetadata() async { await importer.rescanMissingMetadata() }
     func detectMissingDRM() async { await importer.detectMissingDRM() }
-    func backfillMissingAssetHashes() async {
-        do {
-            _ = try await BookAssetMaintenance.backfillMissingHashes(
-                context: modelContext,
-                mutations: mutations
-            )
-        } catch {
-            Log.persistence.error(
-                "Asset hash backfill fetch failed: \(error.localizedDescription, privacy: .public)"
-            )
-            toasts.error(String(localized: "Couldn’t read files that need integrity hashes."))
-        }
-    }
-
     @discardableResult
     func adoptConversionArtifact(
         for bookUUID: UUID,
