@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 import SwiftData
 import OSLog
@@ -15,7 +16,23 @@ private enum WinstonEntryPoint {
         if PluginWorkerProcessMain.isWorkerInvocation {
             PluginWorkerProcessMain.run()
         }
+        do {
+            try LibraryPerformanceConfiguration.configureAppPathsIfNeeded()
+            if let request = try LibraryPerformanceConfiguration.preparationRequest() {
+                try LibraryPerformanceDatasetBuilder.prepare(request)
+                FileHandle.standardOutput.write(Data(
+                    "WINSTON_LIBRARY_PERFORMANCE_PREPARED books=\(request.bookCount) root=\(request.rootDirectory.path)\n".utf8
+                ))
+                return
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "WINSTON_LIBRARY_PERFORMANCE_PREPARATION_FAILED \(error.localizedDescription)\n".utf8
+            ))
+            Darwin.exit(EXIT_FAILURE)
+        }
         StartupPerformance.begin()
+        LibraryPerformanceDiagnostics.beginInitialLoad()
         WinstonApp.main()
     }
 }
@@ -30,7 +47,6 @@ struct WinstonApp: App {
     @State private var deviceMonitor = DeviceMonitor()
     @State private var kindleSyncProfiles: KindleSyncProfileStore
     @State private var transferQueue: TransferQueue
-    @State private var updater: SoftwareUpdater
     @State private var pluginService: PluginService
     @State private var discoveryViewModel: DiscoveryViewModel
     @State private var opdsViewModel: OPDSViewModel
@@ -71,7 +87,6 @@ struct WinstonApp: App {
                 kindleSyncProfiles.record(record)
             }
         ))
-        _updater = State(initialValue: SoftwareUpdater())
         _pluginService = State(initialValue: PluginService(
             modelContext: context,
             settings: settings,
@@ -98,7 +113,12 @@ struct WinstonApp: App {
                             viewModel: viewModel,
                             libraryReadModel: libraryReadModel
                         )
-                            .task { await pluginService.refresh() }
+                            .task {
+                                guard !LibraryPerformanceConfiguration.isScenarioEnabled else {
+                                    return
+                                }
+                                await pluginService.refresh()
+                            }
                     case .managedFileRecoveryFailed(let pendingItemCount):
                         ManagedFileRecoveryUnavailableView(
                             pendingItemCount: pendingItemCount,
@@ -132,7 +152,7 @@ struct WinstonApp: App {
         .windowResizability(.automatic)
         .defaultSize(width: 1100, height: 700)
         .commands {
-            AppCommands(themeManager: themeManager, settings: settings, updater: updater)
+            AppCommands(themeManager: themeManager, settings: settings)
         }
 
         Settings {
@@ -141,7 +161,7 @@ struct WinstonApp: App {
                    !recovery.allowsLibraryAccess {
                     StoreUnavailableView(recovery: recovery)
                 } else if libraryStartupState == .ready {
-                    SettingsView()
+                    SettingsView(maintenance: viewModel.maintenance)
                 } else {
                     LibraryStartupProgressView()
                 }
@@ -150,6 +170,7 @@ struct WinstonApp: App {
                 .environment(themeManager)
                 .environment(settings)
                 .environment(pluginService)
+                .environment(opdsViewModel)
                 .accessibleTheme(themeManager.theme)
                 .font(themeManager.defaultFont)
                 .preferredColorScheme(themeManager.theme.colorScheme)
@@ -158,6 +179,9 @@ struct WinstonApp: App {
 
     @MainActor
     private func prepareLibrary() async {
+        LibraryPerformanceDiagnostics.writeOutput(
+            "WINSTON_LIBRARY_PERFORMANCE_RECOVERY_STARTED"
+        )
         let signposter = Log.persistenceSignposter
         let interval = signposter.beginInterval(
             "CriticalStartupRecovery",
@@ -167,12 +191,33 @@ struct WinstonApp: App {
 
         let recovery = await viewModel.recoverManagedFiles()
         guard !recovery.hasPendingWork else {
+            LibraryPerformanceDiagnostics.writeOutput(
+                "WINSTON_LIBRARY_PERFORMANCE_RECOVERY_BLOCKED"
+            )
             libraryStartupState = .managedFileRecoveryFailed(
                 pendingItemCount: recovery.failedTransactionIDs.count
                     + recovery.unreadableJournalURLs.count
                     + recovery.failureMessages.count
             )
             return
+        }
+        LibraryPerformanceDiagnostics.writeOutput(
+            "WINSTON_LIBRARY_PERFORMANCE_RECOVERY_FINISHED"
+        )
+        let leaseStore = ImportSourceLeaseStore()
+        do {
+            let removed = try await Task.detached(priority: .utility) {
+                try leaseStore.pruneStaleLeases()
+            }.value
+            if removed > 0 {
+                Log.persistence.info(
+                    "Pruned \(removed) stale device import lease(s)"
+                )
+            }
+        } catch {
+            Log.persistence.error(
+                "Could not prune stale device import leases: \(error.localizedDescription, privacy: .public)"
+            )
         }
         libraryStartupState = .ready
     }

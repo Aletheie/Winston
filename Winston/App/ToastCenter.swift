@@ -8,6 +8,9 @@ final class ToastCenter {
         enum Style: Equatable { case info, success, error }
         enum Action: Equatable {
             case reviewEditionProposals
+            case reviewImport
+            case relinkBook(UUID)
+            case attachDigitalFile(UUID)
         }
         let id = UUID()
         var text: String
