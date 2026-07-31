@@ -29,7 +29,7 @@ struct PhysicalBookTests {
             to: [book],
             filter: .all,
             searchText: "b-12",
-            sort: []
+            sort: .sourceOrder
         )
 
         #expect(result.map(\.uuid) == [book.uuid])
@@ -67,7 +67,7 @@ struct PhysicalBookTests {
         #expect(stored.readingStatus == .reading)
         #expect(stored.assets.isEmpty)
         #expect(stored.work?.preferredEditionUUID == stored.uuid)
-        #expect(EditionsBackfill.run(context: library.context) == 0)
+        #expect(try EditionsBackfill.run(context: library.context) == 0)
         #expect(await viewModel.scanForMissingFiles() == 0)
         #expect(!viewModel.isMissing(stored))
         #expect(toasts.messages.last?.style == .success)
@@ -115,11 +115,13 @@ struct PhysicalBookTests {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
         let result = LibraryExporter.export([row], to: output)
-        let data = try Data(contentsOf: output.appending(path: "metadata.json"))
+        let exportDirectory = try #require(result.finalURL)
+        let data = try Data(contentsOf: exportDirectory.appending(path: "metadata.json"))
         let objects = try #require(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
         let exported = try #require(objects.first)
 
         #expect(result.copied == 0)
+        #expect(result.skipped == 1)
         #expect(result.failed == 0)
         #expect(exported["physicalCopy"] as? Bool == true)
         #expect(exported["shelf"] as? String == "C-4")

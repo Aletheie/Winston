@@ -9,11 +9,17 @@ struct LibraryMutationTests {
 
     @Test func commandContextPublishesStableAvailabilityAndRepeatedCommands() {
         let context = LibraryCommandContext()
-        let availability = LibraryCommandAvailability(
-            hasSelection: true,
-            canConvert: true,
-            canFetchMetadata: false,
-            canSaveSearch: true
+        let availability = BookActionAvailability(
+            selectionCount: 2,
+            hasPrimarySelection: true,
+            primaryHasPersistedDigitalFile: true,
+            persistedDigitalFileCount: 1,
+            sendableDigitalFileCount: 1,
+            conversionEligibleCount: 1,
+            calibreAvailable: true,
+            onlineMetadataEnabled: false,
+            onDeviceSelectionCount: 1,
+            hasMeaningfulSearch: true
         )
 
         context.updateAvailability(availability)
@@ -26,12 +32,12 @@ struct LibraryMutationTests {
         #expect(context.requestGeneration == firstGeneration + 1)
     }
 
-    @Test func saveQuietlyBumpsTheRevision() async throws {
+    @Test func fixtureSavePublishesARevision() async throws {
         let lib = try await TestLibrary()
         let before = LibraryMutationLog.shared.revision
         let catalogBefore = LibraryMutationLog.shared.catalogRevision
         lib.context.insert(Book(fileName: "a.epub", originalFileName: "A.epub"))
-        lib.context.saveQuietly()
+        lib.context.fixtureSaveBestEffort()
         #expect(LibraryMutationLog.shared.revision == before + 1)
         #expect(LibraryMutationLog.shared.catalogRevision == catalogBefore + 1)
     }
@@ -42,7 +48,7 @@ struct LibraryMutationTests {
         let catalogBefore = LibraryMutationLog.shared.catalogRevision
         lib.context.insert(Book(fileName: "throwing.epub", originalFileName: "Throwing.epub"))
 
-        try lib.context.saveAndPublish()
+        try lib.context.fixtureSaveAndPublish()
 
         #expect(LibraryMutationLog.shared.revision == before + 1)
         #expect(LibraryMutationLog.shared.catalogRevision == catalogBefore + 1)
@@ -83,7 +89,7 @@ struct LibraryMutationTests {
             bookTitle: "Test"
         ))
 
-        lib.context.saveQuietly(catalogChanged: false)
+        lib.context.fixtureSaveBestEffort(catalogChanged: false)
 
         #expect(LibraryMutationLog.shared.revision == before + 1)
         #expect(LibraryMutationLog.shared.catalogRevision == catalogBefore)
@@ -290,7 +296,8 @@ struct LibraryMutationTests {
         let viewModel = LibraryViewModel(
             modelContext: lib.context,
             settings: AppSettings(),
-            toasts: ToastCenter()
+            toasts: ToastCenter(),
+            managedFiles: lib.managedFiles
         )
         await viewModel.remove(book)
 
@@ -317,7 +324,8 @@ struct LibraryMutationTests {
         let viewModel = LibraryViewModel(
             modelContext: lib.context,
             settings: AppSettings(),
-            toasts: ToastCenter()
+            toasts: ToastCenter(),
+            managedFiles: lib.managedFiles
         )
 
         await viewModel.remove(removed)
