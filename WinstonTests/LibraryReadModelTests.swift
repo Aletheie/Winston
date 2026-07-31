@@ -183,7 +183,7 @@ struct LibraryReadModelTests {
                 to: books,
                 filter: .recentlyAdded,
                 searchText: "",
-                sort: [],
+                sort: .sourceOrder,
                 now: fixedNow
             ).map(\.uuid) == [recent.uuid]
         )
@@ -729,6 +729,37 @@ struct LibraryReadModelTests {
         print("Library indexed query benchmark (\(count) records): \(elapsed)")
         #expect(ids.count == count / 100)
         #expect(elapsed < .seconds(1))
+    }
+
+    @Test func normalizedFacetIndexesGroupTagCaseAndAliasHTMLFormats() async {
+        let first = Book(
+            fileName: "first.htm",
+            originalFileName: "First.htm"
+        )
+        first.title = "First"
+        first.tags = ["Sci-Fi"]
+        let second = Book(
+            fileName: "second.html",
+            originalFileName: "Second.html"
+        )
+        second.title = "Second"
+        second.tags = ["Sci-Fi"]
+        let third = Book(
+            fileName: "third.epub",
+            originalFileName: "Third.epub"
+        )
+        third.title = "Third"
+        third.tags = ["sci-fi"]
+        let model = LibraryReadModel()
+        await bootstrap(model, books: [first, second, third])
+
+        let tagIDs = await model.displayIDs(query: query(filter: .tag("SCI-FI")))
+        let htmlIDs = await model.displayIDs(query: query(filter: .format("HTML")))
+
+        #expect(tagIDs.count == 3)
+        #expect(model.facets.tagKeys == ["Sci-Fi"])
+        #expect(model.facets.tags["Sci-Fi"] == 3)
+        #expect(htmlIDs == [first.uuid, second.uuid])
     }
 
     private var allBooksQuery: LibraryQuerySpec {

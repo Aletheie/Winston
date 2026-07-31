@@ -23,6 +23,8 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
     var smartCounts: [UUID: Int] = [:]
     var authorTips: [LibraryFacetTip] = []
     var seriesTips: [LibraryFacetTip] = []
+    private var tagCountsByComparisonKey: [String: Int] = [:]
+    private var tagSpellingsByComparisonKey: [String: [String: Int]] = [:]
 
     static func build(
         records: [LibraryBookRecord],
@@ -151,7 +153,10 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
             self.series[series, default: 0] += 1
         }
         for tag in record.tags {
-            tags[tag, default: 0] += 1
+            let key = MetadataNormalizer.tagComparisonKey(tag)
+            guard !key.isEmpty else { continue }
+            tagCountsByComparisonKey[key, default: 0] += 1
+            tagSpellingsByComparisonKey[key, default: [:]][tag, default: 0] += 1
         }
         if record.rating > 0 { rated += 1 }
         statusCounts[record.readingStatus, default: 0] += 1
@@ -170,7 +175,17 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
             Self.decrement(&self.series, key: series)
         }
         for tag in record.tags {
-            Self.decrement(&tags, key: tag)
+            let key = MetadataNormalizer.tagComparisonKey(tag)
+            Self.decrement(&tagCountsByComparisonKey, key: key)
+            guard var spellings = tagSpellingsByComparisonKey[key] else {
+                continue
+            }
+            Self.decrement(&spellings, key: tag)
+            if spellings.isEmpty {
+                tagSpellingsByComparisonKey.removeValue(forKey: key)
+            } else {
+                tagSpellingsByComparisonKey[key] = spellings
+            }
         }
         if record.rating > 0 { rated = max(0, rated - 1) }
         Self.decrement(&statusCounts, key: record.readingStatus)
@@ -183,6 +198,25 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
         seriesKeys = series.compactMap { name, count in
             count > 1 ? name : nil
         }.sorted()
+        tags = Dictionary(uniqueKeysWithValues:
+            tagCountsByComparisonKey.compactMap { key, count in
+                guard let spellings = tagSpellingsByComparisonKey[key],
+                      let preferred = spellings.keys.sorted(by: { lhs, rhs in
+                          let leftCount = spellings[lhs, default: 0]
+                          let rightCount = spellings[rhs, default: 0]
+                          if leftCount != rightCount {
+                              return leftCount > rightCount
+                          }
+                          let order = lhs.localizedStandardCompare(rhs)
+                          return order == .orderedSame
+                              ? lhs < rhs
+                              : order == .orderedAscending
+                      }).first else {
+                    return nil
+                }
+                return (preferred, count)
+            }
+        )
         tagKeys = tags.keys.sorted()
         authorTips = authorKeys.compactMap { author in
             MetadataFixFinder.reversedAuthorSuggestion(author).map {
@@ -372,7 +406,11 @@ private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
     mutating func add(_ record: LibraryBookRecord) {
         all.insert(record.id)
         Self.insert(record.id, for: record.readingStatus, into: &statuses)
-        Self.insert(record.id, for: record.format, into: &formats)
+        Self.insert(
+            record.id,
+            for: MetadataNormalizer.formatFilterKey(record.format),
+            into: &formats
+        )
         if !record.displayAuthor.isEmpty {
             Self.insert(record.id, for: record.displayAuthor, into: &authors)
         }
@@ -383,7 +421,11 @@ private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
             Self.insert(record.id, for: id, into: &collections)
         }
         for tag in record.tags {
-            Self.insert(record.id, for: tag, into: &tags)
+            Self.insert(
+                record.id,
+                for: MetadataNormalizer.tagComparisonKey(tag),
+                into: &tags
+            )
         }
         for key in record.deviceMatchKeys {
             Self.insert(record.id, for: key, into: &deviceKeys)
@@ -394,7 +436,11 @@ private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
     mutating func remove(_ record: LibraryBookRecord) {
         all.remove(record.id)
         Self.remove(record.id, for: record.readingStatus, from: &statuses)
-        Self.remove(record.id, for: record.format, from: &formats)
+        Self.remove(
+            record.id,
+            for: MetadataNormalizer.formatFilterKey(record.format),
+            from: &formats
+        )
         if !record.displayAuthor.isEmpty {
             Self.remove(record.id, for: record.displayAuthor, from: &authors)
         }
@@ -405,7 +451,11 @@ private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
             Self.remove(record.id, for: id, from: &collections)
         }
         for tag in record.tags {
-            Self.remove(record.id, for: tag, from: &tags)
+            Self.remove(
+                record.id,
+                for: MetadataNormalizer.tagComparisonKey(tag),
+                from: &tags
+            )
         }
         for key in record.deviceMatchKeys {
             Self.remove(record.id, for: key, from: &deviceKeys)
@@ -422,13 +472,13 @@ private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
         case .collection(let id):
             collections[id] ?? []
         case .format(let format):
-            formats[format] ?? []
+            formats[MetadataNormalizer.formatFilterKey(format)] ?? []
         case .author(let author):
             authors[author] ?? []
         case .series(let series):
             self.series[series] ?? []
         case .tag(let tag):
-            tags[tag] ?? []
+            tags[MetadataNormalizer.tagComparisonKey(tag)] ?? []
         case .rated:
             rated
         }

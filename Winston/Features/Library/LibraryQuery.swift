@@ -11,6 +11,7 @@ nonisolated struct LibraryNormalizedStrings: Equatable, Sendable {
     let format: String
     let shelf: String
     let year: Int?
+    let normalizedLanguage: NormalizedLanguage
 
     init(
         title: String,
@@ -26,12 +27,13 @@ nonisolated struct LibraryNormalizedStrings: Equatable, Sendable {
     ) {
         self.title = Self.normalize(title)
         self.author = Self.normalize(author)
-        self.tags = tags.map(Self.normalize)
+        self.tags = tags.map(MetadataNormalizer.tagComparisonKey)
         self.series = Self.normalize(series)
         self.notes = Self.normalize(notes)
         self.translator = Self.normalize(translator)
-        self.language = Self.normalize(language)
-        self.format = Self.normalize(format)
+        normalizedLanguage = MetadataNormalizer.language(language)
+        self.language = MetadataNormalizer.languageSearchText(language)
+        self.format = MetadataNormalizer.formatFilterKey(format)
         self.shelf = Self.normalize(shelf)
         self.year = year
     }
@@ -55,8 +57,15 @@ nonisolated struct LibraryNormalizedStrings: Equatable, Sendable {
         }) { return false }
         if !query.series.allSatisfy(series.contains) { return false }
         if !query.titles.allSatisfy(title.contains) { return false }
-        if !query.formats.allSatisfy({ format == Self.normalize($0) }) { return false }
-        if !query.languages.allSatisfy({ language == Self.normalize($0) }) { return false }
+        if !query.formats.allSatisfy({
+            format == MetadataNormalizer.formatFilterKey($0)
+        }) { return false }
+        if !query.languages.allSatisfy({
+            MetadataNormalizer.languageMatches(
+                actual: normalizedLanguage.rawValue,
+                operand: $0
+            )
+        }) { return false }
         if !query.translators.allSatisfy(translator.contains) { return false }
         if let constraint = query.year {
             guard let year else { return false }
@@ -70,11 +79,7 @@ nonisolated struct LibraryNormalizedStrings: Equatable, Sendable {
     }
 
     static func normalize(_ value: String?) -> String {
-        value?.trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(
-                options: [.caseInsensitive, .diacriticInsensitive],
-                locale: Locale(identifier: "en_US_POSIX")
-            ) ?? ""
+        MetadataNormalizer.searchKey(value)
     }
 }
 
@@ -122,7 +127,14 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
     let author: String?
     let publisher: String?
     let language: String?
+    let isbn: String?
     let translator: String?
+    let canonicalLanguageTag: String?
+    let baseLanguageCode: String?
+    let languageScriptCode: String?
+    let languageRegionCode: String?
+    let languageNormalizationStatus: MetadataLanguageNormalizationStatus
+    let canonicalISBN13: String?
     let dateAdded: Date
     let rating: Int
     let userRating: Int?
@@ -151,6 +163,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
         author: String? = nil,
         publisher: String? = nil,
         language: String? = nil,
+        isbn: String? = nil,
         translator: String? = nil,
         dateAdded: Date,
         rating: Int,
@@ -179,7 +192,15 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
         self.author = author
         self.publisher = publisher
         self.language = language
+        self.isbn = isbn
         self.translator = translator
+        let normalizedLanguage = MetadataNormalizer.language(language)
+        canonicalLanguageTag = normalizedLanguage.canonicalTag
+        baseLanguageCode = normalizedLanguage.baseLanguageCode
+        languageScriptCode = normalizedLanguage.scriptCode
+        languageRegionCode = normalizedLanguage.regionCode
+        languageNormalizationStatus = normalizedLanguage.status
+        canonicalISBN13 = MetadataNormalizer.canonicalISBN13(isbn)
         self.dateAdded = dateAdded
         self.rating = rating
         self.userRating = userRating
@@ -241,7 +262,15 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
         author = book.displayAuthor
         publisher = book.publisher
         language = book.language
+        isbn = book.isbn
         translator = book.translator
+        let normalizedLanguage = MetadataNormalizer.language(book.language)
+        canonicalLanguageTag = normalizedLanguage.canonicalTag
+        baseLanguageCode = normalizedLanguage.baseLanguageCode
+        languageScriptCode = normalizedLanguage.scriptCode
+        languageRegionCode = normalizedLanguage.regionCode
+        languageNormalizationStatus = normalizedLanguage.status
+        canonicalISBN13 = MetadataNormalizer.canonicalISBN13(book.isbn)
         dateAdded = book.dateAdded
         rating = book.sortRating
         userRating = book.rating
@@ -291,7 +320,14 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
             && lhs.author == rhs.author
             && lhs.publisher == rhs.publisher
             && lhs.language == rhs.language
+            && lhs.isbn == rhs.isbn
             && lhs.translator == rhs.translator
+            && lhs.canonicalLanguageTag == rhs.canonicalLanguageTag
+            && lhs.baseLanguageCode == rhs.baseLanguageCode
+            && lhs.languageScriptCode == rhs.languageScriptCode
+            && lhs.languageRegionCode == rhs.languageRegionCode
+            && lhs.languageNormalizationStatus == rhs.languageNormalizationStatus
+            && lhs.canonicalISBN13 == rhs.canonicalISBN13
             && lhs.dateAdded == rhs.dateAdded
             && lhs.rating == rhs.rating
             && lhs.userRating == rhs.userRating
@@ -317,7 +353,7 @@ enum LibraryQuery {
     static func apply(to books: [Book],
                       filter: LibraryFilter,
                       searchText: String,
-                      sort: [KeyPathComparator<Book>],
+                      sort: LibraryDisplaySort,
                       now: Date = .now) -> [Book] {
         let records = books.enumerated().map {
             LibraryBookRecord(
@@ -331,7 +367,7 @@ enum LibraryQuery {
             for: records,
             filter: filter,
             searchText: searchText,
-            sort: displaySort(for: sort),
+            sort: sort,
             savedSearch: nil,
             smartShelf: nil,
             deviceFileNames: [],
@@ -347,7 +383,7 @@ enum LibraryQuery {
         definition: SmartShelfDefinition,
         deviceFileNames: Set<String>,
         deviceIsConnected: Bool,
-        sort: [KeyPathComparator<Book>]
+        sort: LibraryDisplaySort
     ) -> [Book] {
         let includeHighlights = definition.compiled.requiresHighlights
         let records = books.enumerated().map {
@@ -362,7 +398,7 @@ enum LibraryQuery {
             for: records,
             filter: .all,
             searchText: "",
-            sort: displaySort(for: sort),
+            sort: sort,
             savedSearch: nil,
             smartShelf: definition,
             deviceFileNames: deviceFileNames,
@@ -403,27 +439,6 @@ enum LibraryQuery {
             matchCount: matchCount,
             leadingBookIDs: leadingBookIDs
         )
-    }
-
-    @MainActor
-    static func displaySort(
-        for comparators: [KeyPathComparator<Book>]
-    ) -> LibraryDisplaySort {
-        guard let first = comparators.first else { return .sourceOrder }
-        let ascending = first.order == .forward
-        if first == BookSort.title.comparator(ascending: ascending) {
-            return LibraryDisplaySort(field: .title, ascending: ascending)
-        }
-        if first == BookSort.author.comparator(ascending: ascending) {
-            return LibraryDisplaySort(field: .author, ascending: ascending)
-        }
-        if first == BookSort.dateAdded.comparator(ascending: ascending) {
-            return LibraryDisplaySort(field: .dateAdded, ascending: ascending)
-        }
-        if first == BookSort.rating.comparator(ascending: ascending) {
-            return LibraryDisplaySort(field: .rating, ascending: ascending)
-        }
-        return .sourceOrder
     }
 
     nonisolated static func displayIDs(
@@ -611,7 +626,7 @@ enum LibraryQuery {
         filter: LibraryFilter,
         recentCutoff: Date
     ) -> Bool {
-        switch filter {
+        return switch filter {
         case .all:
             true
         case .recentlyAdded:
@@ -621,13 +636,17 @@ enum LibraryQuery {
         case .collection(let id):
             book.collectionIDs.contains(id)
         case .format(let format):
-            book.format == format
+            MetadataNormalizer.formatFilterKey(book.format)
+                == MetadataNormalizer.formatFilterKey(format)
         case .author(let author):
             book.displayAuthor == author
         case .series(let series):
             book.series == series
         case .tag(let tag):
-            book.tags.contains(tag)
+            book.tags.contains {
+                MetadataNormalizer.tagComparisonKey($0)
+                    == MetadataNormalizer.tagComparisonKey(tag)
+            }
         case .rated:
             book.rating > 0
         }
@@ -763,11 +782,11 @@ enum LibraryQuery {
         init(_ query: SearchQuery) {
             freeText = LibraryNormalizedStrings.normalize(query.freeText)
             authors = query.authors.map(LibraryNormalizedStrings.normalize)
-            tags = query.tags.map(LibraryNormalizedStrings.normalize)
+            tags = query.tags.map(MetadataNormalizer.tagComparisonKey)
             series = query.series.map(LibraryNormalizedStrings.normalize)
             titles = query.titles.map(LibraryNormalizedStrings.normalize)
-            formats = query.formats.map(LibraryNormalizedStrings.normalize)
-            languages = query.languages.map(LibraryNormalizedStrings.normalize)
+            formats = query.formats.map(MetadataNormalizer.formatFilterKey)
+            languages = query.languages
             translators = query.translators.map(LibraryNormalizedStrings.normalize)
             year = query.year
         }
