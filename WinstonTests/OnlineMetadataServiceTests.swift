@@ -29,7 +29,7 @@ struct OnlineMetadataServiceTests {
         _ = await service.fetch(
             isbn: nil,
             title: "  DUNE ",
-            author: "frank-herbert",
+            author: "  frank   herbert ",
             language: .english,
             hardcoverToken: nil
         )
@@ -41,6 +41,32 @@ struct OnlineMetadataServiceTests {
         #expect(diagnostics.cacheHitCount == 1)
         #expect(diagnostics.cacheEntryCount == 1)
         #expect(diagnostics.metadataInFlightCount == 0)
+    }
+
+    @Test func equivalentISBN10AndISBN13ShareTheCacheEntry() async {
+        OnlineMetadataURLProtocol.prepare()
+        let service = makeService()
+
+        _ = await service.fetch(
+            isbn: "ISBN-10: 0-306-40615-2",
+            title: "First title",
+            author: "First author",
+            language: .english,
+            hardcoverToken: nil
+        )
+        _ = await service.fetch(
+            isbn: "9780306406157",
+            title: "Different title",
+            author: "Different author",
+            language: .english,
+            hardcoverToken: nil
+        )
+
+        #expect(OnlineMetadataURLProtocol.requestCount == 2)
+        let diagnostics = await service.cacheDiagnostics()
+        #expect(diagnostics.metadataRequestCount == 1)
+        #expect(diagnostics.cacheHitCount == 1)
+        #expect(diagnostics.cacheEntryCount == 1)
     }
 
     @Test func cacheUsesLRUEvictionAndStaysWithinCapacity() async {
