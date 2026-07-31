@@ -4,11 +4,25 @@ enum LibraryViewMode: String, Hashable {
     case grid, table
 }
 
-enum BookSort: CaseIterable, Identifiable {
+nonisolated enum BookSort: String, CaseIterable, Identifiable, Hashable, Sendable {
     case title, author, dateAdded, rating
 
     var id: Self { self }
 
+    var defaultAscending: Bool {
+        self == .title || self == .author
+    }
+
+    var displaySortField: LibraryDisplaySort.Field {
+        switch self {
+        case .title: .title
+        case .author: .author
+        case .dateAdded: .dateAdded
+        case .rating: .rating
+        }
+    }
+
+    @MainActor
     func comparator(ascending: Bool) -> KeyPathComparator<Book> {
         let order: SortOrder = ascending ? .forward : .reverse
         switch self {
@@ -29,13 +43,50 @@ enum BookSort: CaseIterable, Identifiable {
     }
 }
 
+nonisolated struct LibrarySortPreference: RawRepresentable, Hashable, Sendable {
+    let field: BookSort
+    let ascending: Bool
+
+    static let defaultValue = LibrarySortPreference(field: .dateAdded, ascending: false)
+
+    init(field: BookSort, ascending: Bool) {
+        self.field = field
+        self.ascending = ascending
+    }
+
+    init?(rawValue: String) {
+        let components = rawValue.split(separator: ":", maxSplits: 1)
+        guard components.count == 2,
+              let field = BookSort(rawValue: String(components[0])),
+              let ascending = Bool(String(components[1])) else {
+            return nil
+        }
+        self.init(field: field, ascending: ascending)
+    }
+
+    var rawValue: String {
+        "\(field.rawValue):\(ascending)"
+    }
+
+    var displaySort: LibraryDisplaySort {
+        LibraryDisplaySort(field: field.displaySortField, ascending: ascending)
+    }
+
+    @MainActor
+    var comparator: KeyPathComparator<Book> {
+        field.comparator(ascending: ascending)
+    }
+}
+
 struct LibraryToolbar: ToolbarContent {
     @Binding var viewMode: LibraryViewMode
-    @Binding var sortOrder: [KeyPathComparator<Book>]
+    @Binding var sortPreference: LibrarySortPreference
     @Binding var showInspector: Bool
     @Binding var kindlePresenceFilter: KindlePresenceFilter
     let showsKindleFilter: Bool
-    let transmitEnabled: Bool
+    let availability: BookActionAvailability
+    let deviceIsConnected: Bool
+    let kindleOperationIsActive: Bool
     let onImport: () -> Void
     let onAddPhysicalBook: () -> Void
     let onTransmit: () -> Void
@@ -62,7 +113,7 @@ struct LibraryToolbar: ToolbarContent {
                     } label: {
                         if isCurrent(sort) {
                             Label(sort.label(terminal: theme.usesTerminalCopy),
-                                  systemImage: ascending ? "chevron.up" : "chevron.down")
+                                  systemImage: sortPreference.ascending ? "chevron.up" : "chevron.down")
                         } else {
                             Text(sort.label(terminal: theme.usesTerminalCopy))
                         }
@@ -99,7 +150,7 @@ struct LibraryToolbar: ToolbarContent {
                 Label(theme.copy.transmit, systemImage: "paperplane")
             }
             .disabled(!transmitEnabled)
-            .help(transmitEnabled ? "Send selected books to the device" : "Connect a device and select books")
+            .help(transmitHelp)
         }
 
         ToolbarItem(placement: .primaryAction) {
@@ -114,22 +165,49 @@ struct LibraryToolbar: ToolbarContent {
 
     // MARK: - Sort helpers
 
-    private var ascending: Bool {
-        sortOrder.first?.order == .forward
+    private var transmitEnabled: Bool {
+        deviceIsConnected && availability.canTransmit && !kindleOperationIsActive
     }
 
     private func isCurrent(_ sort: BookSort) -> Bool {
-        guard let current = sortOrder.first else { return false }
-        return current == sort.comparator(ascending: true)
-            || current == sort.comparator(ascending: false)
+        sortPreference.field == sort
     }
 
     private func toggle(_ sort: BookSort) {
         if isCurrent(sort) {
-            sortOrder = [sort.comparator(ascending: !ascending)]
+            sortPreference = LibrarySortPreference(
+                field: sort,
+                ascending: !sortPreference.ascending
+            )
         } else {
-            let asc = sort == .title || sort == .author
-            sortOrder = [sort.comparator(ascending: asc)]
+            sortPreference = LibrarySortPreference(
+                field: sort,
+                ascending: sort.defaultAscending
+            )
         }
+    }
+
+    private var transmitHelp: String {
+        if kindleOperationIsActive {
+            return String(localized: "A Kindle operation is already in progress")
+        }
+        if !deviceIsConnected {
+            return String(localized: "Connect a Kindle to send books")
+        }
+        if !availability.hasSelection {
+            return String(localized: "Select books to send to Kindle")
+        }
+        if availability.persistedDigitalFileCount == 0 {
+            return String(localized: "The selection has no sendable digital files")
+        }
+        if availability.hasDRMOnlyDigitalSelection {
+            return String(
+                localized: "DRM-protected books can’t be sent to Kindle over USB"
+            )
+        }
+        if !availability.canTransmit {
+            return String(localized: "The selection has no sendable digital files")
+        }
+        return String(localized: "Send selected books to the device")
     }
 }

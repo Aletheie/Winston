@@ -4,20 +4,47 @@ struct LibraryStatusToasts: View {
     let viewModel: LibraryViewModel
     let maintenance: MaintenanceScheduler
     let onReviewEditions: () -> Void
+    let onReviewImport: () -> Void
+    let onResolveDigitalFile: (UUID) -> Void
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(ToastCenter.self) private var toastCenter
     @Environment(TransferQueue.self) private var transferQueue
+    @Environment(DeviceMonitor.self) private var deviceMonitor
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
+            if let progress = viewModel.standardImportProgress {
+                ProgressToastCard(
+                    title: standardImportTitle(progress),
+                    progress: progress.fraction,
+                    isCancelling: progress.isCancelling,
+                    onCancel: {
+                        viewModel.cancelImportSession(id: progress.sessionID)
+                    }
+                )
+                .transition(toastTransition)
+            }
             if transferQueue.isTransferring {
                 ProgressToastCard(title: transferTitle,
                                   progress: transferQueue.overallProgress,
                                   isCancelling: transferQueue.activeItem?.stage == .cancelling,
                                   onCancel: { transferQueue.cancel() })
                     .transition(toastTransition)
+            }
+            if let progress = deviceMonitor.deviceDeleteProgress {
+                ProgressToastCard(
+                    title: deviceMonitor.isCancellingDeviceDelete
+                        ? String(localized: "Cancelling Kindle removal…")
+                        : String(
+                            localized: "Removing \(progress.completedTargetCount) of \(progress.totalTargetCount) from the Kindle…"
+                        ),
+                    progress: progress.fraction,
+                    isCancelling: deviceMonitor.isCancellingDeviceDelete,
+                    onCancel: { deviceMonitor.cancelDeviceDelete() }
+                )
+                .transition(toastTransition)
             }
             if viewModel.isImportingCalibre {
                 ProgressToastCard(
@@ -38,7 +65,9 @@ struct LibraryStatusToasts: View {
         }
         .padding(16)
         .animation(toastAnimation, value: activeToasts.map(\.id))
+        .animation(toastAnimation, value: viewModel.standardImportProgress)
         .animation(toastAnimation, value: transferQueue.isTransferring)
+        .animation(toastAnimation, value: deviceMonitor.deviceDeleteProgress)
         .animation(toastAnimation, value: viewModel.isImportingCalibre)
     }
 
@@ -69,6 +98,21 @@ struct LibraryStatusToasts: View {
         guard total > 1 else { return base }
         let current = min(transferQueue.items.filter { $0.stage == .done }.count + 1, total)
         return "\(base) (\(current)/\(total))"
+    }
+
+    private func standardImportTitle(_ progress: ImportSessionProgress) -> String {
+        if progress.isCancelling {
+            return String(localized: "Cancelling import…")
+        }
+        let step = progress.step.localizedProgressLabel
+        if let filename = progress.currentFilename {
+            return String(
+                localized: "Importing \(progress.completedCount) of \(progress.requestedCount): \(filename) — \(step)…"
+            )
+        }
+        return String(
+            localized: "Importing \(progress.completedCount) of \(progress.requestedCount) — \(step)…"
+        )
     }
 
     private var activeToasts: [Toast] {
@@ -138,7 +182,7 @@ struct LibraryStatusToasts: View {
             toasts.append(Toast(id: "calibre", style: style, message: summary))
         }
 
-        if viewModel.isExtracting {
+        if viewModel.isExtracting, viewModel.standardImportProgress == nil {
             toasts.append(Toast(id: "extract", style: .progress,
                                 message: theme.copy.extracting(remaining: viewModel.pendingMetadataCount)))
         }
@@ -232,8 +276,43 @@ struct LibraryStatusToasts: View {
         switch action {
         case .reviewEditionProposals:
             onReviewEditions()
+        case .reviewImport:
+            onReviewImport()
+        case .relinkBook(let bookID), .attachDigitalFile(let bookID):
+            onResolveDigitalFile(bookID)
         }
         if let id = toast.messageID { toastCenter.dismiss(id) }
+    }
+}
+
+private extension ImportSessionStep {
+    var localizedProgressLabel: String {
+        switch self {
+        case .sourceDiscovery:
+            String(localized: "discovering sources")
+        case .staging:
+            String(localized: "staging files")
+        case .inspection:
+            String(localized: "inspecting files")
+        case .reconciliation:
+            String(localized: "reconciling editions")
+        case .modelProposal:
+            String(localized: "preparing catalog changes")
+        case .chunkCommit:
+            String(localized: "saving imported books")
+        case .publishing:
+            String(localized: "publishing library changes")
+        case .derivedJobs:
+            String(localized: "scheduling metadata work")
+        case .cancelling:
+            String(localized: "cancelling")
+        case .cancelled:
+            String(localized: "cancelled")
+        case .failed:
+            String(localized: "failed")
+        case .completed:
+            String(localized: "completed")
+        }
     }
 }
 
@@ -313,6 +392,9 @@ private struct ToastCard: View {
     private var actionTitle: LocalizedStringResource {
         switch toast.action {
         case .reviewEditionProposals: "Review"
+        case .reviewImport: "Review"
+        case .relinkBook: "Relink"
+        case .attachDigitalFile: "Attach"
         case nil: "Open"
         }
     }
