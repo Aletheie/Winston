@@ -23,8 +23,8 @@ private struct BookFileDragModifier: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if let fileURL = book.primaryFileURL {
-            content.draggable(BookDragItem(bookID: book.uuid, fileURL: fileURL))
+        if book.hasCatalogDigitalFile {
+            content.draggable(BookDragItem(bookID: book.uuid, fileURL: book.fileURL))
         } else {
             content
         }
@@ -52,14 +52,6 @@ struct BookGridView: View {
     private var missingUUIDs: Set<UUID> { health.missingFileUUIDs }
 
     private var columns: [GridItem] { WinstonLayout.coverGridColumns(zoom: settings.gridZoom) }
-
-    private var convertibleInSelection: Int {
-        books.filter { selection.isSelected($0) && EbookConverter.needsConversion(format: $0.format) }.count
-    }
-
-    private var onDeviceInSelection: Int {
-        books.filter { selection.isSelected($0) && $0.isOnDevice(fileNames: deviceFileNames) }.count
-    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -121,12 +113,10 @@ struct BookGridView: View {
                     .contextMenu {
                         BookContextMenu(
                             book: book,
-                            selectionCount: selection.count,
+                            availability: actionAvailability(for: book),
                             isInSelection: selection.isSelected(book),
-                            convertibleInSelection: convertibleInSelection,
                             collections: collections,
                             isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
-                            onDeviceInSelection: onDeviceInSelection,
                             actions: actions
                         )
                     }
@@ -137,7 +127,7 @@ struct BookGridView: View {
                     .accessibilityAction(named: Text("Delete")) {
                         actions.delete(book)
                     }
-                    .accessibilityHint(book.hasDigitalFile
+                    .accessibilityHint(book.hasCatalogDigitalFile
                         ? "Press Return to open in Reader"
                         : "Physical copy without a digital file")
                 }
@@ -160,5 +150,34 @@ struct BookGridView: View {
         }
         let destination = min(max(index + offset, books.startIndex), books.index(before: books.endIndex))
         focusedBookID = books[destination].id
+    }
+
+    private func actionAvailability(for book: Book) -> BookActionAvailability {
+        let targets = selection.count > 1 && selection.isSelected(book)
+            ? books.filter { selection.isSelected($0) }
+            : [book]
+        return BookActionAvailability(
+            selectionCount: targets.count,
+            hasPrimarySelection: true,
+            primaryHasPersistedDigitalFile: book.hasCatalogDigitalFile,
+            persistedDigitalFileCount: targets.filter(\.hasCatalogDigitalFile).count,
+            sendableDigitalFileCount: targets.filter {
+                $0.hasCatalogDigitalFile && $0.primaryDRMProtected != true
+            }.count,
+            drmProtectedDigitalFileCount: targets.filter {
+                $0.hasCatalogDigitalFile && $0.primaryDRMProtected == true
+            }.count,
+            conversionEligibleCount: targets.filter {
+                $0.hasCatalogDigitalFile
+                    && $0.primaryDRMProtected != true
+                    && EbookConverter.needsConversion(format: $0.format)
+                    && conversion.canConvertForKindle($0.format)
+            }.count,
+            calibreAvailable: conversion.isCalibreAvailable,
+            onlineMetadataEnabled: settings.onlineMetadataEnabled,
+            onDeviceSelectionCount: targets.filter {
+                $0.isOnDevice(fileNames: deviceFileNames)
+            }.count
+        )
     }
 }

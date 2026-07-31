@@ -15,13 +15,6 @@ final class BookSelectionModel {
         selectedBookIDs.contains(book.id)
     }
 
-    func primaryBook(in books: [Book]) -> Book? {
-        let id = lastClickedBookID.flatMap { selectedBookIDs.contains($0) ? $0 : nil }
-            ?? selectedBookIDs.first
-        guard let id else { return nil }
-        return books.first { $0.id == id }
-    }
-
     @discardableResult
     func handleClick(on book: Book, in displayedBooks: [Book]) -> Bool {
         let modifiers = NSEvent.modifierFlags

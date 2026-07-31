@@ -9,9 +9,10 @@ struct BookTableView: View {
     let editions: CatalogReconciliationService
     var collections: [BookCollection] = []
     let actions: BookActions
-    @Binding var sortOrder: [KeyPathComparator<Book>]
+    @Binding var sortPreference: LibrarySortPreference
 
     @Environment(\.theme) private var theme
+    @Environment(AppSettings.self) private var settings
     @AppStorage("bookTableColumnCustomization") private var columnCustomization = TableColumnCustomization<Book>()
 
     private var convertingUUIDs: Set<UUID> { conversion.convertingUUIDs }
@@ -19,8 +20,8 @@ struct BookTableView: View {
     var body: some View {
         Table(
             books,
-            selection: $selection.selectedBookIDs,
-            sortOrder: $sortOrder,
+            selection: tableSelection,
+            sortOrder: tableSortOrder,
             columnCustomization: $columnCustomization
         ) {
             TableColumn("") { book in
@@ -130,35 +131,85 @@ struct BookTableView: View {
     @ViewBuilder
     private func menu(for ids: Set<Book.ID>) -> some View {
         let chosen = books.filter { ids.contains($0.id) }
-        let convertible = chosen.filter { $0.hasDigitalFile && EbookConverter.needsConversion(format: $0.format) }.count
-        let onDevice = chosen.filter { $0.isOnDevice(fileNames: deviceFileNames) }.count
-        if chosen.count == 1, let book = chosen.first {
+        if let book = primaryBook(in: chosen) {
             BookContextMenu(
                 book: book,
-                selectionCount: selection.count,
+                availability: actionAvailability(for: chosen, primary: book),
                 isInSelection: selection.isSelected(book),
-                convertibleInSelection: convertible,
                 collections: collections,
                 isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
-                onDeviceInSelection: onDevice,
                 actions: actions
             )
-        } else if chosen.count > 1 {
-            if convertible > 0 {
-                Button { actions.convertSelection() } label: {
-                    Label("Convert \(convertible) for Kindle", systemImage: "arrow.triangle.2.circlepath")
-                }
-                Divider()
-            }
-            if onDevice > 0 {
-                Button(role: .destructive) { actions.removeSelectionFromDevice() } label: {
-                    Label("Remove \(onDevice) from Kindle", systemImage: "externaldrive.badge.minus")
-                }
-            }
-            Button(role: .destructive) { actions.deleteSelection() } label: {
-                Label("Delete \(chosen.count) Books", systemImage: "trash")
-            }
         }
+    }
+
+    private var tableSelection: Binding<Set<Book.ID>> {
+        Binding(
+            get: { selection.selectedBookIDs },
+            set: { newSelection in
+                let added = newSelection.subtracting(selection.selectedBookIDs)
+                selection.selectedBookIDs = newSelection
+                if let addedID = added.first {
+                    selection.lastClickedBookID = addedID
+                } else if let lastClicked = selection.lastClickedBookID,
+                          !newSelection.contains(lastClicked) {
+                    selection.lastClickedBookID = newSelection.first
+                }
+            }
+        )
+    }
+
+    /// SwiftUI's Table sorting API still speaks in comparators. Keep that bridge
+    /// here so the rest of the library uses a stable, persistable preference.
+    private var tableSortOrder: Binding<[KeyPathComparator<Book>]> {
+        Binding(
+            get: { [sortPreference.comparator] },
+            set: { newOrder in
+                guard let comparator = newOrder.first else { return }
+                let ascending = comparator.order == .forward
+                guard let field = BookSort.allCases.first(where: {
+                    comparator == $0.comparator(ascending: ascending)
+                }) else { return }
+                sortPreference = LibrarySortPreference(field: field, ascending: ascending)
+            }
+        )
+    }
+
+    private func primaryBook(in books: [Book]) -> Book? {
+        if let lastClicked = selection.lastClickedBookID,
+           let primary = books.first(where: { $0.id == lastClicked }) {
+            return primary
+        }
+        return books.first
+    }
+
+    private func actionAvailability(
+        for books: [Book],
+        primary: Book
+    ) -> BookActionAvailability {
+        BookActionAvailability(
+            selectionCount: books.count,
+            hasPrimarySelection: true,
+            primaryHasPersistedDigitalFile: primary.hasCatalogDigitalFile,
+            persistedDigitalFileCount: books.filter(\.hasCatalogDigitalFile).count,
+            sendableDigitalFileCount: books.filter {
+                $0.hasCatalogDigitalFile && $0.primaryDRMProtected != true
+            }.count,
+            drmProtectedDigitalFileCount: books.filter {
+                $0.hasCatalogDigitalFile && $0.primaryDRMProtected == true
+            }.count,
+            conversionEligibleCount: books.filter {
+                $0.hasCatalogDigitalFile
+                    && $0.primaryDRMProtected != true
+                    && EbookConverter.needsConversion(format: $0.format)
+                    && conversion.canConvertForKindle($0.format)
+            }.count,
+            calibreAvailable: conversion.isCalibreAvailable,
+            onlineMetadataEnabled: settings.onlineMetadataEnabled,
+            onDeviceSelectionCount: books.filter {
+                $0.isOnDevice(fileNames: deviceFileNames)
+            }.count
+        )
     }
 
     private func columnTitle(_ native: LocalizedStringKey, terminal: String) -> LocalizedStringKey {
