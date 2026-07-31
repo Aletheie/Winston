@@ -6,11 +6,14 @@ struct WorkMergePicker: View {
     let service: CatalogReconciliationService
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.theme) private var theme
-    @Query(sort: \Work.title) private var works: [Work]
     @State private var searchText = ""
     @State private var target: Work?
     @State private var isConfirmingMerge = false
+    @State private var candidates: [Work] = []
+    @State private var isLoading = false
+    @State private var loadError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,24 +27,39 @@ struct WorkMergePicker: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
             Divider()
-            List(filteredWorks) { candidate in
-                Button {
-                    requestMerge(of: candidate)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(candidate.displayTitle)
-                            .font(theme.body(size: 12, weight: .medium))
-                        HStack(spacing: 4) {
-                            if let author = candidate.author, !author.isEmpty {
-                                Text(author)
+            Group {
+                if isLoading, candidates.isEmpty {
+                    ProgressView("Loading works…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let loadError {
+                    ContentUnavailableView {
+                        Label("Couldn’t Load Works", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(loadError)
+                    } actions: {
+                        Button("Try Again") { Task { await loadCandidates() } }
+                    }
+                } else {
+                    List(candidates) { candidate in
+                        Button {
+                            requestMerge(of: candidate)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(candidate.displayTitle)
+                                    .font(theme.body(size: 12, weight: .medium))
+                                HStack(spacing: 4) {
+                                    if let author = candidate.author, !author.isEmpty {
+                                        Text(author)
+                                    }
+                                    Text("\(candidate.editions.count) editions")
+                                }
+                                .font(theme.label(size: 10))
+                                .foregroundStyle(theme.textSecondary)
                             }
-                            Text("\(candidate.editions.count) editions")
                         }
-                        .font(theme.label(size: 10))
-                        .foregroundStyle(theme.textSecondary)
+                        .buttonStyle(.plain)
                     }
                 }
-                .buttonStyle(.plain)
             }
             .searchable(text: $searchText)
             Divider()
@@ -65,14 +83,43 @@ struct WorkMergePicker: View {
         } message: { candidate in
             Text("The editions of “\(candidate.displayTitle)” move into “\(work.displayTitle)”. No files are moved or deleted.")
         }
+        .task(id: searchText) {
+            if !searchText.isEmpty {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+            }
+            await loadCandidates()
+        }
     }
 
-    private var filteredWorks: [Work] {
-        let candidates = works.filter { $0.uuid != work.uuid }
-        guard !searchText.isEmpty else { return candidates }
+    private func loadCandidates() async {
+        isLoading = true
+        defer { isLoading = false }
+        let excludedID = work.uuid
         let key = searchText.normalizedMatchKey
-        return candidates.filter {
-            $0.displayTitle.normalizedMatchKey.contains(key) || ($0.matchKey ?? "").contains(key)
+        var descriptor: FetchDescriptor<Work>
+        if key.isEmpty {
+            descriptor = FetchDescriptor<Work>(
+                predicate: #Predicate { $0.uuid != excludedID },
+                sortBy: [SortDescriptor(\Work.title)]
+            )
+        } else {
+            descriptor = FetchDescriptor<Work>(
+                predicate: #Predicate {
+                    $0.uuid != excludedID
+                        && ($0.matchKey?.contains(key) == true)
+                },
+                sortBy: [SortDescriptor(\Work.title)]
+            )
+        }
+        descriptor.fetchLimit = 100
+        descriptor.relationshipKeyPathsForPrefetching = [\Work.editions]
+        do {
+            candidates = try modelContext.fetch(descriptor)
+            loadError = nil
+        } catch {
+            candidates = []
+            loadError = error.localizedDescription
         }
     }
 

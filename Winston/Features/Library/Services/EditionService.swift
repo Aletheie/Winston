@@ -3,16 +3,83 @@ import Observation
 import OSLog
 import SwiftData
 
+private nonisolated struct EditionCandidatePage: Sendable {
+    let candidates: [EditionCandidate]
+    let lastDateAdded: Date?
+    let trailingLastDateCount: Int
+}
+
+@ModelActor
+private actor EditionCandidatePageLoader {
+    func loadPage(
+        startingAt cursorDate: Date?,
+        skippingAtCursor: Int,
+        limit: Int
+    ) throws -> EditionCandidatePage {
+        var descriptor: FetchDescriptor<Book>
+        if let cursorDate {
+            descriptor = FetchDescriptor<Book>(
+                predicate: #Predicate { $0.dateAdded >= cursorDate },
+                sortBy: [
+                    SortDescriptor(\Book.dateAdded),
+                    SortDescriptor(\Book.uuid),
+                ]
+            )
+            descriptor.fetchOffset = skippingAtCursor
+        } else {
+            descriptor = FetchDescriptor<Book>(
+                sortBy: [
+                    SortDescriptor(\Book.dateAdded),
+                    SortDescriptor(\Book.uuid),
+                ]
+            )
+        }
+        descriptor.fetchLimit = max(1, limit)
+        descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
+        let books = try modelContext.fetch(descriptor)
+        let lastDateAdded = books.last?.dateAdded
+        let trailingLastDateCount = lastDateAdded.map { date in
+            books.reversed().prefix { $0.dateAdded == date }.count
+        } ?? 0
+        return EditionCandidatePage(
+            candidates: books.map(Self.candidate),
+            lastDateAdded: lastDateAdded,
+            trailingLastDateCount: trailingLastDateCount
+        )
+    }
+
+    private static func candidate(_ book: Book) -> EditionCandidate {
+        let primaryAsset = book.primaryAsset
+        return EditionCandidate(
+            uuid: book.uuid,
+            workUUID: book.work?.uuid,
+            title: book.displayTitle,
+            author: book.author,
+            language: book.language,
+            translator: book.translator,
+            isbn: book.isbn,
+            publisher: book.publisher,
+            year: book.year,
+            format: book.format,
+            sizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
+            contentHashes: Set(book.assets.compactMap(\.contentHash)),
+            openLibraryWorkKey: book.work?.openLibraryWorkKey,
+            workMatchKey: book.work?.expectedMatchKey
+        )
+    }
+}
+
 @MainActor
 @Observable
 final class CatalogReconciliationService {
     private let modelContext: ModelContext
     private let defaults: UserDefaults
-    private let covers: CoverRepository
+    private let coverMutations: CoverMutationCoordinator
     private let mutations: CatalogMutationService
     private let managedFiles: ManagedFileCoordinator
     private let toasts: ToastCenter?
     private let mutationLog: LibraryMutationLog
+    private let candidatePageLoader: EditionCandidatePageLoader
     private let dismissedDefaultsKey = "editionMatcherDismissedPairKeys"
 
     private(set) var pendingProposals: [EditionMatchProposal] = []
@@ -22,9 +89,12 @@ final class CatalogReconciliationService {
     private(set) var lastEvaluationComparisonCount = 0
     private(set) var lastEvaluationTruncatedBucketCount = 0
     private(set) var lastIndexSynchronizationFetchCount = 0
+    private(set) var lastIndexPageCount = 0
+    private(set) var lastIndexError: String?
     private var dismissedPairKeys: Set<String>
     private var candidateIndex = EditionCandidateIndex()
     private var candidateIndexIsComplete = false
+    @ObservationIgnored private var candidateRefreshTask: Task<Void, Never>?
     private var indexedCatalogRevision: Int
 
     private enum AssetMergePolicy {
@@ -39,8 +109,10 @@ final class CatalogReconciliationService {
     }
 
     private struct CandidateIndexSnapshot {
-        let candidates: [EditionCandidate]
+        let index: EditionCandidateIndex
+        let candidateCount: Int
         let catalogRevision: Int
+        let pageCount: Int
     }
 
     private struct ExactDuplicateEvidence: Hashable, Sendable {
@@ -185,23 +257,32 @@ final class CatalogReconciliationService {
     init(
         modelContext: ModelContext,
         defaults: UserDefaults = .standard,
-        covers: CoverRepository = .shared,
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared,
+        coverMutations: CoverMutationCoordinator? = nil,
         toasts: ToastCenter? = nil,
         mutationLog: LibraryMutationLog = .shared,
         loadEditionCountsImmediately: Bool = true
     ) {
-        self.modelContext = modelContext
-        self.defaults = defaults
-        self.covers = covers
-        self.mutations = mutations ?? CatalogMutationService(
+        let resolvedMutations = mutations ?? CatalogMutationService(
             modelContext: modelContext,
             managedFiles: managedFiles
         )
-        self.managedFiles = managedFiles
+        let resolvedManagedFiles = resolvedMutations.managedFiles
+        self.modelContext = modelContext
+        self.defaults = defaults
+        self.mutations = resolvedMutations
+        self.managedFiles = resolvedManagedFiles
+        self.coverMutations = coverMutations ?? CoverMutationCoordinator.resolve(
+            modelContext: modelContext,
+            mutations: resolvedMutations,
+            managedFiles: resolvedManagedFiles
+        )
         self.toasts = toasts
         self.mutationLog = mutationLog
+        self.candidatePageLoader = EditionCandidatePageLoader(
+            modelContainer: modelContext.container
+        )
         self.indexedCatalogRevision = mutationLog.catalogRevision
         self.dismissedPairKeys = Set(defaults.stringArray(forKey: dismissedDefaultsKey) ?? [])
         if loadEditionCountsImmediately {
@@ -212,16 +293,21 @@ final class CatalogReconciliationService {
     var pendingCount: Int { pendingProposals.count }
 
     func refreshEditionCounts() {
-        ensureCandidateIndex()
+        guard ensureCandidateIndex() else {
+            scheduleCandidateIndexRefresh()
+            return
+        }
         synchronizeCandidateIndex(regenerateProposals: true)
     }
 
     func refreshEditionCountsInChunks(chunkSize: Int = 256) async {
         guard let snapshot = await loadCandidatesInChunks(chunkSize: chunkSize) else { return }
         installCandidateIndex(
-            snapshot.candidates,
+            snapshot.index,
+            candidateCount: snapshot.candidateCount,
             catalogRevision: snapshot.catalogRevision
         )
+        lastIndexPageCount = snapshot.pageCount
         synchronizeCandidateIndex(
             regenerateProposals: true,
             rebuildForMembershipChanges: true
@@ -260,15 +346,29 @@ final class CatalogReconciliationService {
     }
 
     func scanLibrary(chunkSize: Int = 256) async {
+        let signposter = Log.librarySignposter
+        let interval = signposter.beginInterval(
+            "EditionScan",
+            id: signposter.makeSignpostID()
+        )
+        LibraryPerformanceDiagnostics.beginSQLScope("edition_scan_service")
+        defer {
+            LibraryPerformanceDiagnostics.endSQLScope("edition_scan_service")
+            signposter.endInterval("EditionScan", interval)
+        }
         guard let snapshot = await loadCandidatesInChunks(chunkSize: chunkSize) else { return }
         installCandidateIndex(
-            snapshot.candidates,
+            snapshot.index,
+            candidateCount: snapshot.candidateCount,
             catalogRevision: snapshot.catalogRevision
         )
+        lastIndexPageCount = snapshot.pageCount
         synchronizeCandidateIndex(rebuildForMembershipChanges: true)
+        guard candidateIndexIsComplete else { return }
 
         while !Task.isCancelled {
             synchronizeCandidateIndex()
+            guard candidateIndexIsComplete else { return }
             let scanRevision = indexedCatalogRevision
             let candidates = candidateIndex.allCandidates
             let result = await EditionMatcher.scanWithMetrics(candidates)
@@ -288,8 +388,12 @@ final class CatalogReconciliationService {
 
     func evaluate(_ book: Book) {
         guard book.modelContext != nil else { return }
-        ensureCandidateIndex()
+        guard ensureCandidateIndex() else {
+            scheduleCandidateIndexRefresh()
+            return
+        }
         synchronizeCandidateIndex()
+        guard candidateIndexIsComplete else { return }
         let candidate = Self.candidate(book)
         let previousCandidate = candidateIndex.candidate(id: candidate.uuid)
         apply(candidateIndex.update(candidate))
@@ -310,8 +414,12 @@ final class CatalogReconciliationService {
     func evaluate(_ books: [Book]) {
         let books = books.filter { $0.modelContext != nil }
         guard !books.isEmpty else { return }
-        ensureCandidateIndex()
+        guard ensureCandidateIndex() else {
+            scheduleCandidateIndexRefresh()
+            return
+        }
         synchronizeCandidateIndex()
+        guard candidateIndexIsComplete else { return }
         let candidates = books.map(Self.candidate)
         let previousCandidates = candidates.compactMap {
             candidateIndex.candidate(id: $0.uuid)
@@ -726,20 +834,14 @@ final class CatalogReconciliationService {
         guard bookCleanups.count == discardedFileNames.count else { return false }
 
         let winnerCoverOwner = CoverOwner.edition(winner.uuid)
+        let winnerCoverReference = winner.coverReference
         let loserCoverOwner = loser.coverReference.owner
-        let winnerCoverToken = await covers.beginUserMutation(for: winnerCoverOwner)
-        let winnerCoverRollback: CoverRollbackTicket? = if CoverStore.exists(
-            for: winner.coverReference.owner
-        ) {
-            nil
-        } else {
-            await covers.copy(
-                from: loserCoverOwner,
-                using: winnerCoverToken,
-                onlyIfMissing: true
-            )
-        }
-        let coverVersion = winner.coverVersion + (winnerCoverRollback == nil ? 0 : 1)
+        let coverPayload = await Task.detached(priority: .userInitiated) { () -> Data? in
+            guard !CoverStore.exists(for: winnerCoverReference.owner) else {
+                return nil
+            }
+            return CoverStore.loadData(for: loserCoverOwner)
+        }.value
         let transaction: ManagedFileTransaction
         do {
             transaction = try await managedFiles.prepareCleanup(
@@ -748,8 +850,7 @@ final class CatalogReconciliationService {
                     presentBookIDs: [winnerID],
                     absentBookIDs: [loserID],
                     referencedBookFileNames: Set(exactEvidence.map(\.retainedFileName)),
-                    unreferencedBookFileNames: discardedFileNames,
-                    coverVersions: winnerCoverRollback == nil ? [:] : [winnerID: coverVersion]
+                    unreferencedBookFileNames: discardedFileNames
                 ),
                 // A second cover has no lossless catalog representation yet.
                 // Keep the source cover on disk even after a successful copy;
@@ -757,8 +858,27 @@ final class CatalogReconciliationService {
                 cleanups: bookCleanups
             )
         } catch {
-            if let winnerCoverRollback { _ = await covers.rollback(winnerCoverRollback) }
             return false
+        }
+        let preparedCover: PreparedCoverMutation?
+        if let coverPayload {
+            do {
+                preparedCover = try await coverMutations.prepare(
+                    payload: coverPayload,
+                    targetReference: CoverReference(
+                        owner: winnerCoverOwner,
+                        version: winner.coverVersion
+                    ),
+                    selectedBookIDs: [winnerID],
+                    expectedBookReferences: [winnerID: winnerCoverReference],
+                    priority: .user
+                )
+            } catch {
+                await managedFiles.abort(transaction)
+                return false
+            }
+        } else {
+            preparedCover = nil
         }
 
         guard let currentWinner = lookupBook(uuid: winnerID),
@@ -766,105 +886,131 @@ final class CatalogReconciliationService {
               Self.generation(of: currentWinner) == winnerGeneration,
               Self.generation(of: currentLoser) == loserGeneration else {
             await managedFiles.abort(transaction)
-            if let winnerCoverRollback { _ = await covers.rollback(winnerCoverRollback) }
+            if let preparedCover { await coverMutations.abort(preparedCover) }
             return false
         }
 
         var insertedAsset: BookAsset?
-        do {
-            let result = try await mutations.commitFileMutation(
-                .reconcileEditions(
-                    survivorID: winnerID,
-                    removedID: loserID,
-                    removesExactDuplicateFiles: !discardAssetIDs.isEmpty
-                ),
-                transaction: transaction,
-                affectedBookIDs: [winnerID, loserID],
-                affectedWorkIDs: Set([winner.work?.uuid, loser.work?.uuid].compactMap { $0 }),
-                affectedCollectionIDs: Set((winner.collections + loser.collections).map(\.id)),
-                revertingOnFailure: {
-                    preimage.restore(in: modelContext, removing: insertedAsset)
-                }
-            ) {
-                let storedWinner = try mutations.book(id: winnerID)
-                let storedLoser = try mutations.book(id: loserID)
-                guard Self.generation(of: storedWinner) == winnerGeneration,
-                      Self.generation(of: storedLoser) == loserGeneration else {
+        let applyMerge: () throws -> Void = {
+            let storedWinner = try self.mutations.book(id: winnerID)
+            let storedLoser = try self.mutations.book(id: loserID)
+            guard Self.generation(of: storedWinner) == winnerGeneration,
+                  Self.generation(of: storedLoser) == loserGeneration else {
+                throw CatalogMutationError.staleReconciliation
+            }
+            if let expectedProposal {
+                guard self.revalidatedProposal(
+                    between: [storedWinner, storedLoser]
+                ) == expectedProposal else {
                     throw CatalogMutationError.staleReconciliation
                 }
-                if let expectedProposal {
-                    guard revalidatedProposal(between: [storedWinner, storedLoser]) == expectedProposal else {
-                        throw CatalogMutationError.staleReconciliation
+            }
+
+            let losingWork = storedLoser.work
+            let winningFileNames = Set(storedWinner.assets.map(\.fileName))
+            let losingAssets = storedLoser.assets
+            if !storedWinner.hasDigitalFile, storedLoser.hasDigitalFile {
+                storedWinner.fileName = storedLoser.fileName
+                storedWinner.fileSizeBytes = storedLoser.fileSizeBytes
+                storedWinner.drmProtected = storedLoser.drmProtected
+            }
+            if losingAssets.isEmpty,
+               storedLoser.hasDigitalFile,
+               !winningFileNames.contains(storedLoser.fileName) {
+                let asset = BookAsset(
+                    uuid: storedLoser.uuid,
+                    fileName: storedLoser.fileName,
+                    origin: .imported,
+                    sourceProvenance: .legacyMigration,
+                    sizeBytes: storedLoser.fileSizeBytes,
+                    drmProtected: storedLoser.drmProtected,
+                    dateAdded: storedLoser.dateAdded,
+                    book: storedWinner
+                )
+                self.modelContext.insert(asset)
+                insertedAsset = asset
+            } else {
+                for asset in losingAssets {
+                    if discardAssetIDs.contains(asset.uuid) {
+                        self.modelContext.delete(asset)
+                    } else {
+                        asset.book = storedWinner
                     }
                 }
+            }
 
-                let losingWork = storedLoser.work
-                let winningFileNames = Set(storedWinner.assets.map(\.fileName))
-                let losingAssets = storedLoser.assets
-                if !storedWinner.hasDigitalFile, storedLoser.hasDigitalFile {
-                    storedWinner.fileName = storedLoser.fileName
-                    storedWinner.fileSizeBytes = storedLoser.fileSizeBytes
-                    storedWinner.drmProtected = storedLoser.drmProtected
-                }
-                if losingAssets.isEmpty,
-                   storedLoser.hasDigitalFile,
-                   !winningFileNames.contains(storedLoser.fileName) {
-                    let asset = BookAsset(
-                        uuid: storedLoser.uuid,
-                        fileName: storedLoser.fileName,
-                        origin: .imported,
-                        sourceProvenance: .legacyMigration,
-                        sizeBytes: storedLoser.fileSizeBytes,
-                        drmProtected: storedLoser.drmProtected,
-                        dateAdded: storedLoser.dateAdded,
-                        book: storedWinner
-                    )
-                    modelContext.insert(asset)
-                    insertedAsset = asset
-                } else {
-                    for asset in losingAssets {
-                        if discardAssetIDs.contains(asset.uuid) {
-                            modelContext.delete(asset)
-                        } else {
-                            asset.book = storedWinner
-                        }
-                    }
-                }
+            for highlight in storedLoser.highlights { highlight.book = storedWinner }
+            for collection in storedLoser.collections
+            where !collection.books.contains(where: { $0.uuid == storedWinner.uuid }) {
+                collection.books.append(storedWinner)
+            }
+            self.fillEmptyBookMetadata(storedWinner, from: storedLoser)
+            storedWinner.hasPhysicalCopy =
+                storedWinner.hasPhysicalCopy || storedLoser.hasPhysicalCopy
+            if storedWinner.shelfLocation?.isEmpty != false {
+                storedWinner.shelfLocation = storedLoser.shelfLocation
+            }
+            self.mergeReadingHistory(into: storedWinner, from: storedLoser)
 
-                for highlight in storedLoser.highlights { highlight.book = storedWinner }
-                for collection in storedLoser.collections
-                where !collection.books.contains(where: { $0.uuid == storedWinner.uuid }) {
-                    collection.books.append(storedWinner)
-                }
-                fillEmptyBookMetadata(storedWinner, from: storedLoser)
-                storedWinner.hasPhysicalCopy = storedWinner.hasPhysicalCopy || storedLoser.hasPhysicalCopy
-                if storedWinner.shelfLocation?.isEmpty != false {
-                    storedWinner.shelfLocation = storedLoser.shelfLocation
-                }
-                mergeReadingHistory(into: storedWinner, from: storedLoser)
-                if winnerCoverRollback != nil {
-                    storedWinner.coverVersion = coverVersion
-                    guard storedWinner.selectCoverOwner(winnerCoverOwner) else {
-                        throw CatalogMutationError.invalidRequest
-                    }
-                }
-
-                if storedWinner.work?.preferredEditionUUID == loserID {
-                    storedWinner.work?.preferredEditionUUID = winnerID
-                }
-                storedLoser.work = nil
-                modelContext.delete(storedLoser)
-                WorkService.pruneIfOrphaned(losingWork, context: modelContext)
+            if storedWinner.work?.preferredEditionUUID == loserID {
+                storedWinner.work?.preferredEditionUUID = winnerID
+            }
+            storedLoser.work = nil
+            self.modelContext.delete(storedLoser)
+            WorkService.pruneIfOrphaned(
+                losingWork,
+                context: self.modelContext
+            )
+        }
+        let command = CatalogMutationCommand.reconcileEditions(
+            survivorID: winnerID,
+            removedID: loserID,
+            removesExactDuplicateFiles: !discardAssetIDs.isEmpty
+        )
+        let affectedWorkIDs = Set(
+            [winner.work?.uuid, loser.work?.uuid].compactMap { $0 }
+        )
+        let affectedCollectionIDs = Set(
+            (winner.collections + loser.collections).map(\.id)
+        )
+        let rollback = {
+            preimage.restore(
+                in: self.modelContext,
+                removing: insertedAsset
+            )
+        }
+        do {
+            let result: CatalogFileCommitResult
+            if let preparedCover {
+                result = try await coverMutations.commit(
+                    preparedCover,
+                    command: command,
+                    additionalTransactions: [transaction],
+                    affectedBookIDs: [winnerID, loserID],
+                    affectedWorkIDs: affectedWorkIDs,
+                    affectedCollectionIDs: affectedCollectionIDs,
+                    revertingOnFailure: rollback,
+                    applying: applyMerge
+                )
+            } else {
+                result = try await mutations.commitFileMutation(
+                    command,
+                    transaction: transaction,
+                    affectedBookIDs: [winnerID, loserID],
+                    affectedWorkIDs: affectedWorkIDs,
+                    affectedCollectionIDs: affectedCollectionIDs,
+                    revertingOnFailure: rollback,
+                    applying: applyMerge
+                )
             }
             if !result.isFullyPublished {
                 toasts?.info(String(localized: "Edition merge completed; file cleanup will resume automatically."))
             }
         } catch {
-            if let winnerCoverRollback { _ = await covers.rollback(winnerCoverRollback) }
             return false
         }
 
-        await covers.invalidate(for: loserCoverOwner)
+        await coverMutations.invalidate([loserCoverOwner])
         pendingProposals.removeAll { $0.memberUUIDs.contains(loserID) }
         refreshEditionCounts()
         return true
@@ -927,11 +1073,22 @@ final class CatalogReconciliationService {
         return AssetFileSnapshot(assetID: asset.uuid, fileName: asset.fileName, storedSHA256: hash)
     }
 
-    private func ensureCandidateIndex() {
-        guard !candidateIndexIsComplete else { return }
-        rebuildCandidateIndexSynchronously()
+    private func ensureCandidateIndex() -> Bool {
+        candidateIndexIsComplete
     }
 
+    private func scheduleCandidateIndexRefresh() {
+        guard candidateRefreshTask == nil else { return }
+        candidateRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            await refreshEditionCountsInChunks()
+            candidateRefreshTask = nil
+        }
+    }
+
+    /// Compatibility path for explicitly opted-in synchronous initialization.
+    /// Production constructs this service with `loadEditionCountsImmediately`
+    /// disabled and uses the model-actor keyset loader below.
     private func rebuildCandidateIndexSynchronously() {
         var descriptor = FetchDescriptor<Book>(
             sortBy: [
@@ -940,12 +1097,27 @@ final class CatalogReconciliationService {
             ]
         )
         descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
-        guard let books = try? modelContext.fetch(descriptor) else { return }
-        lastIndexSynchronizationFetchCount = books.count
-        installCandidateIndex(
-            books.map(Self.candidate),
-            catalogRevision: mutationLog.catalogRevision
+        let signposter = Log.librarySignposter
+        let interval = signposter.beginInterval(
+            "EditionCandidateFetch",
+            id: signposter.makeSignpostID()
         )
+        do {
+            let books = try modelContext.fetch(descriptor)
+            signposter.endInterval("EditionCandidateFetch", interval)
+            lastIndexError = nil
+            lastIndexSynchronizationFetchCount = books.count
+            installCandidateIndex(
+                books.map(Self.candidate),
+                catalogRevision: mutationLog.catalogRevision
+            )
+        } catch {
+            signposter.endInterval("EditionCandidateFetch", interval)
+            lastIndexError = error.localizedDescription
+            Log.persistence.error(
+                "Synchronous edition candidate fetch failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     private func loadCandidatesInChunks(
@@ -953,30 +1125,61 @@ final class CatalogReconciliationService {
     ) async -> CandidateIndexSnapshot? {
         let catalogRevision = mutationLog.catalogRevision
         var candidates: [EditionCandidate] = []
-        var offset = 0
+        var cursorDate: Date?
+        var skippedAtCursor = 0
+        var pageCount = 0
         let limit = max(1, chunkSize)
         while true {
             guard !Task.isCancelled else { return nil }
-            var descriptor = FetchDescriptor<Book>(
-                sortBy: [
-                    SortDescriptor(\Book.dateAdded),
-                    SortDescriptor(\Book.uuid),
-                ]
+            let signposter = Log.librarySignposter
+            let interval = signposter.beginInterval(
+                "EditionCandidateFetchPage",
+                id: signposter.makeSignpostID()
             )
-            descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
-            descriptor.fetchOffset = offset
-            descriptor.fetchLimit = limit
-            guard let books = try? modelContext.fetch(descriptor) else { return nil }
-            candidates.append(contentsOf: books.map(Self.candidate))
-            offset += books.count
-            guard books.count == limit else { break }
-            await Task.yield()
+            let page: EditionCandidatePage
+            do {
+                page = try await candidatePageLoader.loadPage(
+                    startingAt: cursorDate,
+                    skippingAtCursor: skippedAtCursor,
+                    limit: limit
+                )
+            } catch {
+                signposter.endInterval("EditionCandidateFetchPage", interval)
+                lastIndexError = error.localizedDescription
+                Log.persistence.error(
+                    "Edition candidate page fetch failed: \(error.localizedDescription, privacy: .public)"
+                )
+                return nil
+            }
+            signposter.endInterval("EditionCandidateFetchPage", interval)
+            pageCount += 1
+            candidates.append(contentsOf: page.candidates)
+            guard page.candidates.count == limit,
+                  let lastDateAdded = page.lastDateAdded else {
+                break
+            }
+            if cursorDate == lastDateAdded {
+                skippedAtCursor += page.trailingLastDateCount
+            } else {
+                cursorDate = lastDateAdded
+                skippedAtCursor = page.trailingLastDateCount
+            }
         }
         lastIndexSynchronizationFetchCount = candidates.count
+        let index = await Self.buildCandidateIndex(candidates)
         return CandidateIndexSnapshot(
-            candidates: candidates,
-            catalogRevision: catalogRevision
+            index: index,
+            candidateCount: candidates.count,
+            catalogRevision: catalogRevision,
+            pageCount: pageCount
         )
+    }
+
+    @concurrent
+    private static func buildCandidateIndex(
+        _ candidates: [EditionCandidate]
+    ) async -> EditionCandidateIndex {
+        EditionCandidateIndex(candidates)
     }
 
     private func installCandidateIndex(
@@ -989,6 +1192,19 @@ final class CatalogReconciliationService {
         editionCounts = candidateIndex.editionCounts()
     }
 
+    private func installCandidateIndex(
+        _ index: EditionCandidateIndex,
+        candidateCount: Int,
+        catalogRevision: Int
+    ) {
+        candidateIndex = index
+        candidateIndexIsComplete = true
+        lastIndexError = nil
+        indexedCatalogRevision = catalogRevision
+        lastIndexSynchronizationFetchCount = candidateCount
+        editionCounts = candidateIndex.editionCounts()
+    }
+
     private func synchronizeCandidateIndex(
         regenerateProposals: Bool = false,
         rebuildForMembershipChanges: Bool = false
@@ -997,10 +1213,10 @@ final class CatalogReconciliationService {
         let delta = mutationLog.catalogDelta(since: indexedCatalogRevision)
         guard !delta.isEmpty else { return }
         guard !delta.requiresFullRebuild else {
-            rebuildCandidateIndexSynchronously()
-            // The journal no longer identifies which proposals became stale.
-            // A maintenance scan can rebuild them from the recovered index.
+            candidateIndexIsComplete = false
+            editionCounts = [:]
             pendingProposals.removeAll()
+            scheduleCandidateIndexRefresh()
             return
         }
 
@@ -1009,18 +1225,14 @@ final class CatalogReconciliationService {
             candidateIndex.candidate(id: $0)
         }
         if rebuildForMembershipChanges, delta.changesBookMembership {
-            rebuildCandidateIndexSynchronously()
-            let updatedCandidates = affectedIDs.compactMap {
-                candidateIndex.candidate(id: $0)
-            }
+            candidateIndexIsComplete = false
+            editionCounts = [:]
             invalidateProposals(
                 affectedIDs: affectedIDs,
                 previousCandidates: previousCandidates,
-                updatedCandidates: updatedCandidates
+                updatedCandidates: []
             )
-            if regenerateProposals {
-                evaluateAndLog(updatedCandidates)
-            }
+            scheduleCandidateIndexRefresh()
             return
         }
 
@@ -1109,8 +1321,19 @@ final class CatalogReconciliationService {
     }
 
     private func lookupBook(uuid: UUID) -> Book? {
-        let descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == uuid })
-        return try? modelContext.fetch(descriptor).first
+        var descriptor = FetchDescriptor<Book>(
+            predicate: #Predicate { $0.uuid == uuid }
+        )
+        descriptor.fetchLimit = 1
+        do {
+            return try modelContext.fetch(descriptor).first
+        } catch {
+            lastIndexError = error.localizedDescription
+            Log.persistence.error(
+                "Edition book lookup failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
     }
 
     private func preferredBook(in books: [Book]) -> Book? {
@@ -1137,7 +1360,10 @@ final class CatalogReconciliationService {
     }
 
     private func removeResolvedProposals() {
-        ensureCandidateIndex()
+        guard ensureCandidateIndex() else {
+            scheduleCandidateIndexRefresh()
+            return
+        }
         synchronizeCandidateIndex()
         let index = candidateIndex
         pendingProposals.removeAll { proposal in
@@ -1178,7 +1404,7 @@ final class CatalogReconciliationService {
             sizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
             contentHashes: Set(book.assets.compactMap(\.contentHash)),
             openLibraryWorkKey: book.work?.openLibraryWorkKey,
-            workMatchKey: book.work?.matchKey
+            workMatchKey: book.work?.expectedMatchKey
         )
     }
 

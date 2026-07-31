@@ -1,6 +1,12 @@
 import Foundation
 import SwiftData
 
+nonisolated enum CatalogWorkInvariantViolation: Equatable, Sendable {
+    case staleMatchKey(expected: String?)
+    case danglingPreferredEdition(UUID)
+    case editionPointsToAnotherWork(UUID)
+}
+
 @MainActor
 enum WorkService {
     static func preferredEdition(in work: Work) -> Book? {
@@ -21,6 +27,42 @@ enum WorkService {
         guard work.preferredEditionUUID != repaired else { return false }
         work.preferredEditionUUID = repaired
         return true
+    }
+
+    static func violations(in work: Work) -> [CatalogWorkInvariantViolation] {
+        var result: [CatalogWorkInvariantViolation] = []
+        if work.matchKey != work.expectedMatchKey {
+            result.append(.staleMatchKey(expected: work.expectedMatchKey))
+        }
+        if let preferredEditionUUID = work.preferredEditionUUID,
+           !work.editions.contains(where: { $0.uuid == preferredEditionUUID }) {
+            result.append(.danglingPreferredEdition(preferredEditionUUID))
+        }
+        result.append(contentsOf: work.editions.compactMap { edition in
+            edition.work?.uuid == work.uuid
+                ? nil
+                : .editionPointsToAnotherWork(edition.uuid)
+        })
+        return result
+    }
+
+    /// Repairs only derived/inverse Work state. `Book.work` remains the
+    /// authority for membership, so this never reparents an edition.
+    @discardableResult
+    static func repairCatalogInvariant(_ work: Work) -> Bool {
+        var changed = false
+        let invalidEditionIDs = Set(work.editions.compactMap { edition in
+            edition.work?.uuid == work.uuid ? nil : edition.uuid
+        })
+        if !invalidEditionIDs.isEmpty {
+            work.editions.removeAll { invalidEditionIDs.contains($0.uuid) }
+            changed = true
+        }
+        if work.matchKey != work.expectedMatchKey {
+            work.matchKey = work.expectedMatchKey
+            changed = true
+        }
+        return repairPreferredEditionInvariant(work) || changed
     }
 
     static func pruneIfOrphaned(_ work: Work?, context: ModelContext) {

@@ -45,6 +45,43 @@ struct EditionServiceTests {
         #expect(service.editionCounts[second.uuid] == 2)
     }
 
+    @Test func scanDerivesWorkIdentityInsteadOfTrustingStaleStoredMatchKeys() async throws {
+        let library = try await TestLibrary()
+        let first = insertBook(
+            library,
+            name: "stale-first",
+            title: "Edition One",
+            author: "Edition Author"
+        )
+        let second = insertBook(
+            library,
+            name: "stale-second",
+            title: "Edition Two",
+            author: "Edition Author"
+        )
+        first.work?.title = " Shared  Work "
+        first.work?.author = "José L. Writer"
+        first.work?.matchKey = "legacy-first"
+        second.work?.title = "shared work"
+        second.work?.author = "josé l. writer"
+        second.work?.matchKey = "legacy-second"
+        try library.context.save()
+
+        let service = CatalogReconciliationService(
+            modelContext: library.context
+        )
+        await service.scanLibrary()
+
+        let proposal = try #require(service.pendingProposals.first {
+            Set($0.memberUUIDs) == [first.uuid, second.uuid]
+        })
+        #expect(proposal.verdict == .similarItem)
+        #expect(proposal.confidence == .uncertain)
+        #expect(!proposal.canApply)
+        #expect(first.work?.matchKey == "legacy-first")
+        #expect(second.work?.matchKey == "legacy-second")
+    }
+
     @Test func absorbKeepsFilesAndReparentsAssetsHighlightsAndCollections() async throws {
         let library = try await TestLibrary()
         let winner = insertBook(library, name: "winner", format: "mobi")
@@ -73,6 +110,33 @@ struct EditionServiceTests {
         #expect(winner.translator == "Jan Novák")
         #expect(try library.context.fetchCount(FetchDescriptor<Book>()) == 1)
         #expect(try library.context.fetchCount(FetchDescriptor<Work>()) == 1)
+    }
+
+    @Test func absorbCopiesAMissingCoverThroughTheDurableCoordinator() async throws {
+        let library = try await TestLibrary()
+        let winner = insertBook(library, name: "covered-winner", format: "mobi")
+        let loser = insertBook(library, name: "covered-loser")
+        winner.isbn = "9780441013593"
+        loser.isbn = "9780441013593"
+        loser.coverVersion = 4
+        let sourceData = Data("loser cover".utf8)
+        #expect(CoverStore.restore(sourceData, for: loser.coverReference.owner))
+        try library.context.save()
+        let service = CatalogReconciliationService(modelContext: library.context)
+
+        await service.scanLibrary()
+        let proposal = try #require(service.pendingProposals.first {
+            $0.verdict == .sameEditionOtherFormat
+        })
+        #expect(await service.approve(proposal))
+
+        #expect(winner.coverReference.owner == .edition(winner.uuid))
+        #expect(winner.coverReference.version > 0)
+        #expect(
+            CoverStore.loadData(for: winner.coverReference.owner) == sourceData
+        )
+        #expect(CoverStore.loadData(for: .edition(loser.uuid)) == sourceData)
+        #expect(try library.context.fetchCount(FetchDescriptor<Book>()) == 1)
     }
 
     @Test func mergeEditionsAbsorbsSelectionIntoTheBestEdition() async throws {
@@ -289,7 +353,7 @@ struct EditionServiceTests {
             author: "Indexed Author",
             format: "mobi"
         )
-        try library.context.saveAndPublish(
+        try library.context.fixtureSaveAndPublish(
             affectedBookIDs: [changed.uuid],
             changesBookMembership: true
         )
@@ -307,11 +371,35 @@ struct EditionServiceTests {
         changed.title = "A Completely Different Title"
         changed.work?.title = changed.title
         changed.work?.refreshMatchKey()
-        try library.context.saveAndPublish(affectedBookIDs: [changed.uuid])
+        try library.context.fixtureSaveAndPublish(affectedBookIDs: [changed.uuid])
         service.refreshEditionCounts()
 
         #expect(service.lastIndexSynchronizationFetchCount == 1)
         #expect(!service.pendingProposals.contains { $0.pairKey == stalePair })
+    }
+
+    @Test func asynchronousCandidateIndexUsesKeysetPagesAcrossEqualDates() async throws {
+        let library = try await TestLibrary()
+        let sharedDate = Date(timeIntervalSince1970: 1_900_000_000)
+        for index in 0..<257 {
+            let book = insertBook(
+                library,
+                name: "keyset-\(index)",
+                title: "Unique \(index)",
+                author: "Author \(index)"
+            )
+            book.dateAdded = sharedDate
+        }
+        try library.context.save()
+        let service = CatalogReconciliationService(
+            modelContext: library.context,
+            loadEditionCountsImmediately: false
+        )
+
+        await service.refreshEditionCountsInChunks(chunkSize: 32)
+
+        #expect(service.lastIndexSynchronizationFetchCount == 257)
+        #expect(service.lastIndexPageCount == 9)
     }
 
     @Test func incrementalCountsStayConsistentAfterGroupingAndDelete() async throws {
@@ -329,7 +417,7 @@ struct EditionServiceTests {
 
         second.work = nil
         library.context.delete(second)
-        try library.context.saveAndPublish(
+        try library.context.fixtureSaveAndPublish(
             affectedBookIDs: [second.uuid],
             changesBookMembership: true
         )
@@ -521,6 +609,9 @@ struct EditionServiceTests {
         let mobi = insertBook(library, name: "failed-mobi", format: "mobi")
         epub.isbn = "9780441013593"
         mobi.isbn = "9780441013593"
+        epub.coverVersion = 3
+        let sourceCover = Data("source cover".utf8)
+        #expect(CoverStore.restore(sourceCover, for: epub.coverReference.owner))
         try Data("epub".utf8).write(to: BookFileStore.url(for: epub.fileName))
         try Data("mobi".utf8).write(to: BookFileStore.url(for: mobi.fileName))
         try library.context.save()
@@ -547,6 +638,8 @@ struct EditionServiceTests {
         #expect(mobi.assets.count == 1)
         #expect(!library.context.hasChanges)
         #expect(await coordinator.pendingTransactions().isEmpty)
+        #expect(!CoverStore.exists(for: .edition(mobi.uuid)))
+        #expect(CoverStore.loadData(for: .edition(epub.uuid)) == sourceCover)
         #expect(FileManager.default.fileExists(atPath: BookFileStore.url(for: epub.fileName).path(percentEncoded: false)))
         #expect(FileManager.default.fileExists(atPath: BookFileStore.url(for: mobi.fileName).path(percentEncoded: false)))
     }
