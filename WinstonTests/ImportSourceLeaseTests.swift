@@ -26,12 +26,13 @@ struct ImportSourceLeaseTests {
             sizeBytes: 9
         )
 
-        let first = try #require(
-            await queue.copyToLibrary(deviceBook, via: monitor)
+        let leases = await queue.copyToLibrary(
+            [deviceBook, deviceBook],
+            via: monitor
         )
-        let second = try #require(
-            await queue.copyToLibrary(deviceBook, via: monitor)
-        )
+        #expect(leases.count == 2)
+        let first = try #require(leases.first)
+        let second = try #require(leases.last)
 
         #expect(first.directoryURL != second.directoryURL)
         #expect(first.fileURL.lastPathComponent == second.fileURL.lastPathComponent)
@@ -59,6 +60,68 @@ struct ImportSourceLeaseTests {
         ))
         #expect(!FileManager.default.fileExists(
             atPath: second.directoryURL.path(percentEncoded: false)
+        ))
+    }
+
+    @Test func sessionSpecificCancellationLeavesOtherImportRunning() async throws {
+        let library = try await TestLibrary()
+        let store = ImportSourceLeaseStore(
+            rootDirectory: library.root.appending(
+                path: "ManagedFiles/DeviceImportLeases",
+                directoryHint: .isDirectory
+            )
+        )
+        let firstLease = try makeLease(
+            named: "Cancel-Only-This.epub",
+            contents: "first",
+            store: store
+        )
+        let secondLease = try makeLease(
+            named: "Keep-Running.epub",
+            contents: "second",
+            store: store
+        )
+        let started = AsyncStream<String>.makeStream()
+        let gate = ImportAnalysisGate(started: started.continuation)
+        let importer = makeImporter(
+            in: library,
+            leaseStore: store,
+            analyzeBook: { url in
+                await gate.analyze(url)
+            }
+        )
+        let firstCompletion = AsyncStream<Int>.makeStream()
+        let secondCompletion = AsyncStream<Int>.makeStream()
+        let firstSession = try #require(importer.addBooks(
+            from: [.winstonOwned(firstLease)]
+        ) { books in
+            firstCompletion.continuation.yield(books.count)
+            firstCompletion.continuation.finish()
+        })
+        let secondSession = try #require(importer.addBooks(
+            from: [.winstonOwned(secondLease)]
+        ) { books in
+            secondCompletion.continuation.yield(books.count)
+            secondCompletion.continuation.finish()
+        })
+
+        var startedIterator = started.stream.makeAsyncIterator()
+        _ = await startedIterator.next()
+        _ = await startedIterator.next()
+        importer.cancelImportSession(id: firstSession.id)
+        await gate.resumeAll()
+
+        var firstIterator = firstCompletion.stream.makeAsyncIterator()
+        var secondIterator = secondCompletion.stream.makeAsyncIterator()
+        #expect(await firstIterator.next() == 0)
+        #expect(await secondIterator.next() == 1)
+        #expect(firstSession.step == .cancelled)
+        #expect(secondSession.step == .completed)
+        #expect(!FileManager.default.fileExists(
+            atPath: firstLease.directoryURL.path(percentEncoded: false)
+        ))
+        #expect(!FileManager.default.fileExists(
+            atPath: secondLease.directoryURL.path(percentEncoded: false)
         ))
     }
 
@@ -263,5 +326,33 @@ struct ImportSourceLeaseTests {
         let lease = try store.create(fileName: leaf, createdAt: createdAt)
         try Data(contents.utf8).write(to: lease.fileURL)
         return lease
+    }
+}
+
+private actor ImportAnalysisGate {
+    private let started: AsyncStream<String>.Continuation
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    init(started: AsyncStream<String>.Continuation) {
+        self.started = started
+    }
+
+    func analyze(_ url: URL) async -> ImportBookAnalysis {
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+            started.yield(url.lastPathComponent)
+        }
+        return ImportBookAnalysis(
+            metadata: BookMetadata(),
+            drmProtected: false
+        )
+    }
+
+    func resumeAll() {
+        let pending = continuations
+        continuations = []
+        for continuation in pending {
+            continuation.resume()
+        }
     }
 }

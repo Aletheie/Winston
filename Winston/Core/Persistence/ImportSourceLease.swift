@@ -1,11 +1,44 @@
 import Foundation
 import OSLog
 
+nonisolated enum ImportSourceLeasePurpose:
+    String,
+    Codable,
+    Sendable,
+    Equatable,
+    Hashable
+{
+    case deviceImport
+    case catalogDownload
+
+    var directoryPrefix: String {
+        switch self {
+        case .deviceImport: "lease"
+        case .catalogDownload: "opds-lease"
+        }
+    }
+}
+
 nonisolated struct WinstonImportSourceLease: Sendable, Equatable, Hashable {
     let id: UUID
     let directoryURL: URL
     let fileURL: URL
     let createdAt: Date
+    let purpose: ImportSourceLeasePurpose
+
+    init(
+        id: UUID,
+        directoryURL: URL,
+        fileURL: URL,
+        createdAt: Date,
+        purpose: ImportSourceLeasePurpose = .deviceImport
+    ) {
+        self.id = id
+        self.directoryURL = directoryURL
+        self.fileURL = fileURL
+        self.createdAt = createdAt
+        self.purpose = purpose
+    }
 }
 
 nonisolated enum ImportSource: Sendable, Equatable {
@@ -33,6 +66,37 @@ nonisolated struct ImportSourceLeaseStore: Sendable {
         let id: UUID
         let fileName: String
         let createdAt: Date
+        let purpose: ImportSourceLeasePurpose
+
+        private enum CodingKeys: String, CodingKey {
+            case version, id, fileName, createdAt, purpose
+        }
+
+        init(
+            version: Int,
+            id: UUID,
+            fileName: String,
+            createdAt: Date,
+            purpose: ImportSourceLeasePurpose
+        ) {
+            self.version = version
+            self.id = id
+            self.fileName = fileName
+            self.createdAt = createdAt
+            self.purpose = purpose
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            version = try container.decode(Int.self, forKey: .version)
+            id = try container.decode(UUID.self, forKey: .id)
+            fileName = try container.decode(String.self, forKey: .fileName)
+            createdAt = try container.decode(Date.self, forKey: .createdAt)
+            purpose = try container.decodeIfPresent(
+                ImportSourceLeasePurpose.self,
+                forKey: .purpose
+            ) ?? .deviceImport
+        }
     }
 
     static let staleLeaseAge: TimeInterval = 7 * 24 * 60 * 60
@@ -46,14 +110,15 @@ nonisolated struct ImportSourceLeaseStore: Sendable {
     func create(
         fileName: ManagedLeafName,
         id: UUID = UUID(),
-        createdAt: Date = .now
+        createdAt: Date = .now,
+        purpose: ImportSourceLeasePurpose = .deviceImport
     ) throws -> WinstonImportSourceLease {
         try FileManager.default.createDirectory(
             at: rootDirectory,
             withIntermediateDirectories: true
         )
         let directory = rootDirectory.appending(
-            path: "lease-\(id.uuidString)",
+            path: "\(purpose.directoryPrefix)-\(id.uuidString)",
             directoryHint: .isDirectory
         )
         try FileManager.default.createDirectory(
@@ -64,7 +129,8 @@ nonisolated struct ImportSourceLeaseStore: Sendable {
             version: 1,
             id: id,
             fileName: fileName.rawValue,
-            createdAt: createdAt
+            createdAt: createdAt,
+            purpose: purpose
         )
         do {
             let data = try JSONEncoder().encode(marker)
@@ -81,14 +147,16 @@ nonisolated struct ImportSourceLeaseStore: Sendable {
             id: id,
             directoryURL: directory,
             fileURL: fileURL,
-            createdAt: createdAt
+            createdAt: createdAt,
+            purpose: purpose
         )
     }
 
     func remove(_ lease: WinstonImportSourceLease) throws {
         let directory = lease.directoryURL.standardizedFileURL
         guard directory.deletingLastPathComponent() == rootDirectory,
-              directory.lastPathComponent == "lease-\(lease.id.uuidString)",
+              directory.lastPathComponent
+                == "\(lease.purpose.directoryPrefix)-\(lease.id.uuidString)",
               lease.fileURL.standardizedFileURL.deletingLastPathComponent()
                 == directory else {
             throw CocoaError(.fileReadInvalidFileName)
@@ -96,7 +164,8 @@ nonisolated struct ImportSourceLeaseStore: Sendable {
         let marker = try readMarker(in: directory)
         guard marker.version == 1,
               marker.id == lease.id,
-              marker.fileName == lease.fileURL.lastPathComponent else {
+              marker.fileName == lease.fileURL.lastPathComponent,
+              marker.purpose == lease.purpose else {
             throw CocoaError(.fileReadCorruptFile)
         }
         try FileManager.default.removeItem(at: directory)
@@ -130,7 +199,8 @@ nonisolated struct ImportSourceLeaseStore: Sendable {
                   let marker = try? readMarker(in: directory),
                   marker.version == 1,
                   marker.createdAt < cutoff,
-                  directory.lastPathComponent == "lease-\(marker.id.uuidString)",
+                  directory.lastPathComponent
+                    == "\(marker.purpose.directoryPrefix)-\(marker.id.uuidString)",
                   marker.fileName == directory
                     .appending(path: marker.fileName)
                     .lastPathComponent else {
@@ -140,7 +210,8 @@ nonisolated struct ImportSourceLeaseStore: Sendable {
                 id: marker.id,
                 directoryURL: directory,
                 fileURL: directory.appending(path: marker.fileName),
-                createdAt: marker.createdAt
+                createdAt: marker.createdAt,
+                purpose: marker.purpose
             )
             do {
                 try remove(lease)
