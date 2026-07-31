@@ -1,50 +1,22 @@
 import Foundation
 
-nonisolated struct OPDSCatalog: Identifiable, Hashable, Sendable {
-    enum Kind: String, Hashable, Sendable {
-        case projectGutenberg
-        case standardEbooks
-    }
+nonisolated enum OPDSDocumentFormat: String, Codable, Equatable, Sendable {
+    case opds1
+    case opds2
+    case atom
+}
 
-    let kind: Kind
-    let name: String
-    let rootURL: URL
-    let searchTemplate: String?
+nonisolated enum OPDSSearchLink: Equatable, Sendable {
+    case template(String)
+    case openSearchDescription(URL)
+}
 
-    var id: Kind { kind }
-
-    static let builtIn: [OPDSCatalog] = [
-        OPDSCatalog(
-            kind: .projectGutenberg,
-            name: "Project Gutenberg",
-            rootURL: URL(string: "https://www.gutenberg.org/ebooks.opds/")!,
-            searchTemplate: "https://www.gutenberg.org/ebooks/search.opds/?query={searchTerms}"
-        ),
-        OPDSCatalog(
-            kind: .standardEbooks,
-            name: "Standard Ebooks",
-            rootURL: URL(string: "https://standardebooks.org/feeds/atom/new-releases")!,
-            searchTemplate: nil
-        ),
-    ]
-
-    var rootShortcuts: [OPDSNavigationItem] {
-        guard kind == .projectGutenberg else { return [] }
-        return [
-            OPDSNavigationItem(
-                title: String(localized: "Czech books"),
-                subtitle: String(localized: "Project Gutenberg books in Czech"),
-                url: URL(string: "https://www.gutenberg.org/ebooks/search.opds/?query=l.cs")!,
-                coverURL: nil
-            ),
-            OPDSNavigationItem(
-                title: String(localized: "All books"),
-                subtitle: String(localized: "Browse the complete Project Gutenberg catalog"),
-                url: URL(string: "https://www.gutenberg.org/ebooks/search.opds/")!,
-                coverURL: nil
-            ),
-        ]
-    }
+nonisolated struct OPDSFeedCapabilities: Equatable, Sendable {
+    let hasBrowseNavigation: Bool
+    let hasRemoteSearch: Bool
+    let hasPagination: Bool
+    let hasAcquisitions: Bool
+    let documentFormat: OPDSDocumentFormat
 }
 
 nonisolated struct OPDSFeed: Equatable, Sendable {
@@ -53,9 +25,43 @@ nonisolated struct OPDSFeed: Equatable, Sendable {
     let navigation: [OPDSNavigationItem]
     let publications: [OPDSPublication]
     let nextURL: URL?
-    let searchTemplate: String?
+    let searchLink: OPDSSearchLink?
+    let documentFormat: OPDSDocumentFormat
+
+    init(
+        title: String,
+        subtitle: String?,
+        navigation: [OPDSNavigationItem],
+        publications: [OPDSPublication],
+        nextURL: URL?,
+        searchLink: OPDSSearchLink? = nil,
+        documentFormat: OPDSDocumentFormat = .opds1
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.navigation = navigation
+        self.publications = publications
+        self.nextURL = nextURL
+        self.searchLink = searchLink
+        self.documentFormat = documentFormat
+    }
 
     var isEmpty: Bool { navigation.isEmpty && publications.isEmpty }
+    var searchTemplate: String? {
+        guard case .template(let template) = searchLink else { return nil }
+        return template
+    }
+    var capabilities: OPDSFeedCapabilities {
+        OPDSFeedCapabilities(
+            hasBrowseNavigation: !navigation.isEmpty,
+            hasRemoteSearch: searchLink != nil,
+            hasPagination: nextURL != nil,
+            hasAcquisitions: publications.contains {
+                !$0.acquisitions.isEmpty
+            },
+            documentFormat: documentFormat
+        )
+    }
 
     func prependingNavigation(_ items: [OPDSNavigationItem]) -> OPDSFeed {
         guard !items.isEmpty else { return self }
@@ -67,7 +73,8 @@ nonisolated struct OPDSFeed: Equatable, Sendable {
             navigation: items + remaining,
             publications: publications,
             nextURL: nextURL,
-            searchTemplate: searchTemplate
+            searchLink: searchLink,
+            documentFormat: documentFormat
         )
     }
 
@@ -90,7 +97,8 @@ nonisolated struct OPDSFeed: Equatable, Sendable {
             navigation: navigation + newNavigation,
             publications: combinedPublications,
             nextURL: page.nextURL,
-            searchTemplate: searchTemplate ?? page.searchTemplate
+            searchLink: searchLink ?? page.searchLink,
+            documentFormat: documentFormat
         )
     }
 }
@@ -106,12 +114,42 @@ nonisolated struct OPDSNavigationItem: Identifiable, Hashable, Sendable {
 
 nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
     let id: String
+    let identifiers: [String]
     let title: String
     let authors: [String]
     let summary: String?
     let language: String?
+    let subjects: [String]
+    let rights: String?
+    let published: String?
     let coverURL: URL?
     let acquisitions: [OPDSAcquisition]
+
+    init(
+        id: String,
+        identifiers: [String] = [],
+        title: String,
+        authors: [String],
+        summary: String?,
+        language: String?,
+        subjects: [String] = [],
+        rights: String? = nil,
+        published: String? = nil,
+        coverURL: URL?,
+        acquisitions: [OPDSAcquisition]
+    ) {
+        self.id = id
+        self.identifiers = identifiers
+        self.title = title
+        self.authors = authors
+        self.summary = summary
+        self.language = language
+        self.subjects = subjects
+        self.rights = rights
+        self.published = published
+        self.coverURL = coverURL
+        self.acquisitions = acquisitions
+    }
 
     var authorLine: String? {
         let value = authors.joined(separator: ", ").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -119,7 +157,7 @@ nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
     }
 
     var preferredAcquisition: OPDSAcquisition? {
-        acquisitionOptions.first
+        acquisitionOptions.first(where: \.canImport)
     }
 
     var acquisitionOptions: [OPDSAcquisition] {
@@ -141,10 +179,16 @@ nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
         let summaries = [summary, other.summary].compactMap { $0 }
         return OPDSPublication(
             id: mergedID ?? id,
+            identifiers: Self.uniqueStrings(
+                identifiers + other.identifiers
+            ),
             title: title,
             authors: mergedAuthors,
             summary: summaries.max(by: { $0.count < $1.count }),
             language: language ?? other.language,
+            subjects: Self.uniqueStrings(subjects + other.subjects),
+            rights: rights ?? other.rights,
+            published: published ?? other.published,
             coverURL: coverURL ?? other.coverURL,
             acquisitions: mergedAcquisitions
         )
@@ -153,13 +197,58 @@ nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
     func identified(as newID: String) -> OPDSPublication {
         OPDSPublication(
             id: newID,
+            identifiers: identifiers,
             title: title,
             authors: authors,
             summary: summary,
             language: language,
+            subjects: subjects,
+            rights: rights,
+            published: published,
             coverURL: coverURL,
             acquisitions: acquisitions
         )
+    }
+
+    var canonicalISBNs: Set<String> {
+        Set(identifiers.compactMap(MetadataNormalizer.canonicalISBN13))
+    }
+
+    private static func uniqueStrings(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        return values.filter { seen.insert($0).inserted }
+    }
+}
+
+nonisolated enum OPDSAcquisitionRelation:
+    String,
+    Codable,
+    CaseIterable,
+    Hashable,
+    Sendable
+{
+    case openAccess
+    case generic
+    case sample
+    case borrow
+    case buy
+    case subscribe
+    case unknown
+
+    var isDirectlyDownloadable: Bool {
+        self == .openAccess || self == .generic
+    }
+
+    var localizedLabel: String {
+        switch self {
+        case .openAccess: String(localized: "Open access")
+        case .generic: String(localized: "Direct acquisition")
+        case .sample: String(localized: "Sample")
+        case .borrow: String(localized: "Borrow")
+        case .buy: String(localized: "Buy")
+        case .subscribe: String(localized: "Subscribe")
+        case .unknown: String(localized: "Unknown acquisition")
+        }
     }
 }
 
@@ -168,10 +257,22 @@ nonisolated struct OPDSAcquisition: Identifiable, Hashable, Sendable {
     let mediaType: String
     let title: String?
     let fileExtension: String
+    let relation: OPDSAcquisitionRelation
+    let price: Decimal?
+    let currency: String?
+    let isSupportedFormat: Bool
 
-    var id: String { "\(url.absoluteString)|\(mediaType)" }
-    var formatLabel: String { fileExtension.uppercased() }
+    var id: String {
+        "\(url.absoluteString)|\(mediaType)|\(relation.rawValue)"
+    }
+    var formatLabel: String {
+        if !fileExtension.isEmpty { return fileExtension.uppercased() }
+        return mediaType.opdsNonEmpty?.uppercased() ?? "FILE"
+    }
     var optionLabel: String { title ?? formatLabel }
+    var canImport: Bool {
+        relation.isDirectlyDownloadable && isSupportedFormat
+    }
 
     fileprivate var preferenceRank: Int {
         let formatRank = switch fileExtension {
@@ -201,7 +302,10 @@ nonisolated struct OPDSAcquisition: Identifiable, Hashable, Sendable {
     static func make(
         url: URL,
         mediaType rawMediaType: String?,
-        title: String?
+        title: String?,
+        relations: Set<String> = ["acquisition"],
+        price: Decimal? = nil,
+        currency: String? = nil
     ) -> OPDSAcquisition? {
         guard url.isOPDSHTTPURL else { return nil }
         let mediaType = rawMediaType?
@@ -224,13 +328,57 @@ nonisolated struct OPDSAcquisition: Identifiable, Hashable, Sendable {
         default:
             resolvedExtension = Self.supportedExtensions.contains(pathExtension) ? pathExtension : nil
         }
-        guard let resolvedExtension else { return nil }
+        let fallbackExtension = pathExtension.opdsNonEmpty ?? ""
+        let fileExtension = resolvedExtension ?? fallbackExtension
         return OPDSAcquisition(
             url: url,
             mediaType: mediaType,
             title: title?.opdsNonEmpty,
-            fileExtension: resolvedExtension
+            fileExtension: fileExtension,
+            relation: classify(relations),
+            price: price,
+            currency: currency?.uppercased().opdsNonEmpty,
+            isSupportedFormat: resolvedExtension != nil
         )
+    }
+
+    private static func classify(
+        _ rawRelations: Set<String>
+    ) -> OPDSAcquisitionRelation {
+        let relations = Set(rawRelations.map { $0.lowercased() })
+        if relations.contains("download")
+            || relations.contains("http://opds-spec.org/acquisition/open-access")
+            || relations.contains("https://opds-spec.org/acquisition/open-access") {
+            return .openAccess
+        }
+        if relations.contains("preview")
+            || relations.contains("sample")
+            || relations.contains("http://opds-spec.org/acquisition/sample")
+            || relations.contains("https://opds-spec.org/acquisition/sample") {
+            return .sample
+        }
+        if relations.contains("borrow")
+            || relations.contains("http://opds-spec.org/acquisition/borrow")
+            || relations.contains("https://opds-spec.org/acquisition/borrow") {
+            return .borrow
+        }
+        if relations.contains("buy")
+            || relations.contains("http://opds-spec.org/acquisition/buy")
+            || relations.contains("https://opds-spec.org/acquisition/buy") {
+            return .buy
+        }
+        if relations.contains("subscribe")
+            || relations.contains("http://opds-spec.org/acquisition/subscribe")
+            || relations.contains("https://opds-spec.org/acquisition/subscribe") {
+            return .subscribe
+        }
+        if relations.contains("acquisition")
+            || relations.contains("enclosure")
+            || relations.contains("http://opds-spec.org/acquisition")
+            || relations.contains("https://opds-spec.org/acquisition") {
+            return .generic
+        }
+        return .unknown
     }
 
     private static let supportedExtensions: Set<String> = [

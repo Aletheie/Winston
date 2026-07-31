@@ -17,15 +17,43 @@ nonisolated enum OPDSParser {
             return try parseJSON(data, baseURL: baseURL)
         }
         if type.contains("xml") || type.contains("atom") || firstByte == 0x3C {
-            return try parseAtom(data, baseURL: baseURL)
+            return try parseAtom(
+                data,
+                baseURL: baseURL,
+                contentType: type
+            )
         }
         throw ParseError.unsupportedDocument
     }
 
+    static func parseOpenSearch(
+        _ data: Data,
+        baseURL: URL
+    ) throws -> String {
+        let delegate = OpenSearchDescriptionDelegate(baseURL: baseURL)
+        let parser = XMLParser(data: data)
+        parser.delegate = delegate
+        parser.shouldProcessNamespaces = false
+        parser.shouldReportNamespacePrefixes = false
+        guard parser.parse(),
+              parser.parserError == nil,
+              let template = delegate.searchTemplate else {
+            throw ParseError.malformedDocument
+        }
+        return template
+    }
+
     // MARK: - OPDS 1 / Atom
 
-    private static func parseAtom(_ data: Data, baseURL: URL) throws -> OPDSFeed {
-        let delegate = AtomFeedDelegate(baseURL: baseURL)
+    private static func parseAtom(
+        _ data: Data,
+        baseURL: URL,
+        contentType: String
+    ) throws -> OPDSFeed {
+        let delegate = AtomFeedDelegate(
+            baseURL: baseURL,
+            contentType: contentType
+        )
         let parser = XMLParser(data: data)
         parser.delegate = delegate
         parser.shouldProcessNamespaces = false
@@ -74,9 +102,22 @@ nonisolated enum OPDSParser {
 
         let nextURL = document.links.first(where: { $0.relations.contains("next") })
             .flatMap { resolveURL($0.href, baseURL: baseURL) }
-        let searchTemplate = document.links.first(where: {
+        let searchLink = document.links.first(where: {
             $0.relations.contains("search") && ($0.templated || $0.href.contains("{"))
-        }).flatMap { resolveTemplate($0.href, baseURL: baseURL) }
+        }).flatMap { link in
+            resolveTemplate(link.href, baseURL: baseURL).map(
+                OPDSSearchLink.template
+            )
+        } ?? document.links.first(where: {
+            $0.relations.contains("search")
+                && $0.type?.lowercased().contains(
+                    "opensearchdescription"
+                ) == true
+        }).flatMap { link in
+            resolveURL(link.href, baseURL: baseURL).map(
+                OPDSSearchLink.openSearchDescription
+            )
+        }
 
         return OPDSFeed(
             title: document.metadata.title?.opdsNonEmpty ?? "Catalog",
@@ -84,7 +125,8 @@ nonisolated enum OPDSParser {
             navigation: navigation,
             publications: publications,
             nextURL: nextURL,
-            searchTemplate: searchTemplate
+            searchLink: searchLink,
+            documentFormat: .opds2
         )
     }
 
@@ -93,6 +135,10 @@ nonisolated enum OPDSParser {
         let acquisitionLinks = wire.links.filter { link in
             link.relations.contains { relation in
                 relation == "download"
+                    || relation == "preview"
+                    || relation == "borrow"
+                    || relation == "buy"
+                    || relation == "subscribe"
                     || relation == "enclosure"
                     || relation == "acquisition"
                     || relation.hasPrefix("http://opds-spec.org/acquisition")
@@ -102,11 +148,17 @@ nonisolated enum OPDSParser {
         let acquisitions = unique(
             acquisitionLinks.compactMap { link -> OPDSAcquisition? in
                 guard let url = resolveURL(link.href, baseURL: baseURL) else { return nil }
-                return OPDSAcquisition.make(url: url, mediaType: link.type, title: link.title)
+                return OPDSAcquisition.make(
+                    url: url,
+                    mediaType: link.type,
+                    title: link.title,
+                    relations: link.relations,
+                    price: link.properties?.price?.value,
+                    currency: link.properties?.price?.currency
+                )
             },
             by: \.id
         )
-        guard !acquisitions.isEmpty else { return nil }
 
         let coverLinks = wire.images + wire.links.filter { link in
             link.relations.contains { relation in
@@ -116,16 +168,27 @@ nonisolated enum OPDSParser {
         let coverURL = coverLinks.lazy.compactMap { resolveURL($0.href, baseURL: baseURL) }
             .first(where: \.isOPDSHTTPURL)
         let authors = unique(wire.metadata.author.values.compactMap(\.opdsNonEmpty), by: { $0 })
-        let identifier = wire.metadata.identifier?.opdsNonEmpty
+        let identifiers = unique(
+            wire.metadata.identifier.values.compactMap(\.opdsNonEmpty),
+            by: { $0 }
+        )
+        let identifier = identifiers.first
             ?? acquisitions.first?.url.absoluteString
             ?? "\(title)|\(authors.joined(separator: ","))"
 
         return OPDSPublication(
             id: identifier,
+            identifiers: identifiers,
             title: title,
             authors: authors,
             summary: wire.metadata.description?.strippedHTML.opdsNonEmpty,
             language: wire.metadata.language.values.first?.opdsNonEmpty,
+            subjects: unique(
+                wire.metadata.subject.values.compactMap(\.opdsNonEmpty),
+                by: { $0 }
+            ),
+            rights: wire.metadata.rights?.opdsNonEmpty,
+            published: wire.metadata.published?.opdsNonEmpty,
             coverURL: coverURL,
             acquisitions: acquisitions
         )
@@ -209,6 +272,10 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
         case entryTitle
         case entrySummary
         case entryLanguage
+        case entryIdentifier
+        case entrySubject
+        case entryRights
+        case entryPublished
         case entryAuthor
     }
 
@@ -230,11 +297,16 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
         var title: String?
         var summary: String?
         var language: String?
+        var identifiers: [String] = []
+        var subjects: [String] = []
+        var rights: String?
+        var published: String?
         var authors: [String] = []
         var links: [Link] = []
     }
 
     private let baseURL: URL
+    private let contentType: String
     private var depth = 0
     private var authorDepth = 0
     private var capture: Capture?
@@ -246,18 +318,33 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
     private var publications: [OPDSPublication] = []
     private(set) var wasCancelled = false
 
-    init(baseURL: URL) {
+    init(baseURL: URL, contentType: String) {
         self.baseURL = baseURL
+        self.contentType = contentType
     }
 
     var feed: OPDSFeed {
         let nextURL = feedLinks.first(where: { $0.relations.contains("next") })
             .flatMap(resolve)
-        let searchTemplate = feedLinks.first(where: { link in
+        let searchLink = feedLinks.first(where: { link in
             link.relations.contains("search")
                 && link.type?.lowercased().contains("opensearchdescription") != true
                 && link.href.contains("{")
-        }).flatMap { OPDSParser.resolveTemplate($0.href, baseURL: baseURL) }
+        }).flatMap {
+            OPDSParser.resolveTemplate($0.href, baseURL: baseURL).map(
+                OPDSSearchLink.template
+            )
+        } ?? feedLinks.first(where: { link in
+            link.relations.contains("search")
+                && link.type?.lowercased().contains(
+                    "opensearchdescription"
+                ) == true
+        }).flatMap {
+            resolve($0).map(OPDSSearchLink.openSearchDescription)
+        }
+        let isOPDS = contentType.contains("opds")
+            || !navigation.isEmpty
+            || !publications.isEmpty
         return OPDSFeed(
             title: feedTitle?.opdsNonEmpty ?? "Catalog",
             subtitle: feedSubtitle?.strippedHTML.opdsNonEmpty,
@@ -266,7 +353,8 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
                 OPDSParser.unique(publications, by: \.id)
             ),
             nextURL: nextURL,
-            searchTemplate: searchTemplate
+            searchLink: searchLink,
+            documentFormat: isOPDS ? .opds1 : .atom
         )
     }
 
@@ -326,6 +414,15 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
             if currentEntry?.summary == nil { beginCapture(.entrySummary) }
         case "language" where currentEntry != nil:
             beginCapture(.entryLanguage)
+        case "identifier" where currentEntry != nil:
+            beginCapture(.entryIdentifier)
+        case "subject" where currentEntry != nil:
+            beginCapture(.entrySubject)
+        case "rights" where currentEntry != nil:
+            beginCapture(.entryRights)
+        case "published" where currentEntry != nil,
+             "issued" where currentEntry != nil:
+            beginCapture(.entryPublished)
         case "name" where currentEntry != nil && authorDepth > 0:
             beginCapture(.entryAuthor)
         default:
@@ -376,6 +473,12 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
         case .entryTitle: currentEntry?.title = text
         case .entrySummary: currentEntry?.summary = text
         case .entryLanguage: currentEntry?.language = text
+        case .entryIdentifier:
+            if let text { currentEntry?.identifiers.append(text) }
+        case .entrySubject:
+            if let text { currentEntry?.subjects.append(text) }
+        case .entryRights: currentEntry?.rights = text
+        case .entryPublished: currentEntry?.published = text
         case .entryAuthor:
             if let text { currentEntry?.authors.append(text) }
         }
@@ -392,7 +495,12 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
         }
         let acquisitions = acquisitionLinks.compactMap { link -> OPDSAcquisition? in
             guard let url = resolve(link) else { return nil }
-            return OPDSAcquisition.make(url: url, mediaType: link.type, title: link.title)
+            return OPDSAcquisition.make(
+                url: url,
+                mediaType: link.type,
+                title: link.title,
+                relations: link.relations
+            )
         }
         let uniqueAcquisitions = OPDSParser.unique(acquisitions, by: \.id)
         let coverURL = entry.links.lazy
@@ -407,10 +515,20 @@ private nonisolated final class AtomFeedDelegate: NSObject, XMLParserDelegate {
                 ?? "\(title)|\(entry.authors.joined(separator: ","))"
             publications.append(OPDSPublication(
                 id: id,
+                identifiers: OPDSParser.unique(
+                    entry.identifiers + [entry.id].compactMap { $0 },
+                    by: { $0 }
+                ),
                 title: title,
                 authors: OPDSParser.unique(entry.authors.compactMap(\.opdsNonEmpty), by: { $0 }),
                 summary: entry.summary?.strippedHTML.opdsNonEmpty,
                 language: entry.language?.opdsNonEmpty,
+                subjects: OPDSParser.unique(
+                    entry.subjects.compactMap(\.opdsNonEmpty),
+                    by: { $0 }
+                ),
+                rights: entry.rights?.opdsNonEmpty,
+                published: entry.published?.opdsNonEmpty,
                 coverURL: coverURL,
                 acquisitions: uniqueAcquisitions
             ))
@@ -498,14 +616,18 @@ private nonisolated struct JSONMetadata: Decodable {
     var title: String?
     var subtitle: String?
     var description: String?
-    var identifier: String?
+    var identifier = FlexibleStrings()
     var author = FlexibleContributors()
     var language = FlexibleStrings()
+    var subject = FlexibleSubjects()
+    var rights: String?
+    var published: String?
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
         case title, subtitle, description, identifier, author, language
+        case subject, rights, published
     }
 
     init(from decoder: Decoder) throws {
@@ -513,9 +635,21 @@ private nonisolated struct JSONMetadata: Decodable {
         title = try? container.decodeIfPresent(String.self, forKey: .title)
         subtitle = try? container.decodeIfPresent(String.self, forKey: .subtitle)
         description = try? container.decodeIfPresent(String.self, forKey: .description)
-        identifier = try? container.decodeIfPresent(String.self, forKey: .identifier)
+        identifier = (try? container.decodeIfPresent(
+            FlexibleStrings.self,
+            forKey: .identifier
+        )) ?? FlexibleStrings()
         author = (try? container.decodeIfPresent(FlexibleContributors.self, forKey: .author)) ?? FlexibleContributors()
         language = (try? container.decodeIfPresent(FlexibleStrings.self, forKey: .language)) ?? FlexibleStrings()
+        subject = (try? container.decodeIfPresent(
+            FlexibleSubjects.self,
+            forKey: .subject
+        )) ?? FlexibleSubjects()
+        rights = try? container.decodeIfPresent(String.self, forKey: .rights)
+        published = try? container.decodeIfPresent(
+            String.self,
+            forKey: .published
+        )
     }
 }
 
@@ -525,8 +659,11 @@ private nonisolated struct JSONLink: Decodable {
     let title: String?
     let rel: FlexibleStrings
     let templated: Bool
+    let properties: JSONLinkProperties?
 
-    private enum CodingKeys: String, CodingKey { case href, type, title, rel, templated }
+    private enum CodingKeys: String, CodingKey {
+        case href, type, title, rel, templated, properties
+    }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -535,10 +672,48 @@ private nonisolated struct JSONLink: Decodable {
         title = try? container.decodeIfPresent(String.self, forKey: .title)
         rel = (try? container.decodeIfPresent(FlexibleStrings.self, forKey: .rel)) ?? FlexibleStrings()
         templated = (try? container.decodeIfPresent(Bool.self, forKey: .templated)) ?? false
+        properties = try? container.decodeIfPresent(
+            JSONLinkProperties.self,
+            forKey: .properties
+        )
     }
 
     var relations: Set<String> {
         Set(rel.values.map { $0.lowercased() })
+    }
+}
+
+private nonisolated struct JSONLinkProperties: Decodable {
+    let price: JSONPrice?
+}
+
+private nonisolated struct JSONPrice: Decodable {
+    let currency: String?
+    let value: Decimal?
+
+    private enum CodingKeys: String, CodingKey {
+        case currency, value
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        currency = try? container.decodeIfPresent(
+            String.self,
+            forKey: .currency
+        )
+        if let decimal = try? container.decodeIfPresent(
+            Decimal.self,
+            forKey: .value
+        ) {
+            value = decimal
+        } else if let string = try? container.decodeIfPresent(
+            String.self,
+            forKey: .value
+        ) {
+            value = Decimal(string: string, locale: Locale(identifier: "en_US_POSIX"))
+        } else {
+            value = nil
+        }
     }
 }
 
@@ -577,5 +752,65 @@ private nonisolated struct FlexibleContributors: Decodable {
         } else if let values = try? container.decode([Contributor].self) {
             self.values = values.map(\.name)
         }
+    }
+}
+
+private nonisolated struct FlexibleSubjects: Decodable {
+    private struct Subject: Decodable {
+        let name: String
+    }
+
+    var values: [String] = []
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(String.self) {
+            values = [value]
+        } else if let values = try? container.decode([String].self) {
+            self.values = values
+        } else if let value = try? container.decode(Subject.self) {
+            values = [value.name]
+        } else if let values = try? container.decode([Subject].self) {
+            self.values = values.map(\.name)
+        }
+    }
+}
+
+private nonisolated final class OpenSearchDescriptionDelegate:
+    NSObject,
+    XMLParserDelegate
+{
+    private let baseURL: URL
+    private(set) var searchTemplate: String?
+
+    init(baseURL: URL) {
+        self.baseURL = baseURL
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String] = [:]
+    ) {
+        guard searchTemplate == nil,
+              elementName.split(separator: ":").last?
+                .lowercased() == "url",
+              let template = attributeDict["template"]?.opdsNonEmpty else {
+            return
+        }
+        let type = attributeDict["type"]?.lowercased() ?? ""
+        guard type.contains("opds")
+                || type.contains("atom")
+                || type.contains("json") else {
+            return
+        }
+        searchTemplate = OPDSParser.resolveTemplate(
+            template,
+            baseURL: baseURL
+        )
     }
 }

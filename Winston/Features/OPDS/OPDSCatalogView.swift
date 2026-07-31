@@ -1,26 +1,31 @@
-import SwiftUI
 import SwiftData
+import SwiftUI
 
 struct OPDSCatalogView: View {
     let library: LibraryViewModel
+    let readModel: LibraryReadModel
 
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
     @Environment(OPDSViewModel.self) private var viewModel
+
     @State private var searchText = ""
+    @State private var selectedResultID: String?
+    @State private var expandedResultIDs: Set<String> = []
+    @State private var selectedCatalogFilter: String?
+    @State private var selectedLanguageFilter: String?
+    @State private var selectedFormatFilter: String?
+    @State private var selectedRelationFilter:
+        OPDSAcquisitionRelation?
+    @State private var hidesOwned = false
+    @State private var commandContext = CatalogCommandContext()
+    @FocusState private var searchIsFocused: Bool
 
     var body: some View {
-        Group {
-            if viewModel.selectedCatalog == nil {
-                surface
-            } else {
-                surface
-                    .searchable(text: $searchText, prompt: "Search catalog")
-                    .onSubmit(of: .search) {
-                        guard viewModel.supportsRemoteSearch else { return }
-                        Task { await viewModel.search(searchText) }
-                    }
-            }
+        VStack(spacing: 0) {
+            header
+            Divider().opacity(WinstonLayout.dividerOpacity)
+            content
         }
         .toolbar {
             OPDSCatalogToolbar(viewModel: viewModel) {
@@ -34,34 +39,433 @@ struct OPDSCatalogView: View {
         .onChange(of: settings.onlineMetadataEnabled) { _, _ in
             viewModel.onlineSettingDidChange()
         }
+        .onChange(of: viewModel.activeSearchSeed) { _, seed in
+            guard let seed else { return }
+            searchText = seed.query
+            submitUnifiedSearch()
+        }
+        .focusedSceneValue(\.catalogCommandContext, commandContext)
+        .onChange(of: commandContext.focusSearchGeneration) {
+            searchIsFocused = true
+        }
+        .onKeyPress(.escape) {
+            guard viewModel.isSearching else { return .ignored }
+            viewModel.cancelSearch()
+            return .handled
+        }
+        .onKeyPress(.return) {
+            guard searchIsFocused else { return .ignored }
+            submitSearch()
+            return .handled
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ThemedBackground())
     }
 
-    private var surface: some View {
-        VStack(spacing: 0) {
-            OPDSCatalogHeader(
-                catalog: viewModel.selectedCatalog,
-                feed: viewModel.feed,
-                refreshFailure: viewModel.refreshFailure
+    private var header: some View {
+        HStack(alignment: .center, spacing: 18) {
+            VStack(alignment: .leading, spacing: 4) {
+                if let catalog = viewModel.selectedCatalog {
+                    Text(verbatim: viewModel.feed?.title ?? catalog.name)
+                        .font(theme.display(size: 22, weight: .heavy))
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(
+                            verbatim: viewModel.feed?.subtitle
+                                ?? catalog.rootURL.host()
+                                ?? catalog.name
+                        )
+                        if let format = viewModel.feed?.documentFormat {
+                            Text(verbatim: documentFormatLabel(format))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    theme.surface,
+                                    in: Capsule()
+                                )
+                        }
+                    }
+                    .font(theme.label(size: 10))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+                } else {
+                    theme.styledText(
+                        terminal: "// catalog_hub",
+                        native: "Catalog Hub"
+                    )
+                    .font(theme.display(size: 22, weight: .heavy))
+                    .foregroundStyle(theme.textPrimary)
+                    Text(
+                        "Search every enabled catalog or open one to browse its shelves."
+                    )
+                    .font(theme.body(size: 11))
+                    .foregroundStyle(theme.textSecondary)
+                }
+            }
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(theme.textTertiary)
+                    .accessibilityHidden(true)
+                TextField(
+                    viewModel.selectedCatalog == nil
+                        ? "Search enabled catalogs"
+                        : "Search this catalog",
+                    text: $searchText
+                )
+                .textFieldStyle(.plain)
+                .focused($searchIsFocused)
+                .onSubmit(submitSearch)
+                .accessibilityIdentifier("opds.search")
+                if viewModel.isSearching {
+                    Button {
+                        viewModel.cancelSearch()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel catalog search")
+                    .accessibilityLabel("Cancel catalog search")
+                } else if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                        viewModel.clearSearch()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear catalog search")
+                    .accessibilityLabel("Clear catalog search")
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(width: 320, height: 30)
+            .background(
+                theme.surface.opacity(0.9),
+                in: RoundedRectangle(
+                    cornerRadius: WinstonLayout.cornerMedium
+                )
             )
-            Divider().opacity(0.3)
-            content
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: WinstonLayout.cornerMedium
+                )
+                .stroke(
+                    searchIsFocused
+                        ? theme.borderActive
+                        : theme.borderSubtle,
+                    lineWidth: 1
+                )
+            }
+
+            if viewModel.selectedCatalog == nil {
+                SettingsLink {
+                    Label("Catalog Settings", systemImage: "gearshape")
+                }
+                .controlSize(.small)
+                .help("Add, edit, reorder, or test catalogs")
+            }
         }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 15)
     }
 
     @ViewBuilder
     private var content: some View {
+        if viewModel.selectedCatalog == nil {
+            hubContent
+        } else {
+            browseContent
+        }
+    }
+
+    @ViewBuilder
+    private var hubContent: some View {
+        if !settings.onlineMetadataEnabled {
+            OPDSUnavailableView(
+                title: "Catalogs are offline",
+                systemImage: "wifi.slash",
+                description: String(
+                    localized: "Turn on online metadata in Settings to browse and search OPDS catalogs."
+                )
+            ) {
+                SettingsLink { Text("Open Settings") }
+            }
+        } else if viewModel.catalogs.isEmpty {
+            OPDSUnavailableView(
+                title: "No catalogs configured",
+                systemImage: "books.vertical",
+                description: String(
+                    localized: "Add an OPDS catalog in Settings to begin."
+                )
+            ) {
+                SettingsLink { Text("Add Catalog") }
+            }
+        } else {
+            HSplitView {
+                catalogList
+                    .frame(minWidth: 230, idealWidth: 270, maxWidth: 340)
+                searchSurface
+                    .frame(minWidth: 480)
+            }
+        }
+    }
+
+    private var catalogList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Catalogs")
+                    .font(theme.body(size: 13, weight: .bold))
+                Spacer()
+                Text("\(viewModel.enabledCatalogs.count) enabled")
+                    .font(theme.label(size: 9))
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider().opacity(WinstonLayout.dividerOpacity)
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(viewModel.catalogs) { catalog in
+                        CatalogListRow(
+                            catalog: catalog,
+                            searchState: viewModel.searchStates[catalog.id]
+                        ) {
+                            Task { await viewModel.open(catalog) }
+                        }
+                        Divider()
+                            .opacity(WinstonLayout.dividerOpacity)
+                            .padding(.leading, 52)
+                    }
+                }
+            }
+        }
+        .background(theme.backgroundAlt.opacity(0.45))
+    }
+
+    @ViewBuilder
+    private var searchSurface: some View {
+        if viewModel.searchStates.isEmpty {
+            ContentUnavailableView {
+                Label(
+                    "Search your catalogs",
+                    systemImage: "books.vertical.circle"
+                )
+            } description: {
+                Text(
+                    "Enter a title, author, or ISBN. Winston searches only enabled catalogs and keeps every source and format visible."
+                )
+            }
+        } else if viewModel.searchGroups.isEmpty,
+                  viewModel.isSearching {
+            VStack(spacing: 16) {
+                ProgressView(
+                    value: Double(viewModel.searchCompletedCount),
+                    total: Double(max(1, viewModel.searchRequestedCount))
+                )
+                .frame(width: 280)
+                Text(
+                    "Searching \(viewModel.searchCompletedCount) of \(viewModel.searchRequestedCount) catalogs…"
+                )
+                .font(theme.body(size: 13, weight: .semibold))
+                Text("Successful catalogs appear as soon as they finish.")
+                    .font(theme.body(size: 11))
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if viewModel.searchGroups.isEmpty {
+            searchEmptyState
+        } else {
+            VStack(spacing: 0) {
+                searchStatusBar
+                Divider().opacity(WinstonLayout.dividerOpacity)
+                searchFilters
+                Divider().opacity(WinstonLayout.dividerOpacity)
+                searchResults
+            }
+        }
+    }
+
+    private var searchStatusBar: some View {
+        HStack(spacing: 10) {
+            if viewModel.isSearching {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: "checkmark.circle")
+                    .foregroundStyle(theme.success)
+            }
+            Text(
+                "\(viewModel.searchCompletedCount) of \(viewModel.searchRequestedCount) catalogs completed"
+            )
+            .font(theme.label(size: 10, weight: .semibold))
+            if viewModel.hasPartialSearchFailure {
+                Label(
+                    "Some catalogs failed",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(theme.label(size: 10, weight: .semibold))
+                .foregroundStyle(theme.highlight)
+                .accessibilityLabel(
+                    "Partial search failure. Successful results remain available."
+                )
+            }
+            Spacer()
+            Text("\(filteredGroups.count) results")
+                .font(theme.label(size: 10))
+                .foregroundStyle(theme.textSecondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(theme.backgroundAlt.opacity(0.35))
+    }
+
+    private var searchFilters: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                Picker(
+                    "Catalog",
+                    selection: $selectedCatalogFilter
+                ) {
+                    Text("All catalogs").tag(String?.none)
+                    ForEach(viewModel.enabledCatalogs) {
+                        Text(verbatim: $0.name).tag(Optional($0.id))
+                    }
+                }
+                Picker(
+                    "Language",
+                    selection: $selectedLanguageFilter
+                ) {
+                    Text("All languages").tag(String?.none)
+                    ForEach(availableLanguages, id: \.self) {
+                        Text(verbatim: $0).tag(Optional($0))
+                    }
+                }
+                Picker("Format", selection: $selectedFormatFilter) {
+                    Text("All formats").tag(String?.none)
+                    ForEach(availableFormats, id: \.self) {
+                        Text(verbatim: $0).tag(Optional($0))
+                    }
+                }
+                Picker(
+                    "Acquisition",
+                    selection: $selectedRelationFilter
+                ) {
+                    Text("All acquisitions")
+                        .tag(OPDSAcquisitionRelation?.none)
+                    ForEach(availableRelations, id: \.self) {
+                        Text(verbatim: $0.localizedLabel)
+                            .tag(Optional($0))
+                    }
+                }
+                Toggle("Hide owned", isOn: $hidesOwned)
+                    .toggleStyle(.checkbox)
+            }
+            .controlSize(.small)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var searchResults: some View {
+        List(filteredGroups, selection: $selectedResultID) { group in
+            DisclosureGroup(
+                isExpanded: Binding(
+                    get: { expandedResultIDs.contains(group.id) },
+                    set: {
+                        if $0 {
+                            expandedResultIDs.insert(group.id)
+                        } else {
+                            expandedResultIDs.remove(group.id)
+                        }
+                    }
+                )
+            ) {
+                SearchSourceList(
+                    variants: filteredVariants(in: group),
+                    library: library,
+                    viewModel: viewModel
+                )
+                .padding(.leading, 26)
+                .padding(.vertical, 6)
+            } label: {
+                CatalogSearchResultLabel(group: group)
+            }
+            .tag(group.id)
+            .accessibilityIdentifier("opds.result.\(group.id)")
+        }
+        .listStyle(.inset)
+        .onKeyPress(.return) {
+            guard let selectedResultID else { return .ignored }
+            if expandedResultIDs.contains(selectedResultID) {
+                expandedResultIDs.remove(selectedResultID)
+            } else {
+                expandedResultIDs.insert(selectedResultID)
+            }
+            return .handled
+        }
+    }
+
+    private var searchEmptyState: some View {
+        ContentUnavailableView {
+            if viewModel.searchWasCancelled {
+                Label("Search cancelled", systemImage: "xmark.circle")
+            } else if viewModel.searchStates.values.allSatisfy({
+                $0 == .disabled
+            }) {
+                Label("All catalogs are disabled", systemImage: "pause.circle")
+            } else if viewModel.searchStates.values.allSatisfy({
+                $0 == .unsupportedSearch || $0 == .disabled
+            }) {
+                Label(
+                    "No searchable catalogs",
+                    systemImage: "magnifyingglass"
+                )
+            } else {
+                Label("No catalog results", systemImage: "books.vertical")
+            }
+        } description: {
+            Text(
+                viewModel.searchWasCancelled
+                    ? "Submit the search again when you’re ready."
+                    : "Try a title, author, or ISBN, or open a catalog to browse it."
+            )
+        } actions: {
+            if viewModel.searchStates.values.contains(where: {
+                if case .failed = $0 { return true }
+                return false
+            }) {
+                Menu("Retry failed catalogs") {
+                    ForEach(failedCatalogs) { catalog in
+                        Button(catalog.name) {
+                            viewModel.retrySearch(
+                                catalogID: catalog.id,
+                                ownershipRecords:
+                                    readModel.recordSnapshot()
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var browseContent: some View {
         switch viewModel.phase {
         case .home:
-            OPDSCatalogHome(catalogs: viewModel.catalogs) { catalog in
-                Task { await viewModel.open(catalog) }
-            }
+            EmptyView()
         case .disabledOnline:
             OPDSUnavailableView(
                 title: "Catalogs are offline",
                 systemImage: "wifi.slash",
-                description: String(localized: "Turn on online metadata in Settings to browse and download from OPDS catalogs.")
+                description: String(
+                    localized: "Turn on online metadata in Settings to browse and download from OPDS catalogs."
+                )
             ) {
                 SettingsLink { Text("Open Settings") }
             }
@@ -73,16 +477,18 @@ struct OPDSCatalogView: View {
                 systemImage: "exclamationmark.triangle",
                 description: failure.message
             ) {
-                Button("Try Again") { Task { await viewModel.retry() } }
+                Button("Try Again") {
+                    Task { await viewModel.retry() }
+                }
             }
         case .empty:
-            if hasVisibleResults {
+            if hasVisibleBrowseResults {
                 feedContent
             } else {
                 OPDSEmptyResultsView(isSearching: !searchText.isEmpty)
             }
         case .loaded:
-            if hasVisibleResults {
+            if hasVisibleBrowseResults {
                 feedContent
             } else {
                 OPDSEmptyResultsView(isSearching: !searchText.isEmpty)
@@ -94,7 +500,9 @@ struct OPDSCatalogView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 24) {
                 if !filteredNavigation.isEmpty {
-                    OPDSNavigationSection(items: filteredNavigation) { item in
+                    OPDSNavigationSection(
+                        items: filteredNavigation
+                    ) { item in
                         searchText = ""
                         Task { await viewModel.open(item) }
                     }
@@ -117,7 +525,10 @@ struct OPDSCatalogView: View {
                             if viewModel.isLoadingNextPage {
                                 ProgressView().controlSize(.small)
                             } else {
-                                Label("Load More", systemImage: "arrow.down.circle")
+                                Label(
+                                    "Load More",
+                                    systemImage: "arrow.down.circle"
+                                )
                             }
                         }
                         .disabled(viewModel.isLoadingNextPage)
@@ -130,102 +541,133 @@ struct OPDSCatalogView: View {
         }
     }
 
-    private var filteredNavigation: [OPDSNavigationItem] {
-        guard let items = viewModel.feed?.navigation else { return [] }
-        let query = normalizedSearchText
-        guard !query.isEmpty else { return items }
-        return items.filter {
-            $0.title.localizedCaseInsensitiveContains(query)
-                || $0.subtitle?.localizedCaseInsensitiveContains(query) == true
+    private func submitSearch() {
+        searchIsFocused = false
+        if viewModel.selectedCatalog == nil {
+            submitUnifiedSearch()
+        } else {
+            Task {
+                await viewModel.searchCurrentCatalog(searchText)
+            }
         }
     }
 
-    private var filteredPublications: [OPDSPublication] {
-        guard let items = viewModel.feed?.publications else { return [] }
-        let query = normalizedSearchText
-        guard !query.isEmpty else { return items }
-        return items.filter {
-            $0.title.localizedCaseInsensitiveContains(query)
-                || $0.authorLine?.localizedCaseInsensitiveContains(query) == true
-                || $0.language?.localizedCaseInsensitiveContains(query) == true
-        }
+    private func submitUnifiedSearch() {
+        viewModel.performUnifiedSearch(
+            searchText,
+            ownershipRecords: readModel.recordSnapshot()
+        )
     }
 
     private var normalizedSearchText: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var hasVisibleResults: Bool {
+    private var filteredNavigation: [OPDSNavigationItem] {
+        guard let items = viewModel.feed?.navigation else { return [] }
+        guard !normalizedSearchText.isEmpty else { return items }
+        return items.filter {
+            $0.title.localizedCaseInsensitiveContains(
+                normalizedSearchText
+            )
+                || $0.subtitle?.localizedCaseInsensitiveContains(
+                    normalizedSearchText
+                ) == true
+        }
+    }
+
+    private var filteredPublications: [OPDSPublication] {
+        guard let items = viewModel.feed?.publications else { return [] }
+        guard !normalizedSearchText.isEmpty else { return items }
+        return items.filter {
+            $0.title.localizedCaseInsensitiveContains(
+                normalizedSearchText
+            )
+                || $0.authorLine?.localizedCaseInsensitiveContains(
+                    normalizedSearchText
+                ) == true
+                || $0.language?.localizedCaseInsensitiveContains(
+                    normalizedSearchText
+                ) == true
+        }
+    }
+
+    private var hasVisibleBrowseResults: Bool {
         !filteredNavigation.isEmpty || !filteredPublications.isEmpty
     }
-}
 
-// MARK: - Header and toolbar
-
-private struct OPDSCatalogHeader: View {
-    let catalog: OPDSCatalog?
-    let feed: OPDSFeed?
-    let refreshFailure: OPDSViewModel.OPDSFailure?
-
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    if let catalog {
-                        Text(verbatim: feed?.title ?? catalog.name)
-                            .font(theme.display(size: 22, weight: .heavy))
-                            .foregroundStyle(theme.textPrimary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        Text(verbatim: feed?.subtitle ?? catalog.name)
-                            .font(theme.label(size: 10))
-                            .foregroundStyle(theme.textSecondary)
-                            .lineLimit(2)
-                    } else {
-                        theme.styledText(terminal: "// opds_catalogs", native: "Open Catalogs")
-                            .font(theme.display(size: 22, weight: .heavy))
-                            .foregroundStyle(theme.textPrimary)
-                            .lineLimit(1)
-                            .accessibilityIdentifier("opds.title")
-                        theme.styledText(
-                            terminal: "browse // download // kindle-ready",
-                            native: "Browse free books, add them to your library, and prepare them for Kindle automatically."
-                        )
-                        .font(theme.label(size: 10))
-                        .foregroundStyle(theme.textSecondary)
-                    }
-                }
-                Spacer(minLength: 12)
-                if let catalog {
-                    Text(verbatim: protocolLabel(for: catalog))
-                        .font(theme.label(size: 9, weight: .semibold))
-                        .foregroundStyle(theme.textTertiary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(theme.surface.opacity(0.8), in: Capsule())
-                }
-            }
-
-            if let refreshFailure {
-                Label {
-                    Text(verbatim: refreshFailure.message)
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                }
-                    .font(theme.label(size: 10, weight: .semibold))
-                    .foregroundStyle(theme.highlight)
-            }
+    private var filteredGroups: [OPDSSearchResultGroup] {
+        viewModel.searchGroups.filter { group in
+            (!hidesOwned || !group.isOwned)
+                && !filteredVariants(in: group).isEmpty
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
     }
 
-    private func protocolLabel(for catalog: OPDSCatalog) -> String {
-        switch catalog.kind {
-        case .projectGutenberg: "OPDS 1.2"
-        case .standardEbooks: "ATOM 1.0"
+    private func filteredVariants(
+        in group: OPDSSearchResultGroup
+    ) -> [OPDSSearchVariant] {
+        group.variants.filter { variant in
+            if let selectedCatalogFilter,
+               variant.catalogID != selectedCatalogFilter {
+                return false
+            }
+            if let selectedLanguageFilter,
+               variant.publication.language != selectedLanguageFilter {
+                return false
+            }
+            let acquisitions = variant.publication.acquisitions
+            if let selectedFormatFilter,
+               !acquisitions.contains(where: {
+                   $0.formatLabel == selectedFormatFilter
+               }) {
+                return false
+            }
+            if let selectedRelationFilter,
+               !acquisitions.contains(where: {
+                   $0.relation == selectedRelationFilter
+               }) {
+                return false
+            }
+            return true
+        }
+    }
+
+    private var availableLanguages: [String] {
+        unique(viewModel.searchGroups.flatMap(\.languages)).sorted()
+    }
+
+    private var availableFormats: [String] {
+        unique(viewModel.searchGroups.flatMap(\.formats)).sorted()
+    }
+
+    private var availableRelations: [OPDSAcquisitionRelation] {
+        var seen: Set<OPDSAcquisitionRelation> = []
+        return viewModel.searchGroups
+            .flatMap(\.acquisitionRelations)
+            .filter { seen.insert($0).inserted }
+    }
+
+    private var failedCatalogs: [OPDSCatalogConfiguration] {
+        viewModel.catalogs.filter {
+            if case .failed = viewModel.searchStates[$0.id] {
+                return true
+            }
+            return false
+        }
+    }
+
+    private func unique(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    private func documentFormatLabel(
+        _ format: OPDSDocumentFormat
+    ) -> String {
+        switch format {
+        case .opds1: "OPDS 1"
+        case .opds2: "OPDS 2"
+        case .atom: "Atom"
         }
     }
 }
@@ -243,7 +685,6 @@ private struct OPDSCatalogToolbar: ToolbarContent {
                 .help("Back")
                 .accessibilityIdentifier("opds.back")
             }
-
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     Task { await viewModel.refresh() }
@@ -262,175 +703,402 @@ private struct OPDSCatalogToolbar: ToolbarContent {
     }
 }
 
-// MARK: - Catalog home
-
-private struct OPDSCatalogHome: View {
-    let catalogs: [OPDSCatalog]
-    let onOpen: (OPDSCatalog) -> Void
-
-    private let columns = [
-        GridItem(.adaptive(minimum: 250, maximum: 360), spacing: 16),
-    ]
-
-    var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
-                ForEach(catalogs) { catalog in
-                    OPDSProviderCard(catalog: catalog) { onOpen(catalog) }
-                }
-            }
-            .padding(24)
-        }
-    }
-}
-
-private struct OPDSProviderCard: View {
-    let catalog: OPDSCatalog
-    let action: () -> Void
+private struct CatalogListRow: View {
+    let catalog: OPDSCatalogConfiguration
+    let searchState: OPDSCatalogSearchState?
+    let onBrowse: () -> Void
 
     @Environment(\.theme) private var theme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isHovered = false
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Image(systemName: icon)
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(theme.accent)
-                        .frame(width: 44, height: 44)
-                        .background(theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(theme.textTertiary)
+        Button(action: onBrowse) {
+            HStack(spacing: 10) {
+                Image(systemName: catalog.presentationSystemImage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(
+                        catalog.isEnabled
+                            ? theme.accent
+                            : theme.textTertiary
+                    )
+                    .frame(width: 26)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Text(verbatim: catalog.name)
+                            .font(
+                                theme.body(size: 12, weight: .semibold)
+                            )
+                            .foregroundStyle(theme.textPrimary)
+                            .lineLimit(1)
+                        if catalog.authenticationMode == .basic {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 8))
+                                .accessibilityLabel(
+                                    "Uses Basic authentication"
+                                )
+                        }
+                        if catalog.isHTTP {
+                            Image(
+                                systemName:
+                                    "exclamationmark.triangle.fill"
+                            )
+                            .font(.system(size: 8))
+                            .foregroundStyle(theme.highlight)
+                            .accessibilityLabel(
+                                "Insecure HTTP catalog"
+                            )
+                        }
+                    }
+                    Text(verbatim: statusLabel)
+                        .font(theme.label(size: 9))
+                        .foregroundStyle(statusColor)
+                        .lineLimit(1)
                 }
-
-                Text(verbatim: catalog.name)
-                    .font(theme.body(size: 16, weight: .bold))
-                    .foregroundStyle(theme.textPrimary)
-
-                Text(description)
-                    .font(theme.body(size: 11))
-                    .foregroundStyle(theme.textSecondary)
-                    .multilineTextAlignment(.leading)
-                    .lineLimit(3)
-
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.seal.fill")
-                    Text(availabilityLabel)
-                }
-                .font(theme.label(size: 9, weight: .semibold))
-                .foregroundStyle(theme.accent)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(theme.textTertiary)
             }
-            .frame(maxWidth: .infinity, minHeight: 170, alignment: .topLeading)
-            .padding(18)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .glassCard(cornerRadius: WinstonLayout.cornerLarge)
-        .overlay {
-            RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous)
-                .stroke(isHovered ? theme.accent.opacity(0.45) : theme.borderSubtle, lineWidth: 1)
-        }
-        .onHover { isHovered = $0 }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovered)
+        .disabled(!catalog.isEnabled)
+        .accessibilityLabel(catalog.name)
+        .accessibilityValue(statusLabel)
+        .help(
+            catalog.isEnabled
+                ? String(localized: "Browse this catalog")
+                : String(
+                    localized: "Enable this catalog in Settings before browsing."
+                )
+        )
     }
 
-    private var icon: String {
-        switch catalog.kind {
-        case .projectGutenberg: "text.book.closed.fill"
-        case .standardEbooks: "book.pages.fill"
+    private var statusLabel: String {
+        guard catalog.isEnabled else {
+            return String(localized: "Disabled")
+        }
+        guard let searchState else {
+            return catalog.rootURL.host()
+                ?? String(localized: "Ready to browse")
+        }
+        return switch searchState {
+        case .loading: String(localized: "Searching…")
+        case .success(let publications):
+            String(localized: "\(publications.count) results")
+        case .empty: String(localized: "No results")
+        case .failed(let error): error.description
+        case .unsupportedSearch:
+            String(localized: "Browse only")
+        case .disabled: String(localized: "Disabled")
+        case .cancelled: String(localized: "Search cancelled")
         }
     }
 
-    private var description: LocalizedStringKey {
-        switch catalog.kind {
-        case .projectGutenberg:
-            "A huge open library with classics in many languages, including Czech."
-        case .standardEbooks:
-            "The 15 newest carefully proofread editions, available from the public releases feed."
-        }
-    }
-
-    private var availabilityLabel: LocalizedStringKey {
-        switch catalog.kind {
-        case .projectGutenberg: "Free public-domain books"
-        case .standardEbooks: "15 latest public releases"
+    private var statusColor: Color {
+        guard let searchState else { return theme.textSecondary }
+        return switch searchState {
+        case .failed:
+            theme.highlight
+        case .success:
+            theme.success
+        default:
+            theme.textSecondary
         }
     }
 }
 
-// MARK: - Feed sections
+private struct CatalogSearchResultLabel: View {
+    let group: OPDSSearchResultGroup
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 12) {
+            OPDSCoverView(id: group.id, coverURL: group.coverURL)
+                .frame(width: 38, height: 56)
+                .clipShape(
+                    RoundedRectangle(
+                        cornerRadius: WinstonLayout.cornerSmall
+                    )
+                )
+            VStack(alignment: .leading, spacing: 4) {
+                Text(verbatim: group.title)
+                    .font(theme.body(size: 13, weight: .bold))
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(2)
+                if let author = group.author {
+                    Text(verbatim: author)
+                        .font(theme.body(size: 10))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
+                HStack(spacing: 5) {
+                    Text("\(group.sourceCount) sources")
+                    if !group.formats.isEmpty {
+                        Text(verbatim: group.formats.joined(separator: " · "))
+                    }
+                    if !group.languages.isEmpty {
+                        Text(
+                            verbatim: group.languages.joined(
+                                separator: " · "
+                            )
+                        )
+                    }
+                }
+                .font(theme.label(size: 9))
+                .foregroundStyle(theme.textTertiary)
+            }
+            Spacer(minLength: 8)
+            if group.isOwned {
+                Label(
+                    group.appearsToBeAnotherEdition
+                        ? "Other edition"
+                        : "Owned",
+                    systemImage: group.appearsToBeAnotherEdition
+                        ? "books.vertical.fill"
+                        : "checkmark.circle.fill"
+                )
+                .font(theme.label(size: 9, weight: .semibold))
+                .foregroundStyle(theme.success)
+                .accessibilityLabel(
+                    group.appearsToBeAnotherEdition
+                        ? "A matching work is owned; this appears to be another edition."
+                        : "A matching local book is already owned."
+                )
+            }
+        }
+        .padding(.vertical, 5)
+    }
+}
+
+private struct SearchSourceList: View {
+    let variants: [OPDSSearchVariant]
+    let library: LibraryViewModel
+    let viewModel: OPDSViewModel
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(variants) { variant in
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Label(
+                            variant.catalogName,
+                            systemImage: "books.vertical"
+                        )
+                        .font(theme.body(size: 11, weight: .semibold))
+                        .accessibilityLabel(
+                            "Source catalog \(variant.catalogName)"
+                        )
+                        Spacer()
+                        if let language =
+                            variant.publication.language {
+                            Text(verbatim: language)
+                                .font(theme.label(size: 9))
+                                .foregroundStyle(theme.textSecondary)
+                        }
+                    }
+                    ForEach(variant.publication.acquisitionOptions) {
+                        acquisition in
+                        AcquisitionSourceRow(
+                            acquisition: acquisition,
+                            publication: variant.publication,
+                            catalogID: variant.catalogID,
+                            library: library,
+                            viewModel: viewModel
+                        )
+                    }
+                    if let rights = variant.publication.rights {
+                        Text("Rights: \(rights)")
+                            .font(theme.body(size: 9))
+                            .foregroundStyle(theme.textSecondary)
+                            .lineLimit(2)
+                    }
+                }
+                .padding(10)
+                .background(
+                    theme.backgroundAlt.opacity(0.55),
+                    in: RoundedRectangle(
+                        cornerRadius: WinstonLayout.cornerMedium
+                    )
+                )
+            }
+        }
+    }
+}
+
+private struct AcquisitionSourceRow: View {
+    let acquisition: OPDSAcquisition
+    let publication: OPDSPublication
+    let catalogID: String
+    let library: LibraryViewModel
+    let viewModel: OPDSViewModel
+
+    @Environment(\.theme) private var theme
+    @Environment(DeviceMonitor.self) private var deviceMonitor
+    @Environment(TransferQueue.self) private var transferQueue
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(verbatim: acquisition.formatLabel)
+                .font(theme.label(size: 9, weight: .bold))
+                .frame(minWidth: 36, alignment: .leading)
+            Text(verbatim: acquisition.relation.localizedLabel)
+                .font(theme.body(size: 10))
+            if let price = formattedPrice {
+                Text(verbatim: price)
+                    .font(theme.label(size: 9))
+                    .foregroundStyle(theme.textSecondary)
+            }
+            Spacer()
+            Link(destination: acquisition.url) {
+                Label("Open Source", systemImage: "safari")
+            }
+            .controlSize(.small)
+            .help("Open this exact acquisition at its source")
+            .accessibilityLabel(
+                "Open \(acquisition.relation.localizedLabel) source in browser"
+            )
+
+            if acquisition.canImport {
+                if viewModel.isDownloading(
+                    publication,
+                    catalogID: catalogID
+                ) {
+                    Button("Cancel") {
+                        viewModel.cancelDownload(
+                            publication,
+                            catalogID: catalogID
+                        )
+                    }
+                    .controlSize(.small)
+                    .accessibilityLabel("Cancel book download")
+                } else {
+                    Menu {
+                        Button("Import") {
+                            importBook(sendsToKindle: false)
+                        }
+                        if deviceMonitor.isConnected {
+                            Button("Import and Send to Kindle") {
+                                importBook(sendsToKindle: true)
+                            }
+                        }
+                    } label: {
+                        Text("Import")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .help(
+                        "Download this exact format and open Import Review"
+                    )
+                    .accessibilityLabel(
+                        "Import \(acquisition.formatLabel) from catalog"
+                    )
+                }
+            } else {
+                Button("Import") {}
+                    .controlSize(.small)
+                    .disabled(true)
+                    .help(importDisabledReason)
+                    .accessibilityLabel(
+                        "Import unavailable. \(importDisabledReason)"
+                    )
+            }
+        }
+    }
+
+    private var formattedPrice: String? {
+        guard let price = acquisition.price else { return nil }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = acquisition.currency
+        return formatter.string(from: price as NSDecimalNumber)
+    }
+
+    private var importDisabledReason: String {
+        if !acquisition.relation.isDirectlyDownloadable {
+            return String(
+                localized: "This acquisition is not a direct download. Open it at the source."
+            )
+        }
+        return String(
+            localized: "Winston cannot import this advertised format."
+        )
+    }
+
+    private func importBook(sendsToKindle: Bool) {
+        if sendsToKindle {
+            viewModel.addToLibrary(
+                publication,
+                acquisition: acquisition,
+                catalogID: catalogID,
+                library: library,
+                onSuccessfulImport: { imported in
+                    Task {
+                        await transferQueue.send(
+                            books: imported,
+                            via: deviceMonitor
+                        )
+                    }
+                }
+            )
+        } else {
+            viewModel.addToLibrary(
+                publication,
+                acquisition: acquisition,
+                catalogID: catalogID,
+                library: library
+            )
+        }
+    }
+}
 
 private struct OPDSNavigationSection: View {
     let items: [OPDSNavigationItem]
     let onOpen: (OPDSNavigationItem) -> Void
 
     @Environment(\.theme) private var theme
-    private let columns = [GridItem(.adaptive(minimum: 235, maximum: 360), spacing: 12)]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("Browse")
                 .font(theme.body(size: 14, weight: .bold))
-                .foregroundStyle(theme.textPrimary)
-
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
-                ForEach(items) { item in
-                    OPDSNavigationCard(item: item) { onOpen(item) }
-                }
-            }
-        }
-    }
-}
-
-private struct OPDSNavigationCard: View {
-    let item: OPDSNavigationItem
-    let action: () -> Void
-
-    @Environment(\.theme) private var theme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: "books.vertical.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(theme.accent)
-                    .frame(width: 34, height: 34)
-                    .background(theme.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(verbatim: item.title)
-                        .font(theme.body(size: 12, weight: .semibold))
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(2)
-                    if let subtitle = item.subtitle {
-                        Text(verbatim: subtitle)
-                            .font(theme.label(size: 9))
-                            .foregroundStyle(theme.textSecondary)
-                            .lineLimit(1)
+            ForEach(items) { item in
+                Button { onOpen(item) } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "books.vertical.fill")
+                            .foregroundStyle(theme.accent)
+                            .frame(width: 26)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(verbatim: item.title)
+                                .font(
+                                    theme.body(
+                                        size: 12,
+                                        weight: .semibold
+                                    )
+                                )
+                            if let subtitle = item.subtitle {
+                                Text(verbatim: subtitle)
+                                    .font(theme.body(size: 10))
+                                    .foregroundStyle(
+                                        theme.textSecondary
+                                    )
+                            }
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .foregroundStyle(theme.textTertiary)
                     }
+                    .padding(10)
+                    .contentShape(Rectangle())
                 }
-                Spacer(minLength: 4)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(theme.textTertiary)
+                .buttonStyle(.plain)
+                Divider().opacity(WinstonLayout.dividerOpacity)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .background(theme.surface.opacity(isHovered ? 0.95 : 0.72), in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(isHovered ? theme.accent.opacity(0.35) : theme.borderSubtle, lineWidth: 1)
-        }
-        .onHover { isHovered = $0 }
     }
 }
 
@@ -440,26 +1108,49 @@ private struct OPDSPublicationSection: View {
     let viewModel: OPDSViewModel
 
     @Environment(\.theme) private var theme
-    private let columns = [GridItem(.adaptive(minimum: 165, maximum: 210), spacing: 16)]
+    @Environment(DeviceMonitor.self) private var deviceMonitor
+    @Environment(TransferQueue.self) private var transferQueue
+    private let columns = [
+        GridItem(.adaptive(minimum: 170, maximum: 215), spacing: 16),
+    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Books")
                 .font(theme.body(size: 14, weight: .bold))
-                .foregroundStyle(theme.textPrimary)
-
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
+            LazyVGrid(
+                columns: columns,
+                alignment: .leading,
+                spacing: 16
+            ) {
                 ForEach(publications) { publication in
                     OPDSPublicationCard(
                         publication: publication,
-                        isDownloading: viewModel.isDownloading(publication),
-                        isDownloaded: viewModel.isDownloaded(publication)
+                        isDownloading: viewModel.isDownloading(
+                            publication
+                        )
                     ) { acquisition in
                         viewModel.addToLibrary(
                             publication,
                             acquisition: acquisition,
                             library: library
                         )
+                    } onImportAndSend: { acquisition in
+                        viewModel.addToLibrary(
+                            publication,
+                            acquisition: acquisition,
+                            library: library,
+                            onSuccessfulImport: { imported in
+                                Task {
+                                    await transferQueue.send(
+                                        books: imported,
+                                        via: deviceMonitor
+                                    )
+                                }
+                            }
+                        )
+                    } onCancel: {
+                        viewModel.cancelDownload(publication)
                     }
                 }
             }
@@ -470,91 +1161,104 @@ private struct OPDSPublicationSection: View {
 private struct OPDSPublicationCard: View {
     let publication: OPDSPublication
     let isDownloading: Bool
-    let isDownloaded: Bool
     let onAdd: (OPDSAcquisition) -> Void
+    let onImportAndSend: (OPDSAcquisition) -> Void
+    let onCancel: () -> Void
 
     @Environment(\.theme) private var theme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isHovered = false
+    @Environment(DeviceMonitor.self) private var deviceMonitor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            OPDSCoverView(id: publication.id, coverURL: publication.coverURL)
-                .aspectRatio(WinstonLayout.coverAspect, contentMode: .fill)
-                .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(6)
+        VStack(alignment: .leading, spacing: 8) {
+            OPDSCoverView(
+                id: publication.id,
+                coverURL: publication.coverURL
+            )
+            .aspectRatio(WinstonLayout.coverAspect, contentMode: .fill)
+            .clipped()
+            .clipShape(
+                RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium)
+            )
 
-            VStack(alignment: .leading, spacing: 7) {
-                Text(verbatim: publication.title)
-                    .font(theme.body(size: 12, weight: .bold))
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(2)
-
-                Text(verbatim: publication.authorLine ?? String(localized: "Author not listed"))
-                    .font(theme.label(size: 9))
-                    .foregroundStyle(publication.authorLine == nil ? theme.textTertiary : theme.textSecondary)
-                    .lineLimit(1)
-
-                Spacer(minLength: 0)
-
-                actionRow
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 4)
-            .padding(.bottom, 10)
-            .frame(minHeight: 94, alignment: .topLeading)
-        }
-        .glassCard(cornerRadius: WinstonLayout.cornerLarge)
-        .overlay {
-            RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous)
-                .stroke(isHovered ? theme.accent.opacity(0.4) : theme.borderSubtle, lineWidth: 1)
-        }
-        .onHover { isHovered = $0 }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovered)
-        .help(publication.summary ?? publication.title)
-    }
-
-    @ViewBuilder
-    private var actionRow: some View {
-        if isDownloading {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("Adding…")
-            }
-            .font(theme.label(size: 9, weight: .semibold))
+            Text(verbatim: publication.title)
+                .font(theme.body(size: 12, weight: .bold))
+                .lineLimit(2)
+            Text(
+                verbatim: publication.authorLine
+                    ?? String(localized: "Author not listed")
+            )
+            .font(theme.body(size: 9))
             .foregroundStyle(theme.textSecondary)
-        } else if isDownloaded {
-            Label("In Library", systemImage: "checkmark.circle.fill")
-                .font(theme.label(size: 9, weight: .semibold))
-                .foregroundStyle(theme.success)
-        } else if let preferred = publication.preferredAcquisition {
-            HStack(spacing: 4) {
-                Button {
-                    onAdd(preferred)
-                } label: {
-                    Label("Add \(preferred.formatLabel)", systemImage: "plus")
-                        .lineLimit(1)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .accessibilityIdentifier("opds.add.\(publication.id)")
+            .lineLimit(1)
 
-                if publication.acquisitions.count > 1 {
-                    Menu {
-                        ForEach(publication.acquisitionOptions) { acquisition in
-                            Button(acquisition.optionLabel) { onAdd(acquisition) }
-                        }
-                    } label: {
-                        Image(systemName: "chevron.down")
+            if isDownloading {
+                Button("Cancel Download", action: onCancel)
+                    .controlSize(.small)
+            } else if let preferred =
+                publication.preferredAcquisition {
+                HStack(spacing: 4) {
+                    Button("Import \(preferred.formatLabel)") {
+                        onAdd(preferred)
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("Choose format")
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    if publication.acquisitionOptions.count > 1 {
+                        Menu {
+                            if deviceMonitor.isConnected {
+                                Button("Import and Send to Kindle") {
+                                    onImportAndSend(preferred)
+                                }
+                                Divider()
+                            }
+                            ForEach(
+                                publication.acquisitionOptions
+                            ) { acquisition in
+                                if acquisition.canImport {
+                                    Button(
+                                        acquisition.optionLabel
+                                    ) {
+                                        onAdd(acquisition)
+                                    }
+                                } else {
+                                    Link(
+                                        "\(acquisition.optionLabel) — \(acquisition.relation.localizedLabel)",
+                                        destination: acquisition.url
+                                    )
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "chevron.down")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .help("Choose an exact source format")
+                    }
                 }
+                if !deviceMonitor.isConnected {
+                    Text("Connect a Kindle to import and send immediately.")
+                        .font(theme.label(size: 8))
+                        .foregroundStyle(theme.textTertiary)
+                        .help(
+                            "Import and Send to Kindle is unavailable because no device is connected."
+                        )
+                }
+            } else if let source =
+                publication.acquisitionOptions.first {
+                Link("Open Source", destination: source.url)
+                    .controlSize(.small)
             }
         }
+        .padding(10)
+        .background(
+            theme.surface.opacity(0.78),
+            in: RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge)
+                .stroke(theme.borderSubtle, lineWidth: 1)
+        }
+        .help(publication.summary ?? publication.title)
     }
 }
 
@@ -571,16 +1275,26 @@ private struct OPDSCoverView: View {
         Color.clear
             .overlay {
                 if let image {
-                    Image(nsImage: image).resizable().scaledToFill()
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
                 } else {
-                    BookCoverArt(accent1: colors.primary, accent2: colors.secondary)
+                    BookCoverArt(
+                        accent1: colors.primary,
+                        accent2: colors.secondary
+                    )
                 }
             }
             .clipped()
             .task(id: coverTaskID) {
                 image = nil
-                guard settings.onlineMetadataEnabled, let coverURL else { return }
-                image = await DiscoveryImageLoader.shared.image(for: coverURL)
+                guard settings.onlineMetadataEnabled,
+                      let coverURL else {
+                    return
+                }
+                image = await DiscoveryImageLoader.shared.image(
+                    for: coverURL
+                )
             }
     }
 
@@ -591,58 +1305,37 @@ private struct OPDSCoverView: View {
     private var palette: ColorPair {
         let palettes = theme.coverPalettes
         guard !palettes.isEmpty else {
-            return ColorPair(primary: theme.accent, secondary: theme.accentSecondary)
+            return ColorPair(
+                primary: theme.accent,
+                secondary: theme.accentSecondary
+            )
         }
-        let index = id.utf8.reduce(0) { ($0 &* 31 &+ Int($1)) % palettes.count }
+        let index = id.utf8.reduce(0) {
+            ($0 &* 31 &+ Int($1)) % palettes.count
+        }
         return palettes[index]
     }
 }
 
-// MARK: - States
-
 private struct OPDSLoadingView: View {
     @Environment(\.theme) private var theme
-    private let columns = [GridItem(.adaptive(minimum: 235, maximum: 360), spacing: 12)]
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Opening catalog…")
-                    .font(theme.body(size: 14, weight: .bold))
-                    .foregroundStyle(theme.textPrimary)
-
-                LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
-                    ForEach(0..<6, id: \.self) { _ in
-                        HStack(spacing: 12) {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(theme.surfaceGlass)
-                                .frame(width: 34, height: 34)
-                            VStack(alignment: .leading, spacing: 6) {
-                                RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
-                                    .fill(theme.surfaceGlass)
-                                    .frame(maxWidth: 150)
-                                    .frame(height: 10)
-                                RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
-                                    .fill(theme.surfaceGlass.opacity(0.7))
-                                    .frame(maxWidth: 96)
-                                    .frame(height: 8)
-                            }
-                            Spacer(minLength: 4)
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
-                        .background(theme.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(theme.borderSubtle, lineWidth: 1)
-                        }
-                    }
-                }
-                .redacted(reason: .placeholder)
-                .accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Opening catalog…")
+                .font(theme.body(size: 14, weight: .bold))
+            ForEach(0..<6, id: \.self) { _ in
+                RoundedRectangle(
+                    cornerRadius: WinstonLayout.cornerMedium
+                )
+                .fill(theme.surfaceGlass)
+                .frame(height: 54)
             }
-            .padding(24)
         }
+        .padding(24)
+        .redacted(reason: .placeholder)
+        .accessibilityLabel("Opening catalog")
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -668,23 +1361,24 @@ private struct OPDSEmptyResultsView: View {
 
     var body: some View {
         ContentUnavailableView {
-            if isSearching {
-                Label("No Search Results", systemImage: "magnifyingglass")
-            } else {
-                Label("No Books Here", systemImage: "books.vertical")
-            }
+            Label(
+                isSearching ? "No Search Results" : "No Books Here",
+                systemImage: isSearching
+                    ? "magnifyingglass"
+                    : "books.vertical"
+            )
         } description: {
-            if isSearching {
-                Text("Try a different search.")
-            } else {
-                Text("Go back to choose another section, or search this catalog.")
-            }
+            Text(
+                isSearching
+                    ? "Try a different search."
+                    : "Go back to choose another section, or search this catalog."
+            )
         }
     }
 }
 
 #if DEBUG
-#Preview("OPDS catalogs") {
+#Preview("Catalog Hub") {
     let container = PersistenceController.inMemory()
     let settings = AppSettings()
     let toasts = ToastCenter()
@@ -693,15 +1387,15 @@ private struct OPDSEmptyResultsView: View {
             modelContext: container.mainContext,
             settings: settings,
             toasts: toasts
-        )
+        ),
+        readModel: LibraryReadModel()
     )
     .modelContainer(container)
     .environment(settings)
     .environment(OPDSViewModel(settings: settings, toasts: toasts))
-    .environment(ToastCenter())
+    .environment(toasts)
     .environment(ThemeManager())
-    .environment(DiscoveryViewModel(settings: settings))
     .environment(\.theme, .black)
-    .frame(width: 820, height: 620)
+    .frame(width: 980, height: 680)
 }
 #endif

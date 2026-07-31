@@ -119,7 +119,7 @@ struct OPDSParserTests {
         )
 
         let publication = try #require(feed.publications.first)
-        #expect(OPDSCatalog.builtIn[1].rootURL.absoluteString ==
+        #expect(OPDSCatalogConfiguration.builtInDefaults[1].rootURL.absoluteString ==
             "https://standardebooks.org/feeds/atom/new-releases")
         #expect(publication.coverURL?.absoluteString ==
             "https://standardebooks.org/ebooks/example/book/downloads/cover-thumbnail.jpg")
@@ -168,6 +168,11 @@ struct OPDSParserTests {
         )
 
         #expect(feed.title == "Modern Catalog")
+        #expect(feed.documentFormat == .opds2)
+        #expect(feed.capabilities.hasBrowseNavigation)
+        #expect(feed.capabilities.hasRemoteSearch)
+        #expect(feed.capabilities.hasPagination)
+        #expect(feed.capabilities.hasAcquisitions)
         #expect(feed.navigation.map(\.title) == ["Popular", "Languages"])
         #expect(feed.nextURL == URL(string: "https://catalog.example/page/2"))
         #expect(feed.searchTemplate == "https://catalog.example/search{?query}")
@@ -178,6 +183,75 @@ struct OPDSParserTests {
         #expect(publication.summary == "A clean summary.")
         #expect(publication.coverURL == URL(string: "https://catalog.example/root/cover.png"))
         #expect(publication.preferredAcquisition?.fileExtension == "epub")
+    }
+
+    @Test func `OpenSearch description resolves an OPDS template`() throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
+          <ShortName>Books</ShortName>
+          <Url type="application/atom+xml;profile=opds-catalog"
+               template="/search?query={searchTerms}"/>
+        </OpenSearchDescription>
+        """
+
+        let template = try OPDSParser.parseOpenSearch(
+            Data(xml.utf8),
+            baseURL: URL(
+                string: "https://catalog.example/descriptions/search.xml"
+            )!
+        )
+
+        #expect(
+            template
+                == "https://catalog.example/search?query={searchTerms}"
+        )
+    }
+
+    @Test func `Publication metadata and paid acquisition remain visible`() throws {
+        let json = """
+        {
+          "metadata": { "title": "Store" },
+          "publications": [{
+            "metadata": {
+              "identifier": ["urn:isbn:9780306406157", "provider:42"],
+              "title": "Detailed Book",
+              "author": "Ada Author",
+              "language": "en",
+              "subject": [{"name": "Fiction"}, {"name": "Robots"}],
+              "rights": "Licensed reading copy",
+              "published": "2026-07-31"
+            },
+            "links": [{
+              "rel": "buy",
+              "href": "/buy/book.epub",
+              "type": "application/epub+zip",
+              "properties": {
+                "price": { "currency": "eur", "value": "4.99" }
+              }
+            }]
+          }]
+        }
+        """
+
+        let feed = try OPDSParser.parse(
+            Data(json.utf8),
+            baseURL: URL(string: "https://catalog.example/opds")!,
+            contentType: "application/opds+json"
+        )
+        let publication = try #require(feed.publications.first)
+        let acquisition = try #require(publication.acquisitions.first)
+
+        #expect(publication.identifiers == [
+            "urn:isbn:9780306406157", "provider:42",
+        ])
+        #expect(publication.subjects == ["Fiction", "Robots"])
+        #expect(publication.rights == "Licensed reading copy")
+        #expect(publication.published == "2026-07-31")
+        #expect(acquisition.relation == .buy)
+        #expect(acquisition.price == Decimal(string: "4.99"))
+        #expect(acquisition.currency == "EUR")
+        #expect(!acquisition.canImport)
     }
 
     @Test func `Unsupported documents and unsafe acquisition URLs are rejected`() {
@@ -247,7 +321,9 @@ struct OPDSViewModelTests {
         let client = FakeOPDSClient()
         let viewModel = OPDSViewModel(settings: settings, toasts: ToastCenter(), service: client)
 
-        await viewModel.open(OPDSCatalog.builtIn[0])
+        await viewModel.open(
+            OPDSCatalogConfiguration.builtInDefaults[0]
+        )
 
         #expect(viewModel.phase == .disabledOnline)
         #expect(await client.feedCalls == 0)
@@ -258,7 +334,7 @@ struct OPDSViewModelTests {
         let oldValue = settings.onlineMetadataEnabled
         settings.onlineMetadataEnabled = true
         defer { settings.onlineMetadataEnabled = oldValue }
-        let catalog = OPDSCatalog.builtIn[1]
+        let catalog = OPDSCatalogConfiguration.builtInDefaults[1]
         let nextURL = URL(string: "https://example.com/page/2")!
         let first = OPDSFeed(
             title: "Catalog",
@@ -271,7 +347,7 @@ struct OPDSViewModelTests {
             )],
             publications: [],
             nextURL: nextURL,
-            searchTemplate: nil
+            searchLink: nil
         )
         let second = OPDSFeed(
             title: "Catalog",
@@ -287,7 +363,7 @@ struct OPDSViewModelTests {
             ],
             publications: [],
             nextURL: nil,
-            searchTemplate: nil
+            searchLink: nil
         )
         let client = FakeOPDSClient(feeds: [catalog.rootURL: first, nextURL: second])
         let viewModel = OPDSViewModel(settings: settings, toasts: ToastCenter(), service: client)
@@ -300,7 +376,7 @@ struct OPDSViewModelTests {
         #expect(viewModel.feed?.nextURL == nil)
     }
 
-    @Test func `Downloaded EPUB is imported and prepared for Kindle automatically`() async throws {
+    @Test func `Downloaded EPUB waits for Import Review then commits normally`() async throws {
         let testLibrary = try await TestLibrary()
         let settings = AppSettings()
         let oldOnline = settings.onlineMetadataEnabled
@@ -337,24 +413,40 @@ struct OPDSViewModelTests {
         )
         let viewModel = OPDSViewModel(settings: settings, toasts: toasts, service: client)
 
-        viewModel.addToLibrary(publication, acquisition: acquisition, library: library)
+        viewModel.addToLibrary(
+            publication,
+            acquisition: acquisition,
+            catalogID:
+                OPDSBuiltInCatalog.projectGutenberg.stableID,
+            library: library
+        )
 
-        let target = EbookConverter.kindleTarget(forFormat: "epub").ext
         let deadline = Date.now.addingTimeInterval(8)
         while Date.now < deadline {
-            if let book = testLibrary.context.allBooks().first,
-               book.assets.contains(where: { $0.format.lowercased() == target }) {
+            if library.preparedImportBatch?.phase == .ready {
                 break
             }
             try? await Task.sleep(for: .milliseconds(25))
         }
 
+        #expect(testLibrary.context.allBooks().isEmpty)
+        #expect(library.preparedImportBatch?.phase == .ready)
+        library.commitImportReview()
+
+        let commitDeadline = Date.now.addingTimeInterval(8)
+        while Date.now < commitDeadline {
+            if !testLibrary.context.allBooks().isEmpty {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
         let book = try #require(testLibrary.context.allBooks().first)
-        #expect(viewModel.isDownloaded(publication))
+        #expect(viewModel.isDownloaded(
+            publication,
+            catalogID:
+                OPDSBuiltInCatalog.projectGutenberg.stableID
+        ))
         #expect(book.format.lowercased() == "epub")
-        #expect(book.assets.contains(where: {
-            $0.format.lowercased() == target && $0.origin == .generated
-        }))
         #expect(await client.downloadCalls == 1)
     }
 }
