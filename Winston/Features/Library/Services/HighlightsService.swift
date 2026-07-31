@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftData
 
 @MainActor
@@ -37,47 +38,69 @@ final class HighlightsService {
         self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
     }
 
-    func importHighlights(via monitor: DeviceMonitor) {
+    func importHighlights(via monitor: DeviceMonitor) async {
         guard let connection = monitor.connection, !isImportingHighlights else { return }
         isImportingHighlights = true
         highlightImportSummary = nil
-        Task {
-            defer { isImportingHighlights = false }
-            let text = try? await connection.readClippingsText()
-            guard let text, !text.isEmpty else {
-                highlightImportSummary = String(localized: "No clippings file found on the device.")
-                return
-            }
-            let clippings = await Task.detached(priority: .userInitiated) { KindleClippings.parse(text) }.value
-            let libraryBooks = (try? modelContext.fetchAllBooksForGlobalAnalysis()) ?? []
-            let snapshots = libraryBooks.map { book in
-                BookSnapshot(
-                    uuid: book.uuid,
-                    title: book.displayTitle,
-                    existing: Set(book.highlights.map { Signature(text: $0.text, location: $0.location) })
-                )
-            }
-            let matches = await Self.match(clippings: clippings, books: snapshots)
-            let insertions = matches.map {
-                CatalogHighlightInsertion(
-                    bookID: $0.bookUUID,
-                    text: $0.text,
-                    isNote: $0.isNote,
-                    location: $0.location,
-                    addedDate: $0.addedDate
-                )
-            }
-            let added: Int
-            if insertions.isEmpty {
-                added = 0
-            } else if case .success = mutations.execute(.importHighlights(insertions)) {
-                added = insertions.count
-            } else {
-                added = 0
-            }
-            highlightImportSummary = added > 0
-                ? String(localized: "Imported \(added) highlight(s).")
-                : String(localized: "No new highlights found.")
+        defer { isImportingHighlights = false }
+        let text: String?
+        do {
+            text = try await connection.readClippingsText()
+        } catch {
+            highlightImportSummary = String(
+                localized: "Couldn’t read clippings from the device."
+            )
+            return
+        }
+        guard let text, !text.isEmpty else {
+            highlightImportSummary = String(localized: "No clippings file found on the device.")
+            return
+        }
+        let clippings = await Task.detached(priority: .userInitiated) {
+            KindleClippings.parse(text)
+        }.value
+        let libraryBooks: [Book]
+        do {
+            libraryBooks = try modelContext.fetchAllBooksForGlobalAnalysis()
+        } catch {
+            Log.persistence.error(
+                "Highlight import catalog fetch failed: \(error.localizedDescription, privacy: .public)"
+            )
+            highlightImportSummary = String(
+                localized: "Couldn’t read the library for highlight matching."
+            )
+            return
+        }
+        let snapshots = libraryBooks.map { book in
+            BookSnapshot(
+                uuid: book.uuid,
+                title: book.displayTitle,
+                existing: Set(book.highlights.map {
+                    Signature(text: $0.text, location: $0.location)
+                })
+            )
+        }
+        let matches = await Self.match(clippings: clippings, books: snapshots)
+        let insertions = matches.map {
+            CatalogHighlightInsertion(
+                bookID: $0.bookUUID,
+                text: $0.text,
+                isNote: $0.isNote,
+                location: $0.location,
+                addedDate: $0.addedDate
+            )
+        }
+        if insertions.isEmpty {
+            highlightImportSummary = String(localized: "No new highlights found.")
+            return
+        } else if case .success = mutations.execute(.importHighlights(insertions)) {
+            highlightImportSummary = String(
+                localized: "Imported \(insertions.count) highlight(s)."
+            )
+        } else {
+            highlightImportSummary = String(
+                localized: "Couldn’t save imported highlights."
+            )
         }
     }
 

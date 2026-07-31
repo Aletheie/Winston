@@ -26,8 +26,6 @@ private nonisolated struct VisibleHighlightGroup: Sendable {
 }
 
 struct HighlightsView: View {
-    let books: [Book]
-
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @Environment(\.modelContext) private var modelContext
@@ -38,6 +36,7 @@ struct HighlightsView: View {
     @State private var visible: [BookGroup] = []
     @State private var totalCount = 0
     @State private var isLoading = true
+    @State private var loadError: String?
     @State private var groupGeneration = 0
 
     private struct BookGroup: Identifiable {
@@ -101,6 +100,16 @@ struct HighlightsView: View {
             ProgressView()
                 .controlSize(.large)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let loadError, sourceGroups.isEmpty {
+            ContentUnavailableView {
+                Label("Couldn’t Load Highlights", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(loadError)
+            } actions: {
+                Button("Try Again") {
+                    Task { await rebuildSourceGroups() }
+                }
+            }
         } else if visible.isEmpty {
             ContentUnavailableView {
                 Label(search.isEmpty ? String(localized: "No highlights yet")
@@ -149,26 +158,39 @@ struct HighlightsView: View {
 
     private func rebuildSourceGroups() async {
         isLoading = true
-        var descriptor = FetchDescriptor<Book>(
-            sortBy: [SortDescriptor(\Book.dateAdded, order: .reverse)]
+        defer { isLoading = false }
+        var descriptor = FetchDescriptor<Highlight>(
+            sortBy: [SortDescriptor(\Highlight.dateImported)]
         )
-        descriptor.relationshipKeyPathsForPrefetching = [\Book.highlights]
-        let sourceBooks = (try? modelContext.fetch(descriptor)) ?? books
+        descriptor.relationshipKeyPathsForPrefetching = [\Highlight.book]
+        let fetchedHighlights: [Highlight]
+        do {
+            fetchedHighlights = try modelContext.fetch(descriptor)
+            loadError = nil
+        } catch {
+            loadError = error.localizedDescription
+            toasts.error(String(localized: "Couldn’t read highlights from the library."))
+            return
+        }
 
         var booksByID: [UUID: Book] = [:]
         var highlightsByBookID: [UUID: [Highlight]] = [:]
         var sources: [HighlightGroupSource] = []
-        booksByID.reserveCapacity(sourceBooks.count)
-        highlightsByBookID.reserveCapacity(sourceBooks.count)
-        sources.reserveCapacity(sourceBooks.count)
+        booksByID.reserveCapacity(fetchedHighlights.count)
+        highlightsByBookID.reserveCapacity(fetchedHighlights.count)
         var processedHighlights = 0
 
-        for book in sourceBooks {
+        for highlight in fetchedHighlights {
             guard !Task.isCancelled else { return }
-            let highlights = book.highlights
-            guard !highlights.isEmpty else { continue }
+            guard let book = highlight.book else { continue }
             booksByID[book.uuid] = book
-            highlightsByBookID[book.uuid] = highlights
+            highlightsByBookID[book.uuid, default: []].append(highlight)
+        }
+        sources.reserveCapacity(booksByID.count)
+
+        for (bookID, book) in booksByID {
+            guard !Task.isCancelled,
+                  let highlights = highlightsByBookID[bookID] else { return }
 
             var entries: [HighlightGroupSource.Entry] = []
             entries.reserveCapacity(highlights.count)
@@ -185,7 +207,7 @@ struct HighlightsView: View {
                 }
             }
             sources.append(HighlightGroupSource(
-                bookID: book.uuid,
+                bookID: bookID,
                 title: book.displayTitle,
                 entries: entries
             ))
@@ -206,7 +228,6 @@ struct HighlightsView: View {
         sourceGroups = groups
         searchGroups = prepared
         totalCount = prepared.reduce(0) { $0 + $1.sourceIndices.count }
-        isLoading = false
         groupGeneration &+= 1
         await applySearch()
     }
