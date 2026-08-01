@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SeriesView: View {
     let books: [Book]
+    let wishlist: WishlistService
     let onOpen: (Book) -> Void
     let onShowInLibrary: (String) -> Void
     let seriesName: String?
@@ -18,12 +19,14 @@ struct SeriesView: View {
 
     init(
         books: [Book],
+        wishlist: WishlistService,
         onOpen: @escaping (Book) -> Void,
         onShowInLibrary: @escaping (String) -> Void,
         seriesName: String? = nil,
         catalogService: any SeriesCatalogFetching = HardcoverSeriesService.shared
     ) {
         self.books = books
+        self.wishlist = wishlist
         self.onOpen = onOpen
         self.onShowInLibrary = onShowInLibrary
         self.seriesName = seriesName
@@ -60,6 +63,7 @@ struct SeriesView: View {
                                 name: group.name,
                                 books: group.books,
                                 completion: completionModel.completions[group.lookup.id],
+                                wishlist: wishlist,
                                 catalogPhase: completionModel.phase,
                                 isFocused: seriesName != nil,
                                 onOpen: onOpen,
@@ -273,6 +277,7 @@ private struct SeriesSection: View {
     let name: String
     let books: [Book]
     let completion: SeriesCompletion?
+    let wishlist: WishlistService
     let catalogPhase: SeriesCompletionViewModel.Phase
     let isFocused: Bool
     let onOpen: (Book) -> Void
@@ -295,7 +300,10 @@ private struct SeriesSection: View {
             LocalReadingProgress(readCount: readCount, totalCount: books.count)
 
             if let completion {
-                SeriesOwnershipSummary(completion: completion)
+                SeriesOwnershipSummary(
+                    completion: completion,
+                    wishlist: wishlist
+                )
             } else if catalogPhase == .loaded {
                 Label("No exact Hardcover match", systemImage: "questionmark.circle")
                     .font(theme.label(size: 10, weight: .regular))
@@ -399,6 +407,10 @@ private struct SeriesLocalBookRow: View {
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
             Spacer()
+            Text("Owned")
+                .font(theme.label(size: 9, weight: .semibold))
+                .foregroundStyle(theme.success)
+                .accessibilityLabel("Owned local edition")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -419,6 +431,7 @@ private struct SeriesLocalBookRow: View {
 
 private struct SeriesOwnershipSummary: View {
     let completion: SeriesCompletion
+    let wishlist: WishlistService
 
     @Environment(\.theme) private var theme
 
@@ -449,6 +462,25 @@ private struct SeriesOwnershipSummary: View {
                     Label("Hardcover", systemImage: "arrow.up.right")
                 }
                 .help("View this series on Hardcover")
+                if let nextMissing = completion.missingBooks.first {
+                    Button {
+                        CatalogSearchRouter.open(
+                            CatalogSearchSeed(
+                                seriesBook: nextMissing,
+                                seriesName: completion.catalog.name
+                            )
+                        )
+                    } label: {
+                        Label(
+                            "Find Next Missing Volume",
+                            systemImage: "magnifyingglass"
+                        )
+                    }
+                    .controlSize(.small)
+                    .help(
+                        "Search catalogs for only the next missing volume"
+                    )
+                }
             }
             .font(theme.label(size: 10, weight: .semibold))
 
@@ -464,7 +496,11 @@ private struct SeriesOwnershipSummary: View {
                     .foregroundStyle(theme.textTertiary)
 
                 ForEach(completion.missingBooks.prefix(4)) { book in
-                    MissingSeriesBookRow(book: book)
+                    MissingSeriesBookRow(
+                        book: book,
+                        seriesName: completion.catalog.name,
+                        wishlist: wishlist
+                    )
                 }
 
                 if remainingMissingCount > 0 {
@@ -486,6 +522,8 @@ private struct SeriesOwnershipSummary: View {
 
 private struct MissingSeriesBookRow: View {
     let book: HardcoverSeriesBook
+    let seriesName: String
+    let wishlist: WishlistService
 
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
@@ -524,7 +562,60 @@ private struct MissingSeriesBookRow: View {
                 .help("Search External Website")
                 .accessibilityLabel("Search External Website")
             }
+
+            Button {
+                wishlist.toggle(discoveryBook)
+            } label: {
+                Image(
+                    systemName: isWishlisted
+                        ? "heart.slash"
+                        : "heart"
+                )
+            }
+            .buttonStyle(.plain)
+            .help(
+                isWishlisted
+                    ? "Remove from Wishlist"
+                    : "Add to Wishlist"
+            )
+            .accessibilityLabel(
+                isWishlisted
+                    ? "Remove from Wishlist"
+                    : "Add to Wishlist"
+            )
+
+            Button {
+                CatalogSearchRouter.open(
+                    CatalogSearchSeed(
+                        seriesBook: book,
+                        seriesName: seriesName
+                    )
+                )
+            } label: {
+                Image(systemName: "books.vertical")
+            }
+            .buttonStyle(.plain)
+            .help("Find in Catalogs")
+            .accessibilityLabel("Find this missing volume in Catalogs")
+
+            statusLabels
         }
+    }
+
+    @ViewBuilder
+    private var statusLabels: some View {
+        HStack(spacing: 4) {
+            Text("Missing")
+            if isWishlisted {
+                Text("Wanted")
+            }
+            if isUpcoming {
+                Text("Upcoming")
+            }
+        }
+        .font(theme.label(size: 8, weight: .semibold))
+        .foregroundStyle(theme.textTertiary)
+        .accessibilityElement(children: .combine)
     }
 
     private var externalBookURL: URL? {
@@ -542,5 +633,26 @@ private struct MissingSeriesBookRow: View {
         }
         guard let position = book.position else { return "\u{00B7}" }
         return position.formatted(.number.precision(.fractionLength(0...2)))
+    }
+
+    private var discoveryBook: DiscoveryBook {
+        DiscoveryBook(
+            id: String(book.id),
+            title: book.title,
+            author: book.authors.first,
+            coverURL: book.coverURL,
+            hardcoverURL: book.hardcoverURL,
+            rating: nil,
+            releaseDate: book.releaseDate
+        )
+    }
+
+    private var isWishlisted: Bool {
+        wishlist.contains(discoveryBook)
+    }
+
+    private var isUpcoming: Bool {
+        guard let date = book.releaseDate?.date else { return false }
+        return date > .now
     }
 }

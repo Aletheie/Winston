@@ -119,6 +119,7 @@ struct SidebarView: View {
     private var facets: LibraryFacetSnapshot { readModel.facets }
 
     var body: some View {
+        let _ = LibraryPerformanceDiagnostics.recordBody("SidebarViewBody")
         sidebarDeletionAlerts
     }
 

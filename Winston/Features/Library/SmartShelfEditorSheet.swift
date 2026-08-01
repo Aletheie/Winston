@@ -421,6 +421,9 @@ private struct SmartShelfRuleValueEditor: View {
                     }
                 }
                 .labelsHidden()
+            } else if rule.field == .language {
+                LanguageMetadataField(text: $rule.value)
+                    .accessibilityLabel(Text(rule.field.label))
             } else {
                 TextField(valuePrompt, text: $rule.value)
                     .textFieldStyle(.roundedBorder)
