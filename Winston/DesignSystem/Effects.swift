@@ -57,24 +57,6 @@ struct ThemedBackground: View {
 
 // MARK: - Modifiers
 
-private struct NeonGlowModifier: ViewModifier {
-    @Environment(\.theme) private var theme
-    let color: Color
-    let radius: CGFloat
-    let intensity: Double
-
-    func body(content: Content) -> some View {
-        if theme.showsNeonGlow {
-            content
-                .shadow(color: color.opacity(intensity * 0.9), radius: radius * 0.35)
-                .shadow(color: color.opacity(intensity * 0.6), radius: radius)
-                .shadow(color: color.opacity(intensity * 0.28), radius: radius * 2.4)
-        } else {
-            content
-        }
-    }
-}
-
 private struct GlassCardModifier: ViewModifier {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -115,21 +97,6 @@ private struct AccessibleThemeModifier: ViewModifier {
             adapted.borderSubtle = theme.textSecondary.opacity(0.45)
         }
         return content.environment(\.theme, adapted)
-    }
-}
-
-private struct BorderGlowModifier: ViewModifier {
-    let active: Bool
-    let color: Color
-    let cornerRadius: CGFloat
-
-    func body(content: Content) -> some View {
-        content
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(active ? color.opacity(0.45) : .clear, lineWidth: active ? 2 : 0)
-                    .shadow(color: active ? color.opacity(0.6) : .clear, radius: active ? 16 : 0)
-            )
     }
 }
 
@@ -188,16 +155,8 @@ extension View {
 // MARK: - View extensions
 
 extension View {
-    func neonGlow(color: Color, radius: CGFloat = 12, intensity: Double = 0.7) -> some View {
-        modifier(NeonGlowModifier(color: color, radius: radius, intensity: intensity))
-    }
-
     func glassCard(cornerRadius: CGFloat = 12, tintOpacity: Double = 0.6) -> some View {
         modifier(GlassCardModifier(cornerRadius: cornerRadius, tintOpacity: tintOpacity))
-    }
-
-    func borderGlow(active: Bool, color: Color, cornerRadius: CGFloat = 12) -> some View {
-        modifier(BorderGlowModifier(active: active, color: color, cornerRadius: cornerRadius))
     }
 
     func themedBorder(cornerRadius: CGFloat) -> some View {
