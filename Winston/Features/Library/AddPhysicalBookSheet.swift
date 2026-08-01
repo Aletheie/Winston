@@ -4,7 +4,6 @@ import UniformTypeIdentifiers
 struct AddPhysicalBookSheet: View {
     let viewModel: LibraryViewModel
 
-    @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
 
     @State private var title = ""
@@ -20,8 +19,8 @@ struct AddPhysicalBookSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Label("Add Physical Book", systemImage: "books.vertical")
-                .font(theme.label(size: 14, weight: .bold))
-                .foregroundStyle(theme.usesTerminalCopy ? theme.accentSecondary : theme.textPrimary)
+                .font(.headline)
+                .foregroundStyle(.primary)
                 .padding(.bottom, 16)
 
             PhysicalBookFields(
@@ -44,34 +43,19 @@ struct AddPhysicalBookSheet: View {
 
             HStack {
                 Button("Cancel") { dismiss() }
-                    .buttonStyle(.plain)
-                    .font(theme.label(size: 12))
-                    .foregroundStyle(theme.textSecondary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
                     .keyboardShortcut(.cancelAction)
 
                 Spacer()
 
                 Button("Add Book") { addBook() }
-                    .buttonStyle(.plain)
-                    .font(theme.label(size: 12, weight: .bold))
-                    .foregroundStyle(theme.colorScheme == .dark ? theme.background : .white)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 7)
-                    .background(
-                        RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
-                            .fill(theme.usesTerminalCopy ? theme.accentSecondary : theme.accent)
-                    )
+                    .buttonStyle(.borderedProminent)
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .opacity(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.5 : 1)
                     .keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)
         .frame(minWidth: 440, idealWidth: 500, maxWidth: 620)
-        .background(theme.backgroundAlt)
+        .background(.background)
     }
 
     private func addBook() {
@@ -132,32 +116,20 @@ private struct PhysicalBookFields: View {
 private struct PhysicalBookNotesField: View {
     @Binding var notes: String
 
-    @Environment(\.theme) private var theme
-
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Notes")
-                .font(theme.label(size: 9, weight: .semibold))
-                .foregroundStyle(theme.textTertiary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             TextEditor(text: $notes)
-                .font(theme.label(size: 12, weight: .regular))
-                .scrollContentBackground(.hidden)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 2)
+                .font(.body)
                 .frame(height: 72)
-                .background(
-                    RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall, style: .continuous)
-                        .fill(theme.surface.opacity(0.5))
-                )
-                .themedBorder(cornerRadius: WinstonLayout.cornerSmall)
         }
     }
 }
 
 private struct PhysicalBookCoverField: View {
     @Binding var coverURL: URL?
-
-    @Environment(\.theme) private var theme
 
     var body: some View {
         HStack(spacing: 10) {
@@ -173,14 +145,14 @@ private struct PhysicalBookCoverField: View {
                 Text(coverURL.lastPathComponent)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .foregroundStyle(theme.textSecondary)
+                    .foregroundStyle(.secondary)
                 Button("Remove", systemImage: "xmark.circle.fill") { self.coverURL = nil }
                     .labelStyle(.iconOnly)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(theme.textTertiary)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
         }
-        .font(theme.label(size: 11))
+        .font(.callout)
     }
 }

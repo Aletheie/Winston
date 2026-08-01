@@ -283,6 +283,6 @@ private struct WorkDetailFooter: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
+        .background(.bar)
     }
 }
