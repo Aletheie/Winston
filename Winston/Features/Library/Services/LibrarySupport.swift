@@ -8,63 +8,14 @@ extension ModelContext {
     /// Callers must decide how a fetch failure affects their operation.
     func fetchAllBooksForGlobalAnalysis() throws -> [Book] {
         let interval = Log.librarySignposter.beginInterval("GlobalBookFetch")
-        defer { Log.librarySignposter.endInterval("GlobalBookFetch", interval) }
+        LibraryPerformanceDiagnostics.beginSQLScope("global_book_fetch")
+        defer {
+            LibraryPerformanceDiagnostics.endSQLScope("global_book_fetch")
+            Log.librarySignposter.endInterval("GlobalBookFetch", interval)
+        }
         return try fetch(FetchDescriptor<Book>())
     }
 
-    func saveAndPublish(
-        catalogChanged: Bool = true,
-        affectedBookIDs: Set<UUID>? = nil,
-        affectedWorkIDs: Set<UUID> = [],
-        affectedAssetIDs: Set<UUID> = [],
-        affectedCollectionIDs: Set<UUID> = [],
-        fields: CatalogChangeFields = .all,
-        changesBookMembership: Bool = false,
-        fullTextAffectedBookIDs: Set<UUID>? = []
-    ) throws {
-        try save()
-        LibraryMutationLog.shared.bump(
-            catalogChanged: catalogChanged,
-            affectedBookIDs: affectedBookIDs,
-            affectedWorkIDs: affectedWorkIDs,
-            affectedAssetIDs: affectedAssetIDs,
-            affectedCollectionIDs: affectedCollectionIDs,
-            fields: fields,
-            changesBookMembership: changesBookMembership,
-            fullTextAffectedBookIDs: fullTextAffectedBookIDs
-        )
-    }
-
-    @discardableResult
-    func saveQuietly(
-        rollbackOnFailure _: Bool = true,
-        catalogChanged: Bool = true,
-        affectedBookIDs: Set<UUID>? = nil,
-        affectedWorkIDs: Set<UUID> = [],
-        affectedAssetIDs: Set<UUID> = [],
-        affectedCollectionIDs: Set<UUID> = [],
-        fields: CatalogChangeFields = .all,
-        changesBookMembership: Bool = false,
-        fullTextAffectedBookIDs: Set<UUID>? = []
-    ) -> Bool {
-        do {
-            try saveAndPublish(
-                catalogChanged: catalogChanged,
-                affectedBookIDs: affectedBookIDs,
-                affectedWorkIDs: affectedWorkIDs,
-                affectedAssetIDs: affectedAssetIDs,
-                affectedCollectionIDs: affectedCollectionIDs,
-                fields: fields,
-                changesBookMembership: changesBookMembership,
-                fullTextAffectedBookIDs: fullTextAffectedBookIDs
-            )
-            return true
-        } catch {
-            rollback()
-            Log.persistence.error("Best-effort SwiftData save failed and rolled back: \(error.localizedDescription, privacy: .public)")
-            return false
-        }
-    }
 }
 
 nonisolated let libraryEbookExtensions: Set<String> = ["epub", "mobi", "azw", "azw3", "pdf", "txt", "html", "htm"]
