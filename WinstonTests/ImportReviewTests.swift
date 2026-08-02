@@ -477,6 +477,80 @@ struct ImportReviewTests {
         #expect(try managedBookFiles().map(\.lastPathComponent) == [asset.fileName])
     }
 
+    @Test func `Catalog import exposes proposal context and cancellation cleans download`() async throws {
+        let library = try await TestLibrary()
+        let store = ImportSourceLeaseStore(
+            rootDirectory: library.root.appending(
+                path: "CatalogLeases",
+                directoryHint: .isDirectory
+            )
+        )
+        let leaf = try #require(
+            ManagedLeafName(rawValue: "Catalog Book.epub")
+        )
+        let lease = try store.create(
+            fileName: leaf,
+            purpose: .catalogDownload
+        )
+        try Data("catalog bytes".utf8).write(to: lease.fileURL)
+        let importer = makeImporter(
+            in: library,
+            leaseStore: store,
+            analyzeBook: { _ in
+                var metadata = BookMetadata()
+                metadata.title = "Embedded Title"
+                metadata.author = "Embedded Author"
+                metadata.language = "cs"
+                return ImportBookAnalysis(
+                    metadata: metadata,
+                    drmProtected: false,
+                    validation: .ok
+                )
+            }
+        )
+        let context = CatalogImportContext(
+            catalogID: "custom.catalog",
+            catalogName: "Private Catalog",
+            publicationID: "publication-1",
+            publicationTitle: "Catalog Title",
+            publicationAuthors: ["Catalog Author"],
+            publicationLanguage: "en",
+            sourceURL: try #require(
+                URL(string: "https://catalog.example/books/1")
+            ),
+            attribution: "Catalog contributors",
+            contributors: ["Ada", "Charles"],
+            selectedFormat: "EPUB",
+            acquisitionRelation: .openAccess
+        )
+
+        _ = importer.beginCatalogImportReview(
+            from: .winstonOwned(lease),
+            context: context
+        )
+        let item = try #require(
+            try await readyBatch(from: importer).items.first
+        )
+
+        #expect(item.catalogContext == context)
+        #expect(Set(item.catalogMetadataDifferences.map(\.field)) == Set([
+            String(localized: "Title"),
+            String(localized: "Author"),
+            String(localized: "Language"),
+        ]))
+        #expect(item.metadata.title == "Embedded Title")
+        #expect(FileManager.default.fileExists(
+            atPath: lease.fileURL.path(percentEncoded: false)
+        ))
+
+        importer.cancelImportReview()
+        try await waitUntilReviewCloses(importer)
+        #expect(!FileManager.default.fileExists(
+            atPath: lease.directoryURL.path(percentEncoded: false)
+        ))
+        #expect(library.context.allBooks().isEmpty)
+    }
+
     private func makeImporter(
         in library: TestLibrary,
         managedFiles: ManagedFileCoordinator? = nil,

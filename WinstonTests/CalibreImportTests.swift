@@ -1251,6 +1251,7 @@ struct CalibreImportSessionIntegrationTests {
         let metadata = MetadataService(
             modelContext: library.context,
             settings: settings,
+            online: OfflineCalibreMetadataClient(),
             mutations: mutations
         )
         let wishlist = WishlistService(modelContext: library.context, toasts: toasts)
@@ -1344,4 +1345,18 @@ private enum CalibreSessionFixture {
         }
         return (root, database)
     }
+}
+
+private actor OfflineCalibreMetadataClient: OnlineMetadataFetching {
+    func fetch(
+        isbn: String?,
+        title: String,
+        author: String?,
+        language: MetadataLanguage,
+        hardcoverToken: String?
+    ) async -> OnlineMetadataFetchResult {
+        OnlineMetadataFetchResult(metadata: nil, reachedNetwork: false)
+    }
+
+    func downloadCover(_ url: URL) async -> Data? { nil }
 }

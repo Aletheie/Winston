@@ -7,7 +7,23 @@ struct EditionReviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var booksByUUID: [UUID: Book] = [:]
     @State private var isScanning = false
-    @State private var reviewRequest: ReconciliationReviewRequest?
+    @State private var selectedPairKeys: Set<String> = []
+    @State private var focusedPairKey: String?
+    @State private var verdictFilter: EditionVerdict?
+    @State private var confidenceFilter: MatchConfidence?
+    @State private var batchController = ReconciliationBatchController()
+
+    private var visibleProposals: [EditionMatchProposal] {
+        service.pendingProposals.filter { proposal in
+            (verdictFilter == nil || proposal.verdict == verdictFilter)
+                && (confidenceFilter == nil || proposal.confidence == confidenceFilter)
+        }
+    }
+
+    private var focusedProposal: EditionMatchProposal? {
+        guard let focusedPairKey else { return nil }
+        return service.pendingProposals.first { $0.pairKey == focusedPairKey }
+    }
 
     var body: some View {
         let proposals = service.pendingProposals
@@ -18,16 +34,69 @@ struct EditionReviewSheet: View {
             if proposals.isEmpty, !isScanning {
                 ReconciliationEmptyState()
             } else {
-                EditionProposalList(
-                    proposals: proposals,
+                ReconciliationFilterBar(
+                    verdict: $verdictFilter,
+                    confidence: $confidenceFilter,
+                    visibleCount: visibleProposals.count,
+                    totalCount: proposals.count
+                )
+                Divider()
+                HSplitView {
+                    EditionProposalList(
+                        proposals: visibleProposals,
+                        booksByUUID: booksByUUID,
+                        selection: $selectedPairKeys,
+                        focus: $focusedPairKey,
+                        isEnabled: !batchController.isRunning,
+                        onDismiss: dismissProposal
+                    )
+                    .frame(minWidth: 300, idealWidth: 360)
+
+                    ReconciliationWorkspaceDetail(
+                        proposal: focusedProposal,
+                        booksByUUID: booksByUUID,
+                        service: service,
+                        isBatchRunning: batchController.isRunning,
+                        onPrevious: focusPreviousProposal,
+                        onNext: focusNextProposal,
+                        onResolved: proposalWasResolved
+                    )
+                    .id(focusedProposal?.pairKey)
+                    .frame(minWidth: 340, idealWidth: 460)
+                }
+            }
+            if let progress = batchController.progress {
+                Divider()
+                ReconciliationBatchProgressView(
+                    progress: progress,
+                    isCancelling: batchController.isCancelling,
+                    onCancel: batchController.cancel
+                )
+            } else if let result = batchController.result {
+                Divider()
+                ReconciliationBatchResultView(
+                    result: result,
                     booksByUUID: booksByUUID,
-                    onDismiss: service.dismiss,
-                    onReview: openReview
+                    onRetry: retryBatch,
+                    onDismiss: batchController.clearResult
                 )
             }
             Divider()
-            ReconciliationFooter(
+            ReconciliationWorkspaceCommandBar(
                 isScanning: isScanning,
+                selectedCount: selectedPairKeys.count,
+                hiddenSelectedCount: selectedPairKeys.subtracting(
+                    Set(visibleProposals.map(\.pairKey))
+                ).count,
+                visibleCount: visibleProposals.count,
+                canApply: visibleProposals.contains {
+                    selectedPairKeys.contains($0.pairKey) && $0.canApply
+                },
+                isRunning: batchController.isRunning,
+                onSelectAllVisible: selectAllVisible,
+                onClearSelection: { selectedPairKeys.removeAll() },
+                onKeepSeparate: { startBatch(.dismiss) },
+                onApply: { startBatch(.apply) },
                 onRescan: { Task { await scan() } },
                 onDone: { dismiss() }
             )
@@ -36,24 +105,84 @@ struct EditionReviewSheet: View {
         .onChange(of: LibraryMutationLog.shared.revision, initial: true) {
             rebuildBookIndex()
         }
-        .task { await scan() }
-        .sheet(item: $reviewRequest) { request in
-            ReconciliationReviewSheet(request: request, service: service)
+        .onChange(of: visibleProposals.map(\.pairKey), initial: true) { _, pairKeys in
+            synchronizeWorkspace(with: pairKeys)
         }
+        .onChange(of: batchController.result?.id) {
+            guard let result = batchController.result else { return }
+            selectedPairKeys = result.retryablePairKeys
+            synchronizeWorkspace(with: visibleProposals.map(\.pairKey))
+        }
+        .task { await scan() }
+        .interactiveDismissDisabled(batchController.isRunning)
     }
 
     private func rebuildBookIndex() {
         booksByUUID = Dictionary(books.map { ($0.uuid, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
-    private func openReview(_ proposal: EditionMatchProposal) {
-        let members = proposal.memberUUIDs.compactMap { booksByUUID[$0] }
-        guard members.count == proposal.memberUUIDs.count else { return }
-        reviewRequest = ReconciliationReviewRequest(
-            proposal: proposal,
-            books: members,
-            survivorUUID: service.mergeSurvivor(among: members)?.uuid
+    private func dismissProposal(_ proposal: EditionMatchProposal) {
+        service.dismiss(proposal)
+        selectedPairKeys.remove(proposal.pairKey)
+        proposalWasResolved(proposal.pairKey)
+    }
+
+    private func selectAllVisible() {
+        selectedPairKeys.formUnion(visibleProposals.map(\.pairKey))
+    }
+
+    private func startBatch(_ action: ReconciliationBatchAction) {
+        batchController.start(
+            action: action,
+            pairKeys: selectedPairKeys,
+            service: service
         )
+    }
+
+    private func retryBatch() {
+        guard let result = batchController.result,
+              !result.retryablePairKeys.isEmpty else { return }
+        batchController.clearResult()
+        batchController.start(
+            action: result.action,
+            pairKeys: result.retryablePairKeys,
+            service: service
+        )
+    }
+
+    private func synchronizeWorkspace(with visiblePairKeys: [String]) {
+        let pendingKeys = Set(service.pendingProposals.map(\.pairKey))
+        selectedPairKeys.formIntersection(pendingKeys)
+        if let focusedPairKey, pendingKeys.contains(focusedPairKey) { return }
+        focusedPairKey = visiblePairKeys.first
+    }
+
+    private func proposalWasResolved(_ pairKey: String) {
+        selectedPairKeys.remove(pairKey)
+        let remaining = visibleProposals.map(\.pairKey).filter { $0 != pairKey }
+        focusedPairKey = remaining.first
+    }
+
+    private func focusPreviousProposal() {
+        moveFocus(by: -1)
+    }
+
+    private func focusNextProposal() {
+        moveFocus(by: 1)
+    }
+
+    private func moveFocus(by offset: Int) {
+        let keys = visibleProposals.map(\.pairKey)
+        guard !keys.isEmpty else {
+            focusedPairKey = nil
+            return
+        }
+        guard let focusedPairKey,
+              let index = keys.firstIndex(of: focusedPairKey) else {
+            self.focusedPairKey = keys.first
+            return
+        }
+        self.focusedPairKey = keys[min(max(index + offset, 0), keys.count - 1)]
     }
 
     private func scan() async {
@@ -112,6 +241,349 @@ private struct ReconciliationEmptyState: View {
     }
 }
 
+private struct ReconciliationFilterBar: View {
+    @Binding var verdict: EditionVerdict?
+    @Binding var confidence: MatchConfidence?
+    let visibleCount: Int
+    let totalCount: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Picker("Proposal type", selection: $verdict) {
+                Text("All Types").tag(nil as EditionVerdict?)
+                ForEach(EditionVerdict.allCases, id: \.self) { value in
+                    Text(verdictTitle(value)).tag(value as EditionVerdict?)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 220)
+            .accessibilityLabel("Proposal type filter")
+
+            Picker("Confidence", selection: $confidence) {
+                Text("All Confidence Levels").tag(nil as MatchConfidence?)
+                ForEach(MatchConfidence.allCases, id: \.self) { value in
+                    Text(value.label).tag(value as MatchConfidence?)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 190)
+            .accessibilityLabel("Confidence filter")
+
+            Spacer()
+            Text("Showing \(visibleCount) of \(totalCount)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Showing \(visibleCount) of \(totalCount) proposals")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .themedChrome(role: .toolbar)
+    }
+
+    private func verdictTitle(_ verdict: EditionVerdict) -> LocalizedStringResource {
+        switch verdict {
+        case .duplicateFile: "Identical Files"
+        case .sameEditionOtherFormat: "Same Edition"
+        case .sameWorkOtherEdition: "Other Editions"
+        case .similarItem: "Similar Only"
+        }
+    }
+}
+
+private struct ReconciliationWorkspaceDetail: View {
+    let proposal: EditionMatchProposal?
+    let booksByUUID: [UUID: Book]
+    let service: CatalogReconciliationService
+    let isBatchRunning: Bool
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    let onResolved: (String) -> Void
+
+    @State private var applyController = ReconciliationApplyController()
+
+    var body: some View {
+        if let proposal {
+            let books = proposal.memberUUIDs.compactMap { booksByUUID[$0] }
+            VStack(spacing: 0) {
+                HStack {
+                    ReconciliationReviewHeader(proposal: proposal)
+                    Spacer()
+                    Button(action: onPrevious) {
+                        Label("Previous Proposal", systemImage: "chevron.up")
+                            .labelStyle(.iconOnly)
+                    }
+                    .help("Previous Proposal")
+                    Button(action: onNext) {
+                        Label("Next Proposal", systemImage: "chevron.down")
+                            .labelStyle(.iconOnly)
+                    }
+                    .help("Next Proposal")
+                }
+                Divider()
+                if books.count == proposal.memberUUIDs.count {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            ReconciliationBookComparison(books: books)
+                            ReconciliationPlanView(
+                                proposal: proposal,
+                                books: books,
+                                survivorUUID: service.mergeSurvivor(among: books)?.uuid
+                            )
+                            if applyController.phase != .reviewing {
+                                ReconciliationApplyStatus(phase: applyController.phase)
+                            }
+                        }
+                        .padding(16)
+                    }
+                } else {
+                    ContentUnavailableView(
+                        "Proposal Changed",
+                        systemImage: "arrow.clockwise",
+                        description: Text("Rescan to review the current catalog state.")
+                    )
+                }
+                Divider()
+                actions(for: proposal)
+            }
+            .onChange(of: applyController.phase) { _, phase in
+                guard phase == .completed else { return }
+                onResolved(proposal.pairKey)
+            }
+            .onDisappear {
+                applyController.cancelIfPossible()
+            }
+        } else {
+            ContentUnavailableView(
+                "Select a Proposal",
+                systemImage: "books.vertical",
+                description: Text("Choose a proposal to inspect its evidence and planned changes.")
+            )
+        }
+    }
+
+    private func actions(for proposal: EditionMatchProposal) -> some View {
+        HStack {
+            if applyController.phase == .committing {
+                Label("Finishing protected changes…", systemImage: "lock.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if applyController.canCancel {
+                Button("Cancel Operation", action: applyController.cancel)
+            }
+            Button("Keep Separate") {
+                service.dismiss(proposal)
+                onResolved(proposal.pairKey)
+            }
+            .disabled(applyController.isRunning || isBatchRunning)
+            if proposal.canApply {
+                Button(actionLabel(for: proposal)) {
+                    applyController.start(proposal: proposal, service: service)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!applyController.canApply || isBatchRunning)
+            }
+        }
+        .padding(12)
+        .themedChrome(role: .sheetAction)
+    }
+
+    private func actionLabel(
+        for proposal: EditionMatchProposal
+    ) -> LocalizedStringResource {
+        if case .failed = applyController.phase { return "Try Again" }
+        if applyController.phase == .cancelled { return "Try Again" }
+        return switch proposal.verdict {
+        case .duplicateFile: "Merge Identical Copies"
+        case .sameEditionOtherFormat: "Merge Edition Records"
+        case .sameWorkOtherEdition: "Group Editions"
+        case .similarItem: "Keep Separate"
+        }
+    }
+}
+
+private struct ReconciliationBatchProgressView: View {
+    let progress: ReconciliationBatchProgress
+    let isCancelling: Bool
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView(value: progress.fraction)
+                .frame(width: 150)
+                .accessibilityLabel("Batch reconciliation progress")
+                .accessibilityValue(
+                    "\(progress.completedCount) of \(progress.totalCount) proposals"
+                )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(statusTitle)
+                    .font(.caption.weight(.semibold))
+                Text("\(progress.completedCount) of \(progress.totalCount) proposals completed")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if progress.canCancel {
+                Button(isCancelling ? "Cancelling…" : "Cancel Batch", action: onCancel)
+                    .disabled(isCancelling)
+            } else {
+                Label("Protected commit", systemImage: "lock.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .themedChrome(role: .sheetAction)
+    }
+
+    private var statusTitle: LocalizedStringResource {
+        if isCancelling { return "Stopping after the current safe boundary…" }
+        return switch progress.phase {
+        case .validating: "Revalidating selected proposals…"
+        case .committing: "Applying the current proposal…"
+        case .cancelling: "Stopping the batch…"
+        }
+    }
+}
+
+private struct ReconciliationBatchResultView: View {
+    let result: ReconciliationBatchResult
+    let booksByUUID: [UUID: Book]
+    let onRetry: () -> Void
+    let onDismiss: () -> Void
+
+    @State private var showsDetails = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(summary, systemImage: result.wasCancelled
+                    ? "pause.circle.fill"
+                    : "checkmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Button(showsDetails ? "Hide Details" : "Details") {
+                    showsDetails.toggle()
+                }
+                .buttonStyle(.link)
+                if !result.retryablePairKeys.isEmpty {
+                    Button("Retry Remaining", action: onRetry)
+                }
+                Button("Dismiss", action: onDismiss)
+            }
+            if showsDetails {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(result.items) { item in
+                            HStack {
+                                Image(systemName: symbol(for: item.outcome))
+                                    .accessibilityHidden(true)
+                                Text(itemTitle(item))
+                                    .lineLimit(1)
+                                Spacer()
+                                Text(outcomeTitle(item.outcome))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .font(.caption2)
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                }
+                .frame(maxHeight: 110)
+            }
+        }
+        .padding(10)
+        .themedChrome(role: .sheetAction)
+    }
+
+    private var summary: LocalizedStringResource {
+        "\(result.appliedCount) applied, \(result.dismissedCount) kept separate, \(result.staleCount) stale, \(result.conflictCount) conflicts, \(result.failedCount) failed, \(result.pendingCount) pending"
+    }
+
+    private func itemTitle(_ item: ReconciliationBatchResultItem) -> String {
+        let titles = item.memberUUIDs.compactMap { booksByUUID[$0]?.displayTitle }
+        return titles.isEmpty ? item.pairKey : titles.formatted()
+    }
+
+    private func outcomeTitle(
+        _ outcome: ReconciliationBatchItemOutcome
+    ) -> LocalizedStringResource {
+        switch outcome {
+        case .applied: "Applied"
+        case .dismissed: "Kept separate"
+        case .stale: "Stale"
+        case .conflicting(.overlappingProposal): "Overlapping proposal"
+        case .conflicting(.missingProposal): "Missing proposal"
+        case .conflicting(.notApplicable): "Review only"
+        case .conflicting(.sourceChanged): "Source changed"
+        case .failed: "Failed"
+        case .pending: "Pending"
+        }
+    }
+
+    private func symbol(for outcome: ReconciliationBatchItemOutcome) -> String {
+        switch outcome {
+        case .applied, .dismissed: "checkmark.circle.fill"
+        case .stale, .conflicting: "exclamationmark.circle.fill"
+        case .failed: "xmark.octagon.fill"
+        case .pending: "clock"
+        }
+    }
+}
+
+private struct ReconciliationWorkspaceCommandBar: View {
+    let isScanning: Bool
+    let selectedCount: Int
+    let hiddenSelectedCount: Int
+    let visibleCount: Int
+    let canApply: Bool
+    let isRunning: Bool
+    let onSelectAllVisible: () -> Void
+    let onClearSelection: () -> Void
+    let onKeepSeparate: () -> Void
+    let onApply: () -> Void
+    let onRescan: () -> Void
+    let onDone: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            if selectedCount > 0 {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(selectedCount) Selected")
+                        .font(.caption.weight(.semibold))
+                    if hiddenSelectedCount > 0 {
+                        Text("\(hiddenSelectedCount) hidden by filters")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Button("Select All Visible", action: onSelectAllVisible)
+                    .disabled(visibleCount == 0 || isRunning)
+                Button("Clear", action: onClearSelection)
+                    .disabled(isRunning)
+                Button("Keep Separate Selected", action: onKeepSeparate)
+                    .disabled(isRunning)
+                Button("Apply Selected", action: onApply)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canApply || isRunning)
+            } else {
+                Text("Select proposals to apply or keep separate as a safe serial batch.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Rescan", action: onRescan)
+                .disabled(isScanning || isRunning)
+            Button("Done", action: onDone)
+                .keyboardShortcut(.defaultAction)
+                .disabled(isRunning)
+        }
+        .padding(12)
+        .themedChrome(role: .sheetAction)
+    }
+}
+
 private struct EditionProposalSection: Identifiable {
     let verdict: EditionVerdict
     let proposals: [EditionMatchProposal]
@@ -122,8 +594,10 @@ private struct EditionProposalSection: Identifiable {
 private struct EditionProposalList: View {
     let proposals: [EditionMatchProposal]
     let booksByUUID: [UUID: Book]
+    @Binding var selection: Set<String>
+    @Binding var focus: String?
+    let isEnabled: Bool
     let onDismiss: (EditionMatchProposal) -> Void
-    let onReview: (EditionMatchProposal) -> Void
 
     private var sections: [EditionProposalSection] {
         let grouped = Dictionary(grouping: proposals, by: \.verdict)
@@ -134,16 +608,26 @@ private struct EditionProposalList: View {
     }
 
     var body: some View {
-        List {
+        List(selection: $focus) {
             ForEach(sections) { section in
                 Section {
                     ForEach(section.proposals) { proposal in
                         EditionProposalRow(
                             proposal: proposal,
                             books: proposal.memberUUIDs.compactMap { booksByUUID[$0] },
+                            isSelected: selection.contains(proposal.pairKey),
+                            isEnabled: isEnabled,
+                            onToggleSelection: {
+                                if selection.contains(proposal.pairKey) {
+                                    selection.remove(proposal.pairKey)
+                                } else {
+                                    selection.insert(proposal.pairKey)
+                                }
+                            },
                             onDismiss: { onDismiss(proposal) },
-                            onReview: { onReview(proposal) }
+                            onFocus: { focus = proposal.pairKey }
                         )
+                        .tag(proposal.pairKey)
                     }
                 } header: {
                     EditionVerdictHeader(verdict: section.verdict)
@@ -189,19 +673,34 @@ private struct ReconciliationFooter: View {
                 .keyboardShortcut(.defaultAction)
         }
         .padding(12)
+        .themedChrome(role: .sheetAction)
     }
 }
 
 private struct EditionProposalRow: View {
     let proposal: EditionMatchProposal
     let books: [Book]
+    let isSelected: Bool
+    let isEnabled: Bool
+    let onToggleSelection: () -> Void
     let onDismiss: () -> Void
-    let onReview: () -> Void
+    let onFocus: () -> Void
 
     @Environment(\.theme) private var theme
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
+            Toggle(isOn: Binding(
+                get: { isSelected },
+                set: { _ in onToggleSelection() }
+            )) {
+                Text("Select proposal")
+            }
+            .labelsHidden()
+            .toggleStyle(.checkbox)
+            .disabled(!isEnabled)
+            .accessibilityLabel("Select proposal")
+            .accessibilityValue(isSelected ? "Selected" : "Not selected")
             HStack(spacing: -8) {
                 ForEach(books) { book in
                     BookCoverImageView(book: book, tier: .thumb)
@@ -246,10 +745,12 @@ private struct EditionProposalRow: View {
             Spacer()
             Button("Dismiss", action: onDismiss)
                 .buttonStyle(.borderless)
-            Button("Review", action: onReview)
+                .disabled(!isEnabled)
+            Button("View", action: onFocus)
                 .buttonStyle(.borderedProminent)
         }
         .padding(.vertical, 5)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private var confidenceColor: Color {
@@ -266,8 +767,7 @@ private struct ReconciliationReviewSheet: View {
     let service: CatalogReconciliationService
 
     @Environment(\.dismiss) private var dismiss
-    @State private var isApplying = false
-    @State private var applyFailed = false
+    @State private var applyController = ReconciliationApplyController()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -281,12 +781,8 @@ private struct ReconciliationReviewSheet: View {
                         books: request.books,
                         survivorUUID: request.survivorUUID
                     )
-                    if applyFailed {
-                        Label(
-                            "The books changed while this proposal was open, or the library could not save. Rescan before trying again.",
-                            systemImage: "exclamationmark.triangle.fill"
-                        )
-                        .foregroundStyle(.orange)
+                    if applyController.phase != .reviewing {
+                        ReconciliationApplyStatus(phase: applyController.phase)
                     }
                 }
                 .padding(20)
@@ -294,13 +790,22 @@ private struct ReconciliationReviewSheet: View {
             Divider()
             ReconciliationReviewActions(
                 proposal: request.proposal,
-                isApplying: isApplying,
-                onCancel: { dismiss() },
+                controller: applyController,
+                onClose: { dismiss() },
+                onCancelOperation: applyController.cancel,
                 onKeepSeparate: keepSeparate,
                 onApply: apply
             )
         }
         .frame(minWidth: 620, idealWidth: 720, maxWidth: 900, minHeight: 520, idealHeight: 650)
+        .interactiveDismissDisabled(applyController.blocksDismissal)
+        .onChange(of: applyController.phase) { _, phase in
+            guard phase == .completed else { return }
+            dismiss()
+        }
+        .onDisappear {
+            applyController.cancelIfPossible()
+        }
     }
 
     private func keepSeparate() {
@@ -309,17 +814,118 @@ private struct ReconciliationReviewSheet: View {
     }
 
     private func apply() {
-        guard request.proposal.canApply, !isApplying else { return }
-        isApplying = true
-        applyFailed = false
-        Task {
-            let succeeded = await service.approve(request.proposal)
-            isApplying = false
-            if succeeded {
-                dismiss()
+        guard request.proposal.canApply else { return }
+        applyController.start(proposal: request.proposal, service: service)
+    }
+}
+
+private struct ReconciliationApplyStatus: View {
+    let phase: ReconciliationApplyController.Phase
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if isProgressVisible {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
             } else {
-                applyFailed = true
+                Image(systemName: systemImage)
+                    .foregroundStyle(statusColor)
+                    .accessibilityHidden(true)
             }
+            VStack(alignment: .leading, spacing: 3) {
+                statusTitle
+                    .font(theme.body(size: 11, weight: .semibold))
+                Text(detail)
+                    .font(theme.label(size: 10))
+                    .foregroundStyle(theme.textSecondary)
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(statusColor.opacity(0.1), in: RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    @ViewBuilder
+    private var statusTitle: some View {
+        switch phase {
+        case .reviewing:
+            EmptyView()
+        case .validating:
+            theme.styledText(terminal: "// validating_reconciliation", native: "Validating current library state")
+        case .cancelling:
+            theme.styledText(terminal: "// cancelling_reconciliation", native: "Cancelling before changes are applied")
+        case .committing:
+            theme.styledText(terminal: "// committing_reconciliation", native: "Applying catalog and file changes")
+        case .completed:
+            theme.styledText(terminal: "// reconciliation_complete", native: "Reconciliation complete")
+        case .cancelled:
+            theme.styledText(terminal: "// reconciliation_cancelled", native: "Reconciliation cancelled")
+        case .failed(.stale):
+            theme.styledText(terminal: "// reconciliation_stale", native: "The proposal is no longer current")
+        case .failed(.notApplicable):
+            theme.styledText(terminal: "// reconciliation_not_applicable", native: "This proposal cannot be applied")
+        case .failed:
+            theme.styledText(terminal: "// reconciliation_failed", native: "Reconciliation could not be completed")
+        }
+    }
+
+    private var detail: LocalizedStringResource {
+        switch phase {
+        case .reviewing:
+            "Review the planned changes before continuing."
+        case .validating:
+            "Checking current metadata and file identities. You can still cancel."
+        case .cancelling:
+            "Waiting for validation work to stop. No catalog changes have started."
+        case .committing:
+            "This protected commit step cannot be cancelled."
+        case .completed:
+            "The catalog and managed files were updated."
+        case .cancelled:
+            "No catalog changes were applied. You can try again."
+        case .failed(.stale):
+            "The books changed while this review was open. Close the review and rescan."
+        case .failed(.notApplicable):
+            "Keep the books separate or close this review."
+        case .failed:
+            "The library could not save the changes. You can try again."
+        }
+    }
+
+    private var accessibilityLabel: Text {
+        Text(detail)
+    }
+
+    private var isProgressVisible: Bool {
+        switch phase {
+        case .validating, .cancelling, .committing:
+            true
+        case .reviewing, .completed, .cancelled, .failed:
+            false
+        }
+    }
+
+    private var systemImage: String {
+        switch phase {
+        case .completed: "checkmark.circle.fill"
+        case .cancelled: "xmark.circle"
+        case .reviewing: "doc.text.magnifyingglass"
+        case .validating, .cancelling, .committing: "clock"
+        case .failed: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var statusColor: Color {
+        switch phase {
+        case .completed: theme.success
+        case .cancelled, .reviewing: theme.textSecondary
+        case .validating, .cancelling, .committing: theme.accent
+        case .failed: theme.highlight
         }
     }
 }
@@ -609,33 +1215,46 @@ private struct ReconciliationPreservationRow: View {
 
 private struct ReconciliationReviewActions: View {
     let proposal: EditionMatchProposal
-    let isApplying: Bool
-    let onCancel: () -> Void
+    let controller: ReconciliationApplyController
+    let onClose: () -> Void
+    let onCancelOperation: () -> Void
     let onKeepSeparate: () -> Void
     let onApply: () -> Void
 
     var body: some View {
         HStack {
-            if isApplying {
-                ProgressView()
-                    .controlSize(.small)
+            if controller.phase == .committing {
+                Text("Finishing protected changes…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Cancel", action: onCancel)
+            if controller.canCancel {
+                Button("Cancel Operation", action: onCancelOperation)
+            } else if controller.phase == .cancelling {
+                Button("Cancelling…", action: {})
+                    .disabled(true)
+            } else {
+                Button("Close", action: onClose)
+                    .disabled(controller.blocksDismissal)
+            }
             if proposal.canApply {
                 Button(actionLabel, action: onApply)
                     .buttonStyle(.borderedProminent)
-                    .disabled(isApplying)
+                    .disabled(!controller.canApply)
             } else {
                 Button("Keep Separate", action: onKeepSeparate)
                     .buttonStyle(.borderedProminent)
+                    .disabled(controller.isRunning)
             }
         }
         .padding(12)
     }
 
     private var actionLabel: LocalizedStringResource {
-        switch proposal.verdict {
+        if case .failed = controller.phase { return "Try Again" }
+        if controller.phase == .cancelled { return "Try Again" }
+        return switch proposal.verdict {
         case .duplicateFile: "Merge Identical Copies"
         case .sameEditionOtherFormat: "Merge Edition Records"
         case .sameWorkOtherEdition: "Group Editions"

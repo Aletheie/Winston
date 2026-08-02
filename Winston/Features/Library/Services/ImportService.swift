@@ -905,12 +905,61 @@ final class ImportService {
         preparedImportBatch = batch
     }
 
+    func setImportReviewSelections(
+        itemIDs: Set<UUID>,
+        isSelected: Bool
+    ) {
+        guard var batch = preparedImportBatch, batch.phase == .ready else { return }
+        for index in batch.items.indices
+        where itemIDs.contains(batch.items[index].id)
+            && batch.items[index].isSelectable {
+            batch.items[index].isSelected = isSelected
+                && batch.items[index].action.importsFile
+        }
+        preparedImportBatch = batch
+    }
+
+    func setImportReviewActions(
+        itemIDs: Set<UUID>,
+        action: ImportReviewAction
+    ) {
+        guard var batch = preparedImportBatch, batch.phase == .ready else { return }
+        for index in batch.items.indices
+        where itemIDs.contains(batch.items[index].id) {
+            guard batch.items[index].supports(action) else { continue }
+            batch.items[index].action = action
+            batch.items[index].isSelected = action.importsFile
+        }
+        preparedImportBatch = batch
+    }
+
+    func applyImportReviewMetadata(
+        field: ImportReviewMetadataField,
+        sourceItemID: UUID,
+        targetItemIDs: Set<UUID>
+    ) {
+        guard var batch = preparedImportBatch,
+              batch.phase == .ready,
+              let source = batch.items.first(where: { $0.id == sourceItemID }) else {
+            return
+        }
+        for index in batch.items.indices
+        where targetItemIDs.contains(batch.items[index].id)
+            && batch.items[index].isSelectable {
+            field.copy(
+                from: source.metadata,
+                to: &batch.items[index].metadata
+            )
+        }
+        preparedImportBatch = batch
+    }
+
     func setImportReviewAction(
         itemID: UUID,
         action: ImportReviewAction
     ) {
         updateImportReviewItem(id: itemID) { item in
-            guard item.isSelectable else { return }
+            guard item.supports(action) else { return }
             item.action = action
             item.isSelected = action.importsFile
         }
@@ -1676,6 +1725,11 @@ final class ImportService {
         var skippedCount = 0
         var createdWorkIDs: Set<UUID> = []
         var createdBookIDs: Set<UUID> = []
+        var itemOutcomes: [UUID: ImportReviewItemOutcome] = Dictionary(
+            uniqueKeysWithValues: batch.items.compactMap { item in
+                item.isSelectable ? nil : (item.id, .failed)
+            }
+        )
 
         let itemsByID = Dictionary(
             uniqueKeysWithValues: batch.items.map { ($0.id, $0) }
@@ -1694,6 +1748,7 @@ final class ImportService {
                   let decision = reconciliation(for: item.action) else {
                 skippedTransactions.append(contentsOf: prepared.transactions)
                 skippedCount += 1
+                itemOutcomes[item.id] = .skipped
                 continue
             }
             guard importReviewDecisionIsAvailable(
@@ -1757,6 +1812,12 @@ final class ImportService {
             )
             importedBookIDs.append(contentsOf: result.importedBookIDs)
             failures.append(contentsOf: result.failures)
+            let failedRequestIDs = Set(result.failures.compactMap(\.requestedBookID))
+            for prepared in chunk.map(\.0) {
+                itemOutcomes[prepared.request.uuid] = failedRequestIDs.contains(
+                    prepared.request.uuid
+                ) ? .failed : .imported
+            }
             nextIndex = end
             session.updateProgress(
                 completed: initialFailureCount
@@ -1771,11 +1832,23 @@ final class ImportService {
 
         if nextIndex < selected.count {
             await abort(selected[nextIndex...].flatMap { $0.0.transactions })
+            for prepared in selected[nextIndex...].map(\.0) {
+                itemOutcomes[prepared.request.uuid] = .cancelled
+            }
         }
 
         let wasCancelled = Task.isCancelled
             || activeImportSessions[session.id] !== session
             || session.step == .cancelling
+        for item in batch.items where itemOutcomes[item.id] == nil {
+            if !item.isSelectable {
+                itemOutcomes[item.id] = .failed
+            } else if !item.willImport {
+                itemOutcomes[item.id] = .skipped
+            } else {
+                itemOutcomes[item.id] = wasCancelled ? .cancelled : .failed
+            }
+        }
         session.updateProgress(
             completed: wasCancelled
                 ? initialFailureCount + skippedCount + nextIndex
@@ -1818,7 +1891,8 @@ final class ImportService {
             requestedCount: batch.requestedCount,
             phase: .completed(summary),
             items: batch.items,
-            completedPreparationCount: batch.completedPreparationCount
+            completedPreparationCount: batch.completedPreparationCount,
+            itemOutcomes: itemOutcomes
         )
         pending.completion?(imported)
     }
