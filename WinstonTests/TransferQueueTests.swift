@@ -6,6 +6,33 @@ import Foundation
 import SwiftData
 @testable import Winston
 
+private struct InjectedJournalFailure: Error {}
+
+private final class JournalCheckpointFault: @unchecked Sendable {
+    private let lock = NSLock()
+    private let state: DurableTransferItemState
+    private var failuresRemaining: Int
+
+    init(
+        state: DurableTransferItemState,
+        failuresRemaining: Int = 1
+    ) {
+        self.state = state
+        self.failuresRemaining = failuresRemaining
+    }
+
+    func check(_ job: DurableTransferJob) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard failuresRemaining > 0,
+              job.items.contains(where: { $0.state == state }) else {
+            return
+        }
+        failuresRemaining -= 1
+        throw InjectedJournalFailure()
+    }
+}
+
 @MainActor
 @Suite(.serialized)
 struct TransferQueueTests {
@@ -51,6 +78,13 @@ struct TransferQueueTests {
             )
     }
 
+    private func waitUntilFinished(_ queue: TransferQueue) async {
+        let deadline = Date.now.addingTimeInterval(2)
+        while queue.isTransferring, Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
     private func durableItem(
         for book: Book,
         state: DurableTransferItemState
@@ -59,11 +93,32 @@ struct TransferQueueTests {
         let generation = try #require(
             TransferFileGeneration.capture(at: descriptor.sourceURL)
         )
+        let payload: DurableTransferPayload? = switch state {
+        case .inFlight, .deliveryUnknown, .payloadCommitted:
+            DurableTransferPayload(
+                attemptID: UUID(),
+                destinationFileName: descriptor.targetFileName,
+                expectedByteCount: UInt64(max(0, generation.fileSize)),
+                artifactFingerprint: nil,
+                transportIdentifier: state == .payloadCommitted
+                    ? "test-transport"
+                    : nil,
+                payloadCommittedAt: state == .payloadCommitted ? .now : nil,
+                conversionAdopted: false,
+                staleVariantsRemoved: false,
+                coverProcessed: false,
+                coverPushed: false,
+                receiptPersisted: false
+            )
+        case .pending, .completed, .failed, .cancelled:
+            nil
+        }
         return DurableTransferItem(
             descriptor: descriptor,
             sourceFileGeneration: generation,
             state: state,
-            detail: nil
+            detail: nil,
+            payload: payload
         )
     }
 
@@ -113,6 +168,80 @@ struct TransferQueueTests {
         #expect(monitor.lastInventoryDelta.toGeneration == before + 2)
         #expect(monitor.lastInventoryDelta.removed.map(\.id) == [books[0].id])
         #expect(monitor.lastInventoryDelta.changedMatchKeys == ["first"])
+    }
+
+    @Test func successfulEjectClearsTheMonitorOnlyAfterAcknowledgement() async throws {
+        let fake = FakeKindleConnection()
+        let monitor = makeMonitor(fake)
+        let book = DeviceBook(
+            path: "documents/book.epub",
+            fileName: "book.epub",
+            sizeBytes: 10
+        )
+        await fake.setBooks([book])
+        await monitor.refreshBooks()
+
+        try await monitor.userDisconnect()
+
+        #expect(await fake.ejected)
+        #expect(!monitor.isEjecting)
+        #expect(monitor.connection == nil)
+        #expect(monitor.state == .disconnected)
+        #expect(monitor.books.isEmpty)
+        #expect(monitor.lastError == nil)
+    }
+
+    @Test func failedEjectKeepsTheLiveConnectionAndInventory() async {
+        let fake = FakeKindleConnection()
+        let monitor = makeMonitor(fake)
+        let book = DeviceBook(
+            path: "documents/book.epub",
+            fileName: "book.epub",
+            sizeBytes: 10
+        )
+        await fake.setBooks([book])
+        await fake.setFailEject(true)
+        await monitor.refreshBooks()
+
+        await #expect(throws: CocoaError.self) {
+            try await monitor.userDisconnect()
+        }
+
+        #expect(await fake.ejected)
+        #expect(!monitor.isEjecting)
+        #expect(monitor.connection != nil)
+        #expect(monitor.info == FakeKindleConnection.fakeInfo)
+        #expect(monitor.books == [book])
+        #expect(monitor.lastError != nil)
+    }
+
+    @Test func physicalDisconnectDuringFailedEjectReconcilesAsSuccess() async throws {
+        let fake = FakeKindleConnection()
+        let monitor = makeMonitor(fake)
+        let book = DeviceBook(
+            path: "documents/book.epub",
+            fileName: "book.epub",
+            sizeBytes: 10
+        )
+        await fake.setBooks([book])
+        await fake.setFailEject(true)
+        await fake.setBlockEject(true)
+        await monitor.refreshBooks()
+
+        let eject = Task {
+            try await monitor.userDisconnect()
+        }
+        await fake.waitUntilEjectStarts()
+        #expect(monitor.isEjecting)
+        await fake.setAlive(false)
+        await fake.releaseBlockedEject()
+        try await eject.value
+
+        #expect(!monitor.isEjecting)
+        #expect(monitor.connection == nil)
+        #expect(monitor.state == .disconnected)
+        #expect(monitor.books.isEmpty)
+        #expect(monitor.lastError == nil)
     }
 
     @Test func allocatedMatchKeyRemovesOnlyTheIntendedCollidingBook() async {
@@ -259,7 +388,7 @@ struct TransferQueueTests {
         await fake.waitUntilSendStarts()
 
         let pending = try #require(store.load().job)
-        #expect(pending.items.map(\.state) == [.pending])
+        #expect(pending.items.map(\.state) == [.inFlight])
         #expect(pending.items.first?.sourceFileGeneration == TransferFileGeneration.capture(at: book.fileURL))
 
         queue.cancel()
@@ -271,6 +400,277 @@ struct TransferQueueTests {
 
         #expect(!queue.isTransferring)
         #expect(store.load().job == nil)
+    }
+
+    @Test func initialJournalSaveFailureTouchesNoDevice() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Initial Checkpoint")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fault = JournalCheckpointFault(state: .pending)
+        let store = TransferQueueJournalStore(
+            directory: directory,
+            beforeSave: fault.check
+        )
+        let fake = FakeKindleConnection()
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            journalStoreOverride: store
+        )
+
+        await queue.send(books: [book], via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 0)
+        #expect(await fake.sentFiles.isEmpty)
+        #expect(queue.lastError != nil)
+        #expect(store.load().job == nil)
+    }
+
+    @Test func inFlightCheckpointFailureStopsBeforeTransport() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "In Flight Checkpoint")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fault = JournalCheckpointFault(state: .inFlight)
+        let store = TransferQueueJournalStore(
+            directory: directory,
+            beforeSave: fault.check
+        )
+        let fake = FakeKindleConnection()
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            journalStoreOverride: store
+        )
+
+        await queue.send(books: [book], via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 0)
+        #expect(store.load().job?.items.map(\.state) == [.pending])
+        #expect(queue.items.first?.stage == .failed)
+        #expect(queue.pendingTransferCount == 1)
+    }
+
+    @Test func payloadCheckpointFailureNeverResendsAfterRestart() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Payload Checkpoint")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fault = JournalCheckpointFault(state: .payloadCommitted)
+        let failingStore = TransferQueueJournalStore(
+            directory: directory,
+            beforeSave: fault.check
+        )
+        let fake = FakeKindleConnection()
+        let firstQueue = TransferQueue(
+            toasts: ToastCenter(),
+            journalStoreOverride: failingStore
+        )
+
+        await firstQueue.send(books: [book], via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 1)
+        #expect(failingStore.load().job?.items.map(\.state) == [.inFlight])
+        let restarted = TransferQueue(
+            toasts: ToastCenter(),
+            journalDirectory: directory
+        )
+        #expect(restarted.hasUnresolvedDelivery)
+
+        await restarted.resumePending(via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 1)
+        #expect(restarted.pendingTransferCount == 0)
+        #expect(TransferQueueJournalStore(directory: directory).load().job == nil)
+    }
+
+    @Test func committedThenThrownTransportReconcilesWithoutResend() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Uncertain Commit")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fake = FakeKindleConnection()
+        await fake.setUncertainTransferMode(.committedThenThrows)
+        let firstQueue = TransferQueue(
+            toasts: ToastCenter(),
+            journalDirectory: directory
+        )
+
+        await firstQueue.send(books: [book], via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 1)
+        #expect(TransferQueueJournalStore(
+            directory: directory
+        ).load().job?.items.map(\.state) == [.deliveryUnknown])
+        await fake.setUncertainTransferMode(.none)
+        let restarted = TransferQueue(
+            toasts: ToastCenter(),
+            journalDirectory: directory
+        )
+
+        await restarted.resumePending(via: makeMonitor(fake))
+        await restarted.resumePending(via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 1)
+        #expect(restarted.pendingTransferCount == 0)
+    }
+
+    @Test func staleInFlightWithAbsentDestinationRetriesExactlyOnce() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Interrupted Before Write")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TransferQueueJournalStore(directory: directory)
+        try store.save(DurableTransferJob(
+            schemaVersion: DurableTransferJob.currentSchemaVersion,
+            id: UUID(),
+            deviceIdentifier: FakeKindleConnection.fakeInfo.identifier,
+            resumePolicy: .sameDeviceAutomatically,
+            createdAt: .now,
+            updatedAt: .now,
+            items: [try durableItem(for: book, state: .inFlight)]
+        ))
+        let fake = FakeKindleConnection()
+        let restarted = TransferQueue(
+            toasts: ToastCenter(),
+            journalDirectory: directory
+        )
+
+        #expect(restarted.hasUnresolvedDelivery)
+        await restarted.resumePending(via: makeMonitor(fake))
+        await restarted.resumePending(via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 1)
+        #expect(restarted.pendingTransferCount == 0)
+        #expect(store.load().job == nil)
+    }
+
+    @Test func wrongSizedDestinationRemainsUnresolvedAndIsNotResent() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Partial Delivery")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fake = FakeKindleConnection()
+        await fake.setUncertainTransferMode(.partialThenThrows)
+        let firstQueue = TransferQueue(
+            toasts: ToastCenter(),
+            journalDirectory: directory
+        )
+
+        await firstQueue.send(books: [book], via: makeMonitor(fake))
+        let restarted = TransferQueue(
+            toasts: ToastCenter(),
+            journalDirectory: directory
+        )
+        await restarted.resumePending(via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 1)
+        #expect(restarted.hasUnresolvedDelivery)
+        #expect(restarted.pendingTransferCount == 1)
+        #expect(TransferQueueJournalStore(
+            directory: directory
+        ).load().job?.items.map(\.state) == [.deliveryUnknown])
+    }
+
+    @Test func receiptFailureResumesOnlyPostProcessing() async throws {
+        struct ReceiptFailure: Error {}
+
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Receipt Resume")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fake = FakeKindleConnection()
+        let firstQueue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { _ in throw ReceiptFailure() },
+            journalDirectory: directory
+        )
+
+        await firstQueue.send(books: [book], via: makeMonitor(fake))
+        let cleanupCount = await fake.staleVariantCalls.count
+        let thumbnailCount = await fake.pushedThumbnails.count
+        var resumedReceipts = 0
+        let restarted = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { _ in resumedReceipts += 1 },
+            journalDirectory: directory
+        )
+
+        await restarted.resumePending(via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 1)
+        #expect(await fake.staleVariantCalls.count == cleanupCount)
+        #expect(await fake.pushedThumbnails.count == thumbnailCount)
+        #expect(resumedReceipts == 1)
+        #expect(restarted.pendingTransferCount == 0)
+    }
+
+    @Test func completionCheckpointFailureIsIdempotentlyRecovered() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Completion Resume")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fault = JournalCheckpointFault(state: .completed)
+        let failingStore = TransferQueueJournalStore(
+            directory: directory,
+            beforeSave: fault.check
+        )
+        let fake = FakeKindleConnection()
+        var receiptCount = 0
+        let firstQueue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { _ in receiptCount += 1 },
+            journalStoreOverride: failingStore
+        )
+
+        await firstQueue.send(books: [book], via: makeMonitor(fake))
+        #expect(failingStore.load().job?.items.map(\.state) == [.payloadCommitted])
+        let restarted = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { _ in receiptCount += 1 },
+            journalDirectory: directory
+        )
+
+        await restarted.resumePending(via: makeMonitor(fake))
+
+        #expect(await fake.transferAttempts == 1)
+        #expect(receiptCount == 1)
+        #expect(restarted.pendingTransferCount == 0)
+    }
+
+    @Test func completedJournalRemovalFailureIsCleanedOnNextLaunch() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Removal Retry")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let removalFault = JournalCheckpointFault(state: .completed)
+        let store = TransferQueueJournalStore(
+            directory: directory,
+            beforeRemove: {
+                let terminal = try #require(
+                    TransferQueueJournalStore(directory: directory).load().job
+                )
+                try removalFault.check(terminal)
+            }
+        )
+        let fake = FakeKindleConnection()
+        let firstQueue = TransferQueue(
+            toasts: ToastCenter(),
+            journalStoreOverride: store
+        )
+
+        await firstQueue.send(books: [book], via: makeMonitor(fake))
+        #expect(TransferQueueJournalStore(
+            directory: directory
+        ).load().job?.isTerminal == true)
+
+        let restarted = TransferQueue(
+            toasts: ToastCenter(),
+            journalDirectory: directory
+        )
+
+        #expect(restarted.pendingTransferCount == 0)
+        #expect(TransferQueueJournalStore(directory: directory).load().job == nil)
+        #expect(await fake.transferAttempts == 1)
     }
 
     @Test func resumeSkipsPayloadCommittedItemAndSendsOnlyPendingItem() async throws {
@@ -300,14 +700,17 @@ struct TransferQueueTests {
             now: { fixedNow }
         )
 
-        #expect(queue.pendingTransferCount == 1)
+        #expect(queue.pendingTransferCount == 2)
         await queue.resumePending(via: makeMonitor(fake))
 
         #expect(await fake.sentFiles.map(\.fileName) == [
             targetFileName(for: pending, format: "mobi"),
         ])
-        #expect(queue.items.map(\.displayName) == [pending.displayTitle])
-        #expect(queue.items.map(\.stage) == [.done])
+        #expect(queue.items.map(\.displayName) == [
+            committed.displayTitle,
+            pending.displayTitle,
+        ])
+        #expect(queue.items.map(\.stage) == [.done, .done])
         #expect(queue.pendingTransferCount == 0)
         #expect(store.load().job == nil)
     }
@@ -342,6 +745,123 @@ struct TransferQueueTests {
         #expect(queue.items.map(\.stage) == [.failed])
         #expect(queue.lastError == TransferArtifactError.sourceChanged.localizedDescription)
         #expect(store.load().job == nil)
+    }
+
+    @Test func resumeDoesNothingForDifferentDevice() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Wrong Device")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TransferQueueJournalStore(directory: directory)
+        try store.save(DurableTransferJob(
+            schemaVersion: DurableTransferJob.currentSchemaVersion,
+            id: UUID(),
+            deviceIdentifier: FakeKindleConnection.fakeInfo.identifier,
+            resumePolicy: .sameDeviceAutomatically,
+            createdAt: .now,
+            updatedAt: .now,
+            items: [try durableItem(for: book, state: .pending)]
+        ))
+        let fake = FakeKindleConnection()
+        let differentInfo = DeviceInfo(
+            name: "Other Kindle",
+            model: "Test",
+            kind: .massStorage,
+            totalBytes: 8_000_000_000,
+            freeBytes: 6_000_000_000
+        )
+        let monitor = DeviceMonitor()
+        monitor.adoptConnectionForTesting(fake, info: differentInfo)
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            journalDirectory: directory
+        )
+
+        await queue.resumePending(via: monitor)
+
+        #expect(await fake.transferAttempts == 0)
+        #expect(queue.pendingTransferCount == 1)
+        #expect(store.load().job?.items.map(\.state) == [.pending])
+    }
+
+    @Test func v1StatesMigrateWithoutDiscardingCommittedPayload() async throws {
+        let lib = try await TestLibrary()
+        let pendingBook = try makeMOBIBook(in: lib, title: "V1 Pending")
+        let committedBook = try makeEPUBBook(in: lib, title: "V1 Committed")
+        let completedBook = try makeMOBIBook(in: lib, title: "V1 Completed")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let store = TransferQueueJournalStore(directory: directory)
+        let v1 = DurableTransferJob(
+            schemaVersion: 1,
+            id: UUID(),
+            deviceIdentifier: FakeKindleConnection.fakeInfo.identifier,
+            resumePolicy: .sameDeviceAutomatically,
+            createdAt: .now,
+            updatedAt: .now,
+            items: [
+                try durableItem(for: pendingBook, state: .pending),
+                DurableTransferItem(
+                    descriptor: KindleSendPreparation.descriptor(for: committedBook),
+                    sourceFileGeneration: try #require(
+                        TransferFileGeneration.capture(at: committedBook.fileURL)
+                    ),
+                    state: .payloadCommitted,
+                    detail: nil,
+                    payload: nil
+                ),
+                try durableItem(for: completedBook, state: .completed),
+            ]
+        )
+        try JSONEncoder().encode(v1).write(to: store.fileURL)
+
+        let result = store.load()
+        let migrated = try #require(result.job)
+
+        #expect(result.issue == nil)
+        #expect(migrated.schemaVersion == DurableTransferJob.currentSchemaVersion)
+        #expect(migrated.items.map(\.state) == [
+            .pending, .payloadCommitted, .completed,
+        ])
+        #expect(migrated.items[1].payload?.destinationFileName
+            == migrated.items[1].descriptor.targetFileName)
+        #expect(migrated.items[1].payload?.expectedByteCount == nil)
+        #expect(!migrated.isTerminal)
+        #expect(store.load().job == migrated)
+    }
+
+    @Test func unsupportedJournalIsQuarantinedByteForByte() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Future Journal")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let store = TransferQueueJournalStore(directory: directory)
+        let unsupported = DurableTransferJob(
+            schemaVersion: 999,
+            id: UUID(),
+            deviceIdentifier: FakeKindleConnection.fakeInfo.identifier,
+            resumePolicy: .sameDeviceAutomatically,
+            createdAt: .now,
+            updatedAt: .now,
+            items: [try durableItem(for: book, state: .pending)]
+        )
+        let bytes = try JSONEncoder().encode(unsupported)
+        try bytes.write(to: store.fileURL)
+
+        let result = store.load()
+
+        #expect(result.issue == .unsupportedSchema(999))
+        #expect(result.job == nil)
+        let quarantinedURL = try #require(result.quarantinedURL)
+        #expect(try Data(contentsOf: quarantinedURL) == bytes)
     }
 
     @Test func corruptDurableJournalIsQuarantinedByteForByte() async throws {
@@ -385,6 +905,69 @@ struct TransferQueueTests {
             targetFileName(for: second, format: "mobi"),
         ])
         #expect(Set(sentNames).count == 2)
+    }
+
+    @Test func allSendEntryPointsShareDescriptorAndTaskBehavior() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Shared Entry")
+        let descriptor = KindleSendPreparation.descriptor(for: book)
+        let asset = BookAsset(
+            uuid: book.uuid,
+            fileName: book.fileName,
+            validationStatus: .ok,
+            book: book
+        )
+        var sentNames: [[String]] = []
+
+        let directBooks = FakeKindleConnection()
+        await TransferQueue(toasts: ToastCenter()).send(
+            books: [book],
+            via: makeMonitor(directBooks)
+        )
+        sentNames.append(await directBooks.sentFiles.map(\.fileName))
+
+        let directDescriptors = FakeKindleConnection()
+        await TransferQueue(toasts: ToastCenter()).send(
+            readModel: [descriptor],
+            via: makeMonitor(directDescriptors)
+        )
+        sentNames.append(await directDescriptors.sentFiles.map(\.fileName))
+
+        let directAsset = FakeKindleConnection()
+        await TransferQueue(toasts: ToastCenter()).send(
+            asset: asset,
+            for: book,
+            via: makeMonitor(directAsset)
+        )
+        sentNames.append(await directAsset.sentFiles.map(\.fileName))
+
+        let begunBooks = FakeKindleConnection()
+        let begunBooksQueue = TransferQueue(toasts: ToastCenter())
+        begunBooksQueue.beginSend(books: [book], via: makeMonitor(begunBooks))
+        await waitUntilFinished(begunBooksQueue)
+        sentNames.append(await begunBooks.sentFiles.map(\.fileName))
+
+        let begunDescriptors = FakeKindleConnection()
+        let begunDescriptorsQueue = TransferQueue(toasts: ToastCenter())
+        begunDescriptorsQueue.beginSend(
+            readModel: [descriptor],
+            via: makeMonitor(begunDescriptors)
+        )
+        await waitUntilFinished(begunDescriptorsQueue)
+        sentNames.append(await begunDescriptors.sentFiles.map(\.fileName))
+
+        let begunAsset = FakeKindleConnection()
+        let begunAssetQueue = TransferQueue(toasts: ToastCenter())
+        begunAssetQueue.beginSend(
+            asset: asset,
+            for: book,
+            via: makeMonitor(begunAsset)
+        )
+        await waitUntilFinished(begunAssetQueue)
+        sentNames.append(await begunAsset.sentFiles.map(\.fileName))
+
+        let expected = [descriptor.targetFileName]
+        #expect(sentNames.allSatisfy { $0 == expected })
     }
 
     @Test func successfulSendRecordsReceiptForTheConnectedKindleProfile() async throws {
@@ -648,13 +1231,13 @@ struct TransferQueueTests {
         await queue.send(books: [book], via: makeMonitor(fake))
 
         #expect(await fake.sentFiles.count == 1)
-        #expect(queue.items.first?.stage == .done)
-        #expect(queue.completedCount == 1)
-        #expect(queue.failedCount == 0)
-        #expect(queue.lastError == nil)
+        #expect(queue.items.first?.stage == .failed)
+        #expect(queue.completedCount == 0)
+        #expect(queue.failedCount == 1)
+        #expect(queue.lastError != nil)
         #expect(queue.lastWarning != nil)
         #expect(receipts.count == 1)
-        #expect(queue.lastBulkOperationResult?.warnings.first?.reason == .postProcessingFailed)
+        #expect(queue.pendingTransferCount == 1)
     }
 
     @Test func thumbnailFailureFinishesWithReceiptWithoutCoverVersion() async throws {
@@ -670,10 +1253,11 @@ struct TransferQueueTests {
 
         await queue.send(books: [book], via: makeMonitor(fake))
 
-        #expect(queue.items.first?.stage == .done)
-        #expect(queue.completedCount == 1)
+        #expect(queue.items.first?.stage == .failed)
+        #expect(queue.completedCount == 0)
         #expect(receipts.count == 1)
         #expect(receipts.first?.coverVersion == nil)
+        #expect(queue.pendingTransferCount == 1)
     }
 
     @Test func receiptFailureAfterVerifiedPayloadFinishesWithWarning() async throws {
@@ -692,12 +1276,12 @@ struct TransferQueueTests {
         #expect(await fake.sentFiles.count == 1)
         #expect(await fake.staleVariantCalls.count == 1)
         #expect(await fake.pushedThumbnails.count == 1)
-        #expect(queue.items.first?.stage == .done)
-        #expect(queue.completedCount == 1)
-        #expect(queue.failedCount == 0)
-        #expect(queue.lastError == nil)
+        #expect(queue.items.first?.stage == .failed)
+        #expect(queue.completedCount == 0)
+        #expect(queue.failedCount == 1)
+        #expect(queue.lastError != nil)
         #expect(queue.lastWarning != nil)
-        #expect(queue.lastBulkOperationResult?.warnings.first?.reason == .postProcessingFailed)
+        #expect(queue.pendingTransferCount == 1)
     }
 
     @Test func cancelKeepsQueueReservedUntilUninterruptibleSendReturns() async throws {
@@ -756,10 +1340,11 @@ struct TransferQueueTests {
         }
 
         #expect(!queue.isTransferring)
-        #expect(queue.items.first?.stage == .cancelled)
+        #expect(queue.items.first?.stage == .failed)
         #expect(await fake.sentFiles.isEmpty)
         #expect(receipts.isEmpty)
-        #expect(queue.failedCount == 0)
+        #expect(queue.failedCount == 1)
+        #expect(queue.hasUnresolvedDelivery)
     }
 
     @Test func deletingLibraryBookDuringSendDoesNotInvalidateQueue() async throws {
@@ -777,7 +1362,7 @@ struct TransferQueueTests {
 
         lib.context.delete(book)
         try lib.context.save()
-        BookFileStore.delete(fileName: managedFileName)
+        TestManagedFileFixtureStore.delete(fileName: managedFileName)
         await fake.releaseBlockedSend()
 
         let deadline = Date.now.addingTimeInterval(2)
@@ -828,7 +1413,7 @@ struct TransferQueueTests {
         )
         let mobiURL = lib.root.appending(path: "sibling.mobi")
         try Data("mobi sibling".utf8).write(to: mobiURL)
-        let siblingName = try BookFileStore.importCopy(of: mobiURL, uuid: UUID())
+        let siblingName = try TestManagedFileFixtureStore.importCopy(of: mobiURL, uuid: UUID())
         let sibling = BookAsset(
             fileName: siblingName, origin: .generated,
             generatedFromContentHash: sourceHash, validationStatus: .ok, book: book
@@ -861,7 +1446,7 @@ struct TransferQueueTests {
         for (ext, bytes) in [("mobi", "mobi"), ("azw3", "azw3 preferred")] {
             let source = lib.root.appending(path: "sibling.\(ext)")
             try Data(bytes.utf8).write(to: source)
-            let name = try BookFileStore.importCopy(of: source, uuid: UUID())
+            let name = try TestManagedFileFixtureStore.importCopy(of: source, uuid: UUID())
             lib.context.insert(BookAsset(
                 fileName: name, origin: .generated,
                 generatedFromContentHash: sourceHash, validationStatus: .ok, book: book
@@ -892,7 +1477,7 @@ struct TransferQueueTests {
         let staleBytes = Data("stale mobi".utf8)
         let staleURL = lib.root.appending(path: "stale.mobi")
         try staleBytes.write(to: staleURL)
-        let staleName = try BookFileStore.importCopy(of: staleURL, uuid: UUID())
+        let staleName = try TestManagedFileFixtureStore.importCopy(of: staleURL, uuid: UUID())
         let stale = BookAsset(
             fileName: staleName, origin: .generated,
             generatedFromContentHash: "previous-primary-hash", validationStatus: .ok, book: book
