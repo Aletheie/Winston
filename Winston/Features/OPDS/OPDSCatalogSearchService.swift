@@ -331,6 +331,7 @@ actor OPDSCatalogSearchService {
                 capability = CachedCapability(
                     rootURL: access.configuration.rootURL,
                     searchLink: root.searchLink
+                        ?? access.configuration.builtInSearchLink
                 )
                 capabilityCache[access.catalogID] = capability
             }

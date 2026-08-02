@@ -572,6 +572,10 @@ final class OPDSViewModel {
                         publicationTitle: publication.title,
                         publicationAuthors: publication.authors,
                         publicationLanguage: publication.language,
+                        sourceURL: publication.sourceURL
+                            ?? acquisition.url,
+                        attribution: publication.attribution,
+                        contributors: publication.contributors,
                         selectedFormat: acquisition.formatLabel,
                         acquisitionRelation: acquisition.relation
                     )

@@ -11,6 +11,8 @@ struct OPDSCatalogConfigurationTests {
         #expect(fixture.settings.catalogConfigurations.map(\.id) == [
             OPDSBuiltInCatalog.projectGutenberg.stableID,
             OPDSBuiltInCatalog.standardEbooks.stableID,
+            OPDSBuiltInCatalog.unglueIt.stableID,
+            OPDSBuiltInCatalog.wikisource.stableID,
         ])
     }
 
@@ -68,7 +70,73 @@ struct OPDSCatalogConfigurationTests {
         #expect(reloaded.catalogConfigurations.contains {
             $0.id == valid.id
         })
-        #expect(reloaded.catalogConfigurations.filter(\.isBuiltIn).count == 2)
+        #expect(reloaded.catalogConfigurations.filter(\.isBuiltIn).count == 4)
+    }
+
+    @Test(arguments: [
+        (AppLanguage.czech, ["en"], "Česká Wikisource", "cs"),
+        (AppLanguage.english, ["cs"], "English Wikisource", "en"),
+        (AppLanguage.system, ["cs-CZ", "en"], "Česká Wikisource", "cs"),
+        (AppLanguage.system, ["de-DE"], "English Wikisource", "en"),
+    ])
+    func `Wikisource follows effective application language with English fallback`(
+        language: AppLanguage,
+        preferredLocalizations: [String],
+        expectedName: String,
+        expectedCode: String
+    ) throws {
+        let catalogs = OPDSCatalogConfiguration.builtInDefaults(
+            for: language,
+            preferredLocalizations: preferredLocalizations
+        )
+        let wikisource = try #require(catalogs.first {
+            $0.builtIn == .wikisource
+        })
+
+        #expect(wikisource.id == OPDSBuiltInCatalog.wikisource.stableID)
+        #expect(wikisource.name == expectedName)
+        #expect(wikisource.rootURL.host == "\(expectedCode).wikisource.org")
+    }
+
+    @Test func `Changing application language updates the stable Wikisource built-in`() throws {
+        let fixture = SettingsFixture()
+        let originalLanguage = fixture.settings.appLanguage
+        defer { fixture.settings.appLanguage = originalLanguage }
+
+        fixture.settings.appLanguage = .czech
+        let czech = try #require(
+            fixture.settings.catalogConfigurations.first {
+                $0.builtIn == .wikisource
+            }
+        )
+        #expect(czech.id == OPDSBuiltInCatalog.wikisource.stableID)
+        #expect(czech.name == "Česká Wikisource")
+        #expect(czech.rootURL.host == "cs.wikisource.org")
+
+        fixture.settings.appLanguage = .english
+        let english = try #require(
+            fixture.settings.catalogConfigurations.first {
+                $0.builtIn == .wikisource
+            }
+        )
+        #expect(english.id == czech.id)
+        #expect(english.name == "English Wikisource")
+        #expect(english.rootURL.host == "en.wikisource.org")
+    }
+
+    @Test func `Unglue built-in uses the documented OPDS root and title search`() throws {
+        let unglue = try #require(
+            OPDSCatalogConfiguration.builtInDefaults.first {
+                $0.builtIn == .unglueIt
+            }
+        )
+
+        #expect(unglue.rootURL.absoluteString == "https://unglue.it/api/opds/")
+        guard case .template(let template) = unglue.builtInSearchLink else {
+            Issue.record("Expected the documented Unglue.it title-search template.")
+            return
+        }
+        #expect(template == "https://unglue.it/api/opds/s.{searchTerms}/")
     }
 
     @Test func `Deleting custom catalog deletes credential`() throws {

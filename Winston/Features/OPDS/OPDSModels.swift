@@ -4,6 +4,7 @@ nonisolated enum OPDSDocumentFormat: String, Codable, Equatable, Sendable {
     case opds1
     case opds2
     case atom
+    case mediaWiki
 }
 
 nonisolated enum OPDSSearchLink: Equatable, Sendable {
@@ -78,6 +79,19 @@ nonisolated struct OPDSFeed: Equatable, Sendable {
         )
     }
 
+    func providingSearchLink(_ fallback: OPDSSearchLink?) -> OPDSFeed {
+        guard searchLink == nil, let fallback else { return self }
+        return OPDSFeed(
+            title: title,
+            subtitle: subtitle,
+            navigation: navigation,
+            publications: publications,
+            nextURL: nextURL,
+            searchLink: fallback,
+            documentFormat: documentFormat
+        )
+    }
+
     func appending(_ page: OPDSFeed) -> OPDSFeed {
         var navigationIDs = Set(navigation.map(\.id))
         let newNavigation = page.navigation.filter { navigationIDs.insert($0.id).inserted }
@@ -122,6 +136,9 @@ nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
     let subjects: [String]
     let rights: String?
     let published: String?
+    let sourceURL: URL?
+    let attribution: String?
+    let contributors: [String]
     let coverURL: URL?
     let acquisitions: [OPDSAcquisition]
 
@@ -135,6 +152,9 @@ nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
         subjects: [String] = [],
         rights: String? = nil,
         published: String? = nil,
+        sourceURL: URL? = nil,
+        attribution: String? = nil,
+        contributors: [String] = [],
         coverURL: URL?,
         acquisitions: [OPDSAcquisition]
     ) {
@@ -147,6 +167,9 @@ nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
         self.subjects = subjects
         self.rights = rights
         self.published = published
+        self.sourceURL = sourceURL
+        self.attribution = attribution
+        self.contributors = contributors
         self.coverURL = coverURL
         self.acquisitions = acquisitions
     }
@@ -189,6 +212,11 @@ nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
             subjects: Self.uniqueStrings(subjects + other.subjects),
             rights: rights ?? other.rights,
             published: published ?? other.published,
+            sourceURL: sourceURL ?? other.sourceURL,
+            attribution: attribution ?? other.attribution,
+            contributors: Self.uniqueStrings(
+                contributors + other.contributors
+            ),
             coverURL: coverURL ?? other.coverURL,
             acquisitions: mergedAcquisitions
         )
@@ -205,6 +233,9 @@ nonisolated struct OPDSPublication: Identifiable, Hashable, Sendable {
             subjects: subjects,
             rights: rights,
             published: published,
+            sourceURL: sourceURL,
+            attribution: attribution,
+            contributors: contributors,
             coverURL: coverURL,
             acquisitions: acquisitions
         )

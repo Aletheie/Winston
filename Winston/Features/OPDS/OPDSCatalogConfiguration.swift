@@ -3,6 +3,8 @@ import Foundation
 nonisolated enum OPDSBuiltInCatalog: String, Codable, Sendable, CaseIterable {
     case projectGutenberg = "project-gutenberg"
     case standardEbooks = "standard-ebooks"
+    case unglueIt = "unglue-it"
+    case wikisource
 
     var stableID: String {
         "builtin.\(rawValue)"
@@ -74,24 +76,58 @@ nonisolated struct OPDSCatalogConfiguration:
         rootURL.scheme?.lowercased() == "http"
     }
 
-    static let builtInDefaults: [OPDSCatalogConfiguration] = [
-        OPDSCatalogConfiguration(
-            id: OPDSBuiltInCatalog.projectGutenberg.stableID,
-            name: "Project Gutenberg",
-            rootURL: URL(string: "https://www.gutenberg.org/ebooks.opds/")!,
-            displayOrder: 0,
-            builtIn: .projectGutenberg
-        ),
-        OPDSCatalogConfiguration(
-            id: OPDSBuiltInCatalog.standardEbooks.stableID,
-            name: "Standard Ebooks",
-            rootURL: URL(
-                string: "https://standardebooks.org/feeds/atom/new-releases"
-            )!,
-            displayOrder: 1,
-            builtIn: .standardEbooks
-        ),
-    ]
+    static var builtInDefaults: [OPDSCatalogConfiguration] {
+        builtInDefaults(
+            for: .system,
+            preferredLocalizations: Bundle.main.preferredLocalizations
+        )
+    }
+
+    static func builtInDefaults(
+        for language: AppLanguage,
+        preferredLocalizations: [String]
+    ) -> [OPDSCatalogConfiguration] {
+        let localizationCode = language.effectiveLocalizationCode(
+            preferredLocalizations: preferredLocalizations
+        )
+        let wikisourceName = localizationCode == "cs"
+            ? "Česká Wikisource"
+            : "English Wikisource"
+        return [
+            OPDSCatalogConfiguration(
+                id: OPDSBuiltInCatalog.projectGutenberg.stableID,
+                name: "Project Gutenberg",
+                rootURL: URL(string: "https://www.gutenberg.org/ebooks.opds/")!,
+                displayOrder: 0,
+                builtIn: .projectGutenberg
+            ),
+            OPDSCatalogConfiguration(
+                id: OPDSBuiltInCatalog.standardEbooks.stableID,
+                name: "Standard Ebooks",
+                rootURL: URL(
+                    string: "https://standardebooks.org/feeds/atom/new-releases"
+                )!,
+                displayOrder: 1,
+                builtIn: .standardEbooks
+            ),
+            OPDSCatalogConfiguration(
+                id: OPDSBuiltInCatalog.unglueIt.stableID,
+                name: "Unglue.it",
+                rootURL: URL(string: "https://unglue.it/api/opds/")!,
+                displayOrder: 2,
+                builtIn: .unglueIt
+            ),
+            OPDSCatalogConfiguration(
+                id: OPDSBuiltInCatalog.wikisource.stableID,
+                name: wikisourceName,
+                rootURL: URL(
+                    string: "https://\(localizationCode).wikisource.org/w/api.php"
+                )!,
+                displayOrder: 3,
+                builtIn: .wikisource
+            ),
+        ]
+    }
 
     static func freshCustom(displayOrder: Int) -> OPDSCatalogConfiguration {
         OPDSCatalogConfiguration(
@@ -230,6 +266,13 @@ enum CatalogSearchRouter {
 }
 
 nonisolated extension OPDSCatalogConfiguration {
+    var builtInSearchLink: OPDSSearchLink? {
+        guard builtIn == .unglueIt else { return nil }
+        return .template(
+            "https://unglue.it/api/opds/s.{searchTerms}/"
+        )
+    }
+
     var presentationShortcuts: [OPDSNavigationItem] {
         guard builtIn == .projectGutenberg else { return [] }
         return [
@@ -262,6 +305,10 @@ nonisolated extension OPDSCatalogConfiguration {
             "text.book.closed.fill"
         case .standardEbooks:
             "book.pages.fill"
+        case .unglueIt:
+            "books.vertical.fill"
+        case .wikisource:
+            "character.book.closed.fill"
         case nil:
             "books.vertical.fill"
         }

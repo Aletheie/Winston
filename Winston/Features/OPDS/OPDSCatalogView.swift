@@ -26,6 +26,10 @@ struct OPDSCatalogView: View {
             header
             Divider().opacity(WinstonLayout.dividerOpacity)
             content
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity
+                )
         }
         .toolbar {
             OPDSCatalogToolbar(viewModel: viewModel) {
@@ -58,7 +62,11 @@ struct OPDSCatalogView: View {
             submitSearch()
             return .handled
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: .infinity,
+            alignment: .top
+        )
         .background(ThemedBackground())
     }
 
@@ -96,6 +104,7 @@ struct OPDSCatalogView: View {
                     )
                     .font(theme.display(size: 22, weight: .heavy))
                     .foregroundStyle(theme.textPrimary)
+                    .accessibilityIdentifier("opds.title")
                     Text(
                         "Search every enabled catalog or open one to browse its shelves."
                     )
@@ -107,16 +116,13 @@ struct OPDSCatalogView: View {
             Spacer(minLength: 12)
 
             HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(theme.textTertiary)
-                    .accessibilityHidden(true)
                 TextField(
                     viewModel.selectedCatalog == nil
                         ? "Search enabled catalogs"
                         : "Search this catalog",
                     text: $searchText
                 )
-                .textFieldStyle(.plain)
+                .textFieldStyle(.roundedBorder)
                 .focused($searchIsFocused)
                 .onSubmit(submitSearch)
                 .accessibilityIdentifier("opds.search")
@@ -126,7 +132,7 @@ struct OPDSCatalogView: View {
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .help("Cancel catalog search")
                     .accessibilityLabel("Cancel catalog search")
                 } else if !searchText.isEmpty {
@@ -136,30 +142,12 @@ struct OPDSCatalogView: View {
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .help("Clear catalog search")
                     .accessibilityLabel("Clear catalog search")
                 }
             }
-            .padding(.horizontal, 10)
-            .frame(width: 320, height: 30)
-            .background(
-                theme.surface.opacity(0.9),
-                in: RoundedRectangle(
-                    cornerRadius: WinstonLayout.cornerMedium
-                )
-            )
-            .overlay {
-                RoundedRectangle(
-                    cornerRadius: WinstonLayout.cornerMedium
-                )
-                .stroke(
-                    searchIsFocused
-                        ? theme.borderActive
-                        : theme.borderSubtle,
-                    lineWidth: 1
-                )
-            }
+            .frame(width: 320)
 
             if viewModel.selectedCatalog == nil {
                 SettingsLink {
@@ -668,6 +656,7 @@ struct OPDSCatalogView: View {
         case .opds1: "OPDS 1"
         case .opds2: "OPDS 2"
         case .atom: "Atom"
+        case .mediaWiki: "MediaWiki"
         }
     }
 }
@@ -916,6 +905,26 @@ private struct SearchSourceList: View {
                             .font(theme.body(size: 9))
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(2)
+                    }
+                    if let attribution =
+                        variant.publication.attribution {
+                        Text("Attribution: \(attribution)")
+                            .font(theme.body(size: 9))
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    if !variant.publication.contributors.isEmpty {
+                        Text(
+                            "Contributors: \(variant.publication.contributors.joined(separator: ", "))"
+                        )
+                        .font(theme.body(size: 9))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(3)
+                    }
+                    if let sourceURL = variant.publication.sourceURL {
+                        Link(destination: sourceURL) {
+                            Label("Source", systemImage: "safari")
+                        }
+                        .controlSize(.small)
                     }
                 }
                 .padding(10)

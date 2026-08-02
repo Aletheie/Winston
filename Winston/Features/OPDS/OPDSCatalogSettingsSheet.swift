@@ -656,6 +656,7 @@ private struct OPDSCatalogTestResultView: View {
         case .opds1: "OPDS 1"
         case .opds2: "OPDS 2"
         case .atom: "Atom"
+        case .mediaWiki: "MediaWiki"
         }
     }
 }
