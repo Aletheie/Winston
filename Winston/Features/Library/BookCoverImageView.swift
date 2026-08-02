@@ -32,7 +32,6 @@ struct BookCoverImageView: View {
             .task(
                 id: "\(coverReference.owner.scope.rawValue)#\(coverReference.owner.id)#\(book.fileName)#\(coverReference.version)"
             ) {
-                coverImage = nil
                 let resolved = await resolvedCover(
                     sourceURL: sourceURL,
                     cacheURL: book.coverCacheURL,

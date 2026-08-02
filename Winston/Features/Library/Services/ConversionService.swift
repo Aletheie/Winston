@@ -167,12 +167,14 @@ final class ConversionService {
     private let checkpoint: ConversionCheckpointHandler
 
     private(set) var convertingUUIDs: Set<UUID> = []
+    private(set) var isCalibreAvailable: Bool
 
     init(
         modelContext: ModelContext,
         toasts: ToastCenter,
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared,
+        calibreAvailable: Bool? = nil,
         worker: @escaping ConversionWorker = { source, format in
             try await EbookConverter.convert(source, to: format)
         },
@@ -185,11 +187,19 @@ final class ConversionService {
             managedFiles: managedFiles
         )
         self.managedFiles = managedFiles
+        self.isCalibreAvailable = calibreAvailable ?? EbookConverter.isCalibreAvailable
         self.worker = worker
         self.checkpoint = checkpoint
     }
 
     func isConverting(_ book: Book) -> Bool { convertingUUIDs.contains(book.uuid) }
+
+    func canConvertForKindle(_ sourceFormat: String) -> Bool {
+        EbookConverter.canConvertForKindle(
+            sourceFormat,
+            calibreAvailable: isCalibreAvailable
+        )
+    }
 
     func convert(_ book: Book) {
         guard book.hasCatalogDigitalFile,
