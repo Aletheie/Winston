@@ -168,6 +168,21 @@ enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
         case .czech:   ["cs"]
         }
     }
+
+    nonisolated func effectiveLocalizationCode(
+        preferredLocalizations: [String]
+    ) -> String {
+        switch self {
+        case .czech:
+            "cs"
+        case .english:
+            "en"
+        case .system:
+            preferredLocalizations.contains {
+                $0.lowercased().hasPrefix("cs")
+            } ? "cs" : "en"
+        }
+    }
 }
 
 @MainActor
@@ -191,6 +206,8 @@ final class AppSettings {
         static let showDiscoverInSidebar = "showDiscoverInSidebar"
         static let showCatalogsInSidebar = "showCatalogsInSidebar"
         static let inspectBeforeKindleTransfer = "inspectBeforeKindleTransfer"
+        static let alwaysReviewImports = "alwaysReviewImports"
+        static let opdsCatalogConfigurations = "opdsCatalogConfigurations"
         static let enabledPlugins = "enabledPluginIDs"
         static let pluginGrants = "pluginGrants"
     }
@@ -200,6 +217,7 @@ final class AppSettings {
     nonisolated static let hardcoverTokenAccount = "hardcover-token"
 
     @ObservationIgnored private let secretStore: any SecretStoring
+    @ObservationIgnored private let defaults: UserDefaults
 
     // Never reassign inside didSet — @Observable turns stored properties into accessors and the setter recurses (clamping lives in adjustGridZoom).
     var gridZoom: Double {
@@ -283,6 +301,21 @@ final class AppSettings {
         }
     }
 
+    var alwaysReviewImports: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                alwaysReviewImports,
+                forKey: Keys.alwaysReviewImports
+            )
+        }
+    }
+
+    var catalogConfigurations: [OPDSCatalogConfiguration] {
+        didSet {
+            Self.persistCatalogs(catalogConfigurations, to: defaults)
+        }
+    }
+
     var enabledPluginIDs: Set<String> {
         didSet { UserDefaults.standard.set(Array(enabledPluginIDs).sorted(), forKey: Keys.enabledPlugins) }
     }
@@ -299,13 +332,25 @@ final class AppSettings {
             } else {
                 UserDefaults.standard.removeObject(forKey: "AppleLanguages")
             }
+            guard oldValue != appLanguage else { return }
+            catalogConfigurations = Self.normalizedCatalogs(
+                catalogConfigurations,
+                builtInDefaults: localizedBuiltInCatalogs
+            )
         }
     }
 
-    init(secretStore: any SecretStoring = AppSecretStoreFactory.make()) {
+    init(
+        secretStore: any SecretStoring = AppSecretStoreFactory.make(),
+        defaults: UserDefaults = .standard
+    ) {
         self.secretStore = secretStore
+        self.defaults = defaults
         let storedToken = secretStore.string(for: Self.hardcoverTokenAccount)
         let legacyToken = UserDefaults.standard.string(forKey: Keys.hardcoverToken)
+        let resolvedAppLanguage = UserDefaults.standard.string(
+            forKey: Keys.appLanguage
+        ).flatMap(AppLanguage.init(rawValue:)) ?? .system
         onlineMetadataEnabled = UserDefaults.standard.bool(forKey: Keys.onlineMetadata)
         watchFolderEnabled = UserDefaults.standard.bool(forKey: Keys.watchEnabled)
         watchFolderPath = UserDefaults.standard.string(forKey: Keys.watchPath)
@@ -321,6 +366,17 @@ final class AppSettings {
         inspectBeforeKindleTransfer = UserDefaults.standard.object(
             forKey: Keys.inspectBeforeKindleTransfer
         ) as? Bool ?? false
+        alwaysReviewImports = UserDefaults.standard.object(
+            forKey: Keys.alwaysReviewImports
+        ) as? Bool ?? false
+        appLanguage = resolvedAppLanguage
+        catalogConfigurations = Self.loadCatalogs(
+            from: defaults,
+            builtInDefaults: OPDSCatalogConfiguration.builtInDefaults(
+                for: resolvedAppLanguage,
+                preferredLocalizations: Bundle.main.preferredLocalizations
+            )
+        )
         enabledPluginIDs = Set(UserDefaults.standard.stringArray(forKey: Keys.enabledPlugins) ?? [])
         pluginGrants = (UserDefaults.standard.dictionary(forKey: Keys.pluginGrants) as? [String: [String]]) ?? [:]
         hardcoverToken = storedToken ?? legacyToken ?? ""
@@ -329,13 +385,267 @@ final class AppSettings {
         ) ?? UserDefaults.standard.string(
             forKey: Keys.legacyExternalBookSearchURLTemplate
         ) ?? ""
-        appLanguage = UserDefaults.standard.string(forKey: Keys.appLanguage)
-            .flatMap(AppLanguage.init(rawValue:)) ?? .system
         if storedToken != nil {
             UserDefaults.standard.removeObject(forKey: Keys.hardcoverToken)
         } else if let legacyToken,
                   secretStore.set(legacyToken, for: Self.hardcoverTokenAccount) {
             UserDefaults.standard.removeObject(forKey: Keys.hardcoverToken)
         }
+    }
+
+    func catalogAccess(
+        for configuration: OPDSCatalogConfiguration
+    ) -> OPDSCatalogAccess {
+        OPDSCatalogAccess(
+            configuration: configuration,
+            credential: configuration.authenticationMode == .basic
+                ? catalogCredential(for: configuration)
+                : nil
+        )
+    }
+
+    func catalogCredentialUsername(
+        for configuration: OPDSCatalogConfiguration
+    ) -> String? {
+        catalogCredential(for: configuration)?.username
+    }
+
+    @discardableResult
+    func setCatalogCredential(
+        _ credential: OPDSBasicCredential?,
+        for configuration: OPDSCatalogConfiguration
+    ) -> Bool {
+        guard let credential else {
+            return secretStore.set(
+                nil,
+                for: configuration.resolvedCredentialKey
+            )
+        }
+        guard credential.isValid,
+              let data = try? JSONEncoder().encode(credential),
+              let encoded = String(data: data, encoding: .utf8) else {
+            return false
+        }
+        return secretStore.set(
+            encoded,
+            for: configuration.resolvedCredentialKey
+        )
+    }
+
+    @discardableResult
+    func saveCatalog(
+        _ configuration: OPDSCatalogConfiguration,
+        replacementCredential: OPDSBasicCredential? = nil
+    ) -> Bool {
+        var configuration = configuration
+        if configuration.builtIn == .wikisource,
+           let localized = localizedBuiltInCatalogs.first(
+               where: { $0.builtIn == .wikisource }
+           ) {
+            configuration.name = localized.name
+            configuration.rootURL = localized.rootURL
+            configuration.authenticationMode = .none
+            configuration.credentialKey = nil
+            configuration.allowsInsecureHTTP = false
+        }
+        let trimmedName = configuration.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              configuration.rootURL.isOPDSHTTPURL else {
+            return false
+        }
+        configuration.name = trimmedName
+        configuration.credentialKey = configuration.resolvedCredentialKey
+
+        if configuration.authenticationMode == .basic {
+            guard !configuration.isHTTP else { return false }
+            if let replacementCredential {
+                guard setCatalogCredential(
+                    replacementCredential,
+                    for: configuration
+                ) else {
+                    return false
+                }
+            } else if catalogCredential(for: configuration) == nil {
+                return false
+            }
+        } else {
+            guard setCatalogCredential(nil, for: configuration) else {
+                return false
+            }
+        }
+
+        var catalogs = catalogConfigurations
+        if let index = catalogs.firstIndex(where: {
+            $0.id == configuration.id
+        }) {
+            catalogs[index] = configuration
+        } else {
+            configuration.displayOrder = catalogs.count
+            catalogs.append(configuration)
+        }
+        catalogConfigurations = Self.normalizedCatalogs(
+            catalogs,
+            builtInDefaults: localizedBuiltInCatalogs
+        )
+        return true
+    }
+
+    @discardableResult
+    func removeCatalog(id: String) -> Bool {
+        guard let catalog = catalogConfigurations.first(where: {
+            $0.id == id && !$0.isBuiltIn
+        }) else {
+            return false
+        }
+        guard setCatalogCredential(nil, for: catalog) else { return false }
+        catalogConfigurations = Self.normalizedCatalogs(
+            catalogConfigurations.filter { $0.id != id },
+            builtInDefaults: localizedBuiltInCatalogs
+        )
+        return true
+    }
+
+    func moveCatalog(id: String, by offset: Int) {
+        guard offset != 0,
+              let source = catalogConfigurations.firstIndex(where: {
+                  $0.id == id
+              }) else {
+            return
+        }
+        let destination = min(
+            max(0, source + offset),
+            catalogConfigurations.count - 1
+        )
+        guard source != destination else { return }
+        var catalogs = catalogConfigurations
+        let catalog = catalogs.remove(at: source)
+        catalogs.insert(catalog, at: destination)
+        for index in catalogs.indices {
+            catalogs[index].displayOrder = index
+        }
+        catalogConfigurations = catalogs
+    }
+
+    func resetBuiltInCatalogs() {
+        for catalog in catalogConfigurations where catalog.isBuiltIn {
+            _ = setCatalogCredential(nil, for: catalog)
+        }
+        var catalogs = localizedBuiltInCatalogs
+            + catalogConfigurations.filter { !$0.isBuiltIn }
+        for index in catalogs.indices {
+            catalogs[index].displayOrder = index
+        }
+        catalogConfigurations = catalogs
+    }
+
+    private func catalogCredential(
+        for configuration: OPDSCatalogConfiguration
+    ) -> OPDSBasicCredential? {
+        guard let value = secretStore.string(
+            for: configuration.resolvedCredentialKey
+        ),
+        let data = value.data(using: .utf8),
+        let credential = try? JSONDecoder().decode(
+            OPDSBasicCredential.self,
+            from: data
+        ),
+        credential.isValid else {
+            return nil
+        }
+        return credential
+    }
+
+    private var localizedBuiltInCatalogs: [OPDSCatalogConfiguration] {
+        OPDSCatalogConfiguration.builtInDefaults(
+            for: appLanguage,
+            preferredLocalizations: Bundle.main.preferredLocalizations
+        )
+    }
+
+    nonisolated private static func loadCatalogs(
+        from defaults: UserDefaults,
+        builtInDefaults: [OPDSCatalogConfiguration]
+    ) -> [OPDSCatalogConfiguration] {
+        let encoded = defaults.array(
+            forKey: Keys.opdsCatalogConfigurations
+        ) as? [Data] ?? []
+        var decoded: [OPDSCatalogConfiguration] = []
+        var seenIDs: Set<String> = []
+        for data in encoded {
+            guard var catalog = try? JSONDecoder().decode(
+                OPDSCatalogConfiguration.self,
+                from: data
+            ),
+            !catalog.id.isEmpty,
+            !catalog.name.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty,
+            catalog.rootURL.isOPDSHTTPURL,
+            seenIDs.insert(catalog.id).inserted else {
+                continue
+            }
+            if let builtIn = OPDSBuiltInCatalog.allCases.first(where: {
+                $0.stableID == catalog.id
+            }) {
+                catalog.builtIn = builtIn
+            } else {
+                catalog.builtIn = nil
+            }
+            decoded.append(catalog)
+        }
+        return normalizedCatalogs(
+            decoded,
+            builtInDefaults: builtInDefaults
+        )
+    }
+
+    nonisolated private static func normalizedCatalogs(
+        _ catalogs: [OPDSCatalogConfiguration],
+        builtInDefaults: [OPDSCatalogConfiguration]
+    ) -> [OPDSCatalogConfiguration] {
+        let defaultsByID = Dictionary(
+            uniqueKeysWithValues: builtInDefaults.map { ($0.id, $0) }
+        )
+        var seenIDs: Set<String> = []
+        var result = catalogs
+            .filter { seenIDs.insert($0.id).inserted }
+            .sorted {
+                if $0.displayOrder != $1.displayOrder {
+                    return $0.displayOrder < $1.displayOrder
+                }
+                return $0.id < $1.id
+            }
+        for index in result.indices
+        where result[index].builtIn == .wikisource {
+            guard let localized = defaultsByID[result[index].id] else {
+                continue
+            }
+            result[index].name = localized.name
+            result[index].rootURL = localized.rootURL
+            result[index].authenticationMode = .none
+            result[index].credentialKey = nil
+            result[index].allowsInsecureHTTP = false
+        }
+        let existingIDs = Set(result.map(\.id))
+        result.append(contentsOf:
+            builtInDefaults.filter {
+                !existingIDs.contains($0.id)
+            }
+        )
+        for index in result.indices {
+            result[index].displayOrder = index
+        }
+        return result
+    }
+
+    nonisolated private static func persistCatalogs(
+        _ catalogs: [OPDSCatalogConfiguration],
+        to defaults: UserDefaults
+    ) {
+        let encoded = catalogs.compactMap {
+            try? JSONEncoder().encode($0)
+        }
+        defaults.set(encoded, forKey: Keys.opdsCatalogConfigurations)
     }
 }
