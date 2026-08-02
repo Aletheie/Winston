@@ -74,24 +74,12 @@ struct HighlightsView: View {
             Text(theme.usesTerminalCopy ? "// highlights" : "Highlights")
                 .font(theme.body(size: 15, weight: .bold))
             Spacer()
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textTertiary)
-                TextField(theme.copy.searchPlaceholder, text: $search)
-                    .textFieldStyle(.plain)
-                    .font(theme.label(size: 12))
-                    .frame(width: 160)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
-                    .fill(theme.surface.opacity(0.6))
-            )
-            .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
+            TextField(theme.copy.searchPlaceholder, text: $search)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 180)
         }
         .padding(16)
+        .background(.bar)
     }
 
     @ViewBuilder
@@ -152,6 +140,7 @@ struct HighlightsView: View {
                 .keyboardShortcut(.defaultAction)
         }
         .padding(12)
+        .background(.bar)
     }
 
     // MARK: - Data

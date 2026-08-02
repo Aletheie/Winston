@@ -149,6 +149,8 @@ final class ReadingRecommendationViewModel {
 
     func prepare(books: [Book], after previousBookID: UUID?) async {
         let preparationID = UUID()
+        rankingTask?.cancel()
+        rankingTask = nil
         activePreparationID = preparationID
         isPreparing = true
         rotationAnchorID = previousBookID
@@ -173,7 +175,6 @@ final class ReadingRecommendationViewModel {
         }
 
         guard !Task.isCancelled, activePreparationID == preparationID else { return }
-        isPreparing = false
         booksByID = sourceBooksByID
         candidates = prepared.candidates
         sourceBookCount = prepared.sourceBookCount
@@ -219,6 +220,7 @@ final class ReadingRecommendationViewModel {
         let candidates = candidates
         let preferences = preferences
         let anchor = rotationAnchorID
+        let completesPreparation = isPreparing
         rankingTask = Task { [weak self] in
             if !immediately {
                 do {
@@ -238,6 +240,9 @@ final class ReadingRecommendationViewModel {
             self.rankedRecommendations = ranked
             self.selectedIndex = 0
             self.updateCurrentRecommendation()
+            if completesPreparation {
+                self.isPreparing = false
+            }
             self.rankingTask = nil
         }
     }
@@ -363,11 +368,7 @@ struct ReadingRecommendationSheet: View {
         .frame(minWidth: 900, idealWidth: 940, maxWidth: 1_160,
                minHeight: 600, idealHeight: 700, maxHeight: 900)
         .background(theme.background)
-        .task(id: LibraryMutationLog.shared.catalogRevision) {
-            if model.currentRecommendation != nil || model.sourceBookCount > 0 {
-                try? await Task.sleep(for: .milliseconds(120))
-                guard !Task.isCancelled else { return }
-            }
+        .task {
             await model.prepare(
                 books: books,
                 after: UUID(uuidString: lastRecommendationBookID)
@@ -617,11 +618,7 @@ private struct ReadingRecommendationResultPane: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        if isPreparing {
-            ProgressView("Checking your library…")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(theme.background)
-        } else if let book, let recommendation {
+        if let book, let recommendation {
             ScrollView {
                 ReadingRecommendationResult(
                     book: book,
@@ -635,6 +632,10 @@ private struct ReadingRecommendationResultPane: View {
                 .padding(28)
             }
             .background(theme.background)
+        } else if isPreparing {
+            ProgressView("Checking your library…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(theme.background)
         } else {
             ReadingRecommendationEmptyState(
                 hasSourceBooks: hasSourceBooks,
@@ -901,6 +902,6 @@ private struct ReadingRecommendationFooter: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(theme.backgroundAlt.opacity(0.98))
+        .background(.bar)
     }
 }

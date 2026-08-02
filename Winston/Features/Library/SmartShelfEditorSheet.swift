@@ -381,17 +381,13 @@ private struct SmartShelfRuleRow: View {
                 Image(systemName: "minus.circle.fill")
                     .foregroundStyle(theme.textTertiary)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .help("Remove Rule")
             .accessibilityLabel("Remove Rule")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
-        .background(theme.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(theme.borderSubtle, lineWidth: 1)
-        }
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onChange(of: rule.field) { oldField, newField in
             guard oldField != newField else { return }
             rule.reset(for: newField)
@@ -566,7 +562,7 @@ private struct SmartShelfEditorFooter: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
+        .background(.bar)
     }
 
     private var actionTitle: LocalizedStringResource {

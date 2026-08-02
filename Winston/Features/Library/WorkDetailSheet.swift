@@ -19,9 +19,21 @@ struct WorkDetailSheet: View {
     @State private var deleteTarget: Book?
     @State private var isConfirmingDelete = false
     @State private var isConfirmingEditionMerge = false
+    @State private var entityNavigation: EntityNavigationModel
 
     private static let ebookTypes: [UTType] = libraryEbookExtensions
         .compactMap { UTType(filenameExtension: $0) }
+
+    init(
+        work: Work,
+        viewModel: LibraryViewModel,
+        onShowInLibrary: @escaping (Book) -> Void
+    ) {
+        self.work = work
+        self.viewModel = viewModel
+        self.onShowInLibrary = onShowInLibrary
+        _entityNavigation = State(initialValue: EntityNavigationModel(work: work))
+    }
 
     var body: some View {
         if work.modelContext == nil {
@@ -39,29 +51,45 @@ struct WorkDetailSheet: View {
                     onCommit: commitIdentity
                 )
                 Divider()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        WorkEditionSection(
-                            editions: editions,
-                            work: work,
-                            preferredEditionUUID: WorkService.preferredEdition(in: work)?.uuid,
-                            compactList: compactList,
-                            selectedEditionUUIDs: $selectedEditionUUIDs,
-                            service: viewModel.editions,
-                            onShowInLibrary: onShowInLibrary,
-                            onDelete: requestDelete
-                        )
-                        if editions.count == 1 {
-                            Button {
-                                isAddingEdition = true
-                            } label: {
-                                Label("Add another translation or edition", systemImage: "plus.circle")
+                EntityBreadcrumb(model: $entityNavigation)
+                Divider()
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            WorkEditionSection(
+                                editions: editions,
+                                work: work,
+                                preferredEditionUUID: WorkService.preferredEdition(in: work)?.uuid,
+                                compactList: compactList,
+                                selectedEditionUUIDs: $selectedEditionUUIDs,
+                                navigationEditionID: entityNavigation.selectedEditionID,
+                                navigationAssetID: entityNavigation.level == .asset
+                                    ? entityNavigation.selectedAssetID
+                                    : nil,
+                                service: viewModel.editions,
+                                onNavigateEdition: { entityNavigation.selectEdition($0) },
+                                onNavigateAsset: { entityNavigation.selectAsset($0) },
+                                onShowInLibrary: onShowInLibrary,
+                                onDelete: requestDelete
+                            )
+                            if editions.count == 1 {
+                                Button {
+                                    isAddingEdition = true
+                                } label: {
+                                    Label("Add another translation or edition", systemImage: "plus.circle")
+                                }
+                                .buttonStyle(.link)
+                                .font(theme.label(size: 11))
                             }
-                            .buttonStyle(.link)
-                            .font(theme.label(size: 11))
+                        }
+                        .padding(20)
+                    }
+                    .onChange(of: entityNavigation.selectedEditionID) { _, editionID in
+                        guard let editionID else { return }
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            proxy.scrollTo(editionID, anchor: .center)
                         }
                     }
-                    .padding(20)
                 }
                 Divider()
                 WorkDetailFooter(
@@ -79,6 +107,9 @@ struct WorkDetailSheet: View {
             .onAppear {
                 title = work.title ?? ""
                 author = work.author ?? ""
+            }
+            .onChange(of: navigationSource) { _, updated in
+                entityNavigation.reconcile(with: updated)
             }
             .fileImporter(
                 isPresented: $isAddingEdition,
@@ -130,6 +161,10 @@ struct WorkDetailSheet: View {
             if $0.dateAdded != $1.dateAdded { return $0.dateAdded < $1.dateAdded }
             return $0.uuid.uuidString < $1.uuid.uuidString
         }
+    }
+
+    private var navigationSource: EntityNavigationModel {
+        EntityNavigationModel(work: work, selectedEditionID: entityNavigation.selectedEditionID)
     }
 
     private func requestDelete(_ book: Book) {
@@ -219,7 +254,11 @@ private struct WorkEditionSection: View {
     let preferredEditionUUID: UUID?
     let compactList: Bool
     @Binding var selectedEditionUUIDs: Set<UUID>
+    let navigationEditionID: UUID?
+    let navigationAssetID: UUID?
     let service: CatalogReconciliationService
+    let onNavigateEdition: (UUID) -> Void
+    let onNavigateAsset: (UUID) -> Void
     let onShowInLibrary: (Book) -> Void
     let onDelete: (Book) -> Void
 
@@ -233,10 +272,15 @@ private struct WorkEditionSection: View {
                         isPreferred: preferredEditionUUID == edition.uuid,
                         compact: true,
                         selectedEditionUUIDs: $selectedEditionUUIDs,
+                        isNavigationSelection: navigationEditionID == edition.uuid,
+                        selectedAssetID: navigationAssetID,
                         service: service,
+                        onNavigateEdition: onNavigateEdition,
+                        onNavigateAsset: onNavigateAsset,
                         onShowInLibrary: onShowInLibrary,
                         onDelete: onDelete
                     )
+                    .id(edition.uuid)
                 }
             }
         } else {
@@ -248,10 +292,15 @@ private struct WorkEditionSection: View {
                         isPreferred: preferredEditionUUID == edition.uuid,
                         compact: false,
                         selectedEditionUUIDs: $selectedEditionUUIDs,
+                        isNavigationSelection: navigationEditionID == edition.uuid,
+                        selectedAssetID: navigationAssetID,
                         service: service,
+                        onNavigateEdition: onNavigateEdition,
+                        onNavigateAsset: onNavigateAsset,
                         onShowInLibrary: onShowInLibrary,
                         onDelete: onDelete
                     )
+                    .id(edition.uuid)
                 }
             }
         }

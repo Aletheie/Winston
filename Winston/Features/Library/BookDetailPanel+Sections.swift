@@ -19,10 +19,155 @@ struct BookDetailPanel: View {
                 actions: actions
             )
         } else if let book {
-            DetailSingleBook(book: book, viewModel: viewModel, actions: actions)
+            EntityDetailWorkspace(
+                rootBook: book,
+                viewModel: viewModel,
+                actions: actions
+            )
+            .id(book.uuid)
         } else {
             DetailEmptyState()
         }
+    }
+}
+
+private struct EntityDetailWorkspace: View {
+    let rootBook: Book
+    let viewModel: LibraryViewModel
+    let actions: BookActions
+
+    @State private var navigation: EntityNavigationModel
+
+    init(rootBook: Book, viewModel: LibraryViewModel, actions: BookActions) {
+        self.rootBook = rootBook
+        self.viewModel = viewModel
+        self.actions = actions
+        _navigation = State(initialValue: EntityNavigationModel(book: rootBook))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            EntityBreadcrumb(model: $navigation)
+            Divider().opacity(WinstonLayout.dividerOpacity)
+            switch navigation.level {
+            case .work:
+                DetailWorkWorkspace(
+                    model: navigation,
+                    liveEditions: liveEditions,
+                    onSelectEdition: { navigation.selectEdition($0) }
+                )
+            case .edition, .asset:
+                if let selectedBook {
+                    DetailSingleBook(
+                        book: selectedBook,
+                        viewModel: viewModel,
+                        actions: actions,
+                        selectedAssetID: navigation.level == .asset
+                            ? navigation.selectedAssetID
+                            : nil,
+                        onSelectAsset: { navigation.selectAsset($0) }
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "Edition no longer available",
+                        systemImage: "book.closed"
+                    )
+                }
+            }
+        }
+        .onChange(of: navigationSource) { _, updated in
+            navigation.reconcile(with: updated)
+        }
+    }
+
+    private var navigationSource: EntityNavigationModel {
+        EntityNavigationModel(book: rootBook)
+    }
+
+    private var liveEditions: [Book] {
+        let editions = rootBook.work?.editions ?? [rootBook]
+        return editions
+            .filter { $0.modelContext != nil }
+            .sorted {
+                if $0.dateAdded != $1.dateAdded { return $0.dateAdded < $1.dateAdded }
+                return $0.uuid.uuidString < $1.uuid.uuidString
+            }
+    }
+
+    private var selectedBook: Book? {
+        guard let selectedEditionID = navigation.selectedEditionID else { return nil }
+        return liveEditions.first(where: { $0.uuid == selectedEditionID })
+    }
+}
+
+private struct DetailWorkWorkspace: View {
+    let model: EntityNavigationModel
+    let liveEditions: [Book]
+    let onSelectEdition: (UUID) -> Void
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: WinstonLayout.space4) {
+                VStack(alignment: .leading, spacing: WinstonLayout.space1) {
+                    Label("Work", systemImage: "books.vertical.fill")
+                        .font(theme.label(size: 10, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                    Text(model.workTitle)
+                        .font(theme.body(size: 18, weight: .bold))
+                        .foregroundStyle(theme.textPrimary)
+                    Text("\(model.editions.count) editions")
+                        .font(theme.label(size: 10))
+                        .foregroundStyle(theme.textSecondary)
+                }
+
+                VStack(alignment: .leading, spacing: WinstonLayout.space2) {
+                    Text("Editions")
+                        .font(theme.label(size: 10, weight: .semibold))
+                        .foregroundStyle(theme.textTertiary)
+                    ForEach(model.editions) { edition in
+                        Button {
+                            onSelectEdition(edition.id)
+                        } label: {
+                            HStack(spacing: WinstonLayout.space2) {
+                                if let book = liveEditions.first(where: { $0.uuid == edition.id }) {
+                                    BookCoverImageView(book: book, tier: .thumb)
+                                        .frame(width: 28, height: 40)
+                                        .clipShape(RoundedRectangle(cornerRadius: 3))
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(edition.label)
+                                        .font(theme.label(size: 11, weight: .semibold))
+                                        .foregroundStyle(theme.textPrimary)
+                                        .lineLimit(2)
+                                    Text("\(edition.assets.count) assets")
+                                        .font(theme.label(size: 9))
+                                        .foregroundStyle(theme.textSecondary)
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(theme.textTertiary)
+                            }
+                            .padding(WinstonLayout.space2)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(
+                            theme.interaction.hover,
+                            in: RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium)
+                        )
+                        .accessibilityLabel(
+                            "Edition: \(edition.label), \(edition.assets.count) assets"
+                        )
+                        .accessibilityHint("Shows this edition without changing the library selection")
+                    }
+                }
+            }
+            .padding(WinstonLayout.space4)
+        }
+        .scrollContentBackground(.hidden)
     }
 }
 
@@ -88,57 +233,81 @@ struct DetailSingleBook: View {
     let book: Book
     let viewModel: LibraryViewModel
     let actions: BookActions
+    var selectedAssetID: UUID? = nil
+    var onSelectAsset: ((UUID) -> Void)? = nil
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                DetailCover(book: book, actions: actions)
-                VStack(alignment: .leading, spacing: 8) {
-                    DetailIdentity(
-                        title: book.displayTitle,
-                        author: book.displayAuthor,
-                        onShowAuthor: actions.showAuthorInLibrary
-                    )
-                    if book.probablySample {
-                        DetailSampleNotice(book: book, viewModel: viewModel)
-                    }
-                    DetailStatusRow(book: book, actions: actions)
-                    DetailActions(
-                        book: book,
-                        actions: actions,
-                        isConverting: viewModel.isConverting(book),
-                        canConvertForKindle: viewModel.conversion.canConvertForKindle(book.format)
-                    )
-                    if let work = book.work {
-                        DetailWork(work: work, actions: actions)
-                    }
-                    DetailSeries(book: book, actions: actions)
-                    Divider().opacity(WinstonLayout.dividerOpacity)
-                    DetailMetadataList(book: book)
-                    DetailRatingRow(book: book, viewModel: viewModel)
-                    if let community = book.communityRating {
-                        DetailCommunityRating(average: community, count: book.communityRatingCount,
-                                              source: book.communityRatingSource)
-                    }
-                    if let description = book.bookDescription?.strippedHTML, !description.isEmpty {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    DetailCover(book: book, actions: actions)
+                    VStack(alignment: .leading, spacing: 8) {
+                        DetailIdentity(
+                            title: book.displayTitle,
+                            author: book.displayAuthor,
+                            onShowAuthor: actions.showAuthorInLibrary
+                        )
+                        if book.probablySample {
+                            DetailSampleNotice(book: book, viewModel: viewModel)
+                        }
+                        DetailStatusRow(book: book, actions: actions)
+                        DetailActions(
+                            book: book,
+                            actions: actions,
+                            isConverting: viewModel.isConverting(book),
+                            canConvertForKindle: viewModel.conversion.canConvertForKindle(book.format)
+                        )
+                        if let work = book.work {
+                            DetailWork(work: work, actions: actions)
+                        }
+                        DetailSeries(book: book, actions: actions)
                         Divider().opacity(WinstonLayout.dividerOpacity)
-                        DetailDescription(text: description)
-                    }
-                    if !book.highlights.isEmpty {
+                        DetailMetadataList(book: book)
+                        DetailRatingRow(book: book, viewModel: viewModel)
+                        if let community = book.communityRating {
+                            DetailCommunityRating(average: community, count: book.communityRatingCount,
+                                                  source: book.communityRatingSource)
+                        }
+                        if let description = book.bookDescription?.strippedHTML, !description.isEmpty {
+                            Divider().opacity(WinstonLayout.dividerOpacity)
+                            DetailDescription(text: description)
+                        }
+                        if !book.highlights.isEmpty {
+                            Divider().opacity(WinstonLayout.dividerOpacity)
+                            DetailHighlights(highlights: book.highlights)
+                        }
                         Divider().opacity(WinstonLayout.dividerOpacity)
-                        DetailHighlights(highlights: book.highlights)
+                        DetailNotes(book: book, viewModel: viewModel)
+                        Divider().opacity(WinstonLayout.dividerOpacity)
+                        DetailFiles(
+                            book: book,
+                            viewModel: viewModel,
+                            actions: actions,
+                            selectedAssetID: selectedAssetID,
+                            onSelectAsset: onSelectAsset
+                        )
                     }
-                    Divider().opacity(WinstonLayout.dividerOpacity)
-                    DetailNotes(book: book, viewModel: viewModel)
-                    Divider().opacity(WinstonLayout.dividerOpacity)
-                    DetailFiles(book: book, viewModel: viewModel, actions: actions)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 16)
                 }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 16)
+            }
+            .onAppear { scrollToSelectedAsset(using: proxy) }
+            .onChange(of: selectedAssetID) { _, _ in
+                scrollToSelectedAsset(using: proxy)
             }
         }
         .scrollContentBackground(.hidden)
         .task(id: book.uuid) { await viewModel.backfillPageCount(for: book) }
+    }
+
+    private func scrollToSelectedAsset(using proxy: ScrollViewProxy) {
+        guard let selectedAssetID else { return }
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.easeOut(duration: 0.18)) {
+                proxy.scrollTo(selectedAssetID, anchor: .center)
+            }
+        }
     }
 }
 
@@ -964,6 +1133,8 @@ struct DetailFiles: View {
     let book: Book
     let viewModel: LibraryViewModel
     let actions: BookActions
+    var selectedAssetID: UUID? = nil
+    var onSelectAsset: ((UUID) -> Void)? = nil
 
     @Environment(\.theme) private var theme
     @State private var removeTarget: BookAsset?
@@ -993,9 +1164,12 @@ struct DetailFiles: View {
                     isPrimary: asset.uuid == book.primaryAsset?.uuid,
                     canRemove: assets.count == 1 || asset.fileName != book.fileName,
                     viewModel: viewModel,
+                    isSelected: selectedAssetID == asset.uuid,
+                    onSelect: { onSelectAsset?(asset.uuid) },
                     onReplace: replaceFile,
                     onRemove: requestRemove
                 )
+                .id(asset.uuid)
             }
             Text("Added \(book.dateAdded.formatted(date: .abbreviated, time: .shortened))")
                 .font(theme.label(size: 9, weight: .regular))
@@ -1054,6 +1228,8 @@ private struct DetailFileRow: View {
     let isPrimary: Bool
     let canRemove: Bool
     let viewModel: LibraryViewModel
+    let isSelected: Bool
+    let onSelect: () -> Void
     let onReplace: (BookAsset) -> Void
     let onRemove: (BookAsset) -> Void
 
@@ -1125,6 +1301,21 @@ private struct DetailFileRow: View {
             .accessibilityLabel("File actions")
         }
         .padding(.vertical, 3)
+        .padding(.horizontal, 4)
+        .background(
+            isSelected ? theme.interaction.selection : Color.clear,
+            in: RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
+        )
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
+                    .stroke(theme.interaction.focus, lineWidth: 1)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .accessibilityValue(isSelected ? "Selected asset" : "Asset")
+        .accessibilityHint("Shows this asset without making it the primary file")
     }
 
     private var validationColor: Color {

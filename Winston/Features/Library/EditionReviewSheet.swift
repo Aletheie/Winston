@@ -5,6 +5,7 @@ struct EditionReviewSheet: View {
     let service: CatalogReconciliationService
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(OperationReportStore.self) private var operationReports
     @State private var booksByUUID: [UUID: Book] = [:]
     @State private var isScanning = false
     @State private var selectedPairKeys: Set<String> = []
@@ -110,6 +111,10 @@ struct EditionReviewSheet: View {
         }
         .onChange(of: batchController.result?.id) {
             guard let result = batchController.result else { return }
+            operationReports.upsert(.reconciliation(
+                result,
+                titlesByBookID: booksByUUID.mapValues(\.displayTitle)
+            ))
             selectedPairKeys = result.retryablePairKeys
             synchronizeWorkspace(with: visibleProposals.map(\.pairKey))
         }
@@ -410,24 +415,24 @@ private struct ReconciliationBatchProgressView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            ProgressView(value: progress.fraction)
-                .frame(width: 150)
-                .accessibilityLabel("Batch reconciliation progress")
-                .accessibilityValue(
+            OperationProgressView(
+                title: Text(statusTitle),
+                detail: Text("\(progress.completedCount) of \(progress.totalCount) proposals completed"),
+                value: progress.fraction,
+                completedCount: progress.completedCount,
+                totalCount: progress.totalCount,
+                accessibilityLabel: Text("Batch reconciliation progress"),
+                accessibilityValue: Text(
                     "\(progress.completedCount) of \(progress.totalCount) proposals"
-                )
-            VStack(alignment: .leading, spacing: 2) {
-                Text(statusTitle)
-                    .font(.caption.weight(.semibold))
-                Text("\(progress.completedCount) of \(progress.totalCount) proposals completed")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if progress.canCancel {
-                Button(isCancelling ? "Cancelling…" : "Cancel Batch", action: onCancel)
-                    .disabled(isCancelling)
-            } else {
+                ),
+                announcementName: String(localized: "Batch reconciliation"),
+                cancelLabel: progress.canCancel
+                    ? Text(isCancelling ? "Cancelling…" : "Cancel Batch")
+                    : nil,
+                canCancel: !isCancelling,
+                onCancel: progress.canCancel ? onCancel : nil
+            )
+            if !progress.canCancel {
                 Label("Protected commit", systemImage: "lock.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -472,6 +477,7 @@ private struct ReconciliationBatchResultView: View {
                 }
                 Button("Dismiss", action: onDismiss)
             }
+            OperationResultSummary(metrics: metrics)
             if showsDetails {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 5) {
@@ -499,6 +505,29 @@ private struct ReconciliationBatchResultView: View {
 
     private var summary: LocalizedStringResource {
         "\(result.appliedCount) applied, \(result.dismissedCount) kept separate, \(result.staleCount) stale, \(result.conflictCount) conflicts, \(result.failedCount) failed, \(result.pendingCount) pending"
+    }
+
+    private var metrics: [OperationResultMetric] {
+        [
+            OperationResultMetric(
+                id: "applied",
+                value: result.appliedCount + result.dismissedCount,
+                label: "Completed",
+                kind: .success
+            ),
+            OperationResultMetric(
+                id: "conflicts",
+                value: result.staleCount + result.conflictCount + result.failedCount,
+                label: "Needs review",
+                kind: .warning
+            ),
+            OperationResultMetric(
+                id: "pending",
+                value: result.pendingCount,
+                label: "Pending",
+                kind: .information
+            ),
+        ]
     }
 
     private func itemTitle(_ item: ReconciliationBatchResultItem) -> String {
