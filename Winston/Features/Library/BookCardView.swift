@@ -4,6 +4,7 @@ import SwiftData
 struct BookCardView: View {
     let book: Book
     var isSelected = false
+    var isFocused = false
     var isOnDevice = false
     var isConverting = false
     var isMissing = false
@@ -12,7 +13,6 @@ struct BookCardView: View {
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var isHovered = false
     @State private var isDeleteHovered = false
 
@@ -23,20 +23,14 @@ struct BookCardView: View {
                 CardTitleStrip(book: book, isOnDevice: isOnDevice, isMissing: isMissing)
             }
             .background(
-                reduceTransparency
-                    ? AnyShapeStyle(theme.surface)
-                    : AnyShapeStyle(.ultraThinMaterial),
-                in: RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous))
-            .background(
                 RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous)
-                    .fill(theme.surfaceGlass.opacity(0.6))
+                    .fill(cardFill)
             )
             .overlay {
                 RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous)
                     .stroke(
-                        isSelected  ? theme.accentSecondary.opacity(0.7)
-                                    : (isHovered ? theme.accent.opacity(0.4) : theme.borderSubtle),
-                        lineWidth: isSelected ? 2 : 1
+                        cardBorder,
+                        lineWidth: cardBorderWidth
                     )
             }
 
@@ -49,21 +43,26 @@ struct BookCardView: View {
                 convertingOverlay
             }
 
-            if editionCount > 1, !isConverting {
-                Text("×\(editionCount)")
-                    .font(theme.label(size: 9, weight: .bold))
-                    .foregroundStyle(theme.textPrimary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(
-                        reduceTransparency
-                            ? AnyShapeStyle(theme.surface)
-                            : AnyShapeStyle(.regularMaterial),
-                        in: Capsule()
-                    )
-                    .padding(8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .accessibilityLabel(Text("\(editionCount) editions"))
+            if !isConverting, isSelected || editionCount > 1 {
+                VStack(alignment: .leading, spacing: 4) {
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(theme.interaction.focus)
+                            .accessibilityHidden(true)
+                    }
+                    if editionCount > 1 {
+                        Text("×\(editionCount)")
+                            .font(theme.label(size: 9, weight: .bold))
+                            .foregroundStyle(theme.textPrimary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(theme.structuralColor(for: .floating), in: Capsule())
+                            .accessibilityLabel(Text("\(editionCount) editions"))
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
         .padding(4)
@@ -72,17 +71,44 @@ struct BookCardView: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isSelected)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isConverting)
         .shadow(
-            color: isSelected
-                ? theme.accentSecondary.opacity(0.18)
-                : Color.black.opacity(isHovered ? 0.14 : 0.07),
-            radius: isSelected ? 8 : (isHovered ? 6 : 3),
-            y: isHovered ? 2 : 1
+            color: cardShadowColor,
+            radius: isSelected || isFocused ? 6 : (isHovered ? 3 : 0),
+            y: isHovered ? 1 : 0
         )
         .onHover { hovering in isHovered = hovering }
         .help("\(book.displayTitle)\(book.displayAuthor.map { " \u{2014} \($0)" } ?? "")")
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(book.displayTitle), \(book.displayAuthor ?? "unknown author"), \(book.format) format")
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    private var usesOpaqueRetroCard: Bool {
+        !theme.structure.usesNativeMaterials
+    }
+
+    private var cardFill: Color {
+        if isSelected { return theme.interaction.selection }
+        if isHovered { return theme.interaction.hover }
+        return usesOpaqueRetroCard ? theme.surface : .clear
+    }
+
+    private var cardBorder: Color {
+        if isFocused { return theme.interaction.focus }
+        if isSelected { return theme.borderActive }
+        if isHovered { return theme.textTertiary.opacity(0.55) }
+        return usesOpaqueRetroCard ? theme.borderSubtle : .clear
+    }
+
+    private var cardBorderWidth: CGFloat {
+        if isFocused || isSelected { return 2 }
+        return usesOpaqueRetroCard || isHovered ? 1 : 0
+    }
+
+    private var cardShadowColor: Color {
+        if theme.showsNeonGlow, isSelected || isFocused {
+            return theme.interaction.focus.opacity(0.20)
+        }
+        return Color.black.opacity(isHovered ? 0.12 : 0)
     }
 
     private var coverArea: some View {
@@ -97,8 +123,7 @@ struct BookCardView: View {
     private var convertingOverlay: some View {
         ZStack {
             RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous)
-                .fill(theme.surface.opacity(theme.colorScheme == .dark ? 0.55 : 0.75))
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous))
+                .fill(theme.surface.opacity(theme.colorScheme == .dark ? 0.92 : 0.94))
                 .shimmering()
 
             VStack(spacing: 8) {
@@ -112,9 +137,7 @@ struct BookCardView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(
-                reduceTransparency
-                    ? AnyShapeStyle(theme.surface)
-                    : AnyShapeStyle(.regularMaterial),
+                AnyShapeStyle(theme.structuralColor(for: .floating)),
                 in: Capsule()
             )
             .overlay(Capsule().stroke(theme.borderSubtle, lineWidth: 1))
@@ -132,9 +155,7 @@ struct BookCardView: View {
                 .foregroundStyle(isDeleteHovered ? theme.destructive : theme.textPrimary)
                 .frame(width: 22, height: 22)
                 .background(
-                    reduceTransparency
-                        ? AnyShapeStyle(theme.surface)
-                        : AnyShapeStyle(.ultraThinMaterial),
+                    AnyShapeStyle(theme.structuralColor(for: .floating)),
                     in: Circle()
                 )
                 .overlay(

@@ -95,6 +95,8 @@ private struct AccessibleThemeModifier: ViewModifier {
         if contrast == .increased {
             adapted.textTertiary = theme.textSecondary
             adapted.borderSubtle = theme.textSecondary.opacity(0.45)
+            adapted.interaction.focus = theme.textPrimary
+            adapted.interaction.disabled = theme.textSecondary.opacity(0.68)
         }
         return content.environment(\.theme, adapted)
     }

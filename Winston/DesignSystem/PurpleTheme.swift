@@ -24,6 +24,25 @@ extension Theme {
         borderSubtle: Color(hex: 0xFF2E97, opacity: 0.15),
         borderActive: Color(hex: 0xFF2E97),
 
+        structure: ThemeStructuralRoles(
+            content: Color(hex: 0x0A0118),
+            sidebar: Color(hex: 0x14082E),
+            toolbar: Color(hex: 0x1F0A3D),
+            inspector: Color(hex: 0x14082E),
+            floating: Color(hex: 0x1F0A3D),
+            sheetAction: Color(hex: 0x14082E),
+            usesNativeMaterials: false
+        ),
+        interaction: ThemeInteractionRoles(
+            selection: Color(hex: 0x00F0FF, opacity: 0.16),
+            focus: Color(hex: 0x00F0FF),
+            hover: Color(hex: 0xFF2E97, opacity: 0.11),
+            pressed: Color(hex: 0xFF2E97, opacity: 0.22),
+            disabled: Color(hex: 0x9D8AC7, opacity: 0.44),
+            warning: Color(hex: 0xFFE600),
+            information: Color(hex: 0x00F0FF)
+        ),
+
         coverPalettes: [
             ColorPair(primary: Color(hex: 0xFF2E97), secondary: Color(hex: 0xB026FF)),
             ColorPair(primary: Color(hex: 0x00F0FF), secondary: Color(hex: 0xB026FF)),

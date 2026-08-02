@@ -1,5 +1,45 @@
 import SwiftUI
 
+nonisolated enum ThemeStructuralRole: CaseIterable, Sendable {
+    case content
+    case sidebar
+    case toolbar
+    case inspector
+    case floating
+    case sheetAction
+}
+
+struct ThemeStructuralRoles: Equatable, Sendable {
+    var content: Color
+    var sidebar: Color
+    var toolbar: Color
+    var inspector: Color
+    var floating: Color
+    var sheetAction: Color
+    var usesNativeMaterials: Bool
+
+    func color(for role: ThemeStructuralRole) -> Color {
+        switch role {
+        case .content: content
+        case .sidebar: sidebar
+        case .toolbar: toolbar
+        case .inspector: inspector
+        case .floating: floating
+        case .sheetAction: sheetAction
+        }
+    }
+}
+
+struct ThemeInteractionRoles: Equatable, Sendable {
+    var selection: Color
+    var focus: Color
+    var hover: Color
+    var pressed: Color
+    var disabled: Color
+    var warning: Color
+    var information: Color
+}
+
 struct Theme: Equatable, Sendable {
     enum FontStyle: Equatable, Sendable {
         case retro
@@ -32,6 +72,11 @@ struct Theme: Equatable, Sendable {
 
     var borderSubtle: Color
     var borderActive: Color
+
+    // MARK: Semantic presentation roles
+
+    var structure: ThemeStructuralRoles
+    var interaction: ThemeInteractionRoles
 
     var coverPalettes: [ColorPair]
 
@@ -106,6 +151,10 @@ struct Theme: Equatable, Sendable {
         let source = book.hasDigitalFile ? book.fileName : book.uuid.uuidString
         let hash = source.utf8.reduce(0) { $0 &+ Int($1) }
         return coverPalettes[abs(hash) % coverPalettes.count]
+    }
+
+    func structuralColor(for role: ThemeStructuralRole) -> Color {
+        structure.color(for: role)
     }
 }
 
