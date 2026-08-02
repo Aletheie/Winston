@@ -203,6 +203,40 @@ actor OPDSService: OPDSFetching {
         at url: URL,
         access: OPDSCatalogAccess
     ) async throws -> OPDSFeed {
+        if access.configuration.builtIn == .wikisource {
+            if WikisourceCatalogAdapter.isRootRequest(
+                url,
+                access: access
+            ) {
+                do {
+                    return try WikisourceCatalogAdapter.rootFeed(
+                        for: access.configuration
+                    )
+                } catch {
+                    throw OPDSServiceError.invalidFeed
+                }
+            }
+            let policy = OPDSRequestPolicy(access: access)
+            let request = try policy.request(
+                for: url,
+                accept: "application/json"
+            )
+            let (data, response) = try await boundedData(
+                for: request,
+                policy: policy
+            )
+            do {
+                return try WikisourceCatalogAdapter.parseSearchFeed(
+                    data,
+                    responseURL: response.url ?? url,
+                    configuration: access.configuration
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw OPDSServiceError.invalidFeed
+            }
+        }
         let policy = OPDSRequestPolicy(access: access)
         let request = try policy.request(
             for: url,
@@ -219,6 +253,8 @@ actor OPDSService: OPDSFetching {
                 contentType: http.value(
                     forHTTPHeaderField: "Content-Type"
                 )
+            ).providingSearchLink(
+                access.configuration.builtInSearchLink
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -258,6 +294,9 @@ actor OPDSService: OPDSFetching {
     func testCatalog(
         access: OPDSCatalogAccess
     ) async throws -> OPDSCatalogTestResult {
+        if access.configuration.builtIn == .wikisource {
+            return try await testWikisourceCatalog(access: access)
+        }
         let enteredURL = access.configuration.rootURL
         let policy = OPDSRequestPolicy(access: access)
         let request = try policy.request(
@@ -311,6 +350,43 @@ actor OPDSService: OPDSFetching {
             supportedFormats: formats.sorted(),
             usesSecureTransport:
                 (discoveredURL ?? effectiveURL).scheme?.lowercased() == "https"
+        )
+    }
+
+    private func testWikisourceCatalog(
+        access: OPDSCatalogAccess
+    ) async throws -> OPDSCatalogTestResult {
+        let rootURL = access.configuration.rootURL
+        guard let url = WikisourceCatalogAdapter.siteInfoURL(
+            rootURL: rootURL
+        ) else {
+            throw OPDSServiceError.invalidURL
+        }
+        let policy = OPDSRequestPolicy(access: access)
+        let request = try policy.request(
+            for: url,
+            accept: "application/json"
+        )
+        let (data, _) = try await boundedData(
+            for: request,
+            policy: policy
+        )
+        let title: String
+        do {
+            title = try WikisourceCatalogAdapter.siteTitle(from: data)
+        } catch {
+            throw OPDSServiceError.invalidFeed
+        }
+        return OPDSCatalogTestResult(
+            title: title,
+            resolvedRootURL: rootURL,
+            discoveredRootURL: nil,
+            documentFormat: .mediaWiki,
+            canBrowse: false,
+            canSearch: true,
+            rootEntryCount: 0,
+            supportedFormats: ["EPUB"],
+            usesSecureTransport: true
         )
     }
 

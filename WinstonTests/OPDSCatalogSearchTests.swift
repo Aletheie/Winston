@@ -153,6 +153,42 @@ struct OPDSCatalogSearchTests {
         #expect(seed.context == "Robot Stories · Book 3")
     }
 
+    @Test func `Failed catalog keeps successful catalog results`() async throws {
+        let catalogs = OPDSCatalogConfiguration.builtInDefaults
+        let successful = catalogs[0]
+        let failing = catalogs[1]
+        let client = ScenarioOPDSClient(failingRoot: failing.rootURL)
+        let service = OPDSCatalogSearchService(
+            client: client,
+            maximumConcurrentCatalogs: 2
+        )
+        var states: [String: OPDSCatalogSearchState] = [:]
+
+        for await update in service.updates(
+            accesses: catalogs.map {
+                OPDSCatalogAccess(configuration: $0, credential: nil)
+            },
+            query: "robot"
+        ) {
+            states[update.catalogID] = update.state
+        }
+
+        if case .success(let publications) = states[successful.id] {
+            #expect(publications.map(\.title) == ["Robot"])
+        } else {
+            Issue.record("Expected the successful catalog result.")
+        }
+        #expect(states[failing.id] == .failed(.server(503)))
+        let groups = OPDSSearchAggregator.aggregate(
+            states: states,
+            catalogNames: Dictionary(
+                uniqueKeysWithValues: catalogs.map { ($0.id, $0.name) }
+            ),
+            ownership: ownership
+        )
+        #expect(groups.map(\.title) == ["Robot"])
+    }
+
     private func publication(
         id: String,
         isbn: String?,
@@ -169,5 +205,62 @@ struct OPDSCatalogSearchTests {
             coverURL: nil,
             acquisitions: []
         )
+    }
+}
+
+actor ScenarioOPDSClient: OPDSFetching {
+    private let failingRoot: URL?
+
+    init(failingRoot: URL? = nil) {
+        self.failingRoot = failingRoot
+    }
+
+    func feed(at url: URL) async throws -> OPDSFeed {
+        if url == failingRoot {
+            throw OPDSServiceError.server(503)
+        }
+        if let query = URLComponents(
+            url: url,
+            resolvingAgainstBaseURL: false
+        )?.queryItems?.first(where: { $0.name == "query" })?.value {
+            if query == "obsolete" {
+                try await Task.sleep(for: .milliseconds(300))
+            }
+            return OPDSFeed(
+                title: "Results",
+                subtitle: nil,
+                navigation: [],
+                publications: [
+                    OPDSPublication(
+                        id: "\(url.host() ?? "catalog")-\(query)",
+                        title: query.capitalized,
+                        authors: ["Ada Author"],
+                        summary: nil,
+                        language: "en",
+                        coverURL: nil,
+                        acquisitions: []
+                    ),
+                ],
+                nextURL: nil,
+                searchLink: nil
+            )
+        }
+        return OPDSFeed(
+            title: "Root",
+            subtitle: nil,
+            navigation: [],
+            publications: [],
+            nextURL: nil,
+            searchLink: .template(
+                "\(url.absoluteString)?query={searchTerms}"
+            )
+        )
+    }
+
+    func download(
+        _ acquisition: OPDSAcquisition,
+        title: String
+    ) async throws -> URL {
+        throw OPDSServiceError.invalidDownload
     }
 }

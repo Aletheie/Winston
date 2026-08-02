@@ -308,6 +308,248 @@ struct OPDSServiceTests {
             try await service.feed(at: URL(string: "https://example.com/large")!)
         }
     }
+
+    @Test func `Unglue root stays on OPDS and receives its documented title search fallback`() async throws {
+        OPDSTestURLProtocol.prepare(
+            status: 200,
+            body: Data(#"{"metadata":{"title":"Unglue.it"}}"#.utf8)
+        )
+        let service = OPDSService(
+            session: URLSession(
+                configuration: OPDSTestURLProtocol.configuration
+            )
+        )
+        let configuration = try #require(
+            OPDSCatalogConfiguration.builtInDefaults.first {
+                $0.builtIn == .unglueIt
+            }
+        )
+
+        let feed = try await service.feed(
+            at: configuration.rootURL,
+            access: OPDSCatalogAccess(
+                configuration: configuration,
+                credential: nil
+            )
+        )
+
+        #expect(feed.documentFormat == .opds2)
+        #expect(
+            feed.searchTemplate
+                == "https://unglue.it/api/opds/s.{searchTerms}/"
+        )
+        #expect(
+            OPDSTestURLProtocol.lastAccept?.contains(
+                "application/opds+json"
+            ) == true
+        )
+    }
+
+    @Test func `Wikisource search uses Action API and defers WS Export`() async throws {
+        WikisourceSearchURLProtocol.prepare()
+        let service = OPDSService(
+            session: URLSession(
+                configuration: WikisourceSearchURLProtocol.configuration
+            )
+        )
+        let configuration = try #require(
+            OPDSCatalogConfiguration.builtInDefaults(
+                for: .english,
+                preferredLocalizations: ["cs"]
+            ).first { $0.builtIn == .wikisource }
+        )
+        let access = OPDSCatalogAccess(
+            configuration: configuration,
+            credential: nil
+        )
+
+        let root = try await service.feed(
+            at: configuration.rootURL,
+            access: access
+        )
+        #expect(root.documentFormat == .mediaWiki)
+        #expect(WikisourceSearchURLProtocol.requestedHosts.isEmpty)
+        let searchLink = try #require(root.searchLink)
+        let template = try #require(
+            try await service.resolvedSearchTemplate(
+                for: searchLink,
+                access: access
+            )
+        )
+        let searchURL = try #require(OPDSService.expandedSearchURL(
+            template: template,
+            query: "Pride and Prejudice"
+        ))
+        let results = try await service.feed(
+            at: searchURL,
+            access: access
+        )
+        let publication = try #require(results.publications.first)
+        let acquisition = try #require(
+            publication.preferredAcquisition
+        )
+
+        #expect(WikisourceSearchURLProtocol.requestedHosts == [
+            "en.wikisource.org",
+        ])
+        #expect(publication.title == "Pride and Prejudice")
+        #expect(publication.sourceURL?.host == "en.wikisource.org")
+        #expect(publication.attribution == "Wikisource")
+        #expect(publication.contributors == ["Ada", "Charles"])
+        #expect(acquisition.url.host == "ws-export.wmcloud.org")
+        #expect(acquisition.canImport)
+        let exportQuery = URLComponents(
+            url: acquisition.url,
+            resolvingAgainstBaseURL: false
+        )?.queryItems
+        #expect(exportQuery?.contains {
+            $0.name == "format" && $0.value == "epub"
+        } == true)
+        #expect(exportQuery?.contains {
+            $0.name == "credits" && $0.value == "true"
+        } == true)
+        #expect(!WikisourceSearchURLProtocol.requestedHosts.contains(
+            "ws-export.wmcloud.org"
+        ))
+    }
+
+    @Test func `Catalog test follows one advertised OPDS discovery link`() async throws {
+        let enteredURL = URL(string: "https://discover.example/")!
+        let catalogURL = URL(string: "https://discover.example/opds")!
+        OPDSDiscoveryURLProtocol.prepare(routes: [
+            enteredURL: .init(
+                contentType: "text/html",
+                body: Data("""
+                <html><head>
+                  <link rel="alternate" type="application/opds+json" href="/opds">
+                </head></html>
+                """.utf8)
+            ),
+            catalogURL: .init(
+                contentType: "application/opds+json",
+                body: Data("""
+                {
+                  "metadata": { "title": "Discovered Catalog" },
+                  "navigation": [{ "title": "Books", "href": "/books" }]
+                }
+                """.utf8)
+            ),
+        ])
+        let service = OPDSService(
+            session: URLSession(
+                configuration: OPDSDiscoveryURLProtocol.configuration
+            )
+        )
+        let configuration = OPDSCatalogConfiguration(
+            id: "discovery",
+            name: "Discovery",
+            rootURL: enteredURL
+        )
+
+        let result = try await service.testCatalog(
+            access: OPDSCatalogAccess(
+                configuration: configuration,
+                credential: nil
+            )
+        )
+
+        #expect(result.title == "Discovered Catalog")
+        #expect(result.discoveredRootURL == catalogURL)
+        #expect(result.canBrowse)
+        #expect(OPDSDiscoveryURLProtocol.requestCount == 2)
+    }
+
+    @Test func `Catalog test rejects an HTML MIME hint without a discovery relationship`() async {
+        let enteredURL = URL(string: "https://discover.example/")!
+        OPDSDiscoveryURLProtocol.prepare(routes: [
+            enteredURL: .init(
+                contentType: "text/html",
+                body: Data("""
+                <html><head>
+                  <link type="application/opds+json" href="/opds">
+                </head></html>
+                """.utf8)
+            ),
+        ])
+        let service = OPDSService(
+            session: URLSession(
+                configuration: OPDSDiscoveryURLProtocol.configuration
+            )
+        )
+        let configuration = OPDSCatalogConfiguration(
+            id: "misleading",
+            name: "Misleading",
+            rootURL: enteredURL
+        )
+
+        await #expect(throws: OPDSServiceError.invalidFeed) {
+            try await service.testCatalog(
+                access: OPDSCatalogAccess(
+                    configuration: configuration,
+                    credential: nil
+                )
+            )
+        }
+        #expect(OPDSDiscoveryURLProtocol.requestCount == 1)
+    }
+
+    @Test func `Cancelling a catalog download leaves no managed temporary data`() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "WinstonCatalogDownloadCancellation-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        SlowOPDSDownloadURLProtocol.prepare()
+        let service = OPDSService(
+            session: URLSession(
+                configuration: SlowOPDSDownloadURLProtocol.configuration
+            ),
+            importSourceLeases: ImportSourceLeaseStore(
+                rootDirectory: root
+            )
+        )
+        let acquisition = try #require(OPDSAcquisition.make(
+            url: URL(string: "https://download.example/book.epub")!,
+            mediaType: "application/epub+zip",
+            title: "EPUB"
+        ))
+        let configuration = OPDSCatalogConfiguration(
+            id: "download-cancellation",
+            name: "Download Cancellation",
+            rootURL: URL(string: "https://download.example/opds")!
+        )
+        let task = Task {
+            try await service.download(
+                acquisition,
+                title: "Cancelled Book",
+                access: OPDSCatalogAccess(
+                    configuration: configuration,
+                    credential: nil
+                )
+            )
+        }
+
+        let deadline = Date.now.addingTimeInterval(2)
+        while !SlowOPDSDownloadURLProtocol.didStart,
+              Date.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        task.cancel()
+        _ = try? await task.value
+
+        let remaining = if FileManager.default.fileExists(
+            atPath: root.path(percentEncoded: false)
+        ) {
+            try FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil
+            )
+        } else {
+            []
+        }
+        #expect(SlowOPDSDownloadURLProtocol.didStop)
+        #expect(remaining.isEmpty)
+    }
 }
 
 @MainActor
@@ -400,6 +642,11 @@ struct OPDSViewModelTests {
             authors: ["OPDS Author"],
             summary: nil,
             language: "en",
+            sourceURL: URL(
+                string: "https://example.com/books/catalog-fixture"
+            ),
+            attribution: "Example contributors",
+            contributors: ["Ada", "Charles"],
             coverURL: nil,
             acquisitions: [acquisition]
         )
@@ -412,13 +659,17 @@ struct OPDSViewModelTests {
             online: OfflineMetadataClient()
         )
         let viewModel = OPDSViewModel(settings: settings, toasts: toasts, service: client)
+        var successfulImportCount = 0
 
         viewModel.addToLibrary(
             publication,
             acquisition: acquisition,
             catalogID:
                 OPDSBuiltInCatalog.projectGutenberg.stableID,
-            library: library
+            library: library,
+            onSuccessfulImport: { imported in
+                successfulImportCount += imported.count
+            }
         )
 
         let deadline = Date.now.addingTimeInterval(8)
@@ -431,6 +682,11 @@ struct OPDSViewModelTests {
 
         #expect(testLibrary.context.allBooks().isEmpty)
         #expect(library.preparedImportBatch?.phase == .ready)
+        #expect(
+            library.preparedImportBatch?.items.first?
+                .catalogContext?.contributors == ["Ada", "Charles"]
+        )
+        #expect(successfulImportCount == 0)
         library.commitImportReview()
 
         let commitDeadline = Date.now.addingTimeInterval(8)
@@ -447,7 +703,111 @@ struct OPDSViewModelTests {
                 OPDSBuiltInCatalog.projectGutenberg.stableID
         ))
         #expect(book.format.lowercased() == "epub")
+        #expect(book.primaryAsset?.sourceProvenance == .catalogImport)
+        #expect(
+            book.primaryAsset?.sourceIdentifier
+                == "https://example.com/books/catalog-fixture"
+        )
+        #expect(successfulImportCount == 1)
         #expect(await client.downloadCalls == 1)
+    }
+
+    @Test func `Failed catalog import never starts the send callback`() async throws {
+        let testLibrary = try await TestLibrary()
+        let settings = AppSettings()
+        let oldValue = settings.onlineMetadataEnabled
+        settings.onlineMetadataEnabled = true
+        defer { settings.onlineMetadataEnabled = oldValue }
+        let acquisition = try #require(OPDSAcquisition.make(
+            url: URL(string: "https://example.com/unavailable.epub")!,
+            mediaType: "application/epub+zip",
+            title: "EPUB"
+        ))
+        let publication = OPDSPublication(
+            id: "unavailable",
+            title: "Unavailable",
+            authors: ["Ada Author"],
+            summary: nil,
+            language: "en",
+            coverURL: nil,
+            acquisitions: [acquisition]
+        )
+        let client = FakeOPDSClient()
+        let library = LibraryViewModel(
+            modelContext: testLibrary.context,
+            settings: settings,
+            toasts: ToastCenter(),
+            online: OfflineMetadataClient()
+        )
+        let viewModel = OPDSViewModel(
+            settings: settings,
+            toasts: ToastCenter(),
+            service: client
+        )
+        var sendCallbackCount = 0
+
+        viewModel.addToLibrary(
+            publication,
+            acquisition: acquisition,
+            catalogID:
+                OPDSBuiltInCatalog.projectGutenberg.stableID,
+            library: library,
+            onSuccessfulImport: { _ in
+                sendCallbackCount += 1
+            }
+        )
+
+        let deadline = Date.now.addingTimeInterval(2)
+        while viewModel.isDownloading(
+            publication,
+            catalogID:
+                OPDSBuiltInCatalog.projectGutenberg.stableID
+        ), Date.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(sendCallbackCount == 0)
+        #expect(testLibrary.context.allBooks().isEmpty)
+        #expect(library.preparedImportBatch == nil)
+    }
+
+    @Test func `Cancelled search cannot publish obsolete results`() async throws {
+        let suiteName = "OPDSViewModelCancellation.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(
+            secretStore: VolatileSecretStore(),
+            defaults: defaults
+        )
+        let oldValue = settings.onlineMetadataEnabled
+        settings.onlineMetadataEnabled = true
+        defer { settings.onlineMetadataEnabled = oldValue }
+        let client = ScenarioOPDSClient()
+        let viewModel = OPDSViewModel(
+            settings: settings,
+            toasts: ToastCenter(),
+            service: client
+        )
+
+        viewModel.performUnifiedSearch(
+            "obsolete",
+            ownershipRecords: []
+        )
+        try await Task.sleep(for: .milliseconds(30))
+        viewModel.performUnifiedSearch(
+            "current",
+            ownershipRecords: []
+        )
+
+        let deadline = Date.now.addingTimeInterval(3)
+        while viewModel.isSearching, Date.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(!viewModel.isSearching)
+        #expect(viewModel.searchQuery == "current")
+        #expect(viewModel.searchGroups.map(\.title) == ["Current"])
     }
 }
 
@@ -533,4 +893,244 @@ private final class OPDSTestURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+}
+
+private final class OPDSDiscoveryURLProtocol:
+    URLProtocol,
+    @unchecked Sendable
+{
+    struct Route: Sendable {
+        let status: Int
+        let contentType: String
+        let body: Data
+
+        init(
+            status: Int = 200,
+            contentType: String,
+            body: Data
+        ) {
+            self.status = status
+            self.contentType = contentType
+            self.body = body
+        }
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var routes: [URL: Route] = [:]
+    nonisolated(unsafe) private static var storedRequestCount = 0
+
+    static var configuration: URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OPDSDiscoveryURLProtocol.self]
+        return configuration
+    }
+
+    static var requestCount: Int {
+        lock.withLock { storedRequestCount }
+    }
+
+    static func prepare(routes: [URL: Route]) {
+        lock.withLock {
+            self.routes = routes
+            storedRequestCount = 0
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(
+        for request: URLRequest
+    ) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let route = Self.lock.withLock { () -> Route? in
+            Self.storedRequestCount += 1
+            return request.url.flatMap { Self.routes[$0] }
+        }
+        guard let route, let url = request.url else {
+            client?.urlProtocol(
+                self,
+                didFailWithError: URLError(.resourceUnavailable)
+            )
+            return
+        }
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: route.status,
+            httpVersion: nil,
+            headerFields: ["Content-Type": route.contentType]
+        )!
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocol(self, didLoad: route.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class WikisourceSearchURLProtocol:
+    URLProtocol,
+    @unchecked Sendable
+{
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var hosts: [String] = []
+
+    static var configuration: URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WikisourceSearchURLProtocol.self]
+        return configuration
+    }
+
+    static var requestedHosts: [String] {
+        lock.withLock { hosts }
+    }
+
+    static func prepare() {
+        lock.withLock { hosts = [] }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(
+        for request: URLRequest
+    ) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(
+                self,
+                didFailWithError: URLError(.badURL)
+            )
+            return
+        }
+        Self.lock.withLock {
+            Self.hosts.append(url.host ?? "")
+        }
+        let body = Data(#"""
+        {
+          "query": {
+            "pages": [{
+              "pageid": 4185790,
+              "ns": 0,
+              "title": "Pride and Prejudice",
+              "index": 1,
+              "fullurl": "https://en.wikisource.org/wiki/Pride_and_Prejudice",
+              "canonicalurl": "https://en.wikisource.org/wiki/Pride_and_Prejudice",
+              "contributors": [
+                {"userid": 1, "name": "Ada"},
+                {"userid": 2, "name": "Charles"}
+              ]
+            }]
+          }
+        }
+        """#.utf8)
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class SlowOPDSDownloadURLProtocol:
+    URLProtocol,
+    @unchecked Sendable
+{
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var started = false
+    nonisolated(unsafe) private static var stopped = false
+    private var deliveryWorkItem: DispatchWorkItem?
+
+    static var configuration: URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SlowOPDSDownloadURLProtocol.self]
+        return configuration
+    }
+
+    static var didStart: Bool {
+        lock.withLock { started }
+    }
+
+    static var didStop: Bool {
+        lock.withLock { stopped }
+    }
+
+    static func prepare() {
+        lock.withLock {
+            started = false
+            stopped = false
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(
+        for request: URLRequest
+    ) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.withLock { Self.started = true }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: [
+                "Content-Type": "application/epub+zip",
+                "Content-Length": "65536",
+            ]
+        )!
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocol(
+            self,
+            didLoad: Data(repeating: 0x41, count: 1_024)
+        )
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.client?.urlProtocol(
+                self,
+                didLoad: Data(repeating: 0x42, count: 64_512)
+            )
+            self.client?.urlProtocolDidFinishLoading(self)
+        }
+        deliveryWorkItem = workItem
+        DispatchQueue.global().asyncAfter(
+            deadline: .now() + 1,
+            execute: workItem
+        )
+    }
+
+    override func stopLoading() {
+        deliveryWorkItem?.cancel()
+        Self.lock.withLock { Self.stopped = true }
+    }
 }
