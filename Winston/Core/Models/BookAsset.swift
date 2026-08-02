@@ -17,6 +17,7 @@ nonisolated enum AssetValidation: String, CaseIterable, Codable, Sendable {
 /// than `AssetOrigin`, which remains as a compatibility/display classification.
 nonisolated enum AssetSourceProvenance: String, CaseIterable, Codable, Sendable {
     case directImport
+    case catalogImport
     case manualFile
     case calibreImport
     case conversion
