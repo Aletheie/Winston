@@ -258,6 +258,66 @@ final class TransferQueue {
         return totalProgress / Double(items.count)
     }
 
+    /// A value-only projection for sync presentation. The durable journal
+    /// remains the source of truth whenever delivery crossed an uncertain or
+    /// committed transport boundary.
+    var kindleSyncExecutionSnapshots: [UUID: KindleTransferExecutionSnapshot] {
+        var snapshots: [UUID: KindleTransferExecutionSnapshot] = [:]
+        snapshots.reserveCapacity(bookIDByItemID.count)
+        for item in items {
+            guard let bookID = bookIDByItemID[item.id] else { continue }
+            let durableItem = durableJob?.items.first {
+                $0.descriptor.bookUUID == bookID
+            }
+            let conflictDetail = lastBulkOperationResult?.conflicts.first {
+                $0.targetID == .catalogBook(bookID)
+            }?.detail
+
+            let outcome: KindleSyncExecutionOutcome
+            let retryEligibility: KindleSyncRetryEligibility
+            switch durableItem?.state {
+            case .inFlight, .deliveryUnknown:
+                outcome = .deliveryUnknown
+                retryEligibility = .deliveryUnknown
+            case .payloadCommitted:
+                if item.stage == .done {
+                    outcome = .succeeded
+                    retryEligibility = .notNeeded
+                } else {
+                    outcome = .failed
+                    retryEligibility = .durableRecovery
+                }
+            case .pending, .completed, .failed, .cancelled, nil:
+                switch item.stage {
+                case .waiting:
+                    outcome = item.id == activeItemID ? .running : .pending
+                    retryEligibility = .notNeeded
+                case .preparing, .converting, .transferring, .cancelling:
+                    outcome = .running
+                    retryEligibility = .notNeeded
+                case .done:
+                    outcome = .succeeded
+                    retryEligibility = .notNeeded
+                case .failed:
+                    outcome = .failed
+                    retryEligibility = .safe
+                case .cancelled:
+                    outcome = .cancelled
+                    retryEligibility = .safe
+                }
+            }
+            snapshots[bookID] = KindleTransferExecutionSnapshot(
+                bookID: bookID,
+                outcome: outcome,
+                progress: outcome.isTerminal ? 1 : item.progress,
+                detail: durableItem?.detail ?? conflictDetail
+                    ?? (outcome == .failed ? lastError : nil),
+                retryEligibility: retryEligibility
+            )
+        }
+        return snapshots
+    }
+
     // MARK: - Sending
 
     func send(books: [Book], via monitor: DeviceMonitor) async {

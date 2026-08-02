@@ -49,6 +49,9 @@ struct KindleSyncPlanSheet: View {
     @State private var planBuildGeneration = 0
     @State private var isApplying = false
     @State private var applyTask: Task<Void, Never>?
+    @State private var executionState: KindleSyncExecutionState?
+    @State private var executionReport: KindleSyncExecutionReport?
+    @State private var isEjectingAfterSync = false
     @State private var showsRemovalConfirmation = false
     @State private var showsProfileEditor = false
     @State private var profileEditorMode: KindleProfileEditorMode = .create
@@ -91,6 +94,7 @@ struct KindleSyncPlanSheet: View {
             KindleSyncPlanFooter(
                 selectedCount: selection.selectedIDs.count,
                 isApplying: isApplying,
+                progress: liveExecutionState?.progress,
                 canApply: monitor.isConnected
                     && !transferQueue.isTransferring
                     && !selection.selectedIDs.isEmpty,
@@ -128,6 +132,26 @@ struct KindleSyncPlanSheet: View {
         } message: {
             Text("Only the selected device copies will be removed. Your Winston library is unchanged.")
         }
+        .sheet(item: $executionReport) { report in
+            KindleSyncExecutionResultSheet(
+                report: report,
+                isCurrentDevice: monitor.info?.identifier == report.deviceIdentifier,
+                isDeviceConnected: monitor.isConnected,
+                isEjecting: isEjectingAfterSync,
+                onRetry: { retrySafeItems(from: report) },
+                onEject: { ejectAfterSync(report) },
+                onKeepConnected: { executionReport = nil },
+                onDone: { executionReport = nil }
+            )
+        }
+    }
+
+    private var liveExecutionState: KindleSyncExecutionState? {
+        guard let executionState else { return nil }
+        guard isApplying else { return executionState }
+        return executionState.mergingTransferSnapshots(
+            transferQueue.kindleSyncExecutionSnapshots
+        )
     }
 
     private var selectedItems: [KindleSyncPlanItem] {
@@ -272,6 +296,7 @@ struct KindleSyncPlanSheet: View {
     }
 
     private func cancelApply() {
+        executionState?.requestCancellation()
         applyTask?.cancel()
         transferQueue.cancel()
     }
@@ -282,71 +307,63 @@ struct KindleSyncPlanSheet: View {
               let connection = monitor.connection else { return }
         let selected = selectedItems
         guard !selected.isEmpty else { return }
+        executionReport = nil
+        executionState = KindleSyncExecutionState(
+            selectedItems: selected,
+            deviceInfo: info
+        )
         isApplying = true
         defer { isApplying = false }
 
-        var failureCount = 0
-        var completedCount = 0
-
-        let removalIDs = Set(selected.filter { $0.action == .remove }.compactMap(\.deviceBookID))
-        let removals = monitor.books.filter { removalIDs.contains($0.id) }
         var removedIDs: Set<DeviceBook.ID> = []
         var removedNames: Set<String> = []
-        for deviceBook in removals {
+        for item in selected where item.action == .remove {
             guard !Task.isCancelled else { break }
+            executionState?.markRunning(item.id)
+            guard let deviceBookID = item.deviceBookID,
+                  let deviceBook = monitor.books.first(where: { $0.id == deviceBookID }) else {
+                executionState?.markFailed(
+                    item.id,
+                    detail: String(localized: "The device book is no longer available."),
+                    retryEligibility: .notNeeded
+                )
+                continue
+            }
             do {
                 try await connection.delete(deviceBook)
                 removedIDs.insert(deviceBook.id)
                 removedNames.insert(deviceBook.fileName)
-                completedCount += 1
+                executionState?.markSucceeded(item.id)
             } catch {
-                failureCount += 1
+                executionState?.markFailed(
+                    item.id,
+                    detail: error.localizedDescription
+                )
             }
         }
         monitor.removeBooksLocally(removedIDs)
         profileStore.recordRemoval(fileNames: removedNames, from: info)
 
         let booksByID = Dictionary(uniqueKeysWithValues: books.map { ($0.uuid, $0) })
-        let sendIDs = selected
-            .filter { $0.action == .add || $0.action == .update }
-            .compactMap(\.bookID)
-        var didSend = false
-        if let descriptors = await readModel.kindleTransferDescriptors(
-            for: sendIDs
-        ) {
-            failureCount += max(0, sendIDs.count - descriptors.count)
-            if !Task.isCancelled, !descriptors.isEmpty {
-                await transferQueue.send(
-                    readModel: descriptors,
-                    via: monitor,
-                    announcesResult: false
-                )
-                didSend = true
-            }
-        } else {
-            let booksToSend = sendIDs.compactMap { booksByID[$0] }
-            failureCount += max(0, sendIDs.count - booksToSend.count)
-            if !Task.isCancelled, !booksToSend.isEmpty {
-                await transferQueue.send(
-                    books: booksToSend,
-                    via: monitor,
-                    announcesResult: false
-                )
-                didSend = true
-            }
-        }
-        if didSend {
-            failureCount += transferQueue.failedCount
-            completedCount += transferQueue.items.count - transferQueue.failedCount
+        if !Task.isCancelled {
+            await applySendItems(
+                selected.filter { $0.action == .add || $0.action == .update },
+                booksByID: booksByID
+            )
         }
 
         let coverItems = selected.filter { $0.action == .repairCover }
         for item in coverItems where !Task.isCancelled {
+            executionState?.markRunning(item.id)
             guard let bookID = item.bookID,
                   let deviceBookID = item.deviceBookID,
                   let book = booksByID[bookID],
                   let deviceBook = monitor.books.first(where: { $0.id == deviceBookID }) else {
-                failureCount += 1
+                executionState?.markFailed(
+                    item.id,
+                    detail: String(localized: "The book or its device copy is no longer available."),
+                    retryEligibility: .notNeeded
+                )
                 continue
             }
             if await transferQueue.repairCover(
@@ -355,9 +372,14 @@ struct KindleSyncPlanSheet: View {
                 via: monitor,
                 announcesResult: false
             ) {
-                completedCount += 1
+                executionState?.markSucceeded(item.id)
+            } else if Task.isCancelled {
+                break
             } else {
-                failureCount += 1
+                executionState?.markFailed(
+                    item.id,
+                    detail: transferQueue.lastError
+                )
             }
         }
 
@@ -366,16 +388,110 @@ struct KindleSyncPlanSheet: View {
             await monitor.refreshInfo()
         }
         if Task.isCancelled {
-            toasts.info(String(localized: "Kindle sync cancelled."))
-            rebuildPlan(resetSelection: true)
+            executionState?.cancelUnfinished()
+        } else {
+            executionState?.finishUnresolvedAsFailures(
+                detail: String(localized: "The sync item did not return a final result.")
+            )
+        }
+        guard let report = executionState?.makeReport() else { return }
+        executionReport = report
+        rebuildPlan(resetSelection: true)
+    }
+
+    private func applySendItems(
+        _ sendItems: [KindleSyncPlanItem],
+        booksByID: [UUID: Book]
+    ) async {
+        guard !sendItems.isEmpty else { return }
+        for item in sendItems { executionState?.markRunning(item.id) }
+        let requestedIDs = sendItems.compactMap(\.bookID)
+
+        if let descriptors = await readModel.kindleTransferDescriptors(
+            for: requestedIDs
+        ) {
+            let descriptorsByID = Dictionary(
+                descriptors.map { ($0.bookUUID, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            let orderedDescriptors = requestedIDs.compactMap { descriptorsByID[$0] }
+            markUnavailableSendItems(sendItems, availableIDs: Set(orderedDescriptors.map(\.bookUUID)))
+            guard !Task.isCancelled, !orderedDescriptors.isEmpty else { return }
+            await transferQueue.send(
+                readModel: orderedDescriptors,
+                via: monitor,
+                announcesResult: false
+            )
+        } else {
+            let orderedBooks = requestedIDs.compactMap { booksByID[$0] }
+            markUnavailableSendItems(sendItems, availableIDs: Set(orderedBooks.map(\.uuid)))
+            guard !Task.isCancelled, !orderedBooks.isEmpty else { return }
+            await transferQueue.send(
+                books: orderedBooks,
+                via: monitor,
+                announcesResult: false
+            )
+        }
+        executionState?.mergeTransferSnapshots(
+            transferQueue.kindleSyncExecutionSnapshots
+        )
+    }
+
+    private func markUnavailableSendItems(
+        _ items: [KindleSyncPlanItem],
+        availableIDs: Set<UUID>
+    ) {
+        for item in items {
+            guard let bookID = item.bookID, !availableIDs.contains(bookID) else { continue }
+            executionState?.markFailed(
+                item.id,
+                detail: String(localized: "The source file is no longer available."),
+                retryEligibility: .notNeeded
+            )
+        }
+    }
+
+    private func retrySafeItems(from report: KindleSyncExecutionReport) {
+        guard monitor.info?.identifier == report.deviceIdentifier else {
+            toasts.error(String(localized: "Reconnect the same Kindle before retrying this sync."))
             return
         }
-        if failureCount == 0 {
-            toasts.success(String(localized: "Applied \(completedCount) Kindle sync changes."))
-            dismiss()
-        } else {
-            toasts.error(String(localized: "Kindle sync finished with \(failureCount) failed changes."))
+        guard let plan else { return }
+        let retryIDs = report.safeRetryPlanItemIDs
+        let validRetryIDs = Set(plan.items.lazy.filter {
+            retryIDs.contains($0.id) && $0.isSelectable
+        }.map(\.id))
+        guard !validRetryIDs.isEmpty else {
+            executionReport = nil
             rebuildPlan(resetSelection: true)
+            toasts.info(String(localized: "Refresh the plan before retrying these changes."))
+            return
+        }
+        selection.selectedIDs = validRetryIDs
+        executionReport = nil
+        if !selection.selectedIDs.intersection(selection.removalIDs).isEmpty {
+            showsRemovalConfirmation = true
+        } else {
+            startApplying()
+        }
+    }
+
+    private func ejectAfterSync(_ report: KindleSyncExecutionReport) {
+        guard !isEjectingAfterSync,
+              monitor.info?.identifier == report.deviceIdentifier else { return }
+        isEjectingAfterSync = true
+        Task { @MainActor in
+            defer { isEjectingAfterSync = false }
+            do {
+                try await monitor.userDisconnect()
+                executionReport = nil
+                toasts.success(String(localized: "Kindle ejected — safe to disconnect."))
+                dismiss()
+            } catch {
+                toasts.error(String(
+                    localized: "Couldn’t eject the Kindle. \(error.localizedDescription)"
+                ))
+            }
         }
     }
 

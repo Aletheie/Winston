@@ -116,14 +116,10 @@ private struct DeviceFilterBar: View {
 
     private var searchField: some View {
         HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundStyle(theme.textTertiary)
             TextField(text: $searchText) {
                 theme.styledText(terminal: "filter", native: "Filter by title or author")
             }
-            .textFieldStyle(.plain)
-            .font(theme.label(size: 12))
+            .textFieldStyle(.roundedBorder)
             if !searchText.isEmpty {
                 Button {
                     searchText = ""
@@ -132,18 +128,12 @@ private struct DeviceFilterBar: View {
                         .font(.system(size: 11))
                         .foregroundStyle(theme.textTertiary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .help(theme.copy.clearSearch)
                 .accessibilityLabel(Text(theme.copy.clearSearch))
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
         .frame(maxWidth: 240)
-        .background(
-            RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
-                .fill(theme.surface.opacity(0.6))
-        )
     }
 
     private var countText: Text {
@@ -191,7 +181,7 @@ private struct AuthorFilterButton: View {
                         .font(.system(size: 11))
                         .foregroundStyle(theme.textTertiary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .help(theme.copy.clearSearch)
                 .accessibilityLabel(Text(theme.copy.clearSearch))
             }

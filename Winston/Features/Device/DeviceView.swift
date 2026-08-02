@@ -223,7 +223,7 @@ struct DeviceView: View {
                 onDisconnect: ejectDevice
             )
             .padding(16)
-            .background(.ultraThinMaterial)
+            .background(.bar)
 
             if let summary = viewModel.highlightImportSummary ?? sidecarSummary {
                 Text(summary)

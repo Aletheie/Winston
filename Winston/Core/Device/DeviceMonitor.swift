@@ -2,6 +2,86 @@ import Foundation
 import Observation
 import OSLog
 
+nonisolated struct KindleRemovalFeedback: Equatable, Sendable {
+    nonisolated enum Style: Equatable, Sendable {
+        case success
+        case info
+        case error
+    }
+
+    let style: Style
+    let message: String
+
+    static func make(for result: BulkOperationResult) -> KindleRemovalFeedback {
+        let removed = result.appliedTargetCount
+        let requested = result.plan.requestedTargetCount
+        let unresolved = max(
+            0,
+            requested - removed - result.plan.unchangedTargetCount
+        )
+
+        switch result.outcomeKind {
+        case .success where removed == 1:
+            return KindleRemovalFeedback(
+                style: .success,
+                message: String(
+                    localized: "Removed 1 book from the Kindle. Winston preserved its library copy."
+                )
+            )
+        case .success:
+            return KindleRemovalFeedback(
+                style: .success,
+                message: String(
+                    localized: "Removed \(removed) books from the Kindle. Winston preserved their library copies."
+                )
+            )
+        case .partialSuccess:
+            return KindleRemovalFeedback(
+                style: .info,
+                message: String(
+                    localized: "Removed \(removed) of \(requested) books from the Kindle. \(unresolved) could not be removed; Winston preserved all library copies."
+                )
+            )
+        case .cancelled where removed == 0:
+            return KindleRemovalFeedback(
+                style: .info,
+                message: String(
+                    localized: "Kindle removal cancelled. No books were removed, and Winston preserved all library copies."
+                )
+            )
+        case .cancelled:
+            return KindleRemovalFeedback(
+                style: .info,
+                message: String(
+                    localized: "Kindle removal cancelled after removing \(removed) of \(requested) books. Winston preserved all library copies."
+                )
+            )
+        case .conflict:
+            return KindleRemovalFeedback(
+                style: .error,
+                message: String(
+                    localized: "No books were removed from the Kindle. \(unresolved) changed or became unavailable; Winston preserved all library copies."
+                )
+            )
+        case .failure:
+            if let detail = result.durableFailure?.detail, !detail.isEmpty {
+                return KindleRemovalFeedback(
+                    style: .error,
+                    message: String(
+                        localized: "Couldn’t remove books from the Kindle: \(detail)"
+                    )
+                )
+            }
+            return KindleRemovalFeedback(
+                style: .error,
+                message: String(
+                    localized: "Couldn’t remove books from the Kindle. Winston preserved all library copies."
+                )
+            )
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class DeviceMonitor {
@@ -23,6 +103,9 @@ final class DeviceMonitor {
     private(set) var connection: (any KindleDeviceConnection)?
     private(set) var lastError: String?
     private(set) var lastBulkOperationResult: BulkOperationResult?
+    private(set) var deviceDeleteProgress: BulkOperationProgress?
+    private(set) var isDeletingBooks = false
+    private(set) var isCancellingDeviceDelete = false
     private(set) var isEjecting = false
 
     private var pollTask: Task<Void, Never>?
@@ -256,7 +339,7 @@ final class DeviceMonitor {
         ids: Set<DeviceBook.ID>
     ) async -> BulkOperationResult {
         let plan = await planDeviceRemoval(ids: ids)
-        if deviceDeleteSession != nil {
+        if isDeletingBooks || deviceDeleteSession != nil {
             let rejected = BulkOperationSession(plan: plan)
             let result = await rejected.execute { _ in
                 throw BulkOperationDurableError(.operationInProgress)
@@ -264,9 +347,13 @@ final class DeviceMonitor {
             lastBulkOperationResult = result
             return result
         }
+        isDeletingBooks = true
+        isCancellingDeviceDelete = false
         let session = BulkOperationSession(plan: plan)
         deviceDeleteSession = session
-        let result = await session.execute { [weak self] chunk in
+        let result = await session.execute(onProgress: { [weak self] progress in
+            self?.deviceDeleteProgress = progress
+        }) { [weak self] chunk in
             guard let self else {
                 throw BulkOperationDurableError(.executionFailed)
             }
@@ -314,7 +401,10 @@ final class DeviceMonitor {
         }
         if deviceDeleteSession === session {
             deviceDeleteSession = nil
+            deviceDeleteProgress = nil
         }
+        isDeletingBooks = false
+        isCancellingDeviceDelete = false
         lastBulkOperationResult = result
         if isConnected { await refreshInfo() }
         Log.device.info(
@@ -325,6 +415,7 @@ final class DeviceMonitor {
 
     func cancelDeviceDelete() {
         guard let session = deviceDeleteSession else { return }
+        isCancellingDeviceDelete = true
         Task { await session.cancel() }
     }
 
