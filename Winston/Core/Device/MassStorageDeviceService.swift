@@ -4,19 +4,26 @@ import OSLog
 import os
 
 actor MassStorageDeviceConnection: KindleDeviceConnection {
+    typealias EjectVolume = @Sendable (URL) async throws -> Void
+
     private let volumeURL: URL
     private let boundary: MountedVolumeBoundary
     private let copyChunkHook: (@Sendable (Int64) throws -> Void)?
+    private let ejectVolume: EjectVolume
     private let connectionState = OSAllocatedUnfairLock<Bool>(initialState: true)
 
     init(
         volumeURL: URL,
-        copyChunkHook: (@Sendable (Int64) throws -> Void)? = nil
+        copyChunkHook: (@Sendable (Int64) throws -> Void)? = nil,
+        ejectVolume: @escaping EjectVolume = { url in
+            try NSWorkspace.shared.unmountAndEjectDevice(at: url)
+        }
     ) throws {
         let boundary = try MountedVolumeBoundary(mountURL: volumeURL)
         self.boundary = boundary
         self.volumeURL = boundary.rootURL
         self.copyChunkHook = copyChunkHook
+        self.ejectVolume = ejectVolume
     }
 
     // MARK: - Detection
@@ -169,14 +176,15 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
         return removed
     }
 
-    func eject() async {
-        defer { markDisconnected() }
-        guard (try? ensureConnected()) != nil else { return }
+    func eject() async throws {
+        try ensureConnected()
         do {
-            try NSWorkspace.shared.unmountAndEjectDevice(at: volumeURL)
+            try await ejectVolume(volumeURL)
+            markDisconnected()
             Log.device.info("Ejected mass-storage volume \(self.volumeURL.lastPathComponent, privacy: .public)")
         } catch {
             Log.device.error("Eject failed: \(error.localizedDescription, privacy: .public)")
+            throw error
         }
     }
 

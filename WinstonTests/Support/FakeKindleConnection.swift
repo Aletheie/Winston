@@ -2,6 +2,12 @@ import Foundation
 @testable import Winston
 
 actor FakeKindleConnection: KindleDeviceConnection {
+    enum UncertainTransferMode: Sendable, Equatable {
+        case none
+        case committedThenThrows
+        case partialThenThrows
+    }
+
     struct SentFile: Sendable, Equatable {
         var fileName: String
         var byteCount: Int
@@ -12,9 +18,17 @@ actor FakeKindleConnection: KindleDeviceConnection {
     private(set) var staleVariantCalls: [[String]] = []
     private(set) var deletedFileNames: [String] = []
     private(set) var ejected = false
+    private(set) var transferAttempts = 0
 
     private var alive = true
+    private var failEject = false
+    private var failCopies = false
+    private var blockEject = false
+    private var ejectStarted = false
+    private var ejectStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var blockedEject: CheckedContinuation<Void, Never>?
     private var failSends = false
+    private var uncertainTransferMode: UncertainTransferMode = .none
     private var failCleanup = false
     private var failThumbnails = false
     private var blockSends = false
@@ -25,7 +39,13 @@ actor FakeKindleConnection: KindleDeviceConnection {
     private var books: [DeviceBook] = []
 
     func setAlive(_ value: Bool) { alive = value }
+    func setFailEject(_ value: Bool) { failEject = value }
+    func setFailCopies(_ value: Bool) { failCopies = value }
+    func setBlockEject(_ value: Bool) { blockEject = value }
     func setFailSends(_ value: Bool) { failSends = value }
+    func setUncertainTransferMode(_ value: UncertainTransferMode) {
+        uncertainTransferMode = value
+    }
     func setFailCleanup(_ value: Bool) { failCleanup = value }
     func setFailThumbnails(_ value: Bool) { failThumbnails = value }
     func setBlockSends(_ value: Bool) { blockSends = value }
@@ -35,6 +55,17 @@ actor FakeKindleConnection: KindleDeviceConnection {
     func waitUntilSendStarts() async {
         if sendStarted { return }
         await withCheckedContinuation { sendStartWaiters.append($0) }
+    }
+
+    func waitUntilEjectStarts() async {
+        if ejectStarted { return }
+        await withCheckedContinuation { ejectStartWaiters.append($0) }
+    }
+
+    func releaseBlockedEject() {
+        blockEject = false
+        blockedEject?.resume()
+        blockedEject = nil
     }
 
     func releaseBlockedSend() {
@@ -66,6 +97,7 @@ actor FakeKindleConnection: KindleDeviceConnection {
         if blockSends {
             await withCheckedContinuation { blockedSend = $0 }
         }
+        transferAttempts += 1
         guard !failSends else { throw DeviceError.transferFailed(code: -1) }
         let bytes = (try? Data(contentsOf: request.sourceURL))?.count ?? 0
         guard UInt64(bytes) == request.expectedByteCount else {
@@ -73,12 +105,23 @@ actor FakeKindleConnection: KindleDeviceConnection {
         }
         progress(1)
         let fileName = request.destination.fileName
+        if uncertainTransferMode == .partialThenThrows {
+            books.append(DeviceBook(
+                path: request.destination.relativePath,
+                fileName: fileName,
+                sizeBytes: UInt64(bytes / 2)
+            ))
+            throw DeviceError.transferFailed(code: -6)
+        }
         sentFiles.append(SentFile(fileName: fileName, byteCount: bytes))
         books.append(DeviceBook(
             path: request.destination.relativePath,
             fileName: fileName,
             sizeBytes: UInt64(bytes)
         ))
+        if uncertainTransferMode == .committedThenThrows {
+            throw DeviceError.transferFailed(code: -7)
+        }
         return DeviceTransferResult(
             destination: request.destination,
             bytesTransferred: UInt64(bytes),
@@ -87,6 +130,7 @@ actor FakeKindleConnection: KindleDeviceConnection {
     }
 
     func copyBook(_ book: DeviceBook, to destination: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        guard !failCopies else { throw DeviceError.transferFailed(code: -5) }
         try Data("fake book".utf8).write(to: destination)
         progress(1)
     }
@@ -107,7 +151,20 @@ actor FakeKindleConnection: KindleDeviceConnection {
 
     func disconnect() async {}
 
-    func eject() async { ejected = true }
+    func eject() async throws {
+        ejected = true
+        ejectStarted = true
+        let waiters = ejectStartWaiters
+        ejectStartWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        if blockEject {
+            await withCheckedContinuation { blockedEject = $0 }
+        }
+        if failEject {
+            throw CocoaError(.fileWriteVolumeReadOnly)
+        }
+        alive = false
+    }
 
     func removeStaleVariants(baseName: String, keeping fileName: String) async throws {
         guard !failCleanup else { throw DeviceError.transferFailed(code: -4) }
