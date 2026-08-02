@@ -403,12 +403,8 @@ private struct FullTextSearchHeader: View {
             }
 
             HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(theme.textTertiary)
                 TextField("Search for a word or phrase", text: $query)
-                    .textFieldStyle(.plain)
-                    .font(theme.body(size: 13))
+                    .textFieldStyle(.roundedBorder)
                     .focused($searchFocused)
                 if !query.isEmpty {
                     Button {
@@ -417,18 +413,11 @@ private struct FullTextSearchHeader: View {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(theme.textTertiary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .help("Clear Search")
                     .accessibilityLabel("Clear Search")
                 }
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 9)
-            .background(theme.surface.opacity(0.64), in: RoundedRectangle(
-                cornerRadius: WinstonLayout.cornerMedium,
-                style: .continuous
-            ))
-            .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
@@ -817,7 +806,7 @@ private struct FullTextSearchFooter: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
+        .background(.bar)
     }
 
     private var isBusy: Bool {
