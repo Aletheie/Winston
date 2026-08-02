@@ -103,6 +103,13 @@ final class LibraryHealthService {
     private var cachedMetadataAnalysis: MetadataFixAnalysis?
     private var cachedMetadataAnalysisRevision = -1
     private var metadataAnalysisTask: (revision: Int, task: Task<MetadataFixAnalysis, Never>)?
+    private(set) var metadataCleanupProgress: MetadataCleanupProgress?
+    private(set) var lastMetadataCleanupResult: MetadataCleanupApplyResult?
+    private var cachedCleanupAnalysis: MetadataCleanupAnalysis?
+    private var cachedCleanupAnalysisRevision = -1
+    private var metadataCleanupTask: Task<MetadataCleanupAnalysis, Never>?
+    private var metadataCleanupGeneration = UUID()
+    private var metadataCleanupUndoChanges: [MetadataCleanupChange] = []
 
     init(
         modelContext: ModelContext,
@@ -129,6 +136,133 @@ final class LibraryHealthService {
 
     func seriesSuggestions() async -> [String] {
         await metadataAnalysis().seriesSuggestions
+    }
+
+    var canUndoMetadataCleanup: Bool {
+        !metadataCleanupUndoChanges.isEmpty
+    }
+
+    func metadataCleanup(
+        scope: MetadataCleanupScope
+    ) async -> MetadataCleanupAnalysis {
+        let revision = LibraryMutationLog.shared.catalogRevision
+        if scope == .wholeLibrary,
+           cachedCleanupAnalysisRevision == revision,
+           let cachedCleanupAnalysis {
+            return cachedCleanupAnalysis
+        }
+
+        metadataCleanupTask?.cancel()
+        let books: [Book]
+        do {
+            switch scope {
+            case .wholeLibrary:
+                books = try modelContext.fetchAllBooksForGlobalAnalysis()
+            case .books(let ids, _):
+                books = try mutations.books(ids: ids)
+            }
+            lastCatalogReadFailed = false
+        } catch {
+            lastCatalogReadFailed = true
+            Log.persistence.error(
+                "Metadata cleanup could not read its scope: \(error.localizedDescription, privacy: .public)"
+            )
+            return MetadataCleanupAnalysis(
+                scope: scope,
+                scannedBookCount: 0,
+                groups: []
+            )
+        }
+
+        metadataCleanupProgress = MetadataCleanupProgress(
+            completedCount: 0,
+            totalCount: books.count
+        )
+        var rows: [MetadataFixRow] = []
+        rows.reserveCapacity(books.count)
+        for (index, book) in books.enumerated() {
+            guard !Task.isCancelled else {
+                metadataCleanupProgress = nil
+                return MetadataCleanupAnalysis(
+                    scope: scope,
+                    scannedBookCount: 0,
+                    groups: []
+                )
+            }
+            rows.append(Self.metadataFixRow(book))
+            if index.isMultiple(of: 128) || index == books.count - 1 {
+                metadataCleanupProgress = MetadataCleanupProgress(
+                    completedCount: index + 1,
+                    totalCount: books.count
+                )
+                await Task.yield()
+            }
+        }
+
+        let snapshot = rows
+        let generation = UUID()
+        metadataCleanupGeneration = generation
+        let task = Task {
+            await Self.computeMetadataCleanup(rows: snapshot, scope: scope)
+        }
+        metadataCleanupTask = task
+        let analysis = await task.value
+        if metadataCleanupGeneration == generation {
+            metadataCleanupTask = nil
+        }
+        guard metadataCleanupGeneration == generation else { return analysis }
+        metadataCleanupProgress = nil
+        guard !Task.isCancelled else { return analysis }
+        if scope == .wholeLibrary,
+           LibraryMutationLog.shared.catalogRevision == revision {
+            cachedCleanupAnalysis = analysis
+            cachedCleanupAnalysisRevision = revision
+        }
+        return analysis
+    }
+
+    func cancelMetadataCleanupAnalysis() {
+        metadataCleanupTask?.cancel()
+        metadataCleanupTask = nil
+        metadataCleanupGeneration = UUID()
+        metadataCleanupProgress = nil
+    }
+
+    func applyMetadataCleanup(
+        _ changes: [MetadataCleanupChange]
+    ) -> Result<MetadataCleanupApplyResult, CatalogMutationError> {
+        let result = mutations.applyMetadataCleanup(changes)
+        if case .success(let applied) = result {
+            lastMetadataCleanupResult = applied
+            metadataCleanupUndoChanges = applied.appliedChanges.map(\.inverse)
+            cachedCleanupAnalysis = nil
+            cachedCleanupAnalysisRevision = -1
+        }
+        return result
+    }
+
+    func undoLastMetadataCleanup()
+        -> Result<MetadataCleanupApplyResult, CatalogMutationError> {
+        guard !metadataCleanupUndoChanges.isEmpty else {
+            return .success(MetadataCleanupApplyResult(
+                requestedChangeCount: 0,
+                appliedChanges: [],
+                conflicts: [],
+                missingBookIDs: []
+            ))
+        }
+        let inverse = metadataCleanupUndoChanges
+        let result = mutations.applyMetadataCleanup(
+            inverse,
+            operation: "metadataCleanupUndo"
+        )
+        if case .success(let undone) = result {
+            lastMetadataCleanupResult = undone
+            metadataCleanupUndoChanges = undone.conflicts.map(\.change)
+            cachedCleanupAnalysis = nil
+            cachedCleanupAnalysisRevision = -1
+        }
+        return result
     }
 
     /// Explicit full-library diagnostic. All SwiftData models are reduced to
@@ -186,14 +320,7 @@ final class LibraryHealthService {
 
             for (index, book) in books.enumerated() {
                 try Task.checkCancellation()
-                metadataRows.append(MetadataFixRow(
-                    bookID: book.uuid,
-                    title: book.displayTitle,
-                    originalFileName: book.originalFileName,
-                    author: book.displayAuthor,
-                    series: book.series,
-                    seriesIndex: book.seriesIndex
-                ))
+                metadataRows.append(Self.metadataFixRow(book))
 
                 if book.work == nil {
                     issues.append(LibraryIntegrityIssue(
@@ -211,6 +338,42 @@ final class LibraryHealthService {
                 }
                 for violation in CatalogModelInvariantService.violations(in: book) {
                     issues.append(Self.issue(for: violation, book: book))
+                }
+
+                if let rawLanguage = book.language,
+                   !rawLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   MetadataNormalizer.language(rawLanguage).status == .unrecognized {
+                    issues.append(LibraryIntegrityIssue(
+                        id: "catalog:book:\(book.uuid.uuidString):unrecognized-language",
+                        category: .catalog,
+                        severity: .warning,
+                        title: book.displayTitle,
+                        detail: String(
+                            localized: "Language metadata is unrecognized: \(rawLanguage)"
+                        ),
+                        bookID: book.uuid,
+                        workID: book.work?.uuid,
+                        assetID: nil,
+                        transactionID: nil,
+                        isAutomaticallyRepairable: false
+                    ))
+                }
+                if let rawISBN = book.isbn,
+                   MetadataNormalizer.isbn(rawISBN).status == .invalid {
+                    issues.append(LibraryIntegrityIssue(
+                        id: "catalog:book:\(book.uuid.uuidString):invalid-isbn",
+                        category: .catalog,
+                        severity: .warning,
+                        title: book.displayTitle,
+                        detail: String(
+                            localized: "ISBN metadata has an invalid checksum: \(rawISBN)"
+                        ),
+                        bookID: book.uuid,
+                        workID: book.work?.uuid,
+                        assetID: nil,
+                        transactionID: nil,
+                        isAutomaticallyRepairable: false
+                    ))
                 }
 
                 if book.assets.isEmpty,
@@ -651,14 +814,7 @@ final class LibraryHealthService {
                 rows.reserveCapacity(books.count)
                 for (index, book) in books.enumerated() {
                     guard !Task.isCancelled else { return MetadataFixAnalysis(fixes: [], seriesSuggestions: []) }
-                    rows.append(MetadataFixRow(
-                        bookID: book.uuid,
-                        title: book.displayTitle,
-                        originalFileName: book.originalFileName,
-                        author: book.displayAuthor,
-                        series: book.series,
-                        seriesIndex: book.seriesIndex
-                    ))
+                    rows.append(Self.metadataFixRow(book))
                     if index > 0, index.isMultiple(of: 128) { await Task.yield() }
                 }
                 let snapshotRows = rows
@@ -681,6 +837,38 @@ final class LibraryHealthService {
     @concurrent
     private static func computeMetadataAnalysis(rows: [MetadataFixRow]) async -> MetadataFixAnalysis {
         MetadataFixFinder.analysis(rows: rows)
+    }
+
+    @concurrent
+    private static func computeMetadataCleanup(
+        rows: [MetadataFixRow],
+        scope: MetadataCleanupScope
+    ) async -> MetadataCleanupAnalysis {
+        guard !Task.isCancelled else {
+            return MetadataCleanupAnalysis(
+                scope: scope,
+                scannedBookCount: 0,
+                groups: []
+            )
+        }
+        return MetadataCleanupFinder.analysis(rows: rows, scope: scope)
+    }
+
+    private static func metadataFixRow(_ book: Book) -> MetadataFixRow {
+        MetadataFixRow(
+            bookID: book.uuid,
+            title: book.title ?? book.displayTitle,
+            storedTitle: book.title,
+            originalFileName: book.originalFileName,
+            author: book.author ?? book.displayAuthor,
+            storedAuthor: book.author,
+            publisher: book.publisher,
+            language: book.language,
+            isbn: book.isbn,
+            series: book.series,
+            seriesIndex: book.seriesIndex,
+            tags: book.tags
+        )
     }
 
     @discardableResult
