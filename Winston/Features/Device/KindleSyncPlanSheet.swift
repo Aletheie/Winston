@@ -471,7 +471,7 @@ private struct KindleSyncPlanHeader: View {
             .help("Use a separate sync history for each Kindle.")
         }
         .padding(18)
-        .background(.ultraThinMaterial)
+        .background(.bar)
     }
 }
 
@@ -680,7 +680,7 @@ private struct KindleSyncPlanFooter: View {
                 .disabled(!canApply || isApplying)
         }
         .padding(14)
-        .background(.ultraThinMaterial)
+        .background(.bar)
     }
 }
 

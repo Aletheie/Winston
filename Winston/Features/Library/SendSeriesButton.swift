@@ -45,7 +45,7 @@ struct SendSeriesButton: View {
     static func pendingSend(in books: [Book], deviceFileNames: Set<String>) -> [Book] {
         books
             .filter {
-                $0.hasDigitalFile && $0.drmProtected != true
+                $0.hasCatalogDigitalFile && $0.drmProtected != true
                     && !$0.isOnDevice(fileNames: deviceFileNames)
             }
             .sorted {
@@ -57,7 +57,7 @@ struct SendSeriesButton: View {
     }
 
     static func entireSeriesIsOnDevice(_ books: [Book], deviceFileNames: Set<String>) -> Bool {
-        let digitalBooks = books.filter(\.hasDigitalFile)
+        let digitalBooks = books.filter(\.hasCatalogDigitalFile)
         return !digitalBooks.isEmpty
             && digitalBooks.allSatisfy { $0.isOnDevice(fileNames: deviceFileNames) }
     }
