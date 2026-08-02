@@ -1,11 +1,5 @@
 import SwiftUI
 
-extension Array where Element == String {
-    func uniquedSorted() -> [String] {
-        Array(Set(self)).sorted()
-    }
-}
-
 nonisolated enum TagMode: String, CaseIterable, Identifiable, Hashable, Sendable {
     case add, replace
     var id: Self { self }
@@ -86,7 +80,9 @@ struct BulkEditSheet: View {
                         SeriesSuggestionMenu(text: $series, suggestions: seriesSuggestions)
                     }
                 }
-                bulkRow("Language", isOn: $applyLanguage) { TextField("Language", text: $language) }
+                bulkRow("Language", isOn: $applyLanguage) {
+                    LanguageMetadataField(text: $language)
+                }
                 bulkRow("Translator", isOn: $applyTranslator) { TextField("Translator", text: $translator) }
                 bulkRow("Status", isOn: $applyStatus) {
                     Picker("", selection: $status) {

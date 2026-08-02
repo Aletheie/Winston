@@ -165,8 +165,7 @@ struct DetailSampleNotice: View {
                 theme.styledText(terminal: "[FULL BOOK]", native: "Full book")
                     .font(theme.label(size: 9, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(theme.accent)
+            .buttonStyle(.link)
         }
         .padding(8)
         .background(
@@ -442,6 +441,17 @@ struct DetailActions: View {
                     actions.delete(book)
                 }
             }
+            DetailActionButton(
+                title: theme.styledText(
+                    terminal: "OTHER EDITIONS",
+                    native: "Find Other Editions"
+                ),
+                icon: "books.vertical",
+                color: theme.accentSecondary
+            ) {
+                actions.findOtherEditions(book)
+            }
+            .help("Find other editions in Catalogs")
             if book.hasCatalogDigitalFile && EbookConverter.needsConversion(format: book.format) {
                 if isConverting {
                     HStack(spacing: 6) {
@@ -708,16 +718,8 @@ struct DetailNotes: View {
                 .font(theme.label(size: 10, weight: .semibold))
                 .foregroundStyle(theme.textTertiary)
             TextEditor(text: $draft)
-                .font(theme.label(size: 11, weight: .regular))
-                .foregroundStyle(theme.textSecondary)
-                .scrollContentBackground(.hidden)
+                .font(.body)
                 .frame(minHeight: 56)
-                .padding(6)
-                .background(
-                    RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
-                        .fill(theme.surface.opacity(0.4))
-                )
-                .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
                 .focused($focused)
                 .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
         }
@@ -979,7 +981,8 @@ struct DetailFiles: View {
                 Button(action: addFile) {
                     Image(systemName: "plus")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
+                .controlSize(.small)
                 .help("Add File")
                 .accessibilityLabel("Add File")
             }

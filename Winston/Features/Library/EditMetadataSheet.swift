@@ -27,18 +27,12 @@ struct EditMetadataSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(theme.copy.editMetadataTitle)
-                    .font(theme.label(size: 14, weight: .bold))
-                    .foregroundStyle(theme.usesTerminalCopy ? theme.accentSecondary : theme.textPrimary)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
                 Spacer()
                 Text(book.format)
-                    .font(theme.label(size: 10, weight: .semibold))
-                    .foregroundStyle(theme.accent)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall, style: .continuous)
-                            .fill(theme.accent.opacity(0.15))
-                    )
+                    .font(.caption.monospaced().weight(.semibold))
+                    .foregroundStyle(.secondary)
             }
             .padding(.bottom, 16)
 
@@ -72,9 +66,18 @@ struct EditMetadataSheet: View {
                 }
 
                 HStack(spacing: 12) {
-                    MetaField(label: theme.styledText(terminal: "LANGUAGE", native: "Language"), text: $language)
-                        .frame(width: 120)
-                    MetaField(label: theme.styledText(terminal: "ISBN", native: "ISBN"), text: $isbn)
+                    LanguageMetadataField(
+                        label: theme.styledText(
+                            terminal: "LANGUAGE",
+                            native: "Language"
+                        ),
+                        text: $language
+                    )
+                    .frame(width: 190)
+                    ISBNMetadataField(
+                        label: theme.styledText(terminal: "ISBN", native: "ISBN"),
+                        text: $isbn
+                    )
                 }
 
                 MetaField(label: theme.styledText(terminal: "TAGS", native: "Tags"), text: $tags,
@@ -86,19 +89,11 @@ struct EditMetadataSheet: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     theme.styledText(terminal: "DESCRIPTION", native: "Description")
-                        .font(theme.label(size: 9, weight: .semibold))
-                        .foregroundStyle(theme.textTertiary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     TextEditor(text: $bookDescription)
-                        .font(theme.label(size: 12, weight: .regular))
-                        .scrollContentBackground(.hidden)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
+                        .font(.body)
                         .frame(height: 72)
-                        .background(
-                            RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall, style: .continuous)
-                                .fill(theme.surface.opacity(0.5))
-                        )
-                        .themedBorder(cornerRadius: WinstonLayout.cornerSmall)
                 }
             }
 
@@ -106,12 +101,6 @@ struct EditMetadataSheet: View {
 
             HStack {
                 Button("Cancel") { dismiss() }
-                    .buttonStyle(.plain)
-                    .font(theme.label(size: 12))
-                    .foregroundStyle(theme.textSecondary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .themedBorder(cornerRadius: WinstonLayout.cornerMedium)
                     .keyboardShortcut(.cancelAction)
 
                 Spacer()
@@ -136,21 +125,13 @@ struct EditMetadataSheet: View {
                         dismiss()
                     }
                 }
-                .buttonStyle(.plain)
-                .font(theme.label(size: 12, weight: .bold))
-                .foregroundStyle(saveLabelColor)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 7)
-                .background(
-                    RoundedRectangle(cornerRadius: WinstonLayout.cornerMedium, style: .continuous)
-                        .fill(saveBackground)
-                )
+                .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
         }
         .padding(24)
         .frame(minWidth: 420, idealWidth: 480, maxWidth: 600)
-        .background(theme.backgroundAlt)
+        .background(.background)
         .onAppear {
             title = book.title ?? ""
             author = book.author ?? ""
@@ -179,14 +160,6 @@ struct EditMetadataSheet: View {
         }
     }
 
-    private var saveBackground: Color {
-        theme.usesTerminalCopy ? theme.accentSecondary : theme.accent
-    }
-
-    private var saveLabelColor: Color {
-        theme.colorScheme == .dark ? theme.background : .white
-    }
-
     private var identityScopeHelp: String {
         switch identityScope {
         case .editionOnly:
@@ -199,6 +172,121 @@ struct EditMetadataSheet: View {
     }
 }
 
+struct LanguageMetadataField: View {
+    let label: Text?
+    @Binding var text: String
+
+    @Environment(\.locale) private var locale
+
+    init(label: Text? = nil, text: Binding<String>) {
+        self.label = label
+        _text = text
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let label {
+                label
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 6) {
+                TextField("Language", text: $text)
+                    .textFieldStyle(.roundedBorder)
+
+                Menu {
+                    ForEach(filteredSuggestions.prefix(18)) { suggestion in
+                        Button(suggestion.label) {
+                            text = suggestion.tag
+                        }
+                    }
+                    if filteredSuggestions.isEmpty {
+                        Text("No matching language suggestions")
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .help("Language suggestions")
+                .accessibilityLabel("Language suggestions")
+            }
+
+            if showsUnrecognizedWarning {
+                Label(
+                    "This language value is unrecognized. It will still be saved as entered.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if shouldOfferCanonicalTag, let canonicalTag = normalized.canonicalTag {
+                Button("Use canonical tag \(canonicalTag)") {
+                    text = canonicalTag
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
+        }
+    }
+
+    private var normalized: NormalizedLanguage {
+        MetadataNormalizer.language(text)
+    }
+
+    private var showsUnrecognizedWarning: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && normalized.status == .unrecognized
+    }
+
+    private var shouldOfferCanonicalTag: Bool {
+        guard let canonicalTag = normalized.canonicalTag else { return false }
+        return canonicalTag != text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var displayLocaleIdentifier: String {
+        locale.language.languageCode?.identifier == "cs" ? "cs" : "en"
+    }
+
+    private var filteredSuggestions: [MetadataLanguageSuggestion] {
+        let suggestions = MetadataNormalizer.languageSuggestions(
+            displayLocaleIdentifier: displayLocaleIdentifier
+        )
+        let query = MetadataNormalizer.searchKey(text)
+        guard !query.isEmpty else { return suggestions }
+        return suggestions.filter {
+            MetadataNormalizer.searchKey($0.label).contains(query)
+        }
+    }
+}
+
+private struct ISBNMetadataField: View {
+    let label: Text
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            MetaField(label: label, text: $text)
+            if normalized.status == .invalid {
+                Label(
+                    "This ISBN has an invalid checksum. It will still be saved as entered.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var normalized: NormalizedISBN {
+        MetadataNormalizer.isbn(text)
+    }
+}
+
 struct MetaField: View {
     let label: Text
     @Binding var text: String
@@ -206,51 +294,27 @@ struct MetaField: View {
     var suggestions: [String] = []
     var showsSuggestionMenu = false
 
-    @Environment(\.theme) private var theme
-    @FocusState private var isFocused: Bool
-
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 label
-                    .font(theme.label(size: 9, weight: .semibold))
-                    .foregroundStyle(theme.textTertiary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 if let hint {
                     Text(hint)
-                        .font(theme.label(size: 8, weight: .regular))
-                        .foregroundStyle(theme.textTertiary.opacity(0.6))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
             }
-            HStack(spacing: 0) {
+            HStack(spacing: 6) {
                 TextField("", text: $text)
                     .seriesAutocomplete(text: $text, suggestions: suggestions)
-                    .font(theme.label(size: 12, weight: .regular))
-                    .textFieldStyle(.plain)
-                    .focused($isFocused)
+                    .textFieldStyle(.roundedBorder)
 
                 if showsSuggestionMenu {
-                    Rectangle()
-                        .fill(theme.borderSubtle)
-                        .frame(width: 1, height: 16)
                     SeriesSuggestionMenu(text: $text, suggestions: suggestions)
-                        .padding(.leading, 2)
                 }
             }
-            .padding(.leading, 8)
-            .padding(.trailing, showsSuggestionMenu ? 3 : 8)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(theme.surface.opacity(0.5))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(isFocused ? focusBorder : theme.borderSubtle, lineWidth: 1)
-            )
         }
-    }
-
-    private var focusBorder: Color {
-        (theme.usesTerminalCopy ? theme.accentSecondary : theme.accent).opacity(0.5)
     }
 }
