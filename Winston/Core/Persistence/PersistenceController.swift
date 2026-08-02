@@ -85,6 +85,12 @@ enum PersistenceController {
         )
     }
 
+    /// Opens a persistent store without recovery or migration side effects.
+    /// Used only by the opt-in performance dataset preparation command.
+    static func performanceContainer(at storeURL: URL) throws -> ModelContainer {
+        try persistentContainer(at: storeURL)
+    }
+
     static func inMemory() -> ModelContainer {
         let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
         do {

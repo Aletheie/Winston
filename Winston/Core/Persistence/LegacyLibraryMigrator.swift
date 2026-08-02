@@ -90,7 +90,16 @@ enum LegacyLibraryMigrator {
             let legacyID = legacy.id
             var descriptor = FetchDescriptor<Book>(predicate: #Predicate { $0.uuid == legacyID })
             descriptor.fetchLimit = 1
-            if (try? context.fetch(descriptor).first) == nil {
+            let alreadyMigrated: Bool
+            do {
+                alreadyMigrated = try context.fetch(descriptor).first != nil
+            } catch {
+                Log.persistence.error(
+                    "Legacy migration could not verify catalog identity \(legacyID.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+                return .failed
+            }
+            if !alreadyMigrated {
                 let sourceURL = resolveURL(for: legacy)
                 let accessing = sourceURL.startAccessingSecurityScopedResource()
                 let result = await migrate(
@@ -171,44 +180,44 @@ enum LegacyLibraryMigrator {
             await managedFiles.abort(transaction)
             return false
         }
-        let book = Book(
-            uuid: legacy.id,
-            fileName: fileName,
-            originalFileName: legacy.fileURL.lastPathComponent,
-            dateAdded: legacy.dateAdded
-        )
-        book.fileSizeBytes = staged.byteCount
-        book.title = legacy.metadata.title
-        book.author = legacy.metadata.author
-        book.publisher = legacy.metadata.publisher
-        book.year = legacy.metadata.year
-        book.language = legacy.metadata.language
-        book.isbn = legacy.metadata.isbn
-        book.series = legacy.metadata.series
-        book.seriesIndex = legacy.metadata.seriesIndex
-        book.tags = legacy.metadata.tags ?? []
-        book.bookDescription = legacy.metadata.description
-        book.rating = legacy.rating
-        let asset = BookAsset(
-            uuid: legacy.id,
-            fileName: fileName,
-            origin: .original,
-            sourceProvenance: .legacyMigration,
-            contentHash: staged.sha256,
-            sizeBytes: staged.byteCount,
-            dateAdded: legacy.dateAdded,
-            validationStatus: .ok,
-            book: book
-        )
-        context.insert(book)
-        context.insert(asset)
-
         do {
             let result = try await mutations.commitStagedFiles(
                 .legacyMigration(bookIDs: [legacy.id]),
                 transactions: [transaction],
                 affectedBookIDs: [legacy.id]
-            )
+            ) {
+                let book = Book(
+                    uuid: legacy.id,
+                    fileName: fileName,
+                    originalFileName: legacy.fileURL.lastPathComponent,
+                    dateAdded: legacy.dateAdded
+                )
+                book.fileSizeBytes = staged.byteCount
+                book.title = legacy.metadata.title
+                book.author = legacy.metadata.author
+                book.publisher = legacy.metadata.publisher
+                book.year = legacy.metadata.year
+                book.language = legacy.metadata.language
+                book.isbn = legacy.metadata.isbn
+                book.series = legacy.metadata.series
+                book.seriesIndex = legacy.metadata.seriesIndex
+                book.tags = legacy.metadata.tags ?? []
+                book.bookDescription = legacy.metadata.description
+                book.rating = legacy.rating
+                let asset = BookAsset(
+                    uuid: legacy.id,
+                    fileName: fileName,
+                    origin: .original,
+                    sourceProvenance: .legacyMigration,
+                    contentHash: staged.sha256,
+                    sizeBytes: staged.byteCount,
+                    dateAdded: legacy.dateAdded,
+                    validationStatus: .ok,
+                    book: book
+                )
+                context.insert(book)
+                context.insert(asset)
+            }
             return result.isFullyPublished
         } catch {
             Log.persistence.error("Legacy migration save failed: \(error.localizedDescription, privacy: .public)")
