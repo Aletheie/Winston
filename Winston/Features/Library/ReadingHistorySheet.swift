@@ -37,6 +37,7 @@ struct ReadingHistorySheet: View {
                     .keyboardShortcut(.defaultAction)
             }
             .padding(12)
+            .background(.bar)
         }
         .background(ThemedBackground())
         .frame(minWidth: 520, idealWidth: 620, maxWidth: 820,
