@@ -208,7 +208,7 @@ struct LibraryIntegritySheet: View {
                 onOpenRecovery()
             }
             if report?.metadataSuggestionCount ?? 0 > 0 {
-                Button("Metadata Fixes…") {
+                Button("Metadata Cleanup…") {
                     dismiss()
                     onReviewMetadata()
                 }
@@ -229,7 +229,7 @@ struct LibraryIntegritySheet: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
+        .background(.bar)
     }
 
     private func scan() async {

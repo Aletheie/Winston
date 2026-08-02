@@ -11,6 +11,9 @@ nonisolated struct CatalogImportContext:
     let publicationTitle: String
     let publicationAuthors: [String]
     let publicationLanguage: String?
+    let sourceURL: URL
+    let attribution: String?
+    let contributors: [String]
     let selectedFormat: String
     let acquisitionRelation: OPDSAcquisitionRelation
 }
@@ -34,6 +37,82 @@ nonisolated enum ImportReviewPhase: Sendable, Equatable {
     case committing
     case completed(ImportSummary)
     case failed(String)
+}
+
+nonisolated enum ImportReviewFilter: String, CaseIterable, Identifiable, Sendable {
+    case all
+    case included
+    case needsDecision
+    case skipped
+    case unavailable
+
+    var id: Self { self }
+
+    var label: LocalizedStringResource {
+        switch self {
+        case .all: "All Files"
+        case .included: "Included"
+        case .needsDecision: "Needs Decision"
+        case .skipped: "Skipped"
+        case .unavailable: "Unavailable"
+        }
+    }
+
+    func includes(_ item: PreparedImportItem) -> Bool {
+        switch self {
+        case .all: true
+        case .included: item.willImport
+        case .needsDecision: item.requiresDecision
+        case .skipped: item.isSelectable && !item.willImport
+        case .unavailable: !item.isSelectable
+        }
+    }
+}
+
+nonisolated enum ImportReviewMetadataField: String, CaseIterable, Identifiable, Sendable {
+    case title
+    case author
+    case publisher
+    case year
+    case language
+    case isbn
+    case series
+    case seriesIndex
+
+    var id: Self { self }
+
+    var label: LocalizedStringResource {
+        switch self {
+        case .title: "Title"
+        case .author: "Author"
+        case .publisher: "Publisher"
+        case .year: "Year"
+        case .language: "Language"
+        case .isbn: "ISBN"
+        case .series: "Series"
+        case .seriesIndex: "Series Index"
+        }
+    }
+
+    func copy(from source: BookMetadata, to destination: inout BookMetadata) {
+        switch self {
+        case .title: destination.title = source.title
+        case .author: destination.author = source.author
+        case .publisher: destination.publisher = source.publisher
+        case .year: destination.year = source.year
+        case .language: destination.language = source.language
+        case .isbn: destination.isbn = source.isbn
+        case .series: destination.series = source.series
+        case .seriesIndex: destination.seriesIndex = source.seriesIndex
+        }
+    }
+}
+
+nonisolated enum ImportReviewItemOutcome: Sendable, Equatable {
+    case imported
+    case skipped
+    case failed
+    case cancelled
 }
 
 nonisolated enum ImportReviewAction: Sendable, Equatable, Hashable {
@@ -90,6 +169,21 @@ nonisolated struct PreparedImportItem: Sendable, Equatable, Identifiable {
         isSelectable && proposedAction == .skip && !reasons.isEmpty
             && workTargets.count > 1
     }
+
+    func supports(_ candidate: ImportReviewAction) -> Bool {
+        guard isSelectable else { return false }
+        switch candidate {
+        case .skip, .createNewWork:
+            return true
+        case .createEdition(let workID):
+            return workTargets.contains { $0.id == workID }
+        case .addFormat(let bookID, let workID):
+            return workTargets.contains { work in
+                (workID == nil || work.id == workID)
+                    && work.editions.contains { $0.id == bookID }
+            }
+        }
+    }
 }
 
 nonisolated struct PreparedImportBatch: Sendable, Equatable, Identifiable {
@@ -99,6 +193,7 @@ nonisolated struct PreparedImportBatch: Sendable, Equatable, Identifiable {
     var phase: ImportReviewPhase
     var items: [PreparedImportItem]
     var completedPreparationCount: Int
+    var itemOutcomes: [UUID: ImportReviewItemOutcome] = [:]
 
     var selectedCount: Int {
         items.count(where: \.willImport)

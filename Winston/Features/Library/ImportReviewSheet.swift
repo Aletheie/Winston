@@ -8,16 +8,21 @@ struct ImportReviewSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
-    @State private var tableSelection: Set<UUID> = []
+    @State private var rowSelection: Set<UUID> = []
+    @State private var focusedItemID: UUID?
+    @State private var filter: ImportReviewFilter = .all
 
     private var batch: PreparedImportBatch? {
         viewModel.preparedImportBatch
     }
 
     private var selectedItem: PreparedImportItem? {
-        let preferredID = tableSelection.first
-        return batch?.items.first { $0.id == preferredID }
-            ?? batch?.items.first
+        guard let focusedItemID else { return visibleItems.first }
+        return batch?.items.first { $0.id == focusedItemID }
+    }
+
+    private var visibleItems: [PreparedImportItem] {
+        batch?.items.filter(filter.includes) ?? []
     }
 
     var body: some View {
@@ -40,10 +45,19 @@ struct ImportReviewSheet: View {
         .interactiveDismissDisabled(batchIsActive)
         .onChange(of: batch?.items.map(\.id), initial: true) { _, ids in
             guard let ids else { return }
-            tableSelection.formIntersection(ids)
-            if tableSelection.isEmpty, let first = ids.first {
-                tableSelection = [first]
+            rowSelection.formIntersection(ids)
+            synchronizeFocus()
+        }
+        .onChange(of: rowSelection) { oldValue, newValue in
+            let added = newValue.subtracting(oldValue)
+            if let addedID = added.first {
+                focusedItemID = addedID
+            } else if let focusedItemID, !newValue.contains(focusedItemID) {
+                self.focusedItemID = newValue.first ?? visibleItems.first?.id
             }
+        }
+        .onChange(of: filter) {
+            synchronizeFocus()
         }
     }
 
@@ -92,44 +106,65 @@ struct ImportReviewSheet: View {
             case .preparing:
                 ImportReviewPreparationView(batch: batch)
             case .ready, .committing:
-                HSplitView {
-                    ImportReviewTable(
-                        items: batch.items,
-                        selection: $tableSelection,
-                        isEnabled: batch.phase == .ready,
-                        onSetSelected: viewModel.setImportReviewSelection
+                VStack(spacing: 0) {
+                    ImportReviewFilterBar(
+                        filter: $filter,
+                        visibleCount: visibleItems.count,
+                        totalCount: batch.items.count,
+                        selectedRowCount: rowSelection.count
                     )
-                    .frame(minWidth: 510)
-
-                    if let selectedItem {
-                        ImportReviewInspector(
-                            item: selectedItem,
+                    Divider()
+                    HSplitView {
+                        ImportReviewTable(
+                            items: visibleItems,
+                            selection: $rowSelection,
                             isEnabled: batch.phase == .ready,
-                            onSetAction: {
-                                viewModel.setImportReviewAction(
-                                    itemID: selectedItem.id,
-                                    action: $0
-                                )
-                            },
-                            onUpdateMetadata: {
-                                viewModel.updateImportReviewMetadata(
-                                    itemID: selectedItem.id,
-                                    metadata: $0
-                                )
-                            }
+                            onSetSelected: viewModel.setImportReviewSelection
                         )
-                        .id(selectedItem.id)
-                        .frame(minWidth: 300, idealWidth: 360)
-                    } else {
-                        ContentUnavailableView(
-                            "Select an item",
-                            systemImage: "doc.text.magnifyingglass"
-                        )
-                        .frame(minWidth: 300, idealWidth: 360)
+                        .frame(minWidth: 510)
+
+                        if let selectedItem {
+                            ImportReviewInspector(
+                                item: selectedItem,
+                                batchTargetIDs: rowSelection,
+                                isEnabled: batch.phase == .ready,
+                                onSetAction: {
+                                    viewModel.setImportReviewAction(
+                                        itemID: selectedItem.id,
+                                        action: $0
+                                    )
+                                },
+                                onUpdateMetadata: {
+                                    viewModel.updateImportReviewMetadata(
+                                        itemID: selectedItem.id,
+                                        metadata: $0
+                                    )
+                                },
+                                onApplyMetadataField: { field in
+                                    viewModel.applyImportReviewMetadata(
+                                        field: field,
+                                        sourceItemID: selectedItem.id,
+                                        targetItemIDs: rowSelection
+                                    )
+                                }
+                            )
+                            .id(selectedItem.id)
+                            .frame(minWidth: 300, idealWidth: 360)
+                        } else {
+                            ContentUnavailableView(
+                                "Select an item",
+                                systemImage: "doc.text.magnifyingglass"
+                            )
+                            .frame(minWidth: 300, idealWidth: 360)
+                        }
                     }
                 }
             case .completed(let summary):
-                ImportReviewResultView(summary: summary)
+                ImportReviewResultView(
+                    summary: summary,
+                    items: batch.items,
+                    outcomes: batch.itemOutcomes
+                )
             case .failed(let message):
                 ContentUnavailableView {
                     Label("Import preparation failed", systemImage: "exclamationmark.triangle")
@@ -165,12 +200,44 @@ struct ImportReviewSheet: View {
                     .keyboardShortcut(.cancelAction)
 
                 case .ready:
-                    Button("Select All") {
-                        viewModel.setAllImportReviewSelections(true)
+                    Text("\(rowSelection.count) rows selected for batch decisions")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Select All Visible") {
+                        rowSelection.formUnion(visibleItems.map(\.id))
                     }
-                    Button("Deselect All") {
-                        viewModel.setAllImportReviewSelections(false)
+                    Button("Clear Row Selection") {
+                        rowSelection.removeAll()
                     }
+                    Menu("Inclusion") {
+                        Button("Include All Visible") {
+                            viewModel.setImportReviewSelections(
+                                itemIDs: Set(visibleItems.map(\.id)),
+                                isSelected: true
+                            )
+                        }
+                        Button("Exclude All Visible") {
+                            viewModel.setImportReviewSelections(
+                                itemIDs: Set(visibleItems.map(\.id)),
+                                isSelected: false
+                            )
+                        }
+                    }
+                    Menu("Set Decision") {
+                        Button("Skip Selected Rows") {
+                            viewModel.setImportReviewActions(
+                                itemIDs: rowSelection,
+                                action: .skip
+                            )
+                        }
+                        Button("Import Selected Rows as New Works") {
+                            viewModel.setImportReviewActions(
+                                itemIDs: rowSelection,
+                                action: .createNewWork
+                            )
+                        }
+                    }
+                    .disabled(rowSelection.isEmpty)
                     Spacer()
                     Button("Cancel") {
                         viewModel.cancelImportReview()
@@ -183,11 +250,24 @@ struct ImportReviewSheet: View {
                     .disabled(!batch.canCommit)
 
                 case .committing:
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Applying the approved import…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if let progress = viewModel.standardImportProgress,
+                       progress.sessionID == batch.sessionID {
+                        ProgressView(value: progress.fraction)
+                            .frame(width: 160)
+                            .accessibilityLabel("Import commit progress")
+                            .accessibilityValue(
+                                "\(progress.completedCount) of \(progress.requestedCount) files"
+                            )
+                        Text(commitProgressTitle(progress))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Preparing the approved import…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Button("Cancel") {
                         viewModel.cancelImportReview()
@@ -196,7 +276,7 @@ struct ImportReviewSheet: View {
 
                 case .completed(let summary):
                     if summary.hasIssues {
-                        Button("Review Import Issues") {
+                        Button("Retry Failed…") {
                             closeResult()
                             onReviewIssues()
                         }
@@ -215,6 +295,12 @@ struct ImportReviewSheet: View {
                     .keyboardShortcut(.defaultAction)
 
                 case .failed:
+                    if !viewModel.importRecoveryItems.isEmpty {
+                        Button("Retry Failed…") {
+                            closeResult()
+                            onReviewIssues()
+                        }
+                    }
                     Spacer()
                     Button("Close") {
                         closeResult()
@@ -224,13 +310,33 @@ struct ImportReviewSheet: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
-            .background(.ultraThinMaterial)
+            .background(.bar)
         }
     }
 
     private func closeResult() {
         viewModel.dismissImportReviewResult()
         dismiss()
+    }
+
+    private func synchronizeFocus() {
+        let visibleIDs = Set(visibleItems.map(\.id))
+        if let focusedItemID, visibleIDs.contains(focusedItemID) { return }
+        focusedItemID = visibleItems.first?.id
+    }
+
+    private func commitProgressTitle(_ progress: ImportSessionProgress) -> String {
+        if progress.isCancelling {
+            return String(localized: "Cancelling after the current safe import boundary…")
+        }
+        if let filename = progress.currentFilename {
+            return String(
+                localized: "Importing \(progress.completedCount) of \(progress.requestedCount): \(filename)…"
+            )
+        }
+        return String(
+            localized: "Importing \(progress.completedCount) of \(progress.requestedCount)…"
+        )
     }
 }
 
@@ -273,6 +379,41 @@ private struct ImportReviewPreparationView: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct ImportReviewFilterBar: View {
+    @Binding var filter: ImportReviewFilter
+    let visibleCount: Int
+    let totalCount: Int
+    let selectedRowCount: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Picker("Import review filter", selection: $filter) {
+                ForEach(ImportReviewFilter.allCases) { filter in
+                    Text(filter.label).tag(filter)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 180)
+            .accessibilityLabel("Import review filter")
+            Text("Showing \(visibleCount) of \(totalCount)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if selectedRowCount > 0 {
+                Text("\(selectedRowCount) rows selected")
+                    .font(.caption.weight(.semibold))
+            }
+            Spacer()
+            Label("Checkbox controls inclusion", systemImage: "checkmark.square")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .accessibilityHint("Row selection controls batch decisions; checkboxes control which files will be imported.")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
     }
 }
 
@@ -359,13 +500,16 @@ private struct ImportReviewTable: View {
 
 private struct ImportReviewInspector: View {
     let item: PreparedImportItem
+    let batchTargetIDs: Set<UUID>
     let isEnabled: Bool
     let onSetAction: (ImportReviewAction) -> Void
     let onUpdateMetadata: (BookMetadata) -> Void
+    let onApplyMetadataField: (ImportReviewMetadataField) -> Void
 
     @Environment(\.theme) private var theme
     @State private var metadata = BookMetadata()
     @State private var loadedItemID: UUID?
+    @State private var pendingBatchField: ImportReviewMetadataField?
 
     var body: some View {
         ScrollView {
@@ -376,6 +520,7 @@ private struct ImportReviewInspector: View {
                 actionPicker
                 evidence
                 metadataEditor
+                batchMetadataActions
             }
             .padding(18)
         }
@@ -386,6 +531,31 @@ private struct ImportReviewInspector: View {
         .onChange(of: metadata) {
             guard loadedItemID == item.id else { return }
             onUpdateMetadata(metadata)
+        }
+        .confirmationDialog(
+            "Overwrite Metadata Field?",
+            isPresented: Binding(
+                get: { pendingBatchField != nil },
+                set: { if !$0 { pendingBatchField = nil } }
+            )
+        ) {
+            if let field = pendingBatchField {
+                Button(
+                    "Apply \(String(localized: field.label)) to \(batchTargetIDs.count) Rows"
+                ) {
+                    onApplyMetadataField(field)
+                    pendingBatchField = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingBatchField = nil
+            }
+        } message: {
+            if let field = pendingBatchField {
+                Text(
+                    "The \(String(localized: field.label).lowercased()) from this focused file will replace that field on every selected row. Other metadata fields stay unchanged."
+                )
+            }
         }
     }
 
@@ -428,6 +598,19 @@ private struct ImportReviewInspector: View {
                 Text("Catalog proposal")
                     .font(.subheadline.weight(.semibold))
                 LabeledContent("Source", value: context.catalogName)
+                if let attribution = context.attribution {
+                    LabeledContent(
+                        "Attribution",
+                        value: attribution
+                    )
+                }
+                if !context.contributors.isEmpty {
+                    LabeledContent(
+                        "Contributors",
+                        value: context.contributors.joined(separator: ", ")
+                    )
+                }
+                Link("Open Source", destination: context.sourceURL)
                 LabeledContent(
                     "Selected format",
                     value: context.selectedFormat
@@ -537,6 +720,28 @@ private struct ImportReviewInspector: View {
         .disabled(!isEnabled || !item.isSelectable)
     }
 
+    @ViewBuilder
+    private var batchMetadataActions: some View {
+        if !batchTargetIDs.isEmpty {
+            Menu {
+                ForEach(ImportReviewMetadataField.allCases) { field in
+                    Button("Apply \(String(localized: field.label))") {
+                        pendingBatchField = field
+                    }
+                }
+            } label: {
+                Label(
+                    "Apply One Field to \(batchTargetIDs.count) Selected Rows…",
+                    systemImage: "rectangle.stack.badge.plus"
+                )
+            }
+            .disabled(!isEnabled || !item.isSelectable)
+            Text("Choose one field explicitly; heterogeneous metadata is never overwritten as a group.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private func optional(
         _ keyPath: WritableKeyPath<BookMetadata, String?>
     ) -> Binding<String> {
@@ -552,19 +757,65 @@ private struct ImportReviewInspector: View {
 
 private struct ImportReviewResultView: View {
     let summary: ImportSummary
+    let items: [PreparedImportItem]
+    let outcomes: [UUID: ImportReviewItemOutcome]
 
     var body: some View {
-        ContentUnavailableView {
-            Label(
-                summary.hasIssues ? "Import completed with issues" : "Import complete",
-                systemImage: summary.hasIssues
-                    ? "exclamationmark.circle"
-                    : "checkmark.circle"
-            )
-        } description: {
-            Text(ImportSummaryPresentation(summary: summary).message)
+        VStack(spacing: 14) {
+            ContentUnavailableView {
+                Label(
+                    summary.hasIssues ? "Import completed with issues" : "Import complete",
+                    systemImage: summary.hasIssues
+                        ? "exclamationmark.circle"
+                        : "checkmark.circle"
+                )
+            } description: {
+                Text(ImportSummaryPresentation(summary: summary).message)
+            }
+            .frame(maxWidth: .infinity)
+
+            if !outcomes.isEmpty {
+                List(items) { item in
+                    HStack(spacing: 10) {
+                        Image(systemName: outcomeSymbol(outcomes[item.id]))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.sourceName)
+                                .lineLimit(1)
+                            Text(outcomeLabel(outcomes[item.id]))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+                .frame(maxWidth: 720, maxHeight: 280)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func outcomeLabel(
+        _ outcome: ImportReviewItemOutcome?
+    ) -> LocalizedStringResource {
+        switch outcome {
+        case .imported: "Imported"
+        case .skipped: "Skipped"
+        case .failed: "Failed"
+        case .cancelled: "Cancelled"
+        case nil: "Not processed"
+        }
+    }
+
+    private func outcomeSymbol(_ outcome: ImportReviewItemOutcome?) -> String {
+        switch outcome {
+        case .imported: "checkmark.circle.fill"
+        case .skipped: "forward.end.circle"
+        case .failed: "xmark.octagon.fill"
+        case .cancelled: "pause.circle.fill"
+        case nil: "questionmark.circle"
+        }
     }
 }
 

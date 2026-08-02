@@ -1170,7 +1170,7 @@ private struct LibraryTimeMachineFooter: View {
         .font(theme.label(size: 10))
         .padding(.horizontal, 16)
         .padding(.vertical, 11)
-        .background(.ultraThinMaterial)
+        .background(.bar)
     }
 
     private func noticeText(_ notice: LibraryTimeMachineRestoreNotice) -> LocalizedStringResource {

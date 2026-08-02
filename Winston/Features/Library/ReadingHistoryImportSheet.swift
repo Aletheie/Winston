@@ -915,6 +915,7 @@ private struct ReadingHistoryImportFooter: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .background(.bar)
     }
 }
 
