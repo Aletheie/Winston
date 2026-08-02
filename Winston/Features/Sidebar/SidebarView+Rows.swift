@@ -183,7 +183,7 @@ struct SidebarFixTip: View {
                         .font(.system(size: 8, weight: .bold))
                         .foregroundStyle(theme.textTertiary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .help("Dismiss")
                 .accessibilityLabel("Dismiss")
             }
@@ -199,15 +199,10 @@ struct SidebarFixTip: View {
                 .font(theme.label(size: 10))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .stroke(theme.borderSubtle, lineWidth: 1)
-                )
             }
-            .buttonStyle(.pressable)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
             .help(applyHelp)
         }
         .padding(.horizontal, 12)

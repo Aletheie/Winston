@@ -194,7 +194,7 @@ private struct NoticeStoryMeta: View {
                         .frame(width: 7, height: 7)
                         .contentShape(Rectangle().inset(by: -6))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .help("Mark as read")
                 .accessibilityLabel("Mark as read")
             }
@@ -420,6 +420,11 @@ private struct NoticeReleaseActions: View {
                 presentation: presentation
             )
 
+            NoticeCatalogSearchButton(
+                notice: notice,
+                notices: notices
+            )
+
             if let url = notice.hardcoverURL {
                 Button {
                     notices.markRead(notice)
@@ -490,8 +495,8 @@ private struct NoticeNextBookActions: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        if let book {
-            HStack(spacing: 8) {
+        HStack(spacing: 8) {
+            if let book {
                 NoticeReadButton(
                     notice: notice,
                     book: book,
@@ -513,10 +518,36 @@ private struct NoticeNextBookActions: View {
                     .buttonStyle(.bordered)
                     .tint(theme.accent)
                 }
+            } else {
+                NoticeMissingBookLabel()
             }
-        } else {
-            NoticeMissingBookLabel()
+
+            NoticeCatalogSearchButton(
+                notice: notice,
+                notices: notices
+            )
         }
+    }
+}
+
+private struct NoticeCatalogSearchButton: View {
+    let notice: LibraryNotice
+    let notices: NoticeService
+
+    var body: some View {
+        Button {
+            notices.markRead(notice)
+            CatalogSearchRouter.open(
+                CatalogSearchSeed(notice: notice)
+            )
+        } label: {
+            Label("Find in Catalogs", systemImage: "books.vertical")
+        }
+        .buttonStyle(.bordered)
+        .help("Open Catalog Hub with this book prefilled")
+        .accessibilityLabel(
+            "Find \(notice.bookTitle) in Catalogs"
+        )
     }
 }
 

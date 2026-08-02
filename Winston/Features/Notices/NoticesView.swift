@@ -426,23 +426,21 @@ struct NoticesGatingBanner: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(theme.textSecondary)
-            message
-                .font(theme.body(size: 12, weight: .regular))
-                .foregroundStyle(theme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 12)
-            SettingsLink {
-                theme.styledText(terminal: "settings", native: "Open Settings")
+        GroupBox {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: icon)
+                    .foregroundStyle(.secondary)
+                message
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                SettingsLink {
+                    theme.styledText(terminal: "settings", native: "Open Settings")
+                }
+                .controlSize(.small)
             }
-            .controlSize(.small)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .glassCard(cornerRadius: 10, tintOpacity: 0.35)
+        .font(.callout)
     }
 
     private var icon: String {
@@ -480,29 +478,27 @@ private struct NoticesFailureBanner: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(theme.destructive)
-            theme.styledText(
-                terminal: "release_check_failed",
-                native: "The last check for new releases failed."
-            )
-            .font(theme.body(size: 12, weight: .regular))
-            .foregroundStyle(theme.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 12)
-            Button {
-                Task { await notices.checkForNewReleases() }
-            } label: {
-                theme.styledText(terminal: "retry", native: "Try Again")
+        GroupBox {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                theme.styledText(
+                    terminal: "release_check_failed",
+                    native: "The last check for new releases failed."
+                )
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                Button {
+                    Task { await notices.checkForNewReleases() }
+                } label: {
+                    theme.styledText(terminal: "retry", native: "Try Again")
+                }
+                .controlSize(.small)
+                .disabled(notices.isChecking)
             }
-            .controlSize(.small)
-            .disabled(notices.isChecking)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .glassCard(cornerRadius: 10, tintOpacity: 0.35)
+        .font(.callout)
     }
 }
 
