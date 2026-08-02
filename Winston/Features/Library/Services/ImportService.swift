@@ -591,6 +591,7 @@ final class ImportService {
         let requests: [CopyRequest]
         var preparedByID: [UUID: PreparedImport]
         let validationFailures: [ImportFailure]
+        let catalogContextsBySourcePath: [String: CatalogImportContext]
         let automaticallyCommitCleanSingle: Bool
         let completion: ImportCompletion?
     }
@@ -794,6 +795,39 @@ final class ImportService {
         automaticallyCommitCleanSingle: Bool = false,
         completion: ImportCompletion? = nil
     ) -> ImportSession? {
+        beginImportReview(
+            from: sources,
+            catalogContextsBySourcePath: [:],
+            automaticallyCommitCleanSingle: automaticallyCommitCleanSingle,
+            completion: completion
+        )
+    }
+
+    @discardableResult
+    func beginCatalogImportReview(
+        from source: ImportSource,
+        context: CatalogImportContext,
+        completion: ImportCompletion? = nil
+    ) -> ImportSession? {
+        beginImportReview(
+            from: [source],
+            catalogContextsBySourcePath: [
+                source.url.standardizedFileURL.path(
+                    percentEncoded: false
+                ): context,
+            ],
+            automaticallyCommitCleanSingle: false,
+            completion: completion
+        )
+    }
+
+    @discardableResult
+    private func beginImportReview(
+        from sources: [ImportSource],
+        catalogContextsBySourcePath: [String: CatalogImportContext],
+        automaticallyCommitCleanSingle: Bool,
+        completion: ImportCompletion?
+    ) -> ImportSession? {
         guard !sources.isEmpty else {
             completion?([])
             return nil
@@ -820,6 +854,7 @@ final class ImportService {
             requests: preflight.requests,
             preparedByID: [:],
             validationFailures: preflight.failures,
+            catalogContextsBySourcePath: catalogContextsBySourcePath,
             automaticallyCommitCleanSingle: automaticallyCommitCleanSingle,
             completion: completion
         )
@@ -1293,7 +1328,14 @@ final class ImportService {
                     for: candidate,
                     proposal: proposal,
                     coverPreview: preview,
-                    workTargets: targets
+                    workTargets: targets,
+                    catalogContext:
+                        pending.catalogContextsBySourcePath[
+                            candidate.request.sourceURL
+                                .standardizedFileURL.path(
+                                    percentEncoded: false
+                                )
+                        ]
                 )
             )
             if case .ambiguousReview = proposal.reconciliation {
@@ -1364,7 +1406,9 @@ final class ImportService {
             isSelectable: false,
             reasons: [failure.reason.localizedLabel],
             warnings: [failure.detail],
-            workTargets: []
+            workTargets: [],
+            catalogContext: nil,
+            catalogMetadataDifferences: []
         )
     }
 
@@ -1372,7 +1416,8 @@ final class ImportService {
         for prepared: PreparedImport,
         proposal: ImportModelProposal,
         coverPreview: Data?,
-        workTargets: [ImportReviewWorkTarget]
+        workTargets: [ImportReviewWorkTarget],
+        catalogContext: CatalogImportContext?
     ) -> PreparedImportItem {
         let inspection = prepared.inspection
         let proposedAction: ImportReviewAction
@@ -1443,8 +1488,69 @@ final class ImportService {
             isSelectable: isSelectable,
             reasons: reasons,
             warnings: warnings,
-            workTargets: workTargets
+            workTargets: workTargets,
+            catalogContext: catalogContext,
+            catalogMetadataDifferences: Self.catalogMetadataDifferences(
+                context: catalogContext,
+                extracted: inspection.metadata
+            )
         )
+    }
+
+    nonisolated private static func catalogMetadataDifferences(
+        context: CatalogImportContext?,
+        extracted: BookMetadata
+    ) -> [CatalogMetadataDifference] {
+        guard let context else { return [] }
+        var differences: [CatalogMetadataDifference] = []
+        appendCatalogDifference(
+            field: String(localized: "Title"),
+            catalogValue: context.publicationTitle,
+            extractedValue: extracted.title,
+            to: &differences
+        )
+        appendCatalogDifference(
+            field: String(localized: "Author"),
+            catalogValue: context.publicationAuthors.joined(
+                separator: ", "
+            ),
+            extractedValue: extracted.author,
+            to: &differences
+        )
+        if let language = context.publicationLanguage {
+            appendCatalogDifference(
+                field: String(localized: "Language"),
+                catalogValue: language,
+                extractedValue: extracted.language,
+                to: &differences
+            )
+        }
+        return differences
+    }
+
+    nonisolated private static func appendCatalogDifference(
+        field: String,
+        catalogValue: String,
+        extractedValue: String?,
+        to differences: inout [CatalogMetadataDifference]
+    ) {
+        let catalog = catalogValue.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !catalog.isEmpty else { return }
+        let extracted = extractedValue?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard catalog.localizedCaseInsensitiveCompare(
+            extracted ?? ""
+        ) != .orderedSame else {
+            return
+        }
+        differences.append(CatalogMetadataDifference(
+            field: field,
+            catalogValue: catalog,
+            extractedValue: extracted?.isEmpty == false ? extracted : nil
+        ))
     }
 
     private func reviewTargets(
@@ -1574,6 +1680,11 @@ final class ImportService {
         let itemsByID = Dictionary(
             uniqueKeysWithValues: batch.items.map { ($0.id, $0) }
         )
+        let catalogContextsByRequestID = Dictionary(
+            uniqueKeysWithValues: batch.items.compactMap { item in
+                item.catalogContext.map { (item.id, $0) }
+            }
+        )
         for request in pending.requests {
             guard let item = itemsByID[request.uuid],
                   let prepared = pending.preparedByID[item.id] else {
@@ -1641,7 +1752,8 @@ final class ImportService {
                 chunk.map(\.0),
                 assigningTo: nil,
                 session: session,
-                reviewDecisions: decisions
+                reviewDecisions: decisions,
+                catalogContexts: catalogContextsByRequestID
             )
             importedBookIDs.append(contentsOf: result.importedBookIDs)
             failures.append(contentsOf: result.failures)
@@ -2294,7 +2406,8 @@ final class ImportService {
         _ prepared: [PreparedImport],
         assigningTo targetWorkID: UUID?,
         session: ImportSession,
-        reviewDecisions: [UUID: ImportReconciliation] = [:]
+        reviewDecisions: [UUID: ImportReconciliation] = [:],
+        catalogContexts: [UUID: CatalogImportContext] = [:]
     ) async -> ImportChunkResult {
         guard !prepared.isEmpty else { return ImportChunkResult() }
         guard !modelContext.hasChanges else {
@@ -2576,7 +2689,13 @@ final class ImportService {
                         uuid: inspection.assetID,
                         fileName: inspection.managedFileName,
                         origin: .original,
-                        sourceProvenance: .directImport,
+                        sourceProvenance:
+                            catalogContexts[prepared.request.uuid] == nil
+                                ? .directImport
+                                : .catalogImport,
+                        sourceIdentifier:
+                            catalogContexts[prepared.request.uuid]?
+                                .sourceURL.absoluteString,
                         contentHash: inspection.sha256,
                         sizeBytes: inspection.sizeBytes,
                         drmProtected: inspection.drmProtected,

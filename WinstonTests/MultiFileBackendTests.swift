@@ -111,8 +111,8 @@ struct MultiFileBackendTests {
         try targetBytes.write(to: targetURL)
 
         let bookID = UUID()
-        let sourceName = try BookFileStore.importCopy(of: sourceURL, uuid: bookID)
-        let targetName = try BookFileStore.importCopy(of: targetURL, uuid: UUID())
+        let sourceName = try TestManagedFileFixtureStore.importCopy(of: sourceURL, uuid: bookID)
+        let targetName = try TestManagedFileFixtureStore.importCopy(of: targetURL, uuid: UUID())
         let sourceHash = try ContentHasher.sha256(of: BookFileStore.url(for: sourceName))
         let targetHash = try ContentHasher.sha256(of: BookFileStore.url(for: targetName))
         let book = Book(uuid: bookID, fileName: sourceName, originalFileName: "Conversion Race.epub")
@@ -173,7 +173,7 @@ struct MultiFileBackendTests {
         let source = try EPUBFixture.make(title: "Sibling", author: "A")
         defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
         let uuid = UUID()
-        let fileName = try BookFileStore.importCopy(of: source, uuid: uuid)
+        let fileName = try TestManagedFileFixtureStore.importCopy(of: source, uuid: uuid)
         let originalBytes = try Data(contentsOf: BookFileStore.url(for: fileName))
         let book = Book(uuid: uuid, fileName: fileName, originalFileName: "Sibling.epub")
         let work = Work(title: "Sibling", author: "A")
@@ -216,7 +216,8 @@ struct MultiFileBackendTests {
         let viewModel = LibraryViewModel(
             modelContext: library.context,
             settings: AppSettings(),
-            toasts: ToastCenter()
+            toasts: ToastCenter(),
+            managedFiles: library.managedFiles
         )
 
         service.convert(fixture.book, to: .mobi)
@@ -248,7 +249,8 @@ struct MultiFileBackendTests {
         let viewModel = LibraryViewModel(
             modelContext: library.context,
             settings: AppSettings(),
-            toasts: ToastCenter()
+            toasts: ToastCenter(),
+            managedFiles: library.managedFiles
         )
 
         service.convert(fixture.book, to: .mobi)
@@ -273,7 +275,8 @@ struct MultiFileBackendTests {
         let viewModel = LibraryViewModel(
             modelContext: library.context,
             settings: AppSettings(),
-            toasts: ToastCenter()
+            toasts: ToastCenter(),
+            managedFiles: library.managedFiles
         )
 
         service.convert(fixture.book, to: .mobi)
@@ -301,7 +304,8 @@ struct MultiFileBackendTests {
         let viewModel = LibraryViewModel(
             modelContext: library.context,
             settings: AppSettings(),
-            toasts: ToastCenter()
+            toasts: ToastCenter(),
+            managedFiles: library.managedFiles
         )
 
         service.convert(fixture.book, to: .mobi)
@@ -501,7 +505,7 @@ struct MultiFileBackendTests {
         let library = try await TestLibrary()
         let source = try EPUBFixture.make(title: "Maintenance", author: "A")
         defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
-        let fileName = try BookFileStore.importCopy(of: source, uuid: UUID())
+        let fileName = try TestManagedFileFixtureStore.importCopy(of: source, uuid: UUID())
         let book = Book(fileName: fileName, originalFileName: "Maintenance.epub")
         let asset = BookAsset(uuid: book.uuid, fileName: fileName, book: book)
         library.context.insert(book)
@@ -531,7 +535,7 @@ struct MultiFileBackendTests {
         let source = library.root.appending(path: "size-race.epub")
         try Data("original size bytes".utf8).write(to: source)
         let uuid = UUID()
-        let fileName = try BookFileStore.importCopy(of: source, uuid: uuid)
+        let fileName = try TestManagedFileFixtureStore.importCopy(of: source, uuid: uuid)
         let book = Book(uuid: uuid, fileName: fileName, originalFileName: "Size Race.epub")
         let asset = BookAsset(
             uuid: uuid,
@@ -571,7 +575,7 @@ struct MultiFileBackendTests {
         let source = library.root.appending(path: "drm-race.epub")
         try Data("original drm bytes".utf8).write(to: source)
         let uuid = UUID()
-        let fileName = try BookFileStore.importCopy(of: source, uuid: uuid)
+        let fileName = try TestManagedFileFixtureStore.importCopy(of: source, uuid: uuid)
         let book = Book(uuid: uuid, fileName: fileName, originalFileName: "DRM Race.epub")
         let asset = BookAsset(
             uuid: uuid,
@@ -759,8 +763,8 @@ struct MultiFileBackendTests {
 
         let bookUUID = UUID()
         let mobiUUID = UUID()
-        let epubName = try BookFileStore.importCopy(of: epubSource, uuid: bookUUID)
-        let mobiName = try BookFileStore.importCopy(of: mobiSource, uuid: mobiUUID)
+        let epubName = try TestManagedFileFixtureStore.importCopy(of: epubSource, uuid: bookUUID)
+        let mobiName = try TestManagedFileFixtureStore.importCopy(of: mobiSource, uuid: mobiUUID)
         let book = Book(uuid: bookUUID, fileName: epubName, originalFileName: "A.epub")
         let epubAsset = BookAsset(uuid: bookUUID, fileName: epubName, book: book)
         let mobiAsset = BookAsset(uuid: mobiUUID, fileName: mobiName, origin: .imported, book: book)
@@ -860,7 +864,7 @@ struct MultiFileBackendTests {
 
         await editions.scanLibrary()
         #expect(editions.pendingProposals.isEmpty)
-        #expect(await BookAssetMaintenance.backfillMissingHashes(context: library.context) == 2)
+        #expect(try await BookAssetMaintenance.backfillMissingHashes(context: library.context) == 2)
         await editions.scanLibrary()
 
         #expect(editions.pendingProposals.contains(where: { $0.verdict == .duplicateFile }))
@@ -974,7 +978,7 @@ struct MultiFileBackendTests {
         try library.context.save()
         let gate = AssetHashGate()
         let task = Task { @MainActor in
-            await BookAssetMaintenance.backfillMissingHashes(
+            try await BookAssetMaintenance.backfillMissingHashes(
                 context: library.context,
                 hashFile: { url in await gate.hash(url) }
             )
@@ -984,7 +988,7 @@ struct MultiFileBackendTests {
         asset.dateAdded = asset.dateAdded.addingTimeInterval(1)
         await gate.resume()
 
-        #expect(await task.value == 0)
+        #expect(try await task.value == 0)
         #expect(asset.contentHash == nil)
     }
 
@@ -1005,7 +1009,7 @@ struct MultiFileBackendTests {
             saveAdapter: CatalogSaveAdapter { _ in throw InjectedFailure() }
         )
 
-        #expect(await BookAssetMaintenance.backfillMissingHashes(
+        #expect(try await BookAssetMaintenance.backfillMissingHashes(
             context: library.context,
             mutations: mutations
         ) == 0)
