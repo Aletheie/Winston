@@ -76,10 +76,12 @@ private struct DiscoveryHeader: View {
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(DiscoveryGenre.all) { genre in
-                        GenreChip(genre: genre, isSelected: genre == selectedGenre) {
-                            onSelect(genre)
+                GlassEffectContainer(spacing: 8) {
+                    HStack(spacing: 8) {
+                        ForEach(DiscoveryGenre.all) { genre in
+                            GenreChip(genre: genre, isSelected: genre == selectedGenre) {
+                                onSelect(genre)
+                            }
                         }
                     }
                 }
@@ -131,7 +133,6 @@ private struct GenreChip: View {
     let action: () -> Void
 
     @Environment(\.theme) private var theme
-    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
     var body: some View {
         Button(action: action) {
@@ -143,21 +144,10 @@ private struct GenreChip: View {
                 }
                 theme.styledText(terminal: genre.terminal, native: genre.nativeLabel)
             }
-                .font(theme.label(size: 12, weight: isSelected ? .bold : .semibold))
-                .foregroundStyle(isSelected ? theme.background : theme.textSecondary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(
-                    Capsule().fill(isSelected ? theme.accent : theme.surfaceGlass.opacity(0.5))
-                )
-                .overlay(
-                    Capsule().stroke(
-                        isSelected && differentiateWithoutColor ? theme.textPrimary : theme.borderSubtle,
-                        lineWidth: isSelected && differentiateWithoutColor ? 2 : 1
-                    )
-                )
+                .font(.callout.weight(isSelected ? .semibold : .regular))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.glass)
+        .tint(isSelected ? theme.accent : nil)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
@@ -343,11 +333,8 @@ private struct DiscoveryPrompt: View {
                 openSettingsWindow()
             } label: {
                 theme.styledText(terminal: "open_settings", native: "Open Settings")
-                    .font(theme.label(size: 12, weight: .semibold))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
             }
-            .buttonStyle(.pressable)
+            .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)
@@ -392,11 +379,8 @@ private struct DiscoveryMessage: View {
 
             Button(action: onRetry) {
                 theme.styledText(terminal: "try_again", native: "Try Again")
-                    .font(theme.label(size: 12, weight: .semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
             }
-            .buttonStyle(.pressable)
+            .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)

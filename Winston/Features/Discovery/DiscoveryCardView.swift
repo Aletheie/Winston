@@ -10,7 +10,6 @@ struct DiscoveryCardView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered = false
-    @State private var isShowingActions = false
 
     init(
         book: DiscoveryBook,
@@ -28,8 +27,14 @@ struct DiscoveryCardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Button {
-                isShowingActions.toggle()
+            Menu {
+                DiscoveryCardActions(
+                    hardcoverURL: book.hardcoverURL,
+                    externalBookURL: externalBookURL,
+                    isWishlisted: isWishlisted,
+                    onToggleWishlist: onToggleWishlist,
+                    onFindInCatalogs: onFindInCatalogs
+                )
             } label: {
                 DiscoveryBookLinkContent(
                     bookID: book.id,
@@ -41,20 +46,12 @@ struct DiscoveryCardView: View {
                     isWishlisted: isWishlisted
                 )
             }
-            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
             .frame(maxWidth: .infinity, alignment: .top)
             .help("Book actions")
             .accessibilityLabel(Text(verbatim: accessibilityText))
             .accessibilityHint("Shows actions for this book")
-        }
-        .popover(isPresented: $isShowingActions, arrowEdge: .bottom) {
-            DiscoveryCardActionPopover(
-                hardcoverURL: book.hardcoverURL,
-                externalBookURL: externalBookURL,
-                isWishlisted: isWishlisted,
-                onToggleWishlist: onToggleWishlist,
-                onFindInCatalogs: onFindInCatalogs
-            )
         }
         .contextMenu {
             DiscoveryCardActions(
@@ -83,94 +80,6 @@ struct DiscoveryCardView: View {
         var parts = [book.title]
         if let author = book.author { parts.append(author) }
         return parts.joined(separator: ", ")
-    }
-}
-
-private struct DiscoveryCardActionPopover: View {
-    let hardcoverURL: URL
-    let externalBookURL: URL?
-    let isWishlisted: Bool
-    let onToggleWishlist: () -> Void
-    let onFindInCatalogs: (() -> Void)?
-
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
-
-    var body: some View {
-        VStack(spacing: 2) {
-            DiscoveryPopoverActionButton(
-                title: "Open on Hardcover",
-                systemImage: "books.vertical"
-            ) {
-                dismiss()
-                openURL(hardcoverURL)
-            }
-
-            if let externalBookURL {
-                DiscoveryPopoverActionButton(
-                    title: "Search External Website",
-                    systemImage: "magnifyingglass"
-                ) {
-                    dismiss()
-                    openURL(externalBookURL)
-                }
-            }
-
-            if let onFindInCatalogs {
-                DiscoveryPopoverActionButton(
-                    title: "Find in Catalogs",
-                    systemImage: "books.vertical"
-                ) {
-                    dismiss()
-                    onFindInCatalogs()
-                }
-            }
-
-            Divider()
-                .padding(.vertical, 4)
-
-            DiscoveryPopoverActionButton(
-                title: isWishlisted ? "Remove from Wishlist" : "Add to Wishlist",
-                systemImage: isWishlisted ? "heart.slash" : "heart"
-            ) {
-                dismiss()
-                onToggleWishlist()
-            }
-        }
-        .padding(8)
-        .frame(width: 240)
-    }
-}
-
-private struct DiscoveryPopoverActionButton: View {
-    let title: LocalizedStringResource
-    let systemImage: String
-    let action: () -> Void
-
-    @Environment(\.theme) private var theme
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            Label {
-                Text(title)
-            } icon: {
-                Image(systemName: systemImage)
-                    .frame(width: 18)
-            }
-            .font(theme.body(size: 12, weight: .medium))
-            .foregroundStyle(theme.textPrimary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(isHovered ? theme.accent.opacity(0.12) : .clear)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
     }
 }
 

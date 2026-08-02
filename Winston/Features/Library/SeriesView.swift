@@ -229,44 +229,41 @@ private struct SeriesCatalogNotice: View {
     let state: State
     let onRetry: () -> Void
 
-    @Environment(\.theme) private var theme
-
     var body: some View {
-        HStack(spacing: 10) {
-            switch state {
-            case .onlineDisabled:
-                Image(systemName: "network.slash")
-                Text("Enable online metadata to check which series books are missing.")
-                Spacer()
-                SettingsLink {
-                    Text("Open Settings")
+        GroupBox {
+            HStack(spacing: 10) {
+                switch state {
+                case .onlineDisabled:
+                    Image(systemName: "network.slash")
+                    Text("Enable online metadata to check which series books are missing.")
+                    Spacer()
+                    SettingsLink {
+                        Text("Open Settings")
+                    }
+                        .controlSize(.small)
+                case .tokenMissing:
+                    Image(systemName: "key")
+                    Text("Add a Hardcover API token to check which series books are missing.")
+                    Spacer()
+                    SettingsLink {
+                        Text("Open Settings")
+                    }
+                        .controlSize(.small)
+                case .loading:
+                    ProgressView().controlSize(.small)
+                    Text("Checking series on Hardcover…")
+                    Spacer()
+                case .failed:
+                    Image(systemName: "wifi.exclamationmark")
+                    Text("Couldn’t load series details from Hardcover.")
+                    Spacer()
+                    Button("Try Again", action: onRetry)
+                        .controlSize(.small)
                 }
-                    .controlSize(.small)
-            case .tokenMissing:
-                Image(systemName: "key")
-                Text("Add a Hardcover API token to check which series books are missing.")
-                Spacer()
-                SettingsLink {
-                    Text("Open Settings")
-                }
-                    .controlSize(.small)
-            case .loading:
-                ProgressView().controlSize(.small)
-                Text("Checking series on Hardcover…")
-                Spacer()
-            case .failed:
-                Image(systemName: "wifi.exclamationmark")
-                Text("Couldn’t load series details from Hardcover.")
-                Spacer()
-                Button("Try Again", action: onRetry)
-                    .controlSize(.small)
             }
         }
-        .font(theme.label(size: 11, weight: .regular))
-        .foregroundStyle(theme.textSecondary)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .glassCard(cornerRadius: 10, tintOpacity: 0.35)
+        .font(.callout)
+        .foregroundStyle(.secondary)
     }
 
 }
@@ -558,7 +555,7 @@ private struct MissingSeriesBookRow: View {
                         .padding(4)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .help("Search External Website")
                 .accessibilityLabel("Search External Website")
             }
@@ -572,7 +569,7 @@ private struct MissingSeriesBookRow: View {
                         : "heart"
                 )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .help(
                 isWishlisted
                     ? "Remove from Wishlist"
@@ -594,7 +591,7 @@ private struct MissingSeriesBookRow: View {
             } label: {
                 Image(systemName: "books.vertical")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .help("Find in Catalogs")
             .accessibilityLabel("Find this missing volume in Catalogs")
 
