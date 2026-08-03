@@ -20,11 +20,14 @@ struct SettingsView: View {
             Tab("View", systemImage: "square.grid.2x2") {
                 viewTab
             }
+            Tab("Catalogs", systemImage: "books.vertical") {
+                OPDSCatalogSettingsPane()
+            }
             Tab("Plugins", systemImage: "puzzlepiece.extension") {
                 PluginsSettingsPane()
             }
         }
-        .frame(width: 460, height: 560)
+        .frame(width: 680, height: 620)
         .onAppear {
             zoomDraft = settings.gridZoom
             reloadBackups()

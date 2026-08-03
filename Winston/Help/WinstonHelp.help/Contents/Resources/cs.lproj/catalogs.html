@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <title>Katalogy a hledání sérií</title>
+    <link rel="stylesheet" href="sty/winston.css">
+</head>
+<body>
+    <p class="nav"><a href="index.html">&larr; Nápověda Winston</a></p>
+    <h1>Katalogy a hledání sérií</h1>
+
+    <p>Centrum katalogů prohledává katalogy OPDS 1 a OPDS 2, aniž by jejich
+    knihy míchalo do vaší knihovny. Winston obsahuje Project Gutenberg,
+    Standard Ebooks, Unglue.it a lokalizovanou Wikisource a můžete přidat
+    veřejné i soukromé zdroje OPDS.</p>
+
+    <h2 id="builtins">Lokalizované otevřené zdroje</h2>
+    <ul>
+        <li><b>Unglue.it</b> používá svůj veřejný kanál OPDS k procházení,
+            hledání podle názvu, stránkování, načítání metadat a stahování.</li>
+        <li><b>Wikisource</b> se řídí účinným jazykem Winstonu: čeština používá
+            českou Wikisource a angličtina anglickou. Budoucí nepodporované
+            systémové jazyky použijí anglickou Wikisource.</li>
+        <li>Hledání ve Wikisource volá veřejné rozhraní MediaWiki Action API.
+            Samotné hledání nikdy nepožádá WS Export o vytvoření ani stažení knihy.</li>
+        <li>Volba <b>Importovat</b> u výsledku Wikisource výslovně vyžádá EPUB
+            ze služby WS Export se zapnutými údaji o přispěvatelích. Centrum
+            katalogů i Kontrola importu zobrazí zdrojovou stránku, uvedení zdroje
+            a jména přispěvatelů; uložený soubor si zachová původ zdrojové stránky.</li>
+    </ul>
+
+    <h2 id="add">Přidání a správa katalogu</h2>
+    <ol>
+        <li>Otevřete <b>Nastavení → Katalogy</b> a klikněte na
+            <b>Přidat katalog</b>.</li>
+        <li>Zadejte název a kořenovou adresu katalogu. <b>Basic</b> zvolte jen
+            tehdy, když vám poskytovatel výslovně přidělil jméno a heslo.</li>
+        <li>Klikněte na <b>Otestovat katalog</b>. Test může z běžné webové
+            stránky zjistit jednu nabízenou adresu OPDS, uložený seznam však
+            nikdy nemění.</li>
+        <li>Katalog uložte a poté jej můžete zapnout, vypnout nebo přesunout.
+            Do společného hledání se zapojují jen zapnuté katalogy.</li>
+    </ol>
+    <p>Volbou <b>Obnovit vestavěné</b> vrátíte čtyři dodané adresy a jejich
+    pořadí. Vlastní katalogy zůstanou beze změny.</p>
+
+    <h2 id="security">Přihlášení, HTTPS a soukromí</h2>
+    <ul>
+        <li>Upřednostňujte <b>HTTPS</b>. Přihlášení Basic je povoleno jen přes
+            HTTPS a hesla se ukládají do Klíčenky macOS.</li>
+        <li>Katalog přes HTTP vyžaduje výslovné potvrzení. Provoz není šifrovaný
+            a Winston mu nikdy neodešle přihlašovací údaje.</li>
+        <li>Údaje se posílají pouze přesně nastavenému původu HTTPS (stejné
+            schéma, server a port). Při přesměrování jinam se odstraní a
+            přesměrování z HTTPS na HTTP se zablokuje.</li>
+        <li>Dotazy a stahování míří přímo do vybraného katalogu. Importované
+            knihy i porovnání s místní knihovnou zůstávají na tomto Macu.
+            Vypnutím online metadat v Nastavení zastavíte požadavky na katalogy.</li>
+    </ul>
+
+    <h2 id="search">Společné hledání a hledání sérií</h2>
+    <ul>
+        <li>V bočním panelu zvolte <b>Katalogy</b> a zadejte název, autora nebo
+            ISBN. Klávesami <kbd>⌘F</kbd> zaměříte hledání a Escape jej zruší.</li>
+        <li>Výsledky se zobrazují postupně. Chyba jednoho zdroje neskryje
+            úspěšné výsledky ostatních.</li>
+        <li>Winston slučuje pouze jisté shody a zachovává viditelné všechny
+            zdroje, edice, formáty, ceny i způsoby získání.</li>
+        <li>Filtrovat lze podle katalogu, jazyka, formátu, způsobu získání a
+            vlastnictví. „Vlastněné místní vydání“ může znamenat i jiné vydání
+            stejného díla ve vaší knihovně.</li>
+        <li>U série, položky wishlistu, oznámení, karty Objevovat nebo knihy
+            zvolte <b>Najít v katalozích</b>. Winston předvyplní nejsilnější
+            dostupný údaj — obvykle ISBN, poté název a autora.</li>
+    </ul>
+
+    <h2 id="acquisition">Způsoby získání a import</h2>
+    <ul>
+        <li><b>Volně dostupné</b> a přímé odkazy lze importovat, pokud nabízejí
+            EPUB, MOBI, AZW, AZW3, PDF, TXT, HTML nebo jiný formát, který
+            Winston výslovně podporuje.</li>
+        <li>Odkazy na <b>ukázku, výpůjčku, nákup a předplatné</b> se otevírají
+            u zdroje. Winston neautomatizuje obchody, půjčování ani DRM.</li>
+        <li>Vyberte přesný zdroj a formát. Nepodporované nebo přihlášené
+            stahování z jiného serveru zůstane dostupné jako <b>Otevřít zdroj</b>,
+            nikoli jako nebezpečné tlačítko importu.</li>
+        <li>Každé stažení z katalogu otevře <b>Kontrolu importu</b>. Rozhodující
+            zůstávají metadata získaná ze souboru; návrhy katalogu a rozdíly se
+            ukážou ke kontrole. Uvedení zdroje a přispěvatelé tam zůstanou
+            viditelní. Zrušení odstraní dočasný soubor a knihovnu nezmění.</li>
+        <li>Je-li připojen Kindle, volba <b>Importovat a odeslat do Kindlu</b>
+            počká na úspěšné uložení do knihovny a až poté přidá knihu do běžné
+            fronty přenosů.</li>
+    </ul>
+
+    <h2 id="troubleshooting">Řešení potíží</h2>
+    <ul>
+        <li><b>Přihlášení selhalo:</b> upravte katalog, zadejte aktuální jméno a
+            nové heslo. Uložená hesla se nikdy nezobrazují.</li>
+        <li><b>Jen procházení:</b> katalog nenabídl kompatibilní vzdálené
+            hledání. Otevřete jej a použijte jeho sekce a navigaci.</li>
+        <li><b>Žádné prohledávatelné katalogy:</b> zapněte alespoň jeden katalog
+            s podporou hledání a zkuste to znovu.</li>
+        <li><b>Přesměrování zablokováno:</b> otevřete zdroj v prohlížeči nebo si
+            od poskytovatele vyžádejte aktuální kořen OPDS přes HTTPS. Winston
+            heslo nikdy nepředá jinému serveru.</li>
+        <li><b>Import není dostupný:</b> vyberte jiný nabízený formát nebo
+            otevřete odkaz u zdroje. DRM a transakční odkazy importovat nelze.</li>
+    </ul>
+
+    <p class="nav"><a href="index.html">&larr; Nápověda Winston</a> · <a href="library.html">Budování knihovny &rarr;</a></p>
+</body>
+</html>

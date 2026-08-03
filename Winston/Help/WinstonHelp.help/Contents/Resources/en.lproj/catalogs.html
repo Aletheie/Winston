@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Catalogs &amp; Series Finder</title>
+    <link rel="stylesheet" href="sty/winston.css">
+</head>
+<body>
+    <p class="nav"><a href="index.html">&larr; Winston Help</a></p>
+    <h1>Catalogs &amp; Series Finder</h1>
+
+    <p>Catalog Hub searches OPDS 1 and OPDS 2 catalogs without mixing their
+    books into your library. Winston includes Project Gutenberg, Standard
+    Ebooks, Unglue.it, and a localized Wikisource, and you can add public or
+    private OPDS sources.</p>
+
+    <h2 id="builtins">Localized open sources</h2>
+    <ul>
+        <li><b>Unglue.it</b> uses its public OPDS feed for browsing, title
+            search, pagination, metadata, and downloads.</li>
+        <li><b>Wikisource</b> follows Winston's effective language: Czech uses
+            Czech Wikisource and English uses English Wikisource. Other future
+            system languages fall back to English Wikisource.</li>
+        <li>Wikisource search calls the public MediaWiki Action API. Merely
+            searching never asks WS Export to build or download a book.</li>
+        <li>Choosing <b>Import</b> for a Wikisource result explicitly requests
+            an EPUB from WS Export with contributor credits enabled. Catalog
+            Hub and Import Review show the source page, attribution, and
+            contributor names; the saved file keeps the source-page provenance.</li>
+    </ul>
+
+    <h2 id="add">Add or manage a catalog</h2>
+    <ol>
+        <li>Open <b>Settings → Catalogs</b> and click <b>Add Catalog</b>.</li>
+        <li>Enter a name and the catalog's root URL. Choose <b>Basic</b> only
+            when the provider explicitly gives you a username and password.</li>
+        <li>Click <b>Test Catalog</b>. Testing can discover one advertised OPDS
+            address from a normal website, but never changes your saved list.</li>
+        <li>Save the catalog, then enable, disable, or reorder it. Only enabled
+            catalogs participate in unified search.</li>
+    </ol>
+    <p>Use <b>Reset Built-ins</b> to restore Winston's four supplied addresses
+    and their order. Your custom catalogs remain untouched.</p>
+
+    <h2 id="security">Authentication, HTTPS &amp; privacy</h2>
+    <ul>
+        <li>Prefer <b>HTTPS</b>. Basic authentication is accepted only over
+            HTTPS, and passwords are stored in the macOS Keychain.</li>
+        <li>An HTTP catalog requires explicit confirmation. Its traffic is not
+            encrypted, and Winston will not send credentials to it.</li>
+        <li>Credentials are sent only to the exact HTTPS origin you configured
+            (same scheme, host, and port). They are stripped on cross-origin
+            redirects, and HTTPS-to-HTTP redirects are blocked.</li>
+        <li>Catalog queries and downloads go directly to the selected catalog.
+            Imported books and local ownership matching stay on this Mac.
+            Disable online metadata in Settings to stop catalog requests.</li>
+    </ul>
+
+    <h2 id="search">Unified search and Series Finder</h2>
+    <ul>
+        <li>Choose <b>Catalogs</b> in the sidebar and enter a title, author, or
+            ISBN. Press <kbd>⌘F</kbd> to focus search and Escape to cancel.</li>
+        <li>Results appear as each catalog finishes. A failed source does not
+            hide successful results from the others.</li>
+        <li>Winston groups only conservative matches and keeps every source,
+            edition, format, price, and acquisition relationship visible.</li>
+        <li>Use filters for catalog, language, format, acquisition, and local
+            ownership. “Owned local edition” can also mean that another edition
+            of the same work is in your library.</li>
+        <li>From a series, wishlist item, update notice, Discover card, or book
+            menu, choose <b>Find in Catalogs</b>. Winston prefills the strongest
+            available identifier, usually ISBN, then title and author.</li>
+    </ul>
+
+    <h2 id="acquisition">Acquisition types and import</h2>
+    <ul>
+        <li><b>Open access</b> and direct acquisition links can be imported when
+            their advertised format is EPUB, MOBI, AZW, AZW3, PDF, TXT, HTML,
+            or another format Winston explicitly supports.</li>
+        <li><b>Sample, borrow, buy, and subscribe</b> links open at their source.
+            Winston does not automate storefront, lending, or DRM workflows.</li>
+        <li>Choose the exact source and format you want. Unsupported or
+            cross-origin authenticated downloads remain available as
+            <b>Open Source</b>, not as unsafe import buttons.</li>
+        <li>Every catalog download opens <b>Import Review</b>. Metadata extracted
+            from the file remains authoritative; catalog suggestions and
+            differences are shown for review. Source attribution and contributor
+            credits remain visible there. Canceling removes the temporary download
+            and changes nothing in the library.</li>
+        <li>With a Kindle connected, <b>Import and Send to Kindle</b> waits for a
+            successful library import before placing the new book in the normal
+            transfer queue.</li>
+    </ul>
+
+    <h2 id="troubleshooting">Troubleshooting</h2>
+    <ul>
+        <li><b>Authentication failed:</b> edit the catalog and enter the current
+            username and a new password. Saved passwords are never displayed.</li>
+        <li><b>Browse only:</b> the catalog did not advertise compatible remote
+            search. Open it and use its shelves and navigation instead.</li>
+        <li><b>No searchable catalogs:</b> enable at least one catalog with
+            search support, then retry.</li>
+        <li><b>Redirect blocked:</b> open the source in a browser or ask the
+            provider for its current HTTPS OPDS root. Winston never forwards a
+            password to a different server.</li>
+        <li><b>Import unavailable:</b> choose another advertised format or open
+            the acquisition at its source. DRM and transactional links are not
+            importable.</li>
+    </ul>
+
+    <p class="nav"><a href="index.html">&larr; Winston Help</a> · <a href="library.html">Building your library &rarr;</a></p>
+</body>
+</html>

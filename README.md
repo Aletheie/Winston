@@ -65,7 +65,7 @@ Winston models **works, editions and files** separately. Two translations of Dun
 
 - [Hardcover](https://hardcover.app) integration matches the series you own and shows missing volumes.
 - **Discover** browses by genre or search. Results can be saved to a wishlist, with search links to your preferred bookstore or library catalog.
-- **Open Catalogs** browses Project Gutenberg’s OPDS catalog and Standard Ebooks’ public Atom releases feed, imports supported books directly, and prepares a Kindle-ready copy automatically.
+- **Open Catalogs** searches Project Gutenberg, Standard Ebooks, Unglue.it, and a Wikisource matched to Winston’s effective English or Czech language. Wikisource search uses its public API and requests an EPUB from WS Export only when you choose Import.
 - Discover and Open Catalogs can each be hidden from the sidebar in Settings.
 - All network features stay off until you enable them in Settings.
 
