@@ -123,7 +123,7 @@ Completed:
 Near term:
 
 - [ ] Notarized releases
-- [ ] Automatic updates through Sparkle
+- [ ] Automatic updates (not currently included; reintroduce only with a complete signed feed and release process)
 - [ ] Native AZW3 output
 - [ ] MTP verified on a current Kindle
 - [ ] Layered app icon with the full glass treatment
@@ -188,6 +188,7 @@ Verified on a Paperwhite 11th generation.
 - **MTP still needs real-hardware verification.** The path for newer Kindles is implemented; the USB-drive path used by older models is proven.
 - **No App Store, no iCloud sync.** Raw USB access means the sandbox is off, which rules out both. Your backups are plain files you can copy.
 - **Not notarized yet**, hence the right click on first launch.
+- **No automatic updater.** Install newer releases manually; automatic updates must be introduced later as a complete signed-feed project.
 - **No Intel Macs.** The libmtp build Winston links against is Apple Silicon only.
 
 ## Tech
@@ -198,9 +199,9 @@ Verified on a Paperwhite 11th generation.
 - Quick Look app extension for MOBI and AZW3 previews
 - `libmtp` and `libusb` for MTP devices
 - [Tuist](https://tuist.dev) for project generation
-- ZIPFoundation for EPUB archives; Sparkle is included for the planned update feed
+- ZIPFoundation for EPUB archives
 - Hardened runtime; the main app is unsandboxed for USB access, while the Quick Look extension is sandboxed
-- 249 tests in 50 suites, including golden byte tests for the MOBI writer
+- Swift Testing unit suite, including golden byte tests for the MOBI writer (run with the command above)
 
 `Winston/Core` contains conversion, device, metadata, persistence and plugin code. `Winston/Features` contains the SwiftUI screens.
 

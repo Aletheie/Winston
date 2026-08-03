@@ -12,20 +12,12 @@ fail() {
     failures=1
 }
 
-if /usr/bin/grep -q 'updates\.example\.com' "$project_manifest"; then
-    fail "SUFeedURL still points at updates.example.com"
-fi
-
 if /usr/bin/grep -q '"MARKETING_VERSION": "0\.1"' "$project_manifest"; then
     fail "MARKETING_VERSION is still the pre-release placeholder 0.1"
 fi
 
 if /usr/bin/grep -q '"NSHumanReadableCopyright": ""' "$project_manifest"; then
     fail "NSHumanReadableCopyright is empty"
-fi
-
-if ! /usr/bin/grep -q '"SUPublicEDKey": "[^"].*"' "$project_manifest"; then
-    fail "SUPublicEDKey is missing"
 fi
 
 if ! /usr/bin/ruby -rjson -e '

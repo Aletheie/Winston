@@ -33,7 +33,7 @@ private let appSettings: SettingsDictionary = [
     "OTHER_LDFLAGS": "$(inherited) -lmtp",
     "ENABLE_APP_SANDBOX": "NO",
     "ENABLE_HARDENED_RUNTIME": "YES",
-    // Sparkle's binary XCFramework and bundled Homebrew libraries do not ship arm64e.
+    // Bundled Homebrew libraries do not ship arm64e.
     "ENABLE_POINTER_AUTHENTICATION": "NO",
     "ENABLE_USER_SCRIPT_SANDBOXING": "NO",
     "LD_RUNPATH_SEARCH_PATHS": "$(inherited) @executable_path/../Frameworks",
@@ -75,9 +75,6 @@ let project = Project(
     packages: [
         .remote(url: "https://github.com/weichsel/ZIPFoundation.git",
                 requirement: .upToNextMajor(from: "0.9.0")),
-        // self-update; bundle-libmtp.sh must not touch Sparkle's signed XPC helpers
-        .remote(url: "https://github.com/sparkle-project/Sparkle",
-                requirement: .upToNextMajor(from: "2.6.0")),
     ],
     // Homebrew's libmtp/libusb ship arm64 only, so a universal Release build can never
     // link — Apple Silicon is the only architecture this app can be built for.
@@ -107,11 +104,6 @@ let project = Project(
                 "CFBundleLocalizations": .array([.string("en"), .string("cs")]),
                 "LSApplicationCategoryType": "public.app-category.reference",
                 "UTImportedTypeDeclarations": kindleTypeDeclarations,
-                // The private half of SUPublicEDKey lives in the login Keychain — losing
-                // it means existing users can't accept updates. TODO: point SUFeedURL at
-                // the real appcast before distributing (example.com is a placeholder).
-                "SUFeedURL": "https://updates.example.com/winston/appcast.xml",
-                "SUPublicEDKey": "dVfH2PNHpcWAwFk1ZXq+7voajLGyew9fPAOGex+j8uU=",
             ]),
             sources: ["Winston/**/*.swift"],
             resources: [
@@ -155,7 +147,6 @@ let project = Project(
             dependencies: [
                 .target(name: "WinstonQuickLook"),
                 .package(product: "ZIPFoundation"),
-                .package(product: "Sparkle"),
             ],
             settings: .settings(base: appSettings)
         ),
