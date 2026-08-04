@@ -150,7 +150,10 @@ struct OPDSCatalogSearchTests {
         )
 
         #expect(seed.query == "The Missing Volume Ada Author")
-        #expect(seed.context == "Robot Stories · Book 3")
+        let localizedPosition = String(
+            localized: "Book \(book.positionText ?? "3")"
+        )
+        #expect(seed.context == "Robot Stories · \(localizedPosition)")
     }
 
     @Test func `Failed catalog keeps successful catalog results`() async throws {

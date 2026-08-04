@@ -32,13 +32,31 @@ struct OPDSCatalogView: View {
                 )
         }
         .toolbar {
-            OPDSCatalogToolbar(viewModel: viewModel) {
+            OPDSCatalogToolbar(
+                viewModel: viewModel,
+                showsSettings: viewModel.selectedCatalog == nil
+            ) {
                 searchText = ""
                 viewModel.goBack()
             }
         }
+        .searchable(
+            text: $searchText,
+            placement: .toolbar,
+            prompt: Text(
+                viewModel.selectedCatalog == nil
+                    ? "Search enabled catalogs"
+                    : "Search this catalog"
+            )
+        )
+        .searchFocused($searchIsFocused)
+        .onSubmit(of: .search, submitSearch)
         .onChange(of: viewModel.selectedCatalog) { _, _ in
             searchText = ""
+        }
+        .onChange(of: searchText) { oldValue, newValue in
+            guard !oldValue.isEmpty, newValue.isEmpty else { return }
+            viewModel.clearSearch()
         }
         .onChange(of: settings.onlineMetadataEnabled) { _, _ in
             viewModel.onlineSettingDidChange()
@@ -57,11 +75,6 @@ struct OPDSCatalogView: View {
             viewModel.cancelSearch()
             return .handled
         }
-        .onKeyPress(.return) {
-            guard searchIsFocused else { return .ignored }
-            submitSearch()
-            return .handled
-        }
         .frame(
             maxWidth: .infinity,
             maxHeight: .infinity,
@@ -71,11 +84,11 @@ struct OPDSCatalogView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 18) {
+        HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 if let catalog = viewModel.selectedCatalog {
                     Text(verbatim: viewModel.feed?.title ?? catalog.name)
-                        .font(theme.display(size: 22, weight: .heavy))
+                        .font(.title2.weight(.semibold))
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1)
                     HStack(spacing: 8) {
@@ -94,7 +107,7 @@ struct OPDSCatalogView: View {
                                 )
                         }
                     }
-                    .font(theme.label(size: 10))
+                    .font(.caption)
                     .foregroundStyle(theme.textSecondary)
                     .lineLimit(1)
                 } else {
@@ -102,63 +115,21 @@ struct OPDSCatalogView: View {
                         terminal: "// catalog_hub",
                         native: "Catalog Hub"
                     )
-                    .font(theme.display(size: 22, weight: .heavy))
+                    .font(.title2.weight(.semibold))
                     .foregroundStyle(theme.textPrimary)
                     .accessibilityIdentifier("opds.title")
                     Text(
                         "Search every enabled catalog or open one to browse its shelves."
                     )
-                    .font(theme.body(size: 11))
+                    .font(.subheadline)
                     .foregroundStyle(theme.textSecondary)
                 }
             }
 
             Spacer(minLength: 12)
-
-            HStack(spacing: 8) {
-                TextField(
-                    viewModel.selectedCatalog == nil
-                        ? "Search enabled catalogs"
-                        : "Search this catalog",
-                    text: $searchText
-                )
-                .textFieldStyle(.roundedBorder)
-                .focused($searchIsFocused)
-                .onSubmit(submitSearch)
-                .accessibilityIdentifier("opds.search")
-                if viewModel.isSearching {
-                    Button {
-                        viewModel.cancelSearch()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Cancel catalog search")
-                    .accessibilityLabel("Cancel catalog search")
-                } else if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                        viewModel.clearSearch()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Clear catalog search")
-                    .accessibilityLabel("Clear catalog search")
-                }
-            }
-            .frame(width: 320)
-
-            if viewModel.selectedCatalog == nil {
-                SettingsLink {
-                    Label("Catalog Settings", systemImage: "gearshape")
-                }
-                .controlSize(.small)
-                .help("Add, edit, reorder, or test catalogs")
-            }
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 15)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
     }
 
     @ViewBuilder
@@ -195,45 +166,45 @@ struct OPDSCatalogView: View {
         } else {
             HSplitView {
                 catalogList
-                    .frame(minWidth: 230, idealWidth: 270, maxWidth: 340)
+                    .frame(
+                        minWidth: 240,
+                        idealWidth: 290,
+                        maxWidth: 360,
+                        maxHeight: .infinity,
+                        alignment: .top
+                    )
                 searchSurface
-                    .frame(minWidth: 480)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
     private var catalogList: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Catalogs")
-                    .font(theme.body(size: 13, weight: .bold))
-                Spacer()
-                Text("\(viewModel.enabledCatalogs.count) enabled")
-                    .font(theme.label(size: 9))
-                    .foregroundStyle(theme.textSecondary)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-
-            Divider().opacity(WinstonLayout.dividerOpacity)
-
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(viewModel.catalogs) { catalog in
-                        CatalogListRow(
-                            catalog: catalog,
-                            searchState: viewModel.searchStates[catalog.id]
-                        ) {
-                            Task { await viewModel.open(catalog) }
-                        }
-                        Divider()
-                            .opacity(WinstonLayout.dividerOpacity)
-                            .padding(.leading, 52)
+        List {
+            Section {
+                ForEach(viewModel.catalogs) { catalog in
+                    CatalogListRow(
+                        catalog: catalog,
+                        searchState: viewModel.searchStates[catalog.id]
+                    ) {
+                        Task { await viewModel.open(catalog) }
                     }
+                }
+            } header: {
+                HStack {
+                    Text("Catalogs")
+                    Spacer()
+                    Text("\(viewModel.enabledCatalogs.count) enabled")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
-        .background(theme.backgroundAlt.opacity(0.45))
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .accessibilityIdentifier("opds.catalogList")
     }
 
     @ViewBuilder
@@ -386,7 +357,7 @@ struct OPDSCatalogView: View {
             .tag(group.id)
             .accessibilityIdentifier("opds.result.\(group.id)")
         }
-        .listStyle(.inset)
+        .listStyle(.plain)
         .onKeyPress(.return) {
             guard let selectedResultID else { return .ignored }
             if expandedResultIDs.contains(selectedResultID) {
@@ -663,6 +634,7 @@ struct OPDSCatalogView: View {
 
 private struct OPDSCatalogToolbar: ToolbarContent {
     let viewModel: OPDSViewModel
+    let showsSettings: Bool
     let onBack: () -> Void
 
     var body: some ToolbarContent {
@@ -674,7 +646,15 @@ private struct OPDSCatalogToolbar: ToolbarContent {
                 .help("Back")
                 .accessibilityIdentifier("opds.back")
             }
-            ToolbarItem(placement: .primaryAction) {
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            if showsSettings {
+                SettingsLink {
+                    Label("Catalog Settings", systemImage: "gearshape")
+                }
+                .help("Add, edit, reorder, or test catalogs")
+                .accessibilityIdentifier("opds.settings")
+            } else {
                 Button {
                     Task { await viewModel.refresh() }
                 } label: {
@@ -703,7 +683,8 @@ private struct CatalogListRow: View {
         Button(action: onBrowse) {
             HStack(spacing: 10) {
                 Image(systemName: catalog.presentationSystemImage)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.body.weight(.semibold))
+                    .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(
                         catalog.isEnabled
                             ? theme.accent
@@ -713,9 +694,7 @@ private struct CatalogListRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 5) {
                         Text(verbatim: catalog.name)
-                            .font(
-                                theme.body(size: 12, weight: .semibold)
-                            )
+                            .font(.body.weight(.semibold))
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                         if catalog.authenticationMode == .basic {
@@ -738,7 +717,7 @@ private struct CatalogListRow: View {
                         }
                     }
                     Text(verbatim: statusLabel)
-                        .font(theme.label(size: 9))
+                        .font(.caption)
                         .foregroundStyle(statusColor)
                         .lineLimit(1)
                 }
@@ -747,8 +726,7 @@ private struct CatalogListRow: View {
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(theme.textTertiary)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
+            .padding(.vertical, 5)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
