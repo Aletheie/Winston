@@ -86,6 +86,52 @@ private struct GlassCardModifier: ViewModifier {
     }
 }
 
+private struct BookTileSurfaceModifier: ViewModifier {
+    let isHovered: Bool
+    let isSelected: Bool
+    let isFocused: Bool
+
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(
+            cornerRadius: WinstonLayout.cornerLarge,
+            style: .continuous
+        )
+
+        content
+            .background(
+                reduceTransparency
+                    ? AnyShapeStyle(theme.surface)
+                    : AnyShapeStyle(.ultraThinMaterial),
+                in: shape
+            )
+            .background(
+                shape.fill(theme.surfaceGlass.opacity(0.6))
+            )
+            .overlay {
+                shape.stroke(borderColor, lineWidth: borderWidth)
+            }
+    }
+
+    private var borderColor: Color {
+        if isFocused { return theme.interaction.focus }
+        if isSelected { return theme.accentSecondary.opacity(0.7) }
+        if isHovered { return theme.accent.opacity(0.4) }
+        if contrast == .increased {
+            return theme.textSecondary.opacity(0.55)
+        }
+        return theme.borderSubtle
+    }
+
+    private var borderWidth: CGFloat {
+        if isFocused || isSelected || contrast == .increased { return 2 }
+        return 1
+    }
+}
+
 private struct AccessibleThemeModifier: ViewModifier {
     let theme: Theme
     @Environment(\.colorSchemeContrast) private var contrast
@@ -167,5 +213,17 @@ extension View {
 
     func accessibleTheme(_ theme: Theme) -> some View {
         modifier(AccessibleThemeModifier(theme: theme))
+    }
+
+    func bookTileSurface(
+        isHovered: Bool,
+        isSelected: Bool = false,
+        isFocused: Bool = false
+    ) -> some View {
+        modifier(BookTileSurfaceModifier(
+            isHovered: isHovered,
+            isSelected: isSelected,
+            isFocused: isFocused
+        ))
     }
 }

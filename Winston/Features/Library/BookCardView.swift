@@ -22,17 +22,11 @@ struct BookCardView: View {
                 coverArea
                 CardTitleStrip(book: book, isOnDevice: isOnDevice, isMissing: isMissing)
             }
-            .background(
-                RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous)
-                    .fill(cardFill)
+            .bookTileSurface(
+                isHovered: isHovered,
+                isSelected: isSelected,
+                isFocused: isFocused
             )
-            .overlay {
-                RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge, style: .continuous)
-                    .stroke(
-                        cardBorder,
-                        lineWidth: cardBorderWidth
-                    )
-            }
 
             if isHovered && !isConverting {
                 deleteButton
@@ -72,8 +66,8 @@ struct BookCardView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: isConverting)
         .shadow(
             color: cardShadowColor,
-            radius: isSelected || isFocused ? 6 : (isHovered ? 3 : 0),
-            y: isHovered ? 1 : 0
+            radius: isSelected || isFocused ? 8 : (isHovered ? 6 : 3),
+            y: isHovered ? 2 : 1
         )
         .onHover { hovering in isHovered = hovering }
         .help("\(book.displayTitle)\(book.displayAuthor.map { " \u{2014} \($0)" } ?? "")")
@@ -82,33 +76,14 @@ struct BookCardView: View {
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
-    private var usesOpaqueRetroCard: Bool {
-        !theme.structure.usesNativeMaterials
-    }
-
-    private var cardFill: Color {
-        if isSelected { return theme.interaction.selection }
-        if isHovered { return theme.interaction.hover }
-        return usesOpaqueRetroCard ? theme.surface : .clear
-    }
-
-    private var cardBorder: Color {
-        if isFocused { return theme.interaction.focus }
-        if isSelected { return theme.borderActive }
-        if isHovered { return theme.textTertiary.opacity(0.55) }
-        return usesOpaqueRetroCard ? theme.borderSubtle : .clear
-    }
-
-    private var cardBorderWidth: CGFloat {
-        if isFocused || isSelected { return 2 }
-        return usesOpaqueRetroCard || isHovered ? 1 : 0
-    }
-
     private var cardShadowColor: Color {
         if theme.showsNeonGlow, isSelected || isFocused {
             return theme.interaction.focus.opacity(0.20)
         }
-        return Color.black.opacity(isHovered ? 0.12 : 0)
+        if isSelected || isFocused {
+            return theme.accentSecondary.opacity(0.18)
+        }
+        return Color.black.opacity(isHovered ? 0.14 : 0.07)
     }
 
     private var coverArea: some View {

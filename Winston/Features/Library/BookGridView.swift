@@ -44,7 +44,6 @@ struct BookGridView: View {
     @Binding var scrollTarget: Book.ID?
 
     @Environment(AppSettings.self) private var settings
-    @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focusedBookID: Book.ID?
 
@@ -54,39 +53,40 @@ struct BookGridView: View {
     private var columns: [GridItem] { WinstonLayout.coverGridColumns(zoom: settings.gridZoom) }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            scrollContent
-                .onChange(of: scrollTarget) {
-                    guard let target = scrollTarget else { return }
-                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
-                        proxy.scrollTo(target, anchor: .center)
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                scrollContent(
+                    availableWidth: geometry.size.width,
+                    scrollProxy: proxy
+                )
+                    .onChange(of: scrollTarget) {
+                        guard let target = scrollTarget else { return }
+                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+                            proxy.scrollTo(target, anchor: .center)
+                        }
+                        scrollTarget = nil
                     }
-                    scrollTarget = nil
-                }
+            }
         }
     }
 
-    private var scrollContent: some View {
+    private func scrollContent(
+        availableWidth: CGFloat,
+        scrollProxy: ScrollViewProxy
+    ) -> some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 16) {
                 ForEach(books) { book in
                     BookCardView(
                         book: book,
                         isSelected: selection.isSelected(book),
+                        isFocused: focusedBookID == book.id,
                         isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
                         isConverting: convertingUUIDs.contains(book.uuid),
                         isMissing: missingUUIDs.contains(book.uuid),
                         editionCount: editions.editionCounts[book.uuid] ?? 1,
                         onDelete: { actions.delete(book) }
                     )
-                    .overlay {
-                        if focusedBookID == book.id {
-                            RoundedRectangle(cornerRadius: WinstonLayout.cornerLarge + 2, style: .continuous)
-                                .stroke(theme.accent, lineWidth: 2)
-                                .padding(1)
-                                .allowsHitTesting(false)
-                        }
-                    }
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2) {
                         focusedBookID = book.id
@@ -100,7 +100,12 @@ struct BookGridView: View {
                     .focusable()
                     .focused($focusedBookID, equals: book.id)
                     .onMoveCommand { direction in
-                        moveFocus(from: book, direction: direction)
+                        moveFocus(
+                            from: book,
+                            direction: direction,
+                            availableWidth: availableWidth,
+                            scrollProxy: scrollProxy
+                        )
                     }
                     .onKeyPress(.return) {
                         actions.open(book)
@@ -132,24 +137,32 @@ struct BookGridView: View {
                         : "Physical copy without a digital file")
                 }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, WinstonLayout.coverGridHorizontalPadding)
             .padding(.vertical, 14)
         }
     }
 
-    private func moveFocus(from book: Book, direction: MoveCommandDirection) {
+    private func moveFocus(
+        from book: Book,
+        direction: MoveCommandDirection,
+        availableWidth: CGFloat,
+        scrollProxy: ScrollViewProxy
+    ) {
         guard let index = books.firstIndex(where: { $0.id == book.id }) else { return }
-        let offset: Int
-        switch direction {
-        case .left, .up:
-            offset = -1
-        case .right, .down:
-            offset = 1
-        @unknown default:
-            return
-        }
-        let destination = min(max(index + offset, books.startIndex), books.index(before: books.endIndex))
+        guard let navigationDirection = GridKeyboardDirection(direction),
+              let destination = GridKeyboardNavigation.destinationIndex(
+                  from: index,
+                  itemCount: books.count,
+                  columnCount: WinstonLayout.coverGridColumnCount(
+                      containerWidth: availableWidth,
+                      zoom: settings.gridZoom
+                  ),
+                  direction: navigationDirection
+              ) else { return }
         focusedBookID = books[destination].id
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
+            scrollProxy.scrollTo(books[destination].id, anchor: .center)
+        }
     }
 
     private func actionAvailability(for book: Book) -> BookActionAvailability {
@@ -179,5 +192,17 @@ struct BookGridView: View {
                 $0.isOnDevice(fileNames: deviceFileNames)
             }.count
         )
+    }
+}
+
+private extension GridKeyboardDirection {
+    init?(_ direction: MoveCommandDirection) {
+        switch direction {
+        case .left: self = .left
+        case .right: self = .right
+        case .up: self = .up
+        case .down: self = .down
+        @unknown default: return nil
+        }
     }
 }
