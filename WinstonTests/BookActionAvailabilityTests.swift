@@ -12,6 +12,7 @@ struct BookActionAvailabilityTests {
         #expect(!physicalSelection.canUsePrimaryFile)
         #expect(physicalSelection.canReplaceOrAttachFile)
         #expect(physicalSelection.canEditMetadata)
+        #expect(!physicalSelection.canInspectWithBookDoctor)
         #expect(!physicalSelection.canTransmit)
     }
 
@@ -35,6 +36,7 @@ struct BookActionAvailabilityTests {
         #expect(availability.canConvertForKindle)
         #expect(availability.canRemoveFromDevice)
         #expect(availability.canTransmit)
+        #expect(availability.canInspectWithBookDoctor)
         #expect(availability.canSaveSearch)
     }
 
@@ -50,6 +52,7 @@ struct BookActionAvailabilityTests {
         #expect(!availability.canFetchMetadata)
         #expect(!availability.canConvertForKindle)
         #expect(!availability.canRemoveFromDevice)
+        #expect(availability.canInspectWithBookDoctor)
         #expect(!availability.canSaveSearch)
     }
 

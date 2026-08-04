@@ -86,6 +86,10 @@ nonisolated struct BookActionAvailability: Equatable, Sendable {
         sendableDigitalFileCount > 0
     }
 
+    var canInspectWithBookDoctor: Bool {
+        persistedDigitalFileCount > 0
+    }
+
     var hasDRMOnlyDigitalSelection: Bool {
         persistedDigitalFileCount > 0
             && drmProtectedDigitalFileCount == persistedDigitalFileCount
@@ -114,14 +118,26 @@ final class LibraryCommandContext {
     }
 }
 
+@Observable
+@MainActor
+final class CatalogCommandContext {
+    private(set) var focusSearchGeneration = 0
+
+    func focusSearch() {
+        focusSearchGeneration &+= 1
+    }
+}
+
 extension FocusedValues {
     @Entry var libraryCommandContext: LibraryCommandContext?
+    @Entry var catalogCommandContext: CatalogCommandContext?
 }
 
 // MARK: - Menu commands
 
 struct AppCommands: Commands {
     @FocusedValue(\.libraryCommandContext) var library
+    @FocusedValue(\.catalogCommandContext) var catalog
     @Bindable var themeManager: ThemeManager
     let settings: AppSettings
 
@@ -203,9 +219,15 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("Find\u{2026}") { library?.perform(.focusSearch) }
+            Button("Find\u{2026}") {
+                if let catalog {
+                    catalog.focusSearch()
+                } else {
+                    library?.perform(.focusSearch)
+                }
+            }
                 .keyboardShortcut("f")
-                .disabled(library == nil)
+                .disabled(library == nil && catalog == nil)
         }
 
         CommandGroup(replacing: .help) {
@@ -228,7 +250,9 @@ struct AppCommands: Commands {
                 .disabled(library == nil)
             Button("Import Review & Recovery\u{2026}") { library?.perform(.showImportRecovery) }
                 .disabled(library == nil)
-            Button("Metadata Fixes\u{2026}") { library?.perform(.showMetadataFixes) }
+            Button("Metadata Cleanup\u{2026}") {
+                library?.perform(.showMetadataFixes)
+            }
                 .disabled(library == nil)
             Button("Highlights\u{2026}") { library?.perform(.showHighlights) }
                 .disabled(library == nil)
@@ -268,7 +292,7 @@ struct AppCommands: Commands {
                 .disabled(library?.availability.canReplaceOrAttachFile != true)
 
             Button("Inspect with Book Doctor\u{2026}") { library?.perform(.inspectSelected) }
-                .disabled(library?.availability.canUsePrimaryFile != true)
+                .disabled(library?.availability.canInspectWithBookDoctor != true)
 
             Divider()
 
