@@ -4,6 +4,12 @@ import Testing
 @testable import Winston
 
 @MainActor
+private final class TimeMachineProgressRecorder {
+    var values: [LibraryTimeMachineSnapshotLoadProgress] = []
+    var reloads: [Int] = []
+}
+
+@MainActor
 struct LibraryTimeMachineTests {
     @Test func diffClassifiesDeletedModifiedAddedAndUnchangedBooks() throws {
         let deletedID = UUID()
@@ -855,6 +861,85 @@ struct LibraryTimeMachineTests {
         #expect(stored.title == "Current")
         #expect(stored.notes == "unrelated")
         #expect(stored.highlights.map(\.text) == ["Current quote"])
+    }
+
+    @Test func currentSnapshotLoaderPagesEqualSortKeysWithoutOmissions() async throws {
+        let library = try await TestLibrary()
+        let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        for index in 0..<513 {
+            let book = Book(
+                fileName: "missing-\(index).epub",
+                originalFileName: "Book \(index).epub"
+            )
+            book.title = "Book \(index)"
+            book.dateAdded = fixedDate
+            library.context.insert(book)
+        }
+        try library.context.save()
+        let progress = TimeMachineProgressRecorder()
+        let loader = LibraryTimeMachineCurrentSnapshotLoader(
+            modelContext: library.context,
+            pageSize: 17,
+            coversDirectory: library.root.appending(path: "covers", directoryHint: .isDirectory),
+            booksDirectory: library.root
+        )
+
+        let first = try await loader.load { progress.values.append($0) }
+        let second = try await loader.load()
+
+        #expect(first.count == 513)
+        #expect(Set(first.map(\.id)).count == 513)
+        #expect(second.map(\.id) == first.map(\.id))
+        #expect(progress.values.first?.completedCount == 0)
+        #expect(progress.values.last?.completedCount == 513)
+        #expect(progress.values.last?.fractionCompleted == 1)
+        #expect(zip(progress.values, progress.values.dropFirst()).allSatisfy {
+            $0.completedCount <= $1.completedCount
+        })
+    }
+
+    @Test func currentSnapshotLoaderStopsBeforePublishingCancelledRemainder() async throws {
+        let library = try await TestLibrary()
+        for index in 0..<40 {
+            let book = Book(
+                fileName: "cancel-\(index).epub",
+                originalFileName: "Cancel \(index).epub"
+            )
+            library.context.insert(book)
+        }
+        try library.context.save()
+        let progress = TimeMachineProgressRecorder()
+        let loader = LibraryTimeMachineCurrentSnapshotLoader(
+            modelContext: library.context,
+            pageSize: 5,
+            coversDirectory: library.root,
+            booksDirectory: library.root,
+            beforePage: { page in
+                if page == 2 { throw CancellationError() }
+            }
+        )
+
+        do {
+            _ = try await loader.load { progress.values.append($0) }
+            Issue.record("Expected the paged snapshot load to be cancelled")
+        } catch is CancellationError {
+            // Expected: no partially built array is returned to the caller.
+        }
+
+        #expect(progress.values.last?.completedCount == 10)
+        #expect(progress.values.last?.totalCount == 40)
+    }
+
+    @Test func revisionReloadCoalescerRunsOnlyTheNewestRequest() async throws {
+        let coalescer = LibraryTimeMachineReloadCoalescer()
+        let recorder = TimeMachineProgressRecorder()
+
+        coalescer.schedule(delay: .milliseconds(25)) { recorder.reloads.append(1) }
+        coalescer.schedule(delay: .milliseconds(25)) { recorder.reloads.append(2) }
+        coalescer.schedule(delay: .milliseconds(25)) { recorder.reloads.append(3) }
+        try await Task.sleep(for: .milliseconds(80))
+
+        #expect(recorder.reloads == [3])
     }
 
     private func snapshot(

@@ -2,19 +2,6 @@ import Observation
 import SwiftData
 import SwiftUI
 
-@MainActor
-private func libraryTimeMachineBooks(in context: ModelContext) throws -> [Book] {
-    var descriptor = FetchDescriptor<Book>()
-    descriptor.relationshipKeyPathsForPrefetching = [
-        \Book.readingSessions,
-        \Book.highlights,
-        \Book.collections,
-        \Book.assets,
-        \Book.work,
-    ]
-    return try context.fetch(descriptor)
-}
-
 nonisolated enum LibraryTimeMachineBookFilter: String, CaseIterable, Identifiable, Sendable {
     case changed
     case restorable
@@ -86,6 +73,8 @@ final class LibraryTimeMachineViewModel {
     private(set) var restoreError: String?
     private(set) var changedCount = 0
     private(set) var restorableCount = 0
+    private(set) var snapshotLoadProgress: LibraryTimeMachineSnapshotLoadProgress?
+    private(set) var snapshotLoadPurpose: LibraryTimeMachineSnapshotLoadPurpose?
 
     @ObservationIgnored private var loadedSnapshot: LibraryTimeMachineSnapshot?
     @ObservationIgnored private var allDiffs: [LibraryTimeMachineBookDiff] = []
@@ -93,6 +82,9 @@ final class LibraryTimeMachineViewModel {
     @ObservationIgnored private var activeDiffBuildID: UUID?
     @ObservationIgnored private var visibleDiffTask: Task<Void, Never>?
     @ObservationIgnored private var diffRevision = 0
+    @ObservationIgnored private var snapshotLoadGeneration = 0
+
+    var isSnapshotLoading: Bool { snapshotLoadPurpose != nil }
 
     var selectedDiff: LibraryTimeMachineBookDiff? {
         guard let selectedBookID else { return nil }
@@ -110,6 +102,9 @@ final class LibraryTimeMachineViewModel {
             selectedBackupID = backups.first?.id
         }
         if backups.isEmpty {
+            snapshotLoadGeneration &+= 1
+            snapshotLoadProgress = nil
+            snapshotLoadPurpose = nil
             visibleDiffTask?.cancel()
             loadedSnapshot = nil
             allDiffs = []
@@ -123,26 +118,50 @@ final class LibraryTimeMachineViewModel {
         }
     }
 
-    func loadSelectedBackup(currentBooks: [Book]) async {
+    func loadSelectedBackup(
+        using currentSnapshotLoader: LibraryTimeMachineCurrentSnapshotLoader
+    ) async {
         guard let backupURL = selectedBackupID else { return }
+        snapshotLoadGeneration &+= 1
+        let generation = snapshotLoadGeneration
         phase = .loading
+        snapshotLoadPurpose = .opening
+        snapshotLoadProgress = nil
         restoreError = nil
         restoreNotice = nil
         await Task.yield()
 
         do {
-            let snapshot = try await Task.detached(priority: .userInitiated) {
+            let backupTask = Task.detached(priority: .userInitiated) {
                 try LibraryTimeMachineReader.load(backupURL)
-            }.value
-            guard selectedBackupID == backupURL, !Task.isCancelled else { return }
+            }
+            defer { backupTask.cancel() }
+            let currentSnapshots = try await currentSnapshotLoader.load {
+                [weak self] progress in
+                guard let self, snapshotLoadGeneration == generation else { return }
+                snapshotLoadProgress = progress
+            }
+            let snapshot = try await backupTask.value
+            guard selectedBackupID == backupURL,
+                  snapshotLoadGeneration == generation,
+                  !Task.isCancelled else { return }
             loadedSnapshot = snapshot
-            await rebuildDiff(currentBooks: currentBooks)
+            await rebuildDiff(currentSnapshots: currentSnapshots)
             guard selectedBackupID == backupURL,
                   loadedSnapshot?.backupURL == backupURL,
+                  snapshotLoadGeneration == generation,
                   !Task.isCancelled else { return }
+            finishSnapshotLoad(generation: generation)
             phase = .loaded
+        } catch is CancellationError {
+            guard snapshotLoadGeneration == generation else { return }
+            finishSnapshotLoad(generation: generation)
+            phase = loadedSnapshot == nil ? .idle : .loaded
         } catch {
-            guard selectedBackupID == backupURL, !Task.isCancelled else { return }
+            guard selectedBackupID == backupURL,
+                  snapshotLoadGeneration == generation,
+                  !Task.isCancelled else { return }
+            finishSnapshotLoad(generation: generation)
             loadedSnapshot = nil
             allDiffs = []
             diffsByID = [:]
@@ -156,12 +175,52 @@ final class LibraryTimeMachineViewModel {
         }
     }
 
-    func rebuildDiff(currentBooks: [Book]) async {
+    func refreshCurrentSnapshot(
+        using currentSnapshotLoader: LibraryTimeMachineCurrentSnapshotLoader
+    ) async {
+        guard loadedSnapshot != nil else {
+            await loadSelectedBackup(using: currentSnapshotLoader)
+            return
+        }
+        snapshotLoadGeneration &+= 1
+        let generation = snapshotLoadGeneration
+        snapshotLoadPurpose = .refreshing
+        snapshotLoadProgress = nil
+        do {
+            let currentSnapshots = try await currentSnapshotLoader.load {
+                [weak self] progress in
+                guard let self, snapshotLoadGeneration == generation else { return }
+                snapshotLoadProgress = progress
+            }
+            guard snapshotLoadGeneration == generation, !Task.isCancelled else { return }
+            await rebuildDiff(currentSnapshots: currentSnapshots)
+            guard snapshotLoadGeneration == generation, !Task.isCancelled else { return }
+            finishSnapshotLoad(generation: generation)
+        } catch is CancellationError {
+            guard snapshotLoadGeneration == generation else { return }
+            finishSnapshotLoad(generation: generation)
+        } catch {
+            guard snapshotLoadGeneration == generation, !Task.isCancelled else { return }
+            finishSnapshotLoad(generation: generation)
+            phase = .failed(error.localizedDescription)
+        }
+    }
+
+    func cancelSnapshotLoad() {
+        snapshotLoadGeneration &+= 1
+        snapshotLoadProgress = nil
+        snapshotLoadPurpose = nil
+        if phase == .loading {
+            phase = loadedSnapshot == nil ? .idle : .loaded
+        }
+    }
+
+    func rebuildDiff(
+        currentSnapshots: [LibraryTimeMachineBookSnapshot]
+    ) async {
         guard let loadedSnapshot else { return }
         let buildID = UUID()
         activeDiffBuildID = buildID
-        let currentSnapshots = await LibraryTimeMachineDiffBuilder.snapshotCurrentBooks(currentBooks)
-        guard !Task.isCancelled, activeDiffBuildID == buildID else { return }
         let diffs = await Self.compare(
             backupBooks: loadedSnapshot.books,
             currentBooks: currentSnapshots
@@ -181,6 +240,12 @@ final class LibraryTimeMachineViewModel {
         changedCount = changed
         restorableCount = restorable
         scheduleVisibleDiffRecompute(immediately: true)
+    }
+
+    private func finishSnapshotLoad(generation: Int) {
+        guard snapshotLoadGeneration == generation else { return }
+        snapshotLoadProgress = nil
+        snapshotLoadPurpose = nil
     }
 
     @concurrent
@@ -215,6 +280,7 @@ final class LibraryTimeMachineViewModel {
     func restorePending(
         modelContext: ModelContext,
         backupFolder: URL,
+        currentSnapshotLoader: LibraryTimeMachineCurrentSnapshotLoader,
         onBackupsChanged: () -> Void
     ) async {
         guard let pendingRestore, !isRestoring else { return }
@@ -236,9 +302,8 @@ final class LibraryTimeMachineViewModel {
                 bookTitle: pendingRestore.snapshot.displayTitle
             )
             do {
-                await rebuildDiff(
-                    currentBooks: try libraryTimeMachineBooks(in: modelContext)
-                )
+                let currentSnapshots = try await currentSnapshotLoader.load()
+                await rebuildDiff(currentSnapshots: currentSnapshots)
             } catch {
                 // The restore is already durable. Keep its success visible even
                 // when the follow-up comparison cannot be refreshed.
@@ -321,6 +386,8 @@ struct LibraryTimeMachineSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @State private var model = LibraryTimeMachineViewModel()
+    @State private var snapshotLoadTask: Task<Void, Never>?
+    @State private var revisionReloadCoalescer = LibraryTimeMachineReloadCoalescer()
 
     var body: some View {
         @Bindable var model = model
@@ -329,7 +396,9 @@ struct LibraryTimeMachineSheet: View {
             LibraryTimeMachineHeader(
                 backupCount: model.backups.count,
                 changedCount: model.changedCount,
-                isLoading: model.phase == .loading
+                loadProgress: model.snapshotLoadProgress,
+                loadPurpose: model.snapshotLoadPurpose,
+                onCancelLoad: cancelSnapshotLoad
             )
             Divider()
             HSplitView {
@@ -346,9 +415,7 @@ struct LibraryTimeMachineSheet: View {
                     searchText: $model.searchText,
                     selection: $model.selectedBookID,
                     resultCount: model.visibleDiffs.count,
-                    onRetry: {
-                        Task { await loadSelectedBackup() }
-                    }
+                    onRetry: startSelectedBackupLoad
                 )
                 .frame(minWidth: 285, idealWidth: 320, maxWidth: 390)
 
@@ -373,22 +440,20 @@ struct LibraryTimeMachineSheet: View {
         }
         .frame(minWidth: 980, idealWidth: 1080, maxWidth: 1320, minHeight: 620, idealHeight: 720)
         .background { ThemedBackground() }
-        .task {
+        .onAppear {
             model.reloadBackups(in: backupFolder)
+            startSelectedBackupLoad()
         }
-        .task(id: model.selectedBackupID) {
-            await loadSelectedBackup()
+        .onChange(of: model.selectedBackupID) {
+            startSelectedBackupLoad()
         }
         .onChange(of: LibraryMutationLog.shared.catalogRevision) {
-            Task {
-                do {
-                    await model.rebuildDiff(
-                        currentBooks: try libraryTimeMachineBooks(in: modelContext)
-                    )
-                } catch {
-                    model.reportCatalogLoadFailure(error)
-                }
-            }
+            scheduleRevisionReload()
+        }
+        .onDisappear {
+            snapshotLoadTask?.cancel()
+            revisionReloadCoalescer.cancel()
+            model.cancelSnapshotLoad()
         }
         .confirmationDialog(
             model.pendingRestore?.scope.confirmationTitle ?? "Restore from Backup?",
@@ -400,6 +465,7 @@ struct LibraryTimeMachineSheet: View {
                     await model.restorePending(
                         modelContext: modelContext,
                         backupFolder: backupFolder,
+                        currentSnapshotLoader: makeCurrentSnapshotLoader(),
                         onBackupsChanged: onBackupsChanged
                     )
                 }
@@ -411,23 +477,44 @@ struct LibraryTimeMachineSheet: View {
         .accessibilityIdentifier("libraryTimeMachine.sheet")
     }
 
-    private func loadSelectedBackup() async {
-        await Task.yield()
-        guard !Task.isCancelled else { return }
-        do {
-            await model.loadSelectedBackup(
-                currentBooks: try libraryTimeMachineBooks(in: modelContext)
-            )
-        } catch {
-            model.reportCatalogLoadFailure(error)
+    private func startSelectedBackupLoad() {
+        revisionReloadCoalescer.cancel()
+        snapshotLoadTask?.cancel()
+        model.cancelSnapshotLoad()
+        guard model.selectedBackupID != nil else { return }
+        let loader = makeCurrentSnapshotLoader()
+        snapshotLoadTask = Task { @MainActor in
+            await model.loadSelectedBackup(using: loader)
         }
+    }
+
+    private func scheduleRevisionReload() {
+        snapshotLoadTask?.cancel()
+        model.cancelSnapshotLoad()
+        guard model.selectedBackupID != nil else { return }
+        let loader = makeCurrentSnapshotLoader()
+        revisionReloadCoalescer.schedule {
+            await model.refreshCurrentSnapshot(using: loader)
+        }
+    }
+
+    private func cancelSnapshotLoad() {
+        snapshotLoadTask?.cancel()
+        revisionReloadCoalescer.cancel()
+        model.cancelSnapshotLoad()
+    }
+
+    private func makeCurrentSnapshotLoader() -> LibraryTimeMachineCurrentSnapshotLoader {
+        LibraryTimeMachineCurrentSnapshotLoader(modelContext: modelContext)
     }
 }
 
 private struct LibraryTimeMachineHeader: View {
     let backupCount: Int
     let changedCount: Int
-    let isLoading: Bool
+    let loadProgress: LibraryTimeMachineSnapshotLoadProgress?
+    let loadPurpose: LibraryTimeMachineSnapshotLoadPurpose?
+    let onCancelLoad: () -> Void
 
     @Environment(\.theme) private var theme
 
@@ -447,10 +534,25 @@ private struct LibraryTimeMachineHeader: View {
                     .foregroundStyle(theme.textSecondary)
             }
             Spacer(minLength: 16)
-            if isLoading {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel("Opening backup")
+            if let loadPurpose {
+                OperationProgressView(
+                    title: Text(loadPurpose == .opening
+                        ? "Reading current library…"
+                        : "Refreshing current library…"),
+                    detail: nil,
+                    value: loadProgress?.fractionCompleted ?? 0,
+                    completedCount: loadProgress?.completedCount ?? 0,
+                    totalCount: loadProgress?.totalCount ?? 0,
+                    accessibilityLabel: Text("Library snapshot progress"),
+                    accessibilityValue: Text(
+                        "\(loadProgress?.completedCount ?? 0) of \(loadProgress?.totalCount ?? 0) books"
+                    ),
+                    announcementName: String(localized: "Library snapshot"),
+                    cancelLabel: Text("Cancel"),
+                    canCancel: true,
+                    onCancel: onCancelLoad
+                )
+                .frame(width: 300)
             } else if backupCount > 0 {
                 Text(
                     "\(backupCount) backups · \(changedCount) changes",
