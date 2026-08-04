@@ -521,4 +521,130 @@ struct KindleSyncPlanTests {
 
         #expect(store.ensureProfile(for: info).lastSeenAt == fixedNow)
     }
+
+    @Test func executionReportPreservesEveryOutcomeAndRetriesOnlyProvenSafeWork() {
+        let succeededID = UUID()
+        let failedID = UUID()
+        let unknownID = UUID()
+        let selected = [
+            executionPlanItem(id: "add|succeeded", bookID: succeededID, title: "Sent"),
+            executionPlanItem(id: "add|failed", bookID: failedID, title: "Failed"),
+            executionPlanItem(id: "add|unknown", bookID: unknownID, title: "Unknown"),
+        ]
+        let info = DeviceInfo(
+            name: "Test Kindle",
+            model: "Paperwhite",
+            kind: .massStorage,
+            totalBytes: 1,
+            freeBytes: 1,
+            identifier: "kindle:test"
+        )
+        var state = KindleSyncExecutionState(selectedItems: selected, deviceInfo: info)
+        state.markSucceeded(selected[0].id)
+        state.mergeTransferSnapshots([
+            failedID: KindleTransferExecutionSnapshot(
+                bookID: failedID,
+                outcome: .failed,
+                progress: 1,
+                detail: "Source disappeared",
+                retryEligibility: .safe
+            ),
+            unknownID: KindleTransferExecutionSnapshot(
+                bookID: unknownID,
+                outcome: .deliveryUnknown,
+                progress: 1,
+                detail: "Connection ended during delivery",
+                retryEligibility: .deliveryUnknown
+            ),
+        ])
+
+        let report = state.makeReport()
+
+        #expect(report.items.map(\.outcome) == [.succeeded, .failed, .deliveryUnknown])
+        #expect(report.safeRetryPlanItemIDs == Set([selected[1].id]))
+        #expect(report.succeededCount == 1)
+        #expect(report.failedCount == 1)
+        #expect(report.deliveryUnknownCount == 1)
+        #expect(report.needsMassStorageEjectGuidance)
+    }
+
+    @Test func executionProgressIsDeterminateAndCancellationStopsAtItemBoundaries() {
+        let selected = [
+            executionPlanItem(id: "remove|one", action: .remove, title: "One"),
+            executionPlanItem(id: "remove|two", action: .remove, title: "Two"),
+            executionPlanItem(id: "remove|three", action: .remove, title: "Three"),
+        ]
+        let info = DeviceInfo(
+            name: "Test Kindle",
+            model: "Paperwhite",
+            kind: .mtp,
+            totalBytes: 1,
+            freeBytes: 1,
+            identifier: "mtp:test"
+        )
+        var state = KindleSyncExecutionState(selectedItems: selected, deviceInfo: info)
+        state.markSucceeded(selected[0].id)
+        state.markRunning(selected[1].id)
+
+        #expect(state.progress.completedCount == 1)
+        #expect(state.progress.totalCount == 3)
+        #expect(state.progress.fractionCompleted == 1.0 / 3.0)
+        #expect(state.progress.currentTitle == "Two")
+
+        state.requestCancellation()
+        state.cancelUnfinished()
+        let report = state.makeReport()
+
+        #expect(report.cancelledCount == 2)
+        #expect(report.safeRetryPlanItemIDs == Set([selected[1].id, selected[2].id]))
+        #expect(!report.needsMassStorageEjectGuidance)
+    }
+
+    @Test func verifiedPayloadRecoveryIsNeverOfferedAsPlanRetry() {
+        let bookID = UUID()
+        let item = executionPlanItem(id: "update|book", action: .update, bookID: bookID)
+        var state = KindleSyncExecutionState(
+            selectedItems: [item],
+            deviceInfo: DeviceInfo(
+                name: "Test Kindle",
+                model: "Scribe",
+                kind: .mtp,
+                totalBytes: 1,
+                freeBytes: 1,
+                identifier: "mtp:test"
+            )
+        )
+        state.mergeTransferSnapshots([
+            bookID: KindleTransferExecutionSnapshot(
+                bookID: bookID,
+                outcome: .failed,
+                progress: 1,
+                detail: "Receipt persistence pending",
+                retryEligibility: .durableRecovery
+            ),
+        ])
+
+        #expect(state.makeReport().safeRetryPlanItemIDs.isEmpty)
+    }
+
+    private func executionPlanItem(
+        id: String,
+        action: KindleSyncAction = .add,
+        bookID: UUID? = nil,
+        title: String = "Book"
+    ) -> KindleSyncPlanItem {
+        KindleSyncPlanItem(
+            id: id,
+            action: action,
+            reason: action == .remove ? .onlyOnDevice : .notOnDevice,
+            bookID: bookID,
+            deviceBookID: action == .remove ? "device|\(id)" : nil,
+            deviceFileName: action == .remove ? "\(title).azw3" : nil,
+            title: title,
+            author: nil,
+            sourceFormat: action == .remove ? nil : "EPUB",
+            targetFormat: action == .remove ? nil : "AZW3",
+            selectedByDefault: true
+        )
+    }
 }

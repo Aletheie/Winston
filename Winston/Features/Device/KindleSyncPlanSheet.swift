@@ -41,6 +41,7 @@ struct KindleSyncPlanSheet: View {
     @Environment(TransferQueue.self) private var transferQueue
     @Environment(KindleSyncProfileStore.self) private var profileStore
     @Environment(ToastCenter.self) private var toasts
+    @Environment(OperationReportStore.self) private var operationReports
 
     @State private var plan: KindleSyncPlan?
     @State private var sections: [KindleSyncPlanSectionData] = []
@@ -52,6 +53,7 @@ struct KindleSyncPlanSheet: View {
     @State private var executionState: KindleSyncExecutionState?
     @State private var executionReport: KindleSyncExecutionReport?
     @State private var isEjectingAfterSync = false
+    @State private var ejectTask: Task<Void, Never>?
     @State private var showsRemovalConfirmation = false
     @State private var showsProfileEditor = false
     @State private var profileEditorMode: KindleProfileEditorMode = .create
@@ -106,7 +108,7 @@ struct KindleSyncPlanSheet: View {
         }
         .frame(minWidth: 760, idealWidth: 840, minHeight: 560, idealHeight: 680)
         .background(theme.background)
-        .interactiveDismissDisabled(isApplying)
+        .interactiveDismissDisabled(isApplying || isEjectingAfterSync)
         .task { rebuildPlan(resetSelection: true) }
         .onChange(of: readModel.generation) { rebuildPlan(resetSelection: false) }
         .onChange(of: readModel.isReady) { rebuildPlan(resetSelection: false) }
@@ -396,6 +398,7 @@ struct KindleSyncPlanSheet: View {
         }
         guard let report = executionState?.makeReport() else { return }
         executionReport = report
+        operationReports.upsert(.kindle(report))
         rebuildPlan(resetSelection: true)
     }
 
@@ -477,11 +480,14 @@ struct KindleSyncPlanSheet: View {
     }
 
     private func ejectAfterSync(_ report: KindleSyncExecutionReport) {
-        guard !isEjectingAfterSync,
+        guard ejectTask == nil,
               monitor.info?.identifier == report.deviceIdentifier else { return }
         isEjectingAfterSync = true
-        Task { @MainActor in
-            defer { isEjectingAfterSync = false }
+        ejectTask = Task { @MainActor in
+            defer {
+                isEjectingAfterSync = false
+                ejectTask = nil
+            }
             do {
                 try await monitor.userDisconnect()
                 executionReport = nil
@@ -546,48 +552,48 @@ private struct KindleSyncPlanHeader: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "externaldrive.badge.checkmark")
-                .font(.system(size: 30, weight: .light))
-                .foregroundStyle(theme.accent)
+        SheetHeader {
+            HStack(spacing: 14) {
+                Image(systemName: "externaldrive.badge.checkmark")
+                    .font(.system(size: 30, weight: .light))
+                    .foregroundStyle(theme.accent)
 
-            VStack(alignment: .leading, spacing: 3) {
-                theme.styledText(terminal: "// kindle_sync_plan", native: "Kindle Sync Plan")
-                    .font(theme.body(size: 17, weight: .bold))
-                    .foregroundStyle(theme.textPrimary)
-                Text("Review exactly what will change on \(deviceName).")
-                    .font(theme.label(size: 11, weight: .regular))
-                    .foregroundStyle(theme.textSecondary)
-            }
+                VStack(alignment: .leading, spacing: 3) {
+                    theme.styledText(terminal: "// kindle_sync_plan", native: "Kindle Sync Plan")
+                        .font(theme.body(size: 17, weight: .bold))
+                        .foregroundStyle(theme.textPrimary)
+                    Text("Review exactly what will change on \(deviceName).")
+                        .font(theme.label(size: 11, weight: .regular))
+                        .foregroundStyle(theme.textSecondary)
+                }
 
-            Spacer()
+                Spacer()
 
-            Menu {
-                ForEach(profiles) { profile in
-                    Button {
-                        onSelectProfile(profile.id)
-                    } label: {
-                        if profile.id == activeProfileID {
-                            Label(profile.name, systemImage: "checkmark")
-                        } else {
-                            Text(profile.name)
+                Menu {
+                    ForEach(profiles) { profile in
+                        Button {
+                            onSelectProfile(profile.id)
+                        } label: {
+                            if profile.id == activeProfileID {
+                                Label(profile.name, systemImage: "checkmark")
+                            } else {
+                                Text(profile.name)
+                            }
                         }
                     }
+                    Divider()
+                    Button("New Profile…", action: onCreateProfile)
+                    Button("Rename Current Profile…", action: onRenameProfile)
+                        .disabled(activeProfileID == nil)
+                } label: {
+                    Label(profileName ?? String(localized: "Profile"), systemImage: "person.crop.circle")
                 }
-                Divider()
-                Button("New Profile…", action: onCreateProfile)
-                Button("Rename Current Profile…", action: onRenameProfile)
-                    .disabled(activeProfileID == nil)
-            } label: {
-                Label(profileName ?? String(localized: "Profile"), systemImage: "person.crop.circle")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(isApplying)
+                .help("Use a separate sync history for each Kindle.")
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .disabled(isApplying)
-            .help("Use a separate sync history for each Kindle.")
         }
-        .padding(18)
-        .background(.bar)
     }
 }
 
@@ -753,6 +759,7 @@ private struct KindleSyncPlanEmptyState: View {
 private struct KindleSyncPlanFooter: View {
     let selectedCount: Int
     let isApplying: Bool
+    let progress: KindleSyncExecutionProgress?
     let canApply: Bool
     let onRefresh: () -> Void
     let onCancel: () -> Void
@@ -762,41 +769,260 @@ private struct KindleSyncPlanFooter: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button(action: onRefresh) {
-                Label("Refresh Plan", systemImage: "arrow.clockwise")
-            }
-            .disabled(isApplying)
+        SheetActionBar {
+            HStack(spacing: 10) {
+                Button(action: onRefresh) {
+                    Label("Refresh Plan", systemImage: "arrow.clockwise")
+                }
+                .disabled(isApplying)
 
-            Spacer()
+                Spacer()
 
-            if isApplying {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Applying changes…")
-                    .font(theme.label(size: 10))
-                    .foregroundStyle(theme.textSecondary)
-            } else {
-                Text("\(selectedCount) changes selected")
-                    .font(theme.label(size: 10))
-                    .foregroundStyle(theme.textSecondary)
-                    .monospacedDigit()
-            }
+                if isApplying, let progress {
+                    OperationProgressView(
+                        title: Text(progress.isCancelling ? "Cancelling safely…" : progress.phaseTitle),
+                        detail: progress.currentTitle.map(Text.init),
+                        value: progress.fractionCompleted,
+                        completedCount: progress.completedCount,
+                        totalCount: progress.totalCount,
+                        accessibilityLabel: Text("Kindle sync progress"),
+                        accessibilityValue: Text("\(progress.completedCount) of \(progress.totalCount) changes complete"),
+                        announcementName: String(localized: "Kindle sync"),
+                        cancelLabel: nil,
+                        canCancel: false,
+                        onCancel: nil
+                    )
+                    .frame(width: 260)
+                } else {
+                    Text("\(selectedCount) changes selected")
+                        .font(theme.label(size: 10))
+                        .foregroundStyle(theme.textSecondary)
+                        .monospacedDigit()
+                }
 
-            if isApplying {
-                Button("Cancel Sync", action: onCancelApply)
-                    .keyboardShortcut(.cancelAction)
-            } else {
-                Button("Cancel", action: onCancel)
-                    .keyboardShortcut(.cancelAction)
+                if isApplying {
+                    Button("Cancel Sync", action: onCancelApply)
+                        .keyboardShortcut(.cancelAction)
+                        .disabled(progress?.isCancelling == true)
+                } else {
+                    Button("Cancel", action: onCancel)
+                        .keyboardShortcut(.cancelAction)
+                }
+                Button("Apply \(selectedCount) Changes", action: onApply)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canApply || isApplying)
             }
-            Button("Apply \(selectedCount) Changes", action: onApply)
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(!canApply || isApplying)
         }
-        .padding(14)
-        .background(.bar)
+    }
+}
+
+private struct KindleSyncExecutionResultSheet: View {
+    let report: KindleSyncExecutionReport
+    let isCurrentDevice: Bool
+    let isDeviceConnected: Bool
+    let isEjecting: Bool
+    let onRetry: () -> Void
+    let onEject: () -> Void
+    let onKeepConnected: () -> Void
+    let onDone: () -> Void
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SheetHeader {
+                VStack(alignment: .leading, spacing: 6) {
+                    theme.styledText(
+                        terminal: "// kindle_sync_result",
+                        native: "Kindle Sync Results"
+                    )
+                    .font(theme.body(size: 16, weight: .bold))
+                    OperationResultSummary(metrics: resultMetrics)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Divider()
+
+            List(report.items) { item in
+                KindleSyncExecutionResultRow(item: item)
+            }
+            .listStyle(.inset)
+
+            if report.deliveryUnknownCount > 0 {
+                Divider()
+                Label {
+                    Text("Delivery could not be verified for some books. Review Kindle transfer recovery before sending them again.")
+                } icon: {
+                    Image(systemName: "questionmark.diamond.fill")
+                }
+                .font(theme.label(size: 11))
+                .foregroundStyle(theme.highlight)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .accessibilityElement(children: .combine)
+            }
+
+            if report.successfulDeviceMutationCount > 0 {
+                Divider()
+                transportGuidance
+                    .padding(12)
+            }
+
+            SheetActionBar {
+                HStack(spacing: 10) {
+                    if report.canRetry {
+                        Button("Retry Safe Changes", action: onRetry)
+                            .disabled(!isCurrentDevice || isEjecting)
+                            .help(retryHelp)
+                    }
+                    Spacer()
+                    if report.needsMassStorageEjectGuidance,
+                       isCurrentDevice,
+                       isDeviceConnected {
+                        Button("Keep Connected", action: onKeepConnected)
+                            .disabled(isEjecting)
+                        Button("Eject and Finish", action: onEject)
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isEjecting)
+                    } else {
+                        Button("Done", action: onDone)
+                            .buttonStyle(.borderedProminent)
+                            .keyboardShortcut(.defaultAction)
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 560, idealWidth: 680, minHeight: 440, idealHeight: 600)
+        .interactiveDismissDisabled(
+            report.needsMassStorageEjectGuidance
+                && isCurrentDevice
+                && isDeviceConnected
+        )
+    }
+
+    private var resultMetrics: [OperationResultMetric] {
+        [
+            OperationResultMetric(id: "succeeded", value: report.succeededCount, label: "Succeeded", kind: .success),
+            OperationResultMetric(id: "failed", value: report.failedCount, label: "Failed", kind: .error),
+            OperationResultMetric(id: "cancelled", value: report.cancelledCount, label: "Cancelled", kind: .information),
+            OperationResultMetric(id: "review", value: report.deliveryUnknownCount, label: "Need Review", kind: .warning),
+        ]
+    }
+
+    @ViewBuilder
+    private var transportGuidance: some View {
+        if report.connectionKind == .massStorage {
+            Label {
+                if isCurrentDevice, isDeviceConnected {
+                    Text("Eject this Kindle before unplugging it so storage closes safely and the Kindle can re-index changed books.")
+                } else {
+                    Text("The synced Kindle is no longer connected. Let it finish indexing before opening changed books.")
+                }
+            } icon: {
+                Image(systemName: "eject.circle.fill")
+            }
+            .foregroundStyle(theme.accent)
+            .accessibilityElement(children: .combine)
+        } else {
+            Label(
+                "The MTP transfer is closed. The Kindle may need a moment to index changed books; no disk eject is required.",
+                systemImage: "checkmark.circle.fill"
+            )
+            .foregroundStyle(theme.success)
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var retryHelp: LocalizedStringResource {
+        isCurrentDevice
+            ? "Retries only proven failures and cancelled work. Successful and delivery-unknown items stay excluded."
+            : "Reconnect the same Kindle to retry these changes."
+    }
+}
+
+private struct KindleSyncExecutionResultRow: View {
+    let item: KindleSyncExecutionItem
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: item.outcome.systemImage)
+                .foregroundStyle(item.outcome.color(in: theme))
+                .frame(width: 18)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .lineLimit(2)
+                Text(item.outcome.title)
+                    .font(theme.label(size: 10))
+                    .foregroundStyle(theme.textSecondary)
+                if let detail = item.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(theme.label(size: 9))
+                        .foregroundStyle(theme.textTertiary)
+                        .textSelection(.enabled)
+                }
+            }
+            Spacer()
+            Text(item.action.title)
+                .font(theme.label(size: 9, weight: .semibold))
+                .foregroundStyle(theme.textTertiary)
+        }
+        .padding(.vertical, 3)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            Text("\(item.title), \(String(localized: item.outcome.title))")
+        )
+    }
+}
+
+private extension KindleSyncExecutionProgress {
+    var phaseTitle: LocalizedStringResource {
+        guard let currentAction else { return "Applying changes…" }
+        return switch currentAction {
+        case .add: "Sending a new book…"
+        case .update: "Updating a book…"
+        case .repairCover: "Repairing a cover…"
+        case .remove: "Removing a device copy…"
+        case .keep, .blocked: "Applying changes…"
+        }
+    }
+}
+
+private extension KindleSyncExecutionOutcome {
+    var title: LocalizedStringResource {
+        switch self {
+        case .pending: "Pending"
+        case .running: "In Progress"
+        case .succeeded: "Succeeded"
+        case .failed: "Failed"
+        case .cancelled: "Cancelled before delivery"
+        case .deliveryUnknown: "Delivery needs review"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .pending: "clock"
+        case .running: "arrow.triangle.2.circlepath"
+        case .succeeded: "checkmark.circle.fill"
+        case .failed: "xmark.circle.fill"
+        case .cancelled: "stop.circle.fill"
+        case .deliveryUnknown: "questionmark.diamond.fill"
+        }
+    }
+
+    func color(in theme: Theme) -> Color {
+        switch self {
+        case .pending, .cancelled: theme.textSecondary
+        case .running: theme.accent
+        case .succeeded: theme.success
+        case .failed: theme.destructive
+        case .deliveryUnknown: theme.highlight
+        }
     }
 }
 
