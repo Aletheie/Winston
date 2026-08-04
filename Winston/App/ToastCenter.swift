@@ -30,6 +30,12 @@ final class ToastCenter {
     ) {
         let resolvedPersistence = persistence
             ?? ((style == .error || action != nil) ? .untilDismissed : .automatic)
+        guard !messages.contains(where: {
+            $0.text == text
+                && $0.style == style
+                && $0.action == action
+                && $0.persistence == resolvedPersistence
+        }) else { return }
         let message = Message(
             text: text,
             style: style,

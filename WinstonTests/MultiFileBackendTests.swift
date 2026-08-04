@@ -234,7 +234,9 @@ struct MultiFileBackendTests {
         #expect(fixture.target.origin == .imported)
         #expect(try Data(contentsOf: fixture.target.fileURL) == Data("newer user file".utf8))
         #expect(fixture.book.assets.filter { $0.format == "MOBI" }.count == 1)
-        #expect(toasts.messages.contains { $0.style == .info && $0.text.contains("changed during conversion") })
+        #expect(toasts.messages.contains {
+            $0.style == .info && $0.persistence == .automatic
+        })
     }
 
     @Test func deletedTargetDuringConversionIsNotRecreatedByStaleResult() async throws {
