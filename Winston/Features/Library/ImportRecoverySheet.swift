@@ -196,7 +196,7 @@ struct ImportRecoverySheet: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(.bar)
+        .themedChrome(role: .sheetAction)
     }
 
     private var totalItemCount: Int {

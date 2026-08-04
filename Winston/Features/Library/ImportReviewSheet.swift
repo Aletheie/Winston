@@ -185,14 +185,23 @@ struct ImportReviewSheet: View {
             HStack(spacing: 8) {
                 switch batch.phase {
                 case .preparing:
-                    ProgressView(
-                        value: Double(batch.completedPreparationCount),
-                        total: Double(max(1, batch.requestedCount))
+                    OperationProgressView(
+                        title: Text("Inspecting import files…"),
+                        detail: Text("No library changes are made during inspection."),
+                        value: Double(batch.completedPreparationCount)
+                            / Double(max(1, batch.requestedCount)),
+                        completedCount: batch.completedPreparationCount,
+                        totalCount: batch.requestedCount,
+                        accessibilityLabel: Text("Import inspection progress"),
+                        accessibilityValue: Text(
+                            "\(batch.completedPreparationCount) of \(batch.requestedCount) files inspected"
+                        ),
+                        announcementName: String(localized: "Import inspection"),
+                        cancelLabel: nil,
+                        canCancel: false,
+                        onCancel: nil
                     )
-                    .frame(width: 150)
-                    Text("Inspecting \(batch.completedPreparationCount) of \(batch.requestedCount)…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .frame(width: 330)
                     Spacer()
                     Button("Cancel") {
                         viewModel.cancelImportReview()
@@ -252,15 +261,22 @@ struct ImportReviewSheet: View {
                 case .committing:
                     if let progress = viewModel.standardImportProgress,
                        progress.sessionID == batch.sessionID {
-                        ProgressView(value: progress.fraction)
-                            .frame(width: 160)
-                            .accessibilityLabel("Import commit progress")
-                            .accessibilityValue(
+                        OperationProgressView(
+                            title: Text(commitProgressTitle(progress)),
+                            detail: Text(progress.step.localizedProgressLabel),
+                            value: progress.fraction,
+                            completedCount: progress.completedCount,
+                            totalCount: progress.requestedCount,
+                            accessibilityLabel: Text("Import commit progress"),
+                            accessibilityValue: Text(
                                 "\(progress.completedCount) of \(progress.requestedCount) files"
-                            )
-                        Text(commitProgressTitle(progress))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            ),
+                            announcementName: String(localized: "Import"),
+                            cancelLabel: nil,
+                            canCancel: false,
+                            onCancel: nil
+                        )
+                        .frame(width: 380)
                     } else {
                         ProgressView()
                             .controlSize(.small)
@@ -310,7 +326,7 @@ struct ImportReviewSheet: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
-            .background(.bar)
+            .themedChrome(role: .sheetAction)
         }
     }
 
@@ -413,7 +429,7 @@ private struct ImportReviewFilterBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .themedChrome(role: .toolbar)
     }
 }
 
@@ -774,6 +790,8 @@ private struct ImportReviewResultView: View {
             }
             .frame(maxWidth: .infinity)
 
+            OperationResultSummary(metrics: metrics)
+
             if !outcomes.isEmpty {
                 List(items) { item in
                     HStack(spacing: 10) {
@@ -794,6 +812,30 @@ private struct ImportReviewResultView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var metrics: [OperationResultMetric] {
+        let values = Array(outcomes.values)
+        return [
+            OperationResultMetric(
+                id: "imported",
+                value: values.count { $0 == .imported },
+                label: "Imported",
+                kind: .success
+            ),
+            OperationResultMetric(
+                id: "failed",
+                value: values.count { $0 == .failed },
+                label: "Failed",
+                kind: .error
+            ),
+            OperationResultMetric(
+                id: "remaining",
+                value: values.count { $0 == .cancelled } + values.count { $0 == .skipped },
+                label: "Not imported",
+                kind: .warning
+            ),
+        ]
     }
 
     private func outcomeLabel(
