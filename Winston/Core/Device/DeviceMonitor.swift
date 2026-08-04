@@ -110,6 +110,7 @@ final class DeviceMonitor {
 
     private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var deviceDeleteSession: BulkOperationSession?
+    @ObservationIgnored private var verifiedTransfers: [String: DeviceBook] = [:]
     private var suspended = false
     private var manuallyDisconnected = false
 
@@ -192,7 +193,7 @@ final class DeviceMonitor {
     // MARK: - Polling
 
     private func poll() async {
-        guard !suspended else { return }
+        guard !suspended, !isEjecting else { return }
         if let connection {
             if await !connection.isAlive() {
                 await disconnect()
@@ -261,11 +262,13 @@ final class DeviceMonitor {
     func disconnect() async {
         await connection?.disconnect()
         connection = nil
+        verifiedTransfers = [:]
         books = []
         state = .disconnected
     }
 
     func adoptConnectionForTesting(_ newConnection: any KindleDeviceConnection, info: DeviceInfo) {
+        verifiedTransfers = [:]
         connection = newConnection
         state = .connected(info)
     }
@@ -282,6 +285,7 @@ final class DeviceMonitor {
     ) {
         guard isCurrentConnection(candidate) else { return }
         connection = nil
+        verifiedTransfers = [:]
         books = []
         state = .disconnected
     }
@@ -292,11 +296,61 @@ final class DeviceMonitor {
         guard let connection else { return }
         do {
             let refreshed = try await connection.listBooks()
-            guard refreshed != books else { return }
-            books = refreshed
+            let refreshedMatchKeys = Set(refreshed.lazy.map(\.matchKey))
+            verifiedTransfers = verifiedTransfers.filter {
+                !refreshedMatchKeys.contains($0.key)
+            }
+            let pendingVerification = verifiedTransfers.values.filter { verified in
+                !refreshed.contains { listed in
+                    listed.id == verified.id || listed.matchKey == verified.matchKey
+                }
+            }
+            let merged = (refreshed + pendingVerification).sorted {
+                let order = $0.fileName.localizedCaseInsensitiveCompare($1.fileName)
+                return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+            }
+            guard merged != books else { return }
+            books = merged
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    /// Publishes an already verified transport result immediately. Some Kindle
+    /// transports expose a stale directory listing briefly after a write; keep
+    /// the verified entry until a later listing confirms it.
+    func recordVerifiedTransfer(
+        _ result: DeviceTransferResult,
+        deviceIdentifier: String,
+        modifiedDate: Date = .now
+    ) {
+        guard let info, info.identifier == deviceIdentifier else { return }
+        let book = DeviceBook(
+            mtpItemID: info.kind == .mtp
+                ? result.transportIdentifier.flatMap(UInt32.init)
+                : nil,
+            path: info.kind == .massStorage
+                ? result.destination.relativePath
+                : nil,
+            fileName: result.destination.fileName,
+            sizeBytes: result.bytesTransferred,
+            modifiedDate: modifiedDate
+        )
+        verifiedTransfers[book.matchKey] = book
+
+        var updated = books
+        if let index = updated.firstIndex(where: {
+            $0.id == book.id || $0.matchKey == book.matchKey
+        }) {
+            updated[index] = book
+        } else {
+            updated.append(book)
+        }
+        updated.sort {
+            let order = $0.fileName.localizedCaseInsensitiveCompare($1.fileName)
+            return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+        }
+        if updated != books { books = updated }
     }
 
     func refreshInfo() async {
@@ -308,6 +362,12 @@ final class DeviceMonitor {
     }
 
     func removeBooksLocally(_ ids: Set<DeviceBook.ID>) {
+        let removedMatchKeys = Set(
+            books.lazy.filter { ids.contains($0.id) }.map(\.matchKey)
+        )
+        verifiedTransfers = verifiedTransfers.filter {
+            !removedMatchKeys.contains($0.key)
+        }
         books.removeAll { ids.contains($0.id) }
     }
 

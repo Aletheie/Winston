@@ -3,6 +3,25 @@ import AppKit
 import OSLog
 import os
 
+nonisolated struct MassStorageVolumeCandidate: Equatable, Sendable {
+    let url: URL
+    let name: String
+    let isReadOnly: Bool
+    let hasDocuments: Bool
+    let hasSystem: Bool
+
+    var hasKindleStructure: Bool { hasDocuments && hasSystem }
+
+    var hasExactKindleName: Bool {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("Kindle") == .orderedSame
+    }
+
+    var isRecognizedKindle: Bool {
+        hasExactKindleName || hasKindleStructure
+    }
+}
+
 actor MassStorageDeviceConnection: KindleDeviceConnection {
     typealias EjectVolume = @Sendable (URL) async throws -> Void
 
@@ -29,12 +48,17 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
     // MARK: - Detection
 
     nonisolated static func detectKindleVolume() -> URL? {
-        let keys: [URLResourceKey] = [.volumeNameKey, .volumeIsRemovableKey]
+        let keys: [URLResourceKey] = [
+            .volumeNameKey,
+            .volumeIsRemovableKey,
+            .volumeIsReadOnlyKey,
+        ]
         let volumes = FileManager.default.mountedVolumeURLs(
             includingResourceValuesForKeys: keys,
             options: [.skipHiddenVolumes]
         ) ?? []
 
+        var candidates: [MassStorageVolumeCandidate] = []
         for volume in volumes {
             let values = try? volume.resourceValues(forKeys: Set(keys))
             guard values?.volumeIsRemovable == true else { continue }
@@ -45,12 +69,36 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
             let name = values?.volumeName ?? ""
             let hasDocuments = (try? boundary.directoryExists(["documents"])) == true
             let hasSystem = (try? boundary.directoryExists(["system"])) == true
-
-            if name.localizedCaseInsensitiveContains("kindle") || (hasDocuments && hasSystem) {
-                return boundary.rootURL
-            }
+            candidates.append(MassStorageVolumeCandidate(
+                url: boundary.rootURL,
+                name: name,
+                isReadOnly: values?.volumeIsReadOnly ?? false,
+                hasDocuments: hasDocuments,
+                hasSystem: hasSystem
+            ))
         }
-        return nil
+        return preferredKindleVolume(in: candidates)
+    }
+
+    nonisolated static func preferredKindleVolume(
+        in candidates: [MassStorageVolumeCandidate]
+    ) -> URL? {
+        candidates
+            .filter(\.isRecognizedKindle)
+            .sorted { lhs, rhs in
+                if lhs.isReadOnly != rhs.isReadOnly {
+                    return !lhs.isReadOnly
+                }
+                if lhs.hasKindleStructure != rhs.hasKindleStructure {
+                    return lhs.hasKindleStructure
+                }
+                if lhs.hasExactKindleName != rhs.hasExactKindleName {
+                    return lhs.hasExactKindleName
+                }
+                return lhs.url.path.localizedStandardCompare(rhs.url.path) == .orderedAscending
+            }
+            .first?
+            .url
     }
 
     // MARK: - KindleDeviceConnection
@@ -102,6 +150,7 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
         progress: @escaping @Sendable (Double) -> Void
     ) throws -> DeviceTransferResult {
         try ensureConnected()
+        try boundary.ensureWritable()
         let fileName = request.destination.fileName
         guard let values = try? request.sourceURL.resourceValues(forKeys: [
             .fileSizeKey,
@@ -178,11 +227,24 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
 
     func eject() async throws {
         try ensureConnected()
+        // The mounted-volume boundary intentionally pins the root directory
+        // while Winston is connected. Release that descriptor before asking
+        // Disk Arbitration to unmount, otherwise Winston itself keeps the
+        // volume busy (OSStatus -47).
+        markDisconnected()
+        boundary.releaseForUnmount()
         do {
             try await ejectVolume(volumeURL)
-            markDisconnected()
             Log.device.info("Ejected mass-storage volume \(self.volumeURL.lastPathComponent, privacy: .public)")
         } catch {
+            do {
+                try boundary.restoreAfterFailedUnmount()
+                markConnected()
+            } catch {
+                Log.device.error(
+                    "Could not restore the mounted-volume boundary after eject failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
             Log.device.error("Eject failed: \(error.localizedDescription, privacy: .public)")
             throw error
         }
@@ -256,5 +318,9 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
 
     private nonisolated func markDisconnected() {
         connectionState.withLock { $0 = false }
+    }
+
+    private nonisolated func markConnected() {
+        connectionState.withLock { $0 = true }
     }
 }

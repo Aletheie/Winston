@@ -223,7 +223,7 @@ struct DeviceView: View {
                 onDisconnect: ejectDevice
             )
             .padding(16)
-            .background(.bar)
+            .themedChrome(role: .toolbar)
 
             if let summary = viewModel.highlightImportSummary ?? sidecarSummary {
                 Text(summary)

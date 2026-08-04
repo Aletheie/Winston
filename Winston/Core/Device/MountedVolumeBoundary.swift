@@ -118,6 +118,47 @@ nonisolated final class MountedVolumeBoundary: @unchecked Sendable {
         (try? validateConnection()) != nil
     }
 
+    func ensureWritable() throws {
+        try validateConnection()
+        var filesystem = statfs()
+        guard fstatfs(rootDescriptor, &filesystem) == 0 else {
+            throw Self.connectionError(errno)
+        }
+        guard filesystem.f_flags & UInt32(MNT_RDONLY) == 0 else {
+            throw DeviceError.readOnly
+        }
+    }
+
+    /// Releases the descriptor that pins the mounted volume so Disk
+    /// Arbitration can unmount it. Call only after serializing device work.
+    func releaseForUnmount() {
+        guard rootDescriptor >= 0 else { return }
+        Darwin.close(rootDescriptor)
+        rootDescriptor = -1
+    }
+
+    /// Re-establishes the same security boundary when an eject attempt fails.
+    func restoreAfterFailedUnmount() throws {
+        guard rootDescriptor < 0 else { return }
+        let descriptor = Darwin.open(
+            rootPath,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard descriptor >= 0 else { throw Self.connectionError(errno) }
+
+        var status = stat()
+        var filesystem = statfs()
+        guard fstat(descriptor, &status) == 0,
+              fstatfs(descriptor, &filesystem) == 0,
+              status.st_mode & S_IFMT == S_IFDIR,
+              FileIdentity(status) == rootIdentity,
+              VolumeIdentity(status: status, filesystem: filesystem) == volumeIdentity else {
+            Darwin.close(descriptor)
+            throw DeviceError.notConnected
+        }
+        rootDescriptor = descriptor
+    }
+
     func directoryExists(_ components: [String]) throws -> Bool {
         switch try openDirectory(components, createIntermediates: false) {
         case .missing:

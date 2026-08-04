@@ -170,6 +170,37 @@ struct TransferQueueTests {
         #expect(monitor.lastInventoryDelta.changedMatchKeys == ["first"])
     }
 
+    @Test func verifiedTransferRemainsVisibleUntilTheDeviceListingCatchesUp() async throws {
+        let fake = FakeKindleConnection()
+        let monitor = makeMonitor(fake)
+        let destination = try #require(DeviceTransferPath(fileName: "Fresh--winston-abc.mobi"))
+        let result = DeviceTransferResult(
+            destination: destination,
+            bytesTransferred: 42,
+            transportIdentifier: destination.relativePath
+        )
+
+        monitor.recordVerifiedTransfer(
+            result,
+            deviceIdentifier: FakeKindleConnection.fakeInfo.identifier
+        )
+        #expect(monitor.deviceFileNames == ["fresh--winston-abc"])
+
+        await monitor.refreshBooks()
+        #expect(monitor.deviceFileNames == ["fresh--winston-abc"])
+
+        await fake.setBooks([
+            DeviceBook(
+                path: destination.relativePath,
+                fileName: destination.fileName,
+                sizeBytes: 42
+            ),
+        ])
+        await monitor.refreshBooks()
+        #expect(monitor.books.count == 1)
+        #expect(monitor.deviceFileNames == ["fresh--winston-abc"])
+    }
+
     @Test func successfulEjectClearsTheMonitorOnlyAfterAcknowledgement() async throws {
         let fake = FakeKindleConnection()
         let monitor = makeMonitor(fake)
@@ -1345,6 +1376,9 @@ struct TransferQueueTests {
         #expect(receipts.isEmpty)
         #expect(queue.failedCount == 1)
         #expect(queue.hasUnresolvedDelivery)
+        let snapshot = try #require(queue.kindleSyncExecutionSnapshots[book.uuid])
+        #expect(snapshot.outcome == .deliveryUnknown)
+        #expect(snapshot.retryEligibility == .deliveryUnknown)
     }
 
     @Test func deletingLibraryBookDuringSendDoesNotInvalidateQueue() async throws {

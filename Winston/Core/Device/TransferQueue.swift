@@ -515,7 +515,8 @@ final class TransferQueue {
                         artifact: artifact,
                         itemID: itemID,
                         connection: connection,
-                        deviceInfo: deviceInfo
+                        deviceInfo: deviceInfo,
+                        monitor: monitor
                     )
                 }
                 return .applied(
@@ -591,7 +592,8 @@ final class TransferQueue {
         artifact: TransferArtifact,
         itemID: UUID,
         connection: any KindleDeviceConnection,
-        deviceInfo: DeviceInfo
+        deviceInfo: DeviceInfo,
+        monitor: DeviceMonitor
     ) async throws -> BulkOperationWarning? {
         guard !Task.isCancelled else {
             markCancelled(itemID)
@@ -620,6 +622,10 @@ final class TransferQueue {
                     }
                 }
             )
+        } catch let deviceError as DeviceError where deviceError == .readOnly {
+            // Writability is checked before the mass-storage transport creates
+            // its temporary file, so this failure is definitively safe to retry.
+            throw deviceError
         } catch {
             checkpointDeliveryUnknown(itemID, detail: error.localizedDescription)
             throw DurableTransferBoundaryError.deliveryUnknown(
@@ -633,6 +639,12 @@ final class TransferQueue {
             checkpointDeliveryUnknown(itemID, detail: detail)
             throw DurableTransferBoundaryError.deliveryUnknown(detail)
         }
+
+        monitor.recordVerifiedTransfer(
+            technicalResult,
+            deviceIdentifier: deviceInfo.identifier,
+            modifiedDate: now()
+        )
 
         try checkpointPayloadCommitted(
             itemID,

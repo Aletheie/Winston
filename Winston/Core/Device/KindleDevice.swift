@@ -179,6 +179,7 @@ nonisolated enum DeviceError: Error, LocalizedError, Equatable {
     case fileMissing
     case invalidFileName
     case unsafePath
+    case readOnly
 
     var errorDescription: String? {
         localizedDescription()
@@ -234,6 +235,12 @@ nonisolated enum DeviceError: Error, LocalizedError, Equatable {
         case .unsafePath:
             String(
                 localized: "The device path violates the mounted-volume boundary",
+                bundle: bundle,
+                locale: locale
+            )
+        case .readOnly:
+            String(
+                localized: "The Kindle is mounted read-only",
                 bundle: bundle,
                 locale: locale
             )
