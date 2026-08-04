@@ -299,6 +299,62 @@ struct EditionServiceTests {
         })
     }
 
+    @Test func approvalRebuildsSuggestionsAfterAFullCatalogInvalidation() async throws {
+        let library = try await TestLibrary()
+        let duneEPUB = insertBook(
+            library,
+            name: "dune-epub",
+            title: "Dune",
+            author: "Frank Herbert"
+        )
+        let duneMOBI = insertBook(
+            library,
+            name: "dune-mobi",
+            title: "Dune",
+            author: "Frank Herbert",
+            format: "mobi"
+        )
+        let foundationEPUB = insertBook(
+            library,
+            name: "foundation-epub",
+            title: "Foundation",
+            author: "Isaac Asimov"
+        )
+        let foundationMOBI = insertBook(
+            library,
+            name: "foundation-mobi",
+            title: "Foundation",
+            author: "Isaac Asimov",
+            format: "mobi"
+        )
+        duneEPUB.language = "en"
+        duneMOBI.language = "cs"
+        duneMOBI.translator = "Jan Novák"
+        try library.context.save()
+        let service = CatalogReconciliationService(modelContext: library.context)
+        await service.scanLibrary()
+        let duneKey = EditionMatcher.pairKey(duneEPUB.uuid, duneMOBI.uuid)
+        let foundationKey = EditionMatcher.pairKey(
+            foundationEPUB.uuid,
+            foundationMOBI.uuid
+        )
+        let duneProposal = try #require(
+            service.pendingProposals.first { $0.pairKey == duneKey }
+        )
+        #expect(service.pendingProposals.contains { $0.pairKey == foundationKey })
+
+        // Simulate a missed catalog delta before the reviewed merge. The
+        // service must rebuild proposals itself instead of requiring Rescan.
+        LibraryMutationLog.shared.bump(
+            affectedBookIDs: nil,
+            changesBookMembership: true
+        )
+
+        #expect(await service.approve(duneProposal))
+        #expect(service.pendingProposals.contains { $0.pairKey == foundationKey })
+        #expect(!service.isRefreshingCandidates)
+    }
+
     @Test func exactMatchPreventsAutomaticWorkAssignmentAndStaysReviewable() async throws {
         let library = try await TestLibrary()
         let newBook = insertBook(library, name: "new")

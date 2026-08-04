@@ -113,6 +113,7 @@ final class CatalogReconciliationService {
     private(set) var lastIndexSynchronizationFetchCount = 0
     private(set) var lastIndexPageCount = 0
     private(set) var lastIndexError: String?
+    private(set) var isRefreshingCandidates = false
     private var dismissedPairKeys: Set<String>
     private var candidateIndex = EditionCandidateIndex()
     private var candidateIndexIsComplete = false
@@ -672,6 +673,7 @@ final class CatalogReconciliationService {
             outcome = .notApplicable
         }
         if outcome == .applied {
+            await awaitCandidateRefreshIfNeeded()
             pendingProposals.removeAll { $0.pairKey == proposal.pairKey }
             removeResolvedProposals()
         }
@@ -1222,7 +1224,7 @@ final class CatalogReconciliationService {
 
         await coverMutations.invalidate([loserCoverOwner])
         pendingProposals.removeAll { $0.memberUUIDs.contains(loserID) }
-        refreshEditionCounts()
+        await refreshEditionCountsAfterMutation()
         return .applied
     }
 
@@ -1331,10 +1333,23 @@ final class CatalogReconciliationService {
 
     private func scheduleCandidateIndexRefresh() {
         guard candidateRefreshTask == nil else { return }
+        isRefreshingCandidates = true
         candidateRefreshTask = Task { [weak self] in
             guard let self else { return }
-            await refreshEditionCountsInChunks()
+            await scanLibrary()
             candidateRefreshTask = nil
+            isRefreshingCandidates = false
+        }
+    }
+
+    private func refreshEditionCountsAfterMutation() async {
+        refreshEditionCounts()
+        await awaitCandidateRefreshIfNeeded()
+    }
+
+    private func awaitCandidateRefreshIfNeeded() async {
+        if let candidateRefreshTask {
+            await candidateRefreshTask.value
         }
     }
 
@@ -1465,9 +1480,15 @@ final class CatalogReconciliationService {
         let delta = mutationLog.catalogDelta(since: indexedCatalogRevision)
         guard !delta.isEmpty else { return }
         guard !delta.requiresFullRebuild else {
+            if delta.affectedBookIDs.isEmpty {
+                pendingProposals.removeAll()
+            } else {
+                pendingProposals.removeAll { proposal in
+                    proposal.memberUUIDs.contains(where: delta.affectedBookIDs.contains)
+                }
+            }
             candidateIndexIsComplete = false
             editionCounts = [:]
-            pendingProposals.removeAll()
             scheduleCandidateIndexRefresh()
             return
         }
