@@ -241,6 +241,82 @@ struct DeviceTableQueryTests {
         let rows = DeviceTableQuery.rows(books: books, authorByMatchKey: ["my book": "Frank Herbert"])
         #expect(rows.map(\.author) == ["Frank Herbert", nil])
     }
+
+    @Test
+    func projectionPublicationRequiresTheCapturedCatalogAndDeviceRevision() {
+        let captured = DeviceProjectionRevision(
+            catalog: 7,
+            readModelIsReady: true,
+            device: 3
+        )
+        #expect(DeviceProjectionPublicationPolicy.shouldPublish(
+            captured: captured,
+            current: captured,
+            isCancelled: false
+        ))
+        #expect(!DeviceProjectionPublicationPolicy.shouldPublish(
+            captured: captured,
+            current: DeviceProjectionRevision(
+                catalog: 8,
+                readModelIsReady: true,
+                device: 3
+            ),
+            isCancelled: false
+        ))
+        #expect(!DeviceProjectionPublicationPolicy.shouldPublish(
+            captured: captured,
+            current: DeviceProjectionRevision(
+                catalog: 7,
+                readModelIsReady: true,
+                device: 4
+            ),
+            isCancelled: false
+        ))
+        #expect(!DeviceProjectionPublicationPolicy.shouldPublish(
+            captured: captured,
+            current: captured,
+            isCancelled: true
+        ))
+    }
+
+    @Test
+    func projectionHandlesEmptyRowsDuplicateMatchKeysAndSelectionPruning() {
+        let duplicateBooks = [
+            DeviceBook(
+                mtpItemID: 1,
+                path: nil,
+                fileName: "Shared Title.azw3",
+                sizeBytes: 1
+            ),
+            DeviceBook(
+                mtpItemID: 2,
+                path: nil,
+                fileName: "Shared Title.mobi",
+                sizeBytes: 1
+            ),
+        ]
+        let rows = DeviceTableQuery.rows(
+            books: duplicateBooks,
+            authorByMatchKey: ["shared title": "One Author"]
+        )
+        #expect(rows.map(\.author) == ["One Author", "One Author"])
+        #expect(DeviceTableQuery.authors(in: rows) == ["One Author"])
+
+        let staleID = DeviceBook(
+            mtpItemID: 3,
+            path: nil,
+            fileName: "Removed.epub",
+            sizeBytes: 1
+        ).id
+        #expect(DeviceProjectionPublicationPolicy.pruneSelection(
+            Set(rows.map(\.id)).union([staleID]),
+            to: rows
+        ) == Set(rows.map(\.id)))
+        #expect(DeviceProjectionPublicationPolicy.pruneSelection(
+            Set(rows.map(\.id)),
+            to: []
+        ).isEmpty)
+    }
 }
 
 // MARK: - Mass storage sidecar cleanup
@@ -315,8 +391,71 @@ struct SidecarCleanupTests {
 
 // MARK: - Mass storage transfer safety
 
+struct MassStorageDetectionTests {
+    @Test func ignoresReadOnlyInstallerImagesWhoseNameOnlyContainsKindle() {
+        let converter = URL(fileURLWithPath: "/Volumes/Kindle Comic Converter")
+        let kindle = URL(fileURLWithPath: "/Volumes/Kindle")
+        let selected = MassStorageDeviceConnection.preferredKindleVolume(in: [
+            MassStorageVolumeCandidate(
+                url: converter,
+                name: "Kindle Comic Converter",
+                isReadOnly: true,
+                hasDocuments: false,
+                hasSystem: false
+            ),
+            MassStorageVolumeCandidate(
+                url: kindle,
+                name: "Kindle",
+                isReadOnly: false,
+                hasDocuments: true,
+                hasSystem: true
+            ),
+        ])
+
+        #expect(selected == kindle)
+        #expect(MassStorageDeviceConnection.preferredKindleVolume(in: [
+            MassStorageVolumeCandidate(
+                url: converter,
+                name: "Kindle Comic Converter",
+                isReadOnly: true,
+                hasDocuments: false,
+                hasSystem: false
+            ),
+        ]) == nil)
+    }
+
+    @Test func recognizesRenamedKindleByItsDirectoryStructure() {
+        let renamed = URL(fileURLWithPath: "/Volumes/Anna Reader")
+        #expect(MassStorageDeviceConnection.preferredKindleVolume(in: [
+            MassStorageVolumeCandidate(
+                url: renamed,
+                name: "Anna Reader",
+                isReadOnly: false,
+                hasDocuments: true,
+                hasSystem: true
+            ),
+        ]) == renamed)
+    }
+}
+
 struct MassStorageTransferTests {
     private struct InjectedCopyFailure: Error { }
+    private struct InjectedEjectFailure: Error { }
+
+    private actor EjectHarness {
+        private var shouldFail = true
+
+        func eject(_ url: URL) throws {
+            _ = url
+            if shouldFail {
+                throw InjectedEjectFailure()
+            }
+        }
+
+        func allowEject() {
+            shouldFail = false
+        }
+    }
 
     private func boundaryFixture() throws -> (root: URL, volume: URL, outside: URL) {
         let root = FileManager.default.temporaryDirectory
@@ -349,6 +488,51 @@ struct MassStorageTransferTests {
         try await connection.send(fileURL: urls.source, fileName: "book.mobi") { _ in }
 
         #expect(try Data(contentsOf: urls.destination) == Data("new complete bytes".utf8))
+    }
+
+    @Test func failedEjectPreservesTheConnectionAndCanBeRetried() async throws {
+        let urls = try fixture()
+        defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
+        let harness = EjectHarness()
+        let connection = try MassStorageDeviceConnection(
+            volumeURL: urls.volume,
+            ejectVolume: { try await harness.eject($0) }
+        )
+
+        await #expect(throws: InjectedEjectFailure.self) {
+            try await connection.eject()
+        }
+        let aliveAfterFailure = await connection.isAlive()
+        #expect(aliveAfterFailure)
+
+        await harness.allowEject()
+        try await connection.eject()
+        let aliveAfterSuccess = await connection.isAlive()
+        #expect(!aliveAfterSuccess)
+    }
+
+    @Test func transportReturnsOnlyTheTechnicalTransferResult() async throws {
+        let urls = try fixture()
+        defer { try? FileManager.default.removeItem(at: urls.volume.deletingLastPathComponent()) }
+        let bytes = Data("immutable payload".utf8)
+        try bytes.write(to: urls.source)
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
+        let destination = try #require(DeviceTransferPath(fileName: "book.mobi"))
+
+        let result = try await connection.transfer(
+            DeviceByteTransfer(
+                sourceURL: urls.source,
+                destination: destination,
+                expectedByteCount: UInt64(bytes.count)
+            )
+        ) { _ in }
+
+        #expect(result == DeviceTransferResult(
+            destination: destination,
+            bytesTransferred: UInt64(bytes.count),
+            transportIdentifier: "documents/book.mobi"
+        ))
+        #expect(try Data(contentsOf: urls.destination) == bytes)
     }
 
     @Test func failedSendPreservesExistingBookAndRemovesTemporaryFile() async throws {
