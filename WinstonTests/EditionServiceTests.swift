@@ -3,6 +3,24 @@ import SwiftData
 import Testing
 @testable import Winston
 
+private actor ReconciliationApprovalGate {
+    private var entered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func suspendCancellably() async throws {
+        entered = true
+        let waiters = enteredWaiters
+        enteredWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        try await Task.sleep(for: .seconds(30))
+    }
+
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+}
+
 @Suite("Edition service", .serialized)
 @MainActor
 struct EditionServiceTests {
@@ -642,6 +660,119 @@ struct EditionServiceTests {
         #expect(CoverStore.loadData(for: .edition(epub.uuid)) == sourceCover)
         #expect(FileManager.default.fileExists(atPath: BookFileStore.url(for: epub.fileName).path(percentEncoded: false)))
         #expect(FileManager.default.fileExists(atPath: BookFileStore.url(for: mobi.fileName).path(percentEncoded: false)))
+    }
+
+    @Test func reconciliationCancellationDuringValidationDoesNotMutateCatalog() async throws {
+        let library = try await TestLibrary()
+        let english = insertBook(library, name: "cancel-validation-en")
+        let czech = insertBook(library, name: "cancel-validation-cs")
+        english.language = "en"
+        czech.language = "cs"
+        czech.translator = "Jan Novák"
+        try library.context.save()
+        let gate = ReconciliationApprovalGate()
+        let service = CatalogReconciliationService(
+            modelContext: library.context,
+            approvalPhaseHook: { phase in
+                guard phase == .validating else { return }
+                try await gate.suspendCancellably()
+            }
+        )
+        await service.scanLibrary()
+        let proposal = try #require(service.pendingProposals.first {
+            $0.verdict == .sameWorkOtherEdition
+        })
+
+        let approvalTask = Task {
+            await service.approveResult(proposal)
+        }
+        await gate.waitUntilEntered()
+        approvalTask.cancel()
+
+        #expect(await approvalTask.value == .cancelled)
+        #expect(try library.context.fetchCount(FetchDescriptor<Book>()) == 2)
+        #expect(try library.context.fetchCount(FetchDescriptor<Work>()) == 2)
+        #expect(english.work?.uuid != czech.work?.uuid)
+        #expect(service.pendingProposals.contains { $0.pairKey == proposal.pairKey })
+    }
+
+    @Test func reconciliationReportsValidationBeforeProtectedCommit() async throws {
+        let library = try await TestLibrary()
+        let english = insertBook(library, name: "phases-en")
+        let czech = insertBook(library, name: "phases-cs")
+        english.language = "en"
+        czech.language = "cs"
+        czech.translator = "Jan Novák"
+        try library.context.save()
+        let service = CatalogReconciliationService(modelContext: library.context)
+        await service.scanLibrary()
+        let proposal = try #require(service.pendingProposals.first {
+            $0.verdict == .sameWorkOtherEdition
+        })
+        var phases: [ReconciliationApprovalPhase] = []
+
+        let outcome = await service.approveResult(proposal) { phase in
+            phases.append(phase)
+        }
+
+        #expect(outcome == .applied)
+        #expect(phases == [.validating, .committing])
+        #expect(try library.context.fetchCount(FetchDescriptor<Book>()) == 2)
+        #expect(try library.context.fetchCount(FetchDescriptor<Work>()) == 1)
+    }
+
+    @Test func reconciliationBatchPlanMarksSharedBooksAsOverlapping() async throws {
+        let library = try await TestLibrary()
+        let first = insertBook(library, name: "batch-overlap-one", title: "One")
+        let second = insertBook(library, name: "batch-overlap-two", title: "Two")
+        let third = insertBook(library, name: "batch-overlap-three", title: "Three")
+        for book in [first, second, third] {
+            book.work?.openLibraryWorkKey = "/works/OL-BATCH-OVERLAP"
+        }
+        try library.context.save()
+        let service = CatalogReconciliationService(modelContext: library.context)
+        await service.scanLibrary()
+        let keys = Set(service.pendingProposals.map(\.pairKey))
+        let plan = service.makeBatchPlan(action: .apply, pairKeys: keys)
+
+        #expect(plan.items.count >= 2)
+        #expect(plan.conflictCount >= 1)
+        let actionableMembers = plan.items
+            .filter { $0.conflict == nil }
+            .map { Set($0.memberUUIDs) }
+        for index in actionableMembers.indices {
+            for otherIndex in actionableMembers.indices where otherIndex > index {
+                #expect(actionableMembers[index].isDisjoint(with: actionableMembers[otherIndex]))
+            }
+        }
+    }
+
+    @Test func reconciliationBatchRejectsChangedSourceGeneration() async throws {
+        let library = try await TestLibrary()
+        let english = insertBook(library, name: "batch-stale-en")
+        let czech = insertBook(library, name: "batch-stale-cs")
+        english.language = "en"
+        czech.language = "cs"
+        czech.translator = "Jan Novák"
+        try library.context.save()
+        let service = CatalogReconciliationService(modelContext: library.context)
+        await service.scanLibrary()
+        let proposal = try #require(service.pendingProposals.first {
+            $0.verdict == .sameWorkOtherEdition
+        })
+        let plan = service.makeBatchPlan(
+            action: .apply,
+            pairKeys: [proposal.pairKey]
+        )
+        let item = try #require(plan.items.first)
+        english.publisher = "Changed after planning"
+        try library.context.save()
+
+        let outcome = await service.performBatchItem(item, action: .apply)
+
+        #expect(outcome == .stale)
+        #expect(try library.context.fetchCount(FetchDescriptor<Book>()) == 2)
+        #expect(try library.context.fetchCount(FetchDescriptor<Work>()) == 2)
     }
 
     private func makeCoordinator(

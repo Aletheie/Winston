@@ -3,6 +3,25 @@ import Observation
 import OSLog
 import SwiftData
 
+nonisolated enum ReconciliationApprovalPhase: Sendable, Equatable {
+    case validating
+    case committing
+}
+
+nonisolated enum ReconciliationApprovalOutcome: Sendable, Equatable {
+    case applied
+    case stale
+    case notApplicable
+    case cancelled
+    case failed
+
+    var didApply: Bool { self == .applied }
+}
+
+typealias ReconciliationApprovalPhaseReporter = @MainActor @Sendable (
+    ReconciliationApprovalPhase
+) async -> Void
+
 private nonisolated struct EditionCandidatePage: Sendable {
     let candidates: [EditionCandidate]
     let lastDateAdded: Date?
@@ -79,6 +98,9 @@ final class CatalogReconciliationService {
     private let managedFiles: ManagedFileCoordinator
     private let toasts: ToastCenter?
     private let mutationLog: LibraryMutationLog
+    private let approvalPhaseHook: (@MainActor @Sendable (
+        ReconciliationApprovalPhase
+    ) async throws -> Void)?
     private let candidatePageLoader: EditionCandidatePageLoader
     private let dismissedDefaultsKey = "editionMatcherDismissedPairKeys"
 
@@ -262,7 +284,10 @@ final class CatalogReconciliationService {
         coverMutations: CoverMutationCoordinator? = nil,
         toasts: ToastCenter? = nil,
         mutationLog: LibraryMutationLog = .shared,
-        loadEditionCountsImmediately: Bool = true
+        loadEditionCountsImmediately: Bool = true,
+        approvalPhaseHook: (@MainActor @Sendable (
+            ReconciliationApprovalPhase
+        ) async throws -> Void)? = nil
     ) {
         let resolvedMutations = mutations ?? CatalogMutationService(
             modelContext: modelContext,
@@ -280,6 +305,7 @@ final class CatalogReconciliationService {
         )
         self.toasts = toasts
         self.mutationLog = mutationLog
+        self.approvalPhaseHook = approvalPhaseHook
         self.candidatePageLoader = EditionCandidatePageLoader(
             modelContainer: modelContext.container
         )
@@ -482,9 +508,109 @@ final class CatalogReconciliationService {
         pendingProposals.removeAll { keys.contains($0.pairKey) }
     }
 
+    func makeBatchPlan(
+        action: ReconciliationBatchAction,
+        pairKeys: Set<String>
+    ) -> ReconciliationBatchPlan {
+        var claimedBookIDs: Set<UUID> = []
+        let proposalsByKey = Dictionary(
+            pendingProposals.map { ($0.pairKey, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var items = pendingProposals.compactMap { proposal -> ReconciliationBatchItem? in
+            guard pairKeys.contains(proposal.pairKey) else { return nil }
+            let books = proposal.memberUUIDs.compactMap { lookupBook(uuid: $0) }
+            let generations = Dictionary(
+                uniqueKeysWithValues: books.map {
+                    ($0.uuid, Self.batchGeneration(of: $0))
+                }
+            )
+            let members = Set(proposal.memberUUIDs)
+            let conflict: ReconciliationBatchConflictReason?
+            if books.count != proposal.memberUUIDs.count {
+                conflict = .missingProposal
+            } else if action == .apply, !proposal.canApply {
+                conflict = .notApplicable
+            } else if action == .apply, !claimedBookIDs.isDisjoint(with: members) {
+                conflict = .overlappingProposal
+            } else {
+                conflict = nil
+                if action == .apply { claimedBookIDs.formUnion(members) }
+            }
+            return ReconciliationBatchItem(
+                pairKey: proposal.pairKey,
+                proposal: proposal,
+                memberUUIDs: proposal.memberUUIDs,
+                sourceGenerations: generations,
+                conflict: conflict
+            )
+        }
+        let missingKeys = pairKeys.subtracting(proposalsByKey.keys).sorted()
+        items.append(contentsOf: missingKeys.map { pairKey in
+            ReconciliationBatchItem(
+                pairKey: pairKey,
+                proposal: nil,
+                memberUUIDs: [],
+                sourceGenerations: [:],
+                conflict: .missingProposal
+            )
+        })
+        return ReconciliationBatchPlan(
+            id: UUID(),
+            action: action,
+            items: items
+        )
+    }
+
+    func performBatchItem(
+        _ item: ReconciliationBatchItem,
+        action: ReconciliationBatchAction,
+        onPhase: ReconciliationApprovalPhaseReporter? = nil
+    ) async -> ReconciliationBatchItemOutcome {
+        guard let proposal = pendingProposals.first(where: {
+            $0.pairKey == item.pairKey
+        }), proposal == item.proposal else {
+            return .stale
+        }
+        if action == .dismiss {
+            dismiss(proposal)
+            return .dismissed
+        }
+        guard proposal.canApply else {
+            return .conflicting(.notApplicable)
+        }
+        let books = proposal.memberUUIDs.compactMap { lookupBook(uuid: $0) }
+        guard books.count == proposal.memberUUIDs.count,
+              books.allSatisfy({
+                  item.sourceGenerations[$0.uuid] == Self.batchGeneration(of: $0)
+              }) else {
+            return .stale
+        }
+        switch await approveResult(proposal, onPhase: onPhase) {
+        case .applied: return .applied
+        case .stale: return .stale
+        case .notApplicable: return .conflicting(.notApplicable)
+        case .cancelled: return .pending
+        case .failed: return .failed
+        }
+    }
+
     @discardableResult
     func approve(_ proposal: EditionMatchProposal) async -> Bool {
-        guard proposal.canApply else { return false }
+        await approveResult(proposal).didApply
+    }
+
+    func approveResult(
+        _ proposal: EditionMatchProposal,
+        onPhase: ReconciliationApprovalPhaseReporter? = nil
+    ) async -> ReconciliationApprovalOutcome {
+        guard proposal.canApply else { return .notApplicable }
+        do {
+            try await beginValidation(reporting: onPhase)
+        } catch {
+            return approvalOutcome(for: error)
+        }
+
         let members = proposal.memberUUIDs.compactMap { lookupBook(uuid: $0) }
         guard members.count == proposal.memberUUIDs.count else {
             let liveUUIDs = Set(members.map(\.uuid))
@@ -492,48 +618,93 @@ final class CatalogReconciliationService {
             pendingProposals.removeAll { pending in
                 pending.memberUUIDs.contains(where: missingUUIDs.contains)
             }
-            return false
+            return .stale
         }
         let revalidated = revalidatedProposal(between: members)
         guard let current = revalidated,
               current.verdict == proposal.verdict,
               current.confidence == proposal.confidence else {
             replacePendingProposal(proposal, with: revalidated)
-            return false
+            return .stale
         }
-        let succeeded: Bool
+        let outcome: ReconciliationApprovalOutcome
         switch current.verdict {
         case .sameWorkOtherEdition:
-            succeeded = groupIntoWork(members) != nil
+            do {
+                try await beginCommit(reporting: onPhase)
+                outcome = groupIntoWork(members) != nil ? .applied : .failed
+            } catch {
+                outcome = approvalOutcome(for: error)
+            }
         case .sameEditionOtherFormat:
             guard let winner = preferredBook(in: members),
-                  let loser = members.first(where: { $0.uuid != winner.uuid }) else { return false }
-            succeeded = await absorb(
+                  let loser = members.first(where: { $0.uuid != winner.uuid }) else {
+                return .stale
+            }
+            outcome = await absorb(
                 loser,
                 into: winner,
                 policy: .retainAll,
-                expectedProposal: current
+                expectedProposal: current,
+                beforeCommit: { [self] in
+                    try await beginCommit(reporting: onPhase)
+                }
             )
         case .duplicateFile:
-            guard current.isExactContentDuplicate else { return false }
+            guard current.isExactContentDuplicate else { return .notApplicable }
             guard let winner = preferredBook(in: members),
-                  let loser = members.first(where: { $0.uuid != winner.uuid }) else { return false }
+                  let loser = members.first(where: { $0.uuid != winner.uuid }) else {
+                return .stale
+            }
             let evidence = await verifiedExactDuplicateEvidence(winner: winner, loser: loser)
-            guard !evidence.isEmpty else { return false }
-            succeeded = await absorb(
+            guard !Task.isCancelled else { return .cancelled }
+            guard !evidence.isEmpty else { return .stale }
+            outcome = await absorb(
                 loser,
                 into: winner,
                 policy: .removeExactDuplicates(evidence: evidence),
-                expectedProposal: current
+                expectedProposal: current,
+                beforeCommit: { [self] in
+                    try await beginCommit(reporting: onPhase)
+                }
             )
         case .similarItem:
-            succeeded = false
+            outcome = .notApplicable
         }
-        if succeeded {
+        if outcome == .applied {
             pendingProposals.removeAll { $0.pairKey == proposal.pairKey }
             removeResolvedProposals()
         }
-        return succeeded
+        return outcome
+    }
+
+    private func beginValidation(
+        reporting reporter: ReconciliationApprovalPhaseReporter?
+    ) async throws {
+        try Task.checkCancellation()
+        await reporter?(.validating)
+        try await approvalPhaseHook?(.validating)
+        try Task.checkCancellation()
+    }
+
+    private func beginCommit(
+        reporting reporter: ReconciliationApprovalPhaseReporter?
+    ) async throws {
+        try Task.checkCancellation()
+        try await approvalPhaseHook?(.committing)
+        try Task.checkCancellation()
+        await reporter?(.committing)
+    }
+
+    private func approvalOutcome(for error: Error) -> ReconciliationApprovalOutcome {
+        if error is CancellationError || Task.isCancelled { return .cancelled }
+        guard let mutationError = error as? CatalogMutationError else { return .failed }
+        switch mutationError {
+        case .staleGeneration, .staleAnalysis, .staleReconciliation, .modelNotFound:
+            return .stale
+        default:
+            return .failed
+        }
     }
 
     func removeProposals(referencing bookUUID: UUID) {
@@ -759,8 +930,9 @@ final class CatalogReconciliationService {
             loser,
             into: winner,
             policy: .retainAll,
-            expectedProposal: proposal
-        ) ? winner : nil
+            expectedProposal: proposal,
+            beforeCommit: nil
+        ).didApply ? winner : nil
     }
 
     @discardableResult
@@ -768,11 +940,13 @@ final class CatalogReconciliationService {
         _ loser: Book,
         into winner: Book,
         policy: AssetMergePolicy,
-        expectedProposal: EditionMatchProposal?
-    ) async -> Bool {
+        expectedProposal: EditionMatchProposal?,
+        beforeCommit: (@MainActor @Sendable () async throws -> Void)?
+    ) async -> ReconciliationApprovalOutcome {
+        guard !Task.isCancelled else { return .cancelled }
         guard loser.uuid != winner.uuid,
               loser.modelContext != nil,
-              winner.modelContext != nil else { return false }
+              winner.modelContext != nil else { return .stale }
         let winnerID = winner.uuid
         let loserID = loser.uuid
         let winnerGeneration = Self.generation(of: winner)
@@ -797,10 +971,10 @@ final class CatalogReconciliationService {
                       return winningFilesByHash[item.sha256]?.contains {
                           $0.fileName == item.retainedFileName
                       } == true
-                  }) else { return false }
+                  }) else { return .stale }
             exactEvidence = evidence
             discardAssetIDs = Set(evidence.map(\.discardedAssetID))
-            guard !discardAssetIDs.isEmpty else { return false }
+            guard !discardAssetIDs.isEmpty else { return .stale }
         }
 
         let retainedFileNames = Set(winner.assets.map(\.fileName))
@@ -820,8 +994,9 @@ final class CatalogReconciliationService {
                 of: discardedFileNames.sorted().map(ManagedFileReference.book)
             )
         } catch {
-            return false
+            return approvalOutcome(for: error)
         }
+        guard !Task.isCancelled else { return .cancelled }
         let bookCleanups = discardedIdentities.compactMap {
             identity -> ManagedFileCleanup? in
             guard let evidence = evidenceByDiscardedFile[identity.reference.relativeName],
@@ -831,17 +1006,24 @@ final class CatalogReconciliationService {
                 retainedEquivalentFileName: evidence.retainedFileName
             )
         }
-        guard bookCleanups.count == discardedFileNames.count else { return false }
+        guard bookCleanups.count == discardedFileNames.count else { return .stale }
 
         let winnerCoverOwner = CoverOwner.edition(winner.uuid)
         let winnerCoverReference = winner.coverReference
         let loserCoverOwner = loser.coverReference.owner
-        let coverPayload = await Task.detached(priority: .userInitiated) { () -> Data? in
+        let coverLoadTask = Task.detached(priority: .userInitiated) { () -> Data? in
+            guard !Task.isCancelled else { return nil }
             guard !CoverStore.exists(for: winnerCoverReference.owner) else {
                 return nil
             }
             return CoverStore.loadData(for: loserCoverOwner)
-        }.value
+        }
+        let coverPayload = await withTaskCancellationHandler {
+            await coverLoadTask.value
+        } onCancel: {
+            coverLoadTask.cancel()
+        }
+        guard !Task.isCancelled else { return .cancelled }
         let transaction: ManagedFileTransaction
         do {
             transaction = try await managedFiles.prepareCleanup(
@@ -858,7 +1040,11 @@ final class CatalogReconciliationService {
                 cleanups: bookCleanups
             )
         } catch {
-            return false
+            return approvalOutcome(for: error)
+        }
+        guard !Task.isCancelled else {
+            await managedFiles.abort(transaction)
+            return .cancelled
         }
         let preparedCover: PreparedCoverMutation?
         if let coverPayload {
@@ -875,10 +1061,16 @@ final class CatalogReconciliationService {
                 )
             } catch {
                 await managedFiles.abort(transaction)
-                return false
+                return approvalOutcome(for: error)
             }
         } else {
             preparedCover = nil
+        }
+
+        guard !Task.isCancelled else {
+            await managedFiles.abort(transaction)
+            if let preparedCover { await coverMutations.abort(preparedCover) }
+            return .cancelled
         }
 
         guard let currentWinner = lookupBook(uuid: winnerID),
@@ -887,7 +1079,7 @@ final class CatalogReconciliationService {
               Self.generation(of: currentLoser) == loserGeneration else {
             await managedFiles.abort(transaction)
             if let preparedCover { await coverMutations.abort(preparedCover) }
-            return false
+            return .stale
         }
 
         var insertedAsset: BookAsset?
@@ -979,21 +1171,38 @@ final class CatalogReconciliationService {
                 removing: insertedAsset
             )
         }
+
         do {
-            let result: CatalogFileCommitResult
-            if let preparedCover {
-                result = try await coverMutations.commit(
-                    preparedCover,
-                    command: command,
-                    additionalTransactions: [transaction],
-                    affectedBookIDs: [winnerID, loserID],
-                    affectedWorkIDs: affectedWorkIDs,
-                    affectedCollectionIDs: affectedCollectionIDs,
-                    revertingOnFailure: rollback,
-                    applying: applyMerge
-                )
+            if let beforeCommit {
+                try await beforeCommit()
             } else {
-                result = try await mutations.commitFileMutation(
+                try Task.checkCancellation()
+            }
+        } catch {
+            await managedFiles.abort(transaction)
+            if let preparedCover { await coverMutations.abort(preparedCover) }
+            return approvalOutcome(for: error)
+        }
+
+        do {
+            // The commit task is deliberately unstructured. Once the UI has
+            // entered the committing phase, cancellation of the review owner
+            // must not interrupt the coordinator between its catalog and file
+            // publication boundaries.
+            let commitTask = Task { @MainActor [self] in
+                if let preparedCover {
+                    return try await coverMutations.commit(
+                        preparedCover,
+                        command: command,
+                        additionalTransactions: [transaction],
+                        affectedBookIDs: [winnerID, loserID],
+                        affectedWorkIDs: affectedWorkIDs,
+                        affectedCollectionIDs: affectedCollectionIDs,
+                        revertingOnFailure: rollback,
+                        applying: applyMerge
+                    )
+                }
+                return try await mutations.commitFileMutation(
                     command,
                     transaction: transaction,
                     affectedBookIDs: [winnerID, loserID],
@@ -1003,17 +1212,28 @@ final class CatalogReconciliationService {
                     applying: applyMerge
                 )
             }
+            let result = try await commitTask.value
             if !result.isFullyPublished {
                 toasts?.info(String(localized: "Edition merge completed; file cleanup will resume automatically."))
             }
         } catch {
-            return false
+            return commitApprovalOutcome(for: error)
         }
 
         await coverMutations.invalidate([loserCoverOwner])
         pendingProposals.removeAll { $0.memberUUIDs.contains(loserID) }
         refreshEditionCounts()
-        return true
+        return .applied
+    }
+
+    private func commitApprovalOutcome(for error: Error) -> ReconciliationApprovalOutcome {
+        guard let mutationError = error as? CatalogMutationError else { return .failed }
+        switch mutationError {
+        case .staleGeneration, .staleAnalysis, .staleReconciliation, .modelNotFound:
+            return .stale
+        default:
+            return .failed
+        }
     }
 
     @discardableResult
@@ -1037,7 +1257,9 @@ final class CatalogReconciliationService {
 
         let retainedCandidates = winnerFiles.filter { sharedStoredHashes.contains($0.storedSHA256) }
         let discardedCandidates = loserFiles.filter { sharedStoredHashes.contains($0.storedSHA256) }
-        return await Task.detached(priority: .userInitiated) {
+        let verificationTask: Task<[ExactDuplicateEvidence], Never> = Task.detached(
+            priority: .userInitiated
+        ) { () -> [ExactDuplicateEvidence] in
             var actualHashes: [UUID: String] = [:]
             for file in retainedCandidates + discardedCandidates {
                 guard !Task.isCancelled,
@@ -1063,7 +1285,12 @@ final class CatalogReconciliationService {
                     sha256: file.storedSHA256
                 )
             }
-        }.value
+        }
+        return await withTaskCancellationHandler {
+            await verificationTask.value
+        } onCancel: {
+            verificationTask.cancel()
+        }
     }
 
     private static func assetFileSnapshot(_ asset: BookAsset) -> AssetFileSnapshot? {
@@ -1071,6 +1298,31 @@ final class CatalogReconciliationService {
               !hash.isEmpty,
               ManagedLeafName(rawValue: asset.fileName) != nil else { return nil }
         return AssetFileSnapshot(assetID: asset.uuid, fileName: asset.fileName, storedSHA256: hash)
+    }
+
+    private static func batchGeneration(
+        of book: Book
+    ) -> ReconciliationBookGenerationToken {
+        ReconciliationBookGenerationToken(
+            candidate: candidate(book),
+            fileName: book.fileName,
+            fileSizeBytes: book.fileSizeBytes,
+            coverOwner: book.coverReference.owner,
+            coverVersion: book.coverVersion,
+            assets: book.assets.map { asset in
+                ReconciliationAssetGenerationToken(
+                    uuid: asset.uuid,
+                    fileName: asset.fileName,
+                    contentHash: asset.contentHash,
+                    sizeBytes: asset.sizeBytes,
+                    dateAdded: asset.dateAdded,
+                    validationStatusRaw: asset.validationStatus?.rawValue,
+                    availabilityRaw: asset.availability.rawValue,
+                    drmProtected: asset.drmProtected
+                )
+            }
+            .sorted { $0.uuid.uuidString < $1.uuid.uuidString }
+        )
     }
 
     private func ensureCandidateIndex() -> Bool {
