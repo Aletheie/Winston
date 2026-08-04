@@ -6,6 +6,7 @@ import Observation
 final class ToastCenter {
     struct Message: Identifiable, Equatable {
         enum Style: Equatable { case info, success, error }
+        enum Persistence: Equatable { case automatic, untilDismissed }
         enum Action: Equatable {
             case reviewEditionProposals
             case reviewImport
@@ -16,16 +17,30 @@ final class ToastCenter {
         var text: String
         var style: Style
         var action: Action?
+        var persistence: Persistence
     }
 
     private(set) var messages: [Message] = []
 
-    func post(_ text: String, style: Message.Style, action: Message.Action? = nil) {
-        let message = Message(text: text, style: style, action: action)
+    func post(
+        _ text: String,
+        style: Message.Style,
+        action: Message.Action? = nil,
+        persistence: Message.Persistence? = nil
+    ) {
+        let resolvedPersistence = persistence
+            ?? ((style == .error || action != nil) ? .untilDismissed : .automatic)
+        let message = Message(
+            text: text,
+            style: style,
+            action: action,
+            persistence: resolvedPersistence
+        )
         messages.append(message)
-        Task {
+        guard resolvedPersistence == .automatic else { return }
+        Task { [weak self] in
             try? await Task.sleep(for: .seconds(5))
-            messages.removeAll { $0.id == message.id }
+            self?.messages.removeAll { $0.id == message.id }
         }
     }
 
