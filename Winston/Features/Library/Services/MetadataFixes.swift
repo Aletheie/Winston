@@ -1,7 +1,7 @@
 import Foundation
 
 nonisolated struct MetadataFix: Sendable, Identifiable, Equatable {
-    enum Kind: String, Sendable, Equatable {
+    enum Kind: String, CaseIterable, Hashable, Sendable {
         case author
         case series
         case seriesAssignment
@@ -41,25 +41,43 @@ nonisolated struct MetadataFix: Sendable, Identifiable, Equatable {
 nonisolated struct MetadataFixRow: Sendable {
     let bookID: UUID?
     let title: String?
+    let storedTitle: String?
     let originalFileName: String?
     let author: String?
+    let storedAuthor: String?
+    let publisher: String?
+    let language: String?
+    let isbn: String?
     let series: String?
     let seriesIndex: String?
+    let tags: [String]
 
     init(
         bookID: UUID? = nil,
         title: String? = nil,
+        storedTitle: String? = nil,
         originalFileName: String? = nil,
         author: String?,
+        storedAuthor: String? = nil,
+        publisher: String? = nil,
+        language: String? = nil,
+        isbn: String? = nil,
         series: String?,
-        seriesIndex: String? = nil
+        seriesIndex: String? = nil,
+        tags: [String] = []
     ) {
         self.bookID = bookID
         self.title = title
+        self.storedTitle = storedTitle
         self.originalFileName = originalFileName
         self.author = author
+        self.storedAuthor = storedAuthor
+        self.publisher = publisher
+        self.language = language
+        self.isbn = isbn
         self.series = series
         self.seriesIndex = seriesIndex
+        self.tags = tags
     }
 }
 
@@ -87,6 +105,9 @@ nonisolated enum MetadataFixFinder {
         var seriesCounts: [String: Int] = [:]
 
         for row in rows {
+            guard !Task.isCancelled else {
+                return MetadataFixAnalysis(fixes: [], seriesSuggestions: [])
+            }
             if let author = nonempty(row.author) {
                 authorCounts[author, default: 0] += 1
             }
@@ -118,9 +139,15 @@ nonisolated enum MetadataFixFinder {
                 )
             }
 
+        guard !Task.isCancelled else {
+            return MetadataFixAnalysis(fixes: [], seriesSuggestions: [])
+        }
         let canonicalSeries = SeriesSuggestions.canonicalNamesByMatchKey(counts: seriesCounts)
         let assignmentCandidates = rows.compactMap {
             assignmentCandidate(for: $0, canonicalSeries: canonicalSeries)
+        }
+        guard !Task.isCancelled else {
+            return MetadataFixAnalysis(fixes: [], seriesSuggestions: [])
         }
         var candidateNameCounts: [String: Int] = [:]
         var candidateFamilyCounts: [String: Int] = [:]
