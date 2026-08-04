@@ -8,6 +8,7 @@ struct ReadingRecommendationTests {
     private func candidate(
         id: UUID = UUID(),
         title: String,
+        author: String = "Author",
         status: ReadingStatus = .unread,
         progress: Double? = nil,
         pages: Int? = nil,
@@ -23,7 +24,7 @@ struct ReadingRecommendationTests {
         ReadingRecommendationCandidate(
             id: id,
             title: title,
-            author: "Author",
+            author: author,
             readingStatus: status,
             activeProgress: progress,
             pageCount: pages,
@@ -309,6 +310,52 @@ struct ReadingRecommendationTests {
         )
 
         #expect(rotated.map(\.bookID) == [secondID, thirdID, firstID, weakID])
+    }
+
+    @Test func strongMatchesAreInterleavedAcrossAuthors() {
+        let first = candidate(title: "A1", author: "Author A")
+        let second = candidate(title: "A2", author: "Author A")
+        let third = candidate(title: "B1", author: "Author B")
+        let fourth = candidate(title: "C1", author: "Author C")
+        let ranked = [first, second, third, fourth].enumerated().map { index, candidate in
+            ReadingRecommendation(
+                bookID: candidate.id,
+                score: 100 - Double(index),
+                reasons: [.readyNow]
+            )
+        }
+
+        let diversified = ReadingRecommendationService.diversifiedStrongMatches(
+            ranked,
+            candidates: [first, second, third, fourth],
+            after: first.id
+        )
+
+        #expect(diversified.map(\.bookID) == [third.id, second.id, fourth.id, first.id])
+    }
+
+    @Test func chooseAnotherPrefersAnUnseenDifferentAuthorAcrossTheWholeLibrary() throws {
+        let first = candidate(title: "A1", author: "Author A")
+        let second = candidate(title: "A2", author: "Author A")
+        let distantAlternative = candidate(title: "B1", author: "Author B")
+        let recommendations = [first, second, distantAlternative].enumerated().map { index, candidate in
+            ReadingRecommendation(
+                bookID: candidate.id,
+                score: 100 - Double(index * 30),
+                reasons: [.readyNow]
+            )
+        }
+
+        let index = try #require(
+            ReadingRecommendationService.nextDiverseRecommendationIndex(
+                in: recommendations,
+                candidates: [first, second, distantAlternative],
+                currentIndex: 0,
+                excluding: [first.id]
+            )
+        )
+
+        #expect(recommendations[index].bookID == distantAlternative.id)
     }
 
     @Test func rankingScalesToALargeLibrary() {

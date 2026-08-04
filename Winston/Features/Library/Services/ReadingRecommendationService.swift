@@ -268,6 +268,100 @@ nonisolated enum ReadingRecommendationService {
         return rotatedPool + recommendations.dropFirst(pool.count)
     }
 
+    /// Interleaves near-equal matches by author and series. Ranking still
+    /// decides which books are strong matches; diversity only changes the
+    /// order inside that strong group.
+    static func diversifiedStrongMatches(
+        _ recommendations: [ReadingRecommendation],
+        candidates: [ReadingRecommendationCandidate],
+        after previousBookID: UUID?,
+        maximumPoolSize: Int = 64,
+        scoreWindow: Double = 20
+    ) -> [ReadingRecommendation] {
+        guard recommendations.count > 1,
+              maximumPoolSize > 1,
+              let topScore = recommendations.first?.score else {
+            return recommendations
+        }
+
+        let candidatesByID = Dictionary(
+            uniqueKeysWithValues: candidates.map { ($0.id, $0) }
+        )
+        var remaining = Array(
+            recommendations
+                .prefix(maximumPoolSize)
+                .prefix { topScore - $0.score <= scoreWindow }
+        )
+        guard remaining.count > 1 else { return recommendations }
+
+        var previousCandidate = previousBookID.flatMap { candidatesByID[$0] }
+        var diversified: [ReadingRecommendation] = []
+        diversified.reserveCapacity(remaining.count)
+
+        while !remaining.isEmpty {
+            var bestIndex = remaining.startIndex
+            var bestRank = Int.max
+            for index in remaining.indices {
+                let recommendation = remaining[index]
+                var rank = diversityRank(
+                    after: previousCandidate,
+                    candidate: candidatesByID[recommendation.bookID]
+                )
+                if recommendation.bookID == previousBookID,
+                   remaining.count > 1 {
+                    rank += 4
+                }
+                if rank < bestRank {
+                    bestIndex = index
+                    bestRank = rank
+                }
+            }
+
+            let next = remaining.remove(at: bestIndex)
+            diversified.append(next)
+            previousCandidate = candidatesByID[next.bookID]
+        }
+
+        return diversified + recommendations.dropFirst(diversified.count)
+    }
+
+    /// Chooses an unseen alternative with a different author and series when
+    /// possible, then progressively relaxes only the diversity preference.
+    /// Every returned item has already passed the user's hard filters.
+    static func nextDiverseRecommendationIndex(
+        in recommendations: [ReadingRecommendation],
+        candidates: [ReadingRecommendationCandidate],
+        currentIndex: Int,
+        excluding seenBookIDs: Set<UUID>
+    ) -> Int? {
+        guard recommendations.count > 1,
+              recommendations.indices.contains(currentIndex) else {
+            return nil
+        }
+        let candidatesByID = Dictionary(
+            uniqueKeysWithValues: candidates.map { ($0.id, $0) }
+        )
+        let current = candidatesByID[recommendations[currentIndex].bookID]
+        let indices = Array(recommendations.indices[(currentIndex + 1)...])
+            + Array(recommendations.indices[..<currentIndex])
+        let unseen = indices.filter {
+            !seenBookIDs.contains(recommendations[$0].bookID)
+        }
+        let choices = unseen.isEmpty ? indices : unseen
+
+        for desiredRank in 0...3 {
+            if let index = choices.first(where: {
+                diversityRank(
+                    after: current,
+                    candidate: candidatesByID[recommendations[$0].bookID]
+                ) == desiredRank
+            }) {
+                return index
+            }
+        }
+        return choices.first
+    }
+
     private struct WeightedReason {
         let weight: Double
         let reason: ReadingRecommendationReason
@@ -457,6 +551,22 @@ nonisolated enum ReadingRecommendationService {
             return false
         }
         return earliestStartedIndex < candidateIndex
+    }
+
+    private static func diversityRank(
+        after previous: ReadingRecommendationCandidate?,
+        candidate: ReadingRecommendationCandidate?
+    ) -> Int {
+        guard let previous else { return 0 }
+        guard let candidate else { return 3 }
+        let sharesAuthor = normalized(previous.author) != nil
+            && normalized(previous.author) == normalized(candidate.author)
+        let sharesSeries = normalized(previous.series) != nil
+            && normalized(previous.series) == normalized(candidate.series)
+        if !sharesAuthor && !sharesSeries { return 0 }
+        if !sharesAuthor { return 1 }
+        if !sharesSeries { return 2 }
+        return 3
     }
 
     private static func normalized(_ value: String?) -> String? {
