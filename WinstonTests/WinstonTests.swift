@@ -607,6 +607,28 @@ struct MassStorageTransferTests {
         #expect(!FileManager.default.fileExists(atPath: source.path(percentEncoded: false)))
     }
 
+    @Test func listBooksSkipsKindleSidecarDirectoryTrees() async throws {
+        let urls = try boundaryFixture()
+        defer { try? FileManager.default.removeItem(at: urls.root) }
+        let documents = urls.volume.appending(path: "documents")
+        let sidecar = documents.appending(path: "visible.sdr/search-index")
+        try FileManager.default.createDirectory(
+            at: sidecar,
+            withIntermediateDirectories: true
+        )
+        try Data("book".utf8).write(
+            to: documents.appending(path: "visible.mobi")
+        )
+        try Data("not a library book".utf8).write(
+            to: sidecar.appending(path: "internal.mobi")
+        )
+        let connection = try MassStorageDeviceConnection(volumeURL: urls.volume)
+
+        let listed = try await connection.listBooks()
+
+        #expect(listed.map(\.fileName) == ["visible.mobi"])
+    }
+
     @Test func copyRejectsAbsoluteAndParentTraversalPaths() async throws {
         let urls = try boundaryFixture()
         defer { try? FileManager.default.removeItem(at: urls.root) }

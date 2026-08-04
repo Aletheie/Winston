@@ -248,10 +248,21 @@ final class DeviceMonitor {
         do {
             let info = try await newConnection.info()
             connection = newConnection
-            state = .connected(info)
             lastError = nil
+            // Keep the public state stable while the first inventory is read.
+            // Publishing `.connected` before `books` made SwiftUI insert a
+            // conditional toolbar item during AppKit's initial toolbar layout,
+            // which can recurse and leave the window unresponsive.
+            let inventoryLoaded = await refreshBooks()
+            guard isCurrentConnection(newConnection) else { return }
+            if !inventoryLoaded {
+                guard await newConnection.isAlive() else {
+                    clearConnection(ifCurrent: newConnection)
+                    return
+                }
+            }
+            state = .connected(info)
             Log.device.info("Connected over \(info.kind == .mtp ? "MTP" : "USB mass storage"): \(info.name, privacy: .public)")
-            await refreshBooks()
         } catch {
             await newConnection.disconnect()
             state = .disconnected
@@ -292,8 +303,9 @@ final class DeviceMonitor {
 
     // MARK: - Books
 
-    func refreshBooks() async {
-        guard let connection else { return }
+    @discardableResult
+    func refreshBooks() async -> Bool {
+        guard let connection else { return false }
         do {
             let refreshed = try await connection.listBooks()
             let refreshedMatchKeys = Set(refreshed.lazy.map(\.matchKey))
@@ -309,10 +321,12 @@ final class DeviceMonitor {
                 let order = $0.fileName.localizedCaseInsensitiveCompare($1.fileName)
                 return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
             }
-            guard merged != books else { return }
+            guard merged != books else { return true }
             books = merged
+            return true
         } catch {
             lastError = error.localizedDescription
+            return false
         }
     }
 

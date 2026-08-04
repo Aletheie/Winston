@@ -126,7 +126,8 @@ actor MassStorageDeviceConnection: KindleDeviceConnection {
         do {
             files = try boundary.listRegularFiles(
                 in: ["documents"],
-                recursively: true
+                recursively: true,
+                skippingDirectoryExtensions: ["sdr"]
             )
         } catch DeviceError.fileMissing {
             throw DeviceError.listFailed

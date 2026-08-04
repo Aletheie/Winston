@@ -193,7 +193,8 @@ nonisolated final class MountedVolumeBoundary: @unchecked Sendable {
     func listRegularFiles(
         in components: [String],
         recursively: Bool,
-        includingHidden: Bool = false
+        includingHidden: Bool = false,
+        skippingDirectoryExtensions: Set<String> = []
     ) throws -> [FileEntry] {
         guard case .descriptor(let descriptor) = try openDirectory(
             components,
@@ -209,6 +210,7 @@ nonisolated final class MountedVolumeBoundary: @unchecked Sendable {
             components: components,
             recursively: recursively,
             includingHidden: includingHidden,
+            skippingDirectoryExtensions: skippingDirectoryExtensions,
             files: &files
         )
         try validateDirectoryBinding(descriptor, components: components)
@@ -580,6 +582,7 @@ nonisolated final class MountedVolumeBoundary: @unchecked Sendable {
         components: [String],
         recursively: Bool,
         includingHidden: Bool,
+        skippingDirectoryExtensions: Set<String>,
         files: inout [FileEntry]
     ) throws {
         let iterationDescriptor = Darwin.dup(directoryDescriptor)
@@ -592,8 +595,14 @@ nonisolated final class MountedVolumeBoundary: @unchecked Sendable {
 
         while let entry = readdir(directory) {
             try Task.checkCancellation()
-            let name = withUnsafeBytes(of: entry.pointee.d_name) { raw in
-                String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
+            let nameLength = Int(entry.pointee.d_namlen)
+            let name: String = try withUnsafeBytes(of: &entry.pointee.d_name) { raw in
+                // `readdir` may return a variable-sized dirent record. Taking
+                // d_name by value copies its entire fixed-capacity Swift tuple
+                // and can read beyond the actual record on FAT volumes. Borrow
+                // the field in place and consume only the kernel-provided bytes.
+                guard nameLength <= raw.count else { throw DeviceError.unsafePath }
+                return String(decoding: raw.prefix(nameLength), as: UTF8.self)
             }
             guard name != ".", name != "..",
                   includingHidden || !name.hasPrefix(".") else { continue }
@@ -621,6 +630,12 @@ nonisolated final class MountedVolumeBoundary: @unchecked Sendable {
             }
             let childComponents = components + [name]
             if kind == S_IFDIR, recursively {
+                let directoryExtension = (name as NSString)
+                    .pathExtension
+                    .lowercased()
+                guard !skippingDirectoryExtensions.contains(directoryExtension) else {
+                    continue
+                }
                 guard case .descriptor(let childDescriptor) = try openDirectory(
                     childComponents,
                     createIntermediates: false
@@ -633,6 +648,7 @@ nonisolated final class MountedVolumeBoundary: @unchecked Sendable {
                     components: childComponents,
                     recursively: true,
                     includingHidden: includingHidden,
+                    skippingDirectoryExtensions: skippingDirectoryExtensions,
                     files: &files
                 )
             } else if kind == S_IFREG {
