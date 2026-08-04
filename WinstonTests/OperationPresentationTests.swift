@@ -62,4 +62,14 @@ struct OperationPresentationTests {
         #expect(center.messages.count == 2)
         #expect(center.messages.allSatisfy { $0.persistence == .automatic })
     }
+
+    @Test @MainActor
+    func identicalActiveFeedbackIsCoalesced() {
+        let center = ToastCenter()
+        center.error("Some transfers failed (1).")
+        center.error("Some transfers failed (1).")
+        center.error("Some transfers failed (1).")
+
+        #expect(center.messages.count == 1)
+    }
 }
