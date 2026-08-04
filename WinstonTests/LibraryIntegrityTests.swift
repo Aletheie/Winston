@@ -40,7 +40,7 @@ struct LibraryIntegrityTests {
         #expect(
             report.issues.contains {
                 $0.bookID == book.uuid
-                    && $0.detail.contains("bibliographic work")
+                    && $0.id.hasSuffix("missing-work")
             }
         )
     }
