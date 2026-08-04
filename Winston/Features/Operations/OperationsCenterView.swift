@@ -4,7 +4,6 @@ struct OperationsCenterView: View {
     let store: OperationReportStore
     let onAction: (OperationReport, OperationReportAction) -> Void
 
-    @Environment(\.theme) private var theme
     @State private var filter: OperationReportStatus = .review
     @State private var expandedReportIDs: Set<UUID> = []
 
@@ -14,70 +13,94 @@ struct OperationsCenterView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
-            filterBar
+            OperationsCenterHeader(
+                filter: $filter,
+                unresolvedCount: store.unresolvedCount
+            )
             Divider()
             if visibleReports.isEmpty {
-                emptyState
+                OperationsEmptyState(status: filter)
             } else {
-                List(visibleReports) { report in
-                    OperationReportRow(
-                        report: report,
-                        isExpanded: Binding(
-                            get: { expandedReportIDs.contains(report.id) },
-                            set: { expanded in
-                                if expanded {
-                                    expandedReportIDs.insert(report.id)
-                                } else {
-                                    expandedReportIDs.remove(report.id)
-                                }
-                            }
-                        ),
-                        onAction: { onAction(report, $0) }
-                    )
-                }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
+                OperationsReportList(
+                    reports: visibleReports,
+                    expandedReportIDs: $expandedReportIDs,
+                    onAction: onAction
+                )
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background { ThemedBackground() }
         .navigationTitle("Review & Operations")
         .accessibilityIdentifier("operationsCenter")
     }
+}
 
-    private var header: some View {
+private struct OperationsCenterHeader: View {
+    @Binding var filter: OperationReportStatus
+    let unresolvedCount: Int
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: WinstonLayout.space5) {
+                OperationsCenterTitle(unresolvedCount: unresolvedCount)
+                Spacer(minLength: WinstonLayout.space5)
+                OperationsStatusPicker(filter: $filter)
+                    .frame(width: 420)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: WinstonLayout.space3) {
+                OperationsCenterTitle(unresolvedCount: unresolvedCount)
+                OperationsStatusPicker(filter: $filter)
+                    .frame(maxWidth: 420)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, WinstonLayout.space4)
+        .padding(.vertical, WinstonLayout.space3)
+    }
+}
+
+private struct OperationsCenterTitle: View {
+    let unresolvedCount: Int
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
         HStack(spacing: WinstonLayout.space3) {
             Image(systemName: "checklist.checked")
-                .font(.system(size: 25, weight: .semibold))
+                .font(.title2.weight(.semibold))
                 .foregroundStyle(theme.accent)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: WinstonLayout.space1) {
+
+            VStack(alignment: .leading, spacing: 2) {
                 theme.styledText(
                     terminal: "// review_and_operations",
                     native: "Review & Operations"
                 )
-                .font(theme.body(size: 17, weight: .bold))
-                Text("Session results and links to recovery work that still needs attention.")
-                    .font(theme.label(size: 11))
-                    .foregroundStyle(theme.textSecondary)
+                .font(.headline)
+                Text("Review results and retry anything that still needs attention.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            Spacer()
-            if store.unresolvedCount > 0 {
-                Text(store.unresolvedCount, format: .number)
-                    .font(theme.label(size: 12, weight: .bold))
-                    .foregroundStyle(theme.textPrimary)
-                    .padding(.horizontal, WinstonLayout.space2)
-                    .padding(.vertical, WinstonLayout.space1)
-                    .background(theme.interaction.selection, in: Capsule())
-                    .accessibilityLabel("\(store.unresolvedCount) unresolved operations")
+
+            if unresolvedCount > 0 {
+                Text(unresolvedCount, format: .number)
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(.quaternary, in: Capsule())
+                    .accessibilityLabel("\(unresolvedCount) unresolved operations")
             }
         }
-        .padding(WinstonLayout.space4)
-        .themedChrome(role: .toolbar)
     }
+}
 
-    private var filterBar: some View {
+private struct OperationsStatusPicker: View {
+    @Binding var filter: OperationReportStatus
+
+    var body: some View {
         Picker("Operation Status", selection: $filter) {
             ForEach(OperationReportStatus.allCases, id: \.self) { status in
                 Text(status.title)
@@ -85,16 +108,38 @@ struct OperationsCenterView: View {
             }
         }
         .pickerStyle(.segmented)
-        .padding(.horizontal, WinstonLayout.space4)
-        .padding(.vertical, WinstonLayout.space2)
-        .themedChrome(role: .toolbar)
+        .labelsHidden()
+        .accessibilityLabel("Operation Status")
+        .accessibilityIdentifier("operations.filter")
     }
+}
 
-    private var emptyState: some View {
+private struct OperationsReportList: View {
+    let reports: [OperationReport]
+    @Binding var expandedReportIDs: Set<UUID>
+    let onAction: (OperationReport, OperationReportAction) -> Void
+
+    var body: some View {
+        List(reports) { report in
+            OperationReportRow(
+                report: report,
+                isExpanded: $expandedReportIDs[contains: report.id],
+                onAction: { onAction(report, $0) }
+            )
+        }
+        .listStyle(.inset(alternatesRowBackgrounds: true))
+        .scrollContentBackground(.hidden)
+    }
+}
+
+private struct OperationsEmptyState: View {
+    let status: OperationReportStatus
+
+    var body: some View {
         ContentUnavailableView {
-            Label(filter.emptyTitle, systemImage: filter.emptySystemImage)
+            Label(status.emptyTitle, systemImage: status.emptySystemImage)
         } description: {
-            Text(filter.emptyDescription)
+            Text(status.emptyDescription)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -135,7 +180,7 @@ private struct OperationReportRow: View {
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(report.source.title)
-                        .font(theme.body(size: 12, weight: .semibold))
+                        .font(.callout.weight(.semibold))
                     HStack(spacing: WinstonLayout.space2) {
                         Text(report.status.title)
                         Text(report.updatedAt, format: .relative(presentation: .named))
@@ -145,13 +190,13 @@ private struct OperationReportRow: View {
                             Text("This Session")
                         }
                     }
-                    .font(theme.label(size: 9))
-                    .foregroundStyle(theme.textSecondary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text("\(report.counts.completed)/\(report.counts.total)")
-                    .font(theme.label(size: 10, weight: .semibold))
-                    .foregroundStyle(theme.textSecondary)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
             .accessibilityElement(children: .combine)
@@ -178,6 +223,19 @@ private struct OperationReportRow: View {
                 }
             }
             .controlSize(.small)
+        }
+    }
+}
+
+private extension Set {
+    subscript(contains element: Element) -> Bool {
+        get { contains(element) }
+        set {
+            if newValue {
+                insert(element)
+            } else {
+                remove(element)
+            }
         }
     }
 }
