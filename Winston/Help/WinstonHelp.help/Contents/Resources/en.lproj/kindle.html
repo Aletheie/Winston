@@ -21,19 +21,20 @@
         <li>Or use the two buttons in the device view's header:
             <ul>
                 <li><b>Review Sync Plan</b> previews every change before it happens: add, update an outdated conversion, repair a cover, keep unchanged, or optionally remove a device-only copy. Removals are off by default and require confirmation.</li>
-                <li><b>⬇ Import N to Library</b> copies books that are on the Kindle but not yet in your library into your library.</li>
+                <li><b>⬇ Import N to Library</b> copies books that are on the Kindle but not yet in your library into temporary import staging, then opens <b>Review Import</b>. The device copy lease remains available until you approve or cancel; cancellation cleans it without changing the library.</li>
             </ul>
         </li>
         <li>Each Kindle gets its own local sync profile. Use the profile menu in the plan to switch, create, or rename profiles; Winston remembers the source file and cover last sent to each one.</li>
         <li>Transfers run one at a time. Progress (including conversion) shows in a status toast in the bottom‑right corner, with a <b>Cancel</b> button to stop the queue.</li>
+        <li>After sending, use the explicit <b>Eject</b> control so a mass-storage Kindle can reindex. Wait for “Kindle ejected — safe to disconnect” before unplugging it. Transfers never eject automatically. If eject fails, Winston leaves the device connected and shows the error so you can close busy files and retry.</li>
         <li>Books already on the device are marked with a badge in your library.</li>
     </ul>
 
     <h2>Managing what's on the Kindle</h2>
     <ul>
         <li>The device view lists what's on the Kindle, with each book's author (matched from your library).</li>
-        <li>Right‑click to <b>Copy to Library</b> or <b>Remove from Device</b> — singly or for a multi‑selection.</li>
-        <li>To clear out an author, right‑click a book by them and choose <b>Remove all by ⟨author⟩</b>.</li>
+        <li>Right‑click to <b>Copy to Library</b> or <b>Remove from Device</b> — singly or for a multi‑selection. Winston confirms the exact count and preserves every library copy.</li>
+        <li>To clear out an author, right‑click a book by them and choose <b>Remove all by ⟨author⟩</b>. Removal progress appears in the status toast, where you can cancel the remaining work.</li>
     </ul>
 
     <h2 id="highlights">Highlights &amp; notes</h2>

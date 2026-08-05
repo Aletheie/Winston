@@ -14,6 +14,9 @@
         <li>Drag files onto the window, use the <span class="badge">Add Files</span> toolbar button, or press <kbd>⌘O</kbd>.</li>
         <li>Supported formats: EPUB, MOBI, AZW3, PDF, TXT, HTML.</li>
         <li>Imported files are <b>copied</b> into Winston's library folder, so moving or deleting the originals won't affect your library.</li>
+        <li>Multiple files always open <b>Review Import</b> before anything is added. The table shows format, size, validation and DRM status, duplicate or edition matches, and Winston's proposed destination. Exact duplicates start as <b>Skip</b>; ambiguous matches wait for you to choose a work or edition. You can edit the embedded metadata before approving the batch.</li>
+        <li>A single clean new book is added immediately by default. A duplicate, ambiguous, damaged, unsupported, or DRM-protected single file still opens the review. Turn on <b>Settings → Imports → Always review imports before adding them</b> to review every single-file import too.</li>
+        <li>Canceling the review removes its temporary staging data and leaves the catalog and managed library unchanged. After approval, use <b>Show Imported Books</b> to reveal only the result without changing your saved filter, sort, view, or inspector settings; use <b>Review Import Issues</b> for failures or deferred recovery.</li>
         <li>To import automatically, turn on a <b>watch folder</b> in Settings → Auto‑Import. New books dropped there are added for you (duplicates are skipped).</li>
     </ul>
 
@@ -73,6 +76,9 @@
         <li>Edit one book from the inspector's <b>Edit</b> button, or many at once by selecting them and choosing <b>Edit Metadata for N…</b>.</li>
         <li>Rename an author, series, or tag across the whole library from its right‑click menu in the sidebar.</li>
         <li>If an author was imported reversed (e.g. “Tolkien, J.R.R.”), a tip at the bottom of the sidebar offers to fix it to “J.R.R. Tolkien” in one click.</li>
+        <li>Choose <b>Library → Metadata Cleanup…</b> to analyze the current filtered view, or use a book selection's context menu to analyze only those books. Library Health can open the cleanup for the whole library.</li>
+        <li>Cleanup separates deterministic <b>Safe to Apply</b> normalizations from <b>Needs Review</b> suggestions and informational values Winston cannot correct automatically. Expand a group to inspect exact per-book before-and-after values, select individual changes, or edit the preferred replacement.</li>
+        <li>Each approved change checks that the book still has the value you reviewed. Concurrent edits are reported as conflicts and never overwritten. <b>Undo Cleanup</b> uses the same guard, so it also preserves any newer edit.</li>
         <li>Change a cover by dropping an image onto it in the inspector, or right‑click the cover → <b>Choose Cover…</b> / <b>Reset Cover</b>.</li>
         <li>Find and clean up copies with <b>Library → Find Duplicates…</b> — copies are matched by title and author (regardless of name order), and each group has a <b>Keep</b> action that removes the others.</li>
     </ul>
