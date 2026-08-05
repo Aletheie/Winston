@@ -13,6 +13,7 @@ struct BookActions {
     var fetchMetadata: (Book) -> Void
     var fetchMetadataSelection: () -> Void
     var reviewMetadataCleanup: (Book) -> Void
+    var findOtherEditions: (Book) -> Void
     var setStatus: (Book, ReadingStatus) -> Void
     var readingHistory: (Book) -> Void
     var addToCollection: (Book, BookCollection) -> Void
@@ -44,35 +45,46 @@ struct BookContextMenu: View {
     private var manualCollections: [BookCollection] { collections.filter { !$0.isSmart } }
 
     var body: some View {
-        if availability.primaryHasPersistedDigitalFile {
-            Button { actions.open(book) } label: {
-                Label("Open in Books", systemImage: "book")
-            }
-        }
-        if let work = book.work {
-            Button { actions.openWork(work) } label: {
-                Label("Open Work", systemImage: "books.vertical")
-            }
-        }
-        if availability.primaryHasPersistedDigitalFile {
-            Button { actions.quickLook(book) } label: {
-                Label("Quick Look", systemImage: "eye")
-            }
-            Button { actions.showInFinder(book) } label: {
-                Label("Show in Finder", systemImage: "folder")
-            }
-            Button { actions.share(book) } label: {
-                Label("Share\u{2026}", systemImage: "square.and.arrow.up")
-            }
-            Button { actions.relink(book) } label: {
-                Label("Replace File\u{2026}", systemImage: "arrow.triangle.2.circlepath.doc.on.clipboard")
-            }
-            Button { actions.inspect(book) } label: {
-                Label("Inspect with Book Doctor…", systemImage: "stethoscope")
+        if isMultiSelection {
+            if availability.persistedDigitalFileCount > 0 {
+                Button { actions.inspect(book) } label: {
+                    Label(
+                        "Inspect \(availability.persistedDigitalFileCount) Files with Book Doctor…",
+                        systemImage: "stethoscope"
+                    )
+                }
             }
         } else {
-            Button { actions.relink(book) } label: {
-                Label("Attach Digital File…", systemImage: "doc.badge.plus")
+            if availability.primaryHasPersistedDigitalFile {
+                Button { actions.open(book) } label: {
+                    Label("Open in Books", systemImage: "book")
+                }
+            }
+            if let work = book.work {
+                Button { actions.openWork(work) } label: {
+                    Label("Open Work", systemImage: "books.vertical")
+                }
+            }
+            if availability.primaryHasPersistedDigitalFile {
+                Button { actions.quickLook(book) } label: {
+                    Label("Quick Look", systemImage: "eye")
+                }
+                Button { actions.showInFinder(book) } label: {
+                    Label("Show in Finder", systemImage: "folder")
+                }
+                Button { actions.share(book) } label: {
+                    Label("Share\u{2026}", systemImage: "square.and.arrow.up")
+                }
+                Button { actions.relink(book) } label: {
+                    Label("Replace File\u{2026}", systemImage: "arrow.triangle.2.circlepath.doc.on.clipboard")
+                }
+                Button { actions.inspect(book) } label: {
+                    Label("Inspect with Book Doctor…", systemImage: "stethoscope")
+                }
+            } else {
+                Button { actions.relink(book) } label: {
+                    Label("Attach Digital File…", systemImage: "doc.badge.plus")
+                }
             }
         }
         Divider()
@@ -80,7 +92,7 @@ struct BookContextMenu: View {
         Menu {
             ForEach(ReadingStatus.allCases) { status in
                 Button { actions.setStatus(book, status) } label: {
-                    if book.readingStatus == status {
+                    if !isMultiSelection && book.readingStatus == status {
                         Label(status.label, systemImage: "checkmark")
                     } else {
                         Text(status.label)
@@ -90,8 +102,10 @@ struct BookContextMenu: View {
         } label: {
             Label("Reading Status", systemImage: "bookmark")
         }
-        Button { actions.readingHistory(book) } label: {
-            Label("Reading History\u{2026}", systemImage: "clock.arrow.circlepath")
+        if !isMultiSelection {
+            Button { actions.readingHistory(book) } label: {
+                Label("Reading History\u{2026}", systemImage: "clock.arrow.circlepath")
+            }
         }
 
         Menu {
@@ -134,6 +148,15 @@ struct BookContextMenu: View {
                     : "Review Metadata Cleanup…",
                 systemImage: "wand.and.sparkles"
             )
+        }
+
+        if !isMultiSelection {
+            Button { actions.findOtherEditions(book) } label: {
+                Label(
+                    "Find Other Editions in Catalogs",
+                    systemImage: "books.vertical"
+                )
+            }
         }
 
         if isMultiSelection {
