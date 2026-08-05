@@ -31,13 +31,8 @@ enum WinstonHelp {
         for language: AppLanguage,
         preferredLocalizations: [String]
     ) -> String {
-        switch language {
-        case .czech:
-            "cs"
-        case .english:
-            "en"
-        case .system:
-            preferredLocalizations.contains { $0.lowercased().hasPrefix("cs") } ? "cs" : "en"
-        }
+        language.effectiveLocalizationCode(
+            preferredLocalizations: preferredLocalizations
+        )
     }
 }
