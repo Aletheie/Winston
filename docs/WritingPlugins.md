@@ -121,7 +121,9 @@ exports.deactivate = () => {
 
 Each synchronous JavaScript turn has about **10 seconds** to return. A plugin
 that hangs is terminated at the process boundary, *quarantined*, and left
-disabled. CPU and memory use are bounded too — still `await` slow host work.
+disabled. Winston does not impose a low cumulative CPU cap on the worker:
+instead, the parent enforces that wall deadline on every JavaScript turn and a
+separate per-session memory limit. Still `await` slow host work.
 
 ---
 
