@@ -141,6 +141,7 @@ final class ReadingRecommendationViewModel {
     @ObservationIgnored private var rotationAnchorID: UUID?
     @ObservationIgnored private var activePreparationID: UUID?
     @ObservationIgnored private var rankingTask: Task<Void, Never>?
+    @ObservationIgnored private var seenRecommendationIDs: Set<UUID> = []
     @ObservationIgnored private var selectedIndex = 0
 
     var hasCustomPreferences: Bool {
@@ -154,6 +155,7 @@ final class ReadingRecommendationViewModel {
         activePreparationID = preparationID
         isPreparing = true
         rotationAnchorID = previousBookID
+        seenRecommendationIDs.removeAll()
 
         var sourceBooksByID: [UUID: Book] = [:]
         sourceBooksByID.reserveCapacity(books.count)
@@ -201,8 +203,14 @@ final class ReadingRecommendationViewModel {
     }
 
     func chooseAnother() {
-        guard rankedRecommendations.count > 1 else { return }
-        selectedIndex = (selectedIndex + 1) % rankedRecommendations.count
+        guard let nextIndex = ReadingRecommendationService
+            .nextDiverseRecommendationIndex(
+                in: rankedRecommendations,
+                candidates: candidates,
+                currentIndex: selectedIndex,
+                excluding: seenRecommendationIDs
+            ) else { return }
+        selectedIndex = nextIndex
         updateCurrentRecommendation()
     }
 
@@ -239,6 +247,7 @@ final class ReadingRecommendationViewModel {
                   self.rotationAnchorID == anchor else { return }
             self.rankedRecommendations = ranked
             self.selectedIndex = 0
+            self.seenRecommendationIDs.removeAll()
             self.updateCurrentRecommendation()
             if completesPreparation {
                 self.isPreparing = false
@@ -258,8 +267,9 @@ final class ReadingRecommendationViewModel {
             preferences: preferences
         )
         guard !Task.isCancelled else { return [] }
-        return ReadingRecommendationService.rotatingStrongMatches(
+        return ReadingRecommendationService.diversifiedStrongMatches(
             ranked,
+            candidates: candidates,
             after: anchor
         )
     }
@@ -275,6 +285,7 @@ final class ReadingRecommendationViewModel {
         let recommendation = rankedRecommendations[selectedIndex]
         currentRecommendation = recommendation
         currentBook = booksByID[recommendation.bookID]
+        seenRecommendationIDs.insert(recommendation.bookID)
         rotationAnchorID = recommendation.bookID
         currentOrdinal = selectedIndex + 1
     }
