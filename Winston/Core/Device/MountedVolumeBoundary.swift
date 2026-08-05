@@ -596,14 +596,24 @@ nonisolated final class MountedVolumeBoundary: @unchecked Sendable {
         while let entry = readdir(directory) {
             try Task.checkCancellation()
             let nameLength = Int(entry.pointee.d_namlen)
-            let name: String = try withUnsafeBytes(of: &entry.pointee.d_name) { raw in
-                // `readdir` may return a variable-sized dirent record. Taking
-                // d_name by value copies its entire fixed-capacity Swift tuple
-                // and can read beyond the actual record on FAT volumes. Borrow
-                // the field in place and consume only the kernel-provided bytes.
-                guard nameLength <= raw.count else { throw DeviceError.unsafePath }
-                return String(decoding: raw.prefix(nameLength), as: UTF8.self)
+            guard let nameOffset = MemoryLayout<dirent>.offset(of: \.d_name),
+                  nameLength <= Int(entry.pointee.d_reclen) - nameOffset else {
+                throw DeviceError.unsafePath
             }
+            // `readdir` may return a variable-sized dirent record. Taking
+            // d_name by value copies its entire fixed-capacity Swift tuple and
+            // can read beyond the actual record on FAT volumes. Read only the
+            // kernel-reported name bytes directly from the returned record.
+            let nameBytes = UnsafeRawPointer(entry)
+                .advanced(by: nameOffset)
+                .assumingMemoryBound(to: UInt8.self)
+            let name = String(
+                decoding: UnsafeBufferPointer(
+                    start: nameBytes,
+                    count: nameLength
+                ),
+                as: UTF8.self
+            )
             guard name != ".", name != "..",
                   includingHidden || !name.hasPrefix(".") else { continue }
             try Self.validateComponent(name)
