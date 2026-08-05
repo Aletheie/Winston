@@ -31,7 +31,9 @@ nonisolated enum Log {
 
     static let conversionSignposter = OSSignposter(subsystem: subsystem, category: "conversion")
     static let deviceSignposter = OSSignposter(subsystem: subsystem, category: "device")
-    static let librarySignposter = OSSignposter(subsystem: subsystem, category: "library")
+    // Time Profiler and the SwiftUI template collect Points of Interest by default.
+    // Keep the library intervals in that category so CLI-recorded traces contain them.
+    static let librarySignposter = OSSignposter(subsystem: subsystem, category: "PointsOfInterest")
     static let metadataSignposter = OSSignposter(subsystem: subsystem, category: "metadata")
     static let persistenceSignposter = OSSignposter(subsystem: subsystem, category: "persistence")
     static let searchSignposter = OSSignposter(subsystem: subsystem, category: "search")
