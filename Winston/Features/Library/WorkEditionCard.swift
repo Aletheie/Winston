@@ -6,7 +6,11 @@ struct WorkEditionCard: View {
     let isPreferred: Bool
     let compact: Bool
     @Binding var selectedEditionUUIDs: Set<UUID>
+    let isNavigationSelection: Bool
+    let selectedAssetID: UUID?
     let service: CatalogReconciliationService
+    let onNavigateEdition: (UUID) -> Void
+    let onNavigateAsset: (UUID) -> Void
     let onShowInLibrary: (Book) -> Void
     let onDelete: (Book) -> Void
 
@@ -32,7 +36,13 @@ struct WorkEditionCard: View {
                         .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
                 }
                 .shadow(color: .black.opacity(0.22), radius: 3, y: 2)
-            WorkEditionDetails(book: book, isPreferred: isPreferred)
+            WorkEditionDetails(
+                book: book,
+                isPreferred: isPreferred,
+                selectedAssetID: selectedAssetID,
+                onNavigateEdition: { onNavigateEdition(book.uuid) },
+                onNavigateAsset: onNavigateAsset
+            )
             Spacer()
             WorkEditionMenu(
                 book: book,
@@ -44,13 +54,24 @@ struct WorkEditionCard: View {
             )
         }
         .padding(12)
-        .glassCard(cornerRadius: 10, tintOpacity: isCompared ? 0.7 : 0.4)
+        .glassCard(
+            cornerRadius: 10,
+            tintOpacity: (isCompared || isNavigationSelection) ? 0.7 : 0.4
+        )
         .overlay {
-            if isCompared {
+            if isCompared || isNavigationSelection {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(theme.accent, lineWidth: 1.5)
+                    .stroke(
+                        isNavigationSelection ? theme.interaction.focus : theme.accent,
+                        lineWidth: isNavigationSelection ? 2 : 1.5
+                    )
             }
         }
+        .accessibilityValue(
+            isNavigationSelection
+                ? "Current edition in related item navigator"
+                : "Edition"
+        )
     }
 
     private var comparisonBinding: Binding<Bool> {
@@ -70,15 +91,22 @@ struct WorkEditionCard: View {
 private struct WorkEditionDetails: View {
     let book: Book
     let isPreferred: Bool
+    let selectedAssetID: UUID?
+    let onNavigateEdition: () -> Void
+    let onNavigateAsset: (UUID) -> Void
 
     @Environment(\.theme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
-                Text(book.displayTitle)
-                    .font(theme.body(size: 13, weight: .semibold))
-                    .lineLimit(2)
+                Button(action: onNavigateEdition) {
+                    Text(book.displayTitle)
+                        .font(theme.body(size: 13, weight: .semibold))
+                        .lineLimit(2)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Navigate to edition: \(book.displayTitle)")
                 if isPreferred {
                     Image(systemName: "star.fill")
                         .font(.system(size: 9))
@@ -100,17 +128,45 @@ private struct WorkEditionDetails: View {
                     .foregroundStyle(theme.textTertiary)
             }
             HStack(spacing: 4) {
-                ForEach(book.assetFormats, id: \.self) { format in
-                    Text(format)
-                        .font(theme.label(size: 9, weight: .bold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(theme.accent.opacity(0.12), in: Capsule())
+                ForEach(sortedAssets) { asset in
+                    Button {
+                        onNavigateAsset(asset.uuid)
+                    } label: {
+                        Text(asset.format)
+                            .font(theme.label(size: 9, weight: .bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                selectedAssetID == asset.uuid
+                                    ? theme.interaction.selection
+                                    : theme.accent.opacity(0.12),
+                                in: Capsule()
+                            )
+                            .overlay {
+                                if selectedAssetID == asset.uuid {
+                                    Capsule().stroke(theme.interaction.focus, lineWidth: 1)
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Navigate to asset: \(asset.fileName)")
+                    .accessibilityValue(selectedAssetID == asset.uuid ? "Selected" : "Not selected")
                 }
             }
             .padding(.top, 1)
         }
         .font(theme.label(size: 11))
+    }
+
+    private var sortedAssets: [BookAsset] {
+        let primaryID = book.primaryAsset?.uuid
+        return book.assets.sorted {
+            if ($0.uuid == primaryID) != ($1.uuid == primaryID) {
+                return $0.uuid == primaryID
+            }
+            if $0.format != $1.format { return $0.format < $1.format }
+            return $0.uuid.uuidString < $1.uuid.uuidString
+        }
     }
 
     private var publicationDescription: String? {

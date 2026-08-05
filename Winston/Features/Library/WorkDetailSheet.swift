@@ -52,7 +52,6 @@ struct WorkDetailSheet: View {
                 )
                 Divider()
                 EntityBreadcrumb(model: $entityNavigation)
-                Divider()
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
