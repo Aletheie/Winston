@@ -15,6 +15,7 @@ enum SidebarItem: Hashable, RawRepresentable {
     case discover
     case catalogs
     case updates
+    case operations
 
     init?(rawValue: String) {
         let parts = rawValue.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
@@ -27,6 +28,7 @@ enum SidebarItem: Hashable, RawRepresentable {
         case "discover": self = .discover
         case "catalogs": self = .catalogs
         case "updates": self = .updates
+        case "operations": self = .operations
         case "status":
             guard let status = ReadingStatus(rawValue: value) else { return nil }
             self = .status(status)
@@ -50,6 +52,7 @@ enum SidebarItem: Hashable, RawRepresentable {
         case .discover: "discover"
         case .catalogs: "catalogs"
         case .updates: "updates"
+        case .operations: "operations"
         case .status(let status): "status:\(status.rawValue)"
         case .collection(let id): "collection:\(id.uuidString)"
         case .format(let value): "format:\(value)"
@@ -61,7 +64,7 @@ enum SidebarItem: Hashable, RawRepresentable {
 
     var libraryFilter: LibraryFilter {
         switch self {
-        case .all, .device, .discover, .catalogs, .updates: .all
+        case .all, .device, .discover, .catalogs, .updates, .operations: .all
         case .recentlyAdded:   .recentlyAdded
         case .status(let s):   .status(s)
         case .collection(let id): .collection(id)
@@ -85,6 +88,7 @@ struct SidebarView: View {
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
     @Environment(DeviceMonitor.self) private var deviceMonitor
+    @Environment(OperationReportStore.self) private var operationReports
     @State private var showAuthors = false
     @State private var showSeries = false
     @State private var showTags = false
@@ -151,13 +155,30 @@ struct SidebarView: View {
                     .tag(SidebarItem.catalogs)
                     .accessibilityIdentifier("sidebar.catalogs")
                 }
-                SidebarRow(
-                    title: theme.styledText(terminal: "UPDATES", native: "Updates"),
-                    systemImage: "bell",
-                    count: viewModel.notices.unreadCount
-                )
-                .tag(SidebarItem.updates)
-                .accessibilityIdentifier("sidebar.updates")
+                if settings.showUpdatesInSidebar {
+                    SidebarRow(
+                        title: theme.styledText(terminal: "UPDATES", native: "Updates"),
+                        systemImage: "bell",
+                        count: viewModel.notices.unreadCount
+                    )
+                    .tag(SidebarItem.updates)
+                    .accessibilityIdentifier("sidebar.updates")
+                }
+                if settings.showOperationsInSidebar {
+                    SidebarRow(
+                        title: theme.styledText(
+                            terminal: "REVIEW_OPS",
+                            native: "Review & Operations"
+                        ),
+                        systemImage: "checklist.checked",
+                        count: operationReports.unresolvedCount
+                    )
+                    .tag(SidebarItem.operations)
+                    .accessibilityIdentifier("sidebar.operations")
+                    .accessibilityLabel(
+                        "Review and Operations, \(operationReports.unresolvedCount) unresolved"
+                    )
+                }
                 if facets.recent > 0 {
                     SidebarRow(title: theme.styledText(terminal: "RECENTLY ADDED", native: "Recently Added"),
                                systemImage: "clock", count: facets.recent)

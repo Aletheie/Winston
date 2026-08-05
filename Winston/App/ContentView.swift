@@ -8,6 +8,7 @@ enum MainDestination: Hashable {
     case discover
     case catalogs
     case updates
+    case operations
 }
 
 struct ContentView: View {
@@ -17,6 +18,8 @@ struct ContentView: View {
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
     @Environment(DeviceMonitor.self) private var deviceMonitor
+    @Environment(TransferQueue.self) private var transferQueue
+    @Environment(OperationReportStore.self) private var operationReports
     @Environment(OPDSViewModel.self) private var opdsViewModel
 
     @SceneStorage("main.sidebarSelection") private var restoredSidebarSelection = SidebarItem.all.rawValue
@@ -28,6 +31,7 @@ struct ContentView: View {
     @State private var watchScanTask: Task<Void, Never>?
     @State private var activeLibrarySheet: LibrarySheet?
     @State private var showImportReview = false
+    @State private var showBulkOperationResult = false
     @State private var projectionStore = LibraryProjectionStore()
     init(
         viewModel: LibraryViewModel,
@@ -43,6 +47,7 @@ struct ContentView: View {
         case .discover: .discover
         case .catalogs: .catalogs
         case .updates:  .updates
+        case .operations: .operations
         default:        .library
         }
     }
@@ -106,6 +111,11 @@ struct ContentView: View {
                     viewModel: viewModel,
                     onOpenSeries: { sidebarSelection = .series($0) }
                 )
+            case .operations:
+                OperationsCenterView(
+                    store: operationReports,
+                    onAction: handleOperationReportAction
+                )
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -120,6 +130,7 @@ struct ContentView: View {
                 maintenance: viewModel.maintenance,
                 onReviewEditions: openEditionReview,
                 onReviewImport: openImportReview,
+                onReviewBulkOperation: { showBulkOperationResult = true },
                 onResolveDigitalFile: resolveDigitalFile
             )
         }
@@ -135,6 +146,20 @@ struct ContentView: View {
                 onShowImportedBooks: showImportedBooks,
                 onReviewIssues: showImportIssues
             )
+        }
+        .sheet(isPresented: $showBulkOperationResult) {
+            if let report = viewModel.bulkOperationReport {
+                BulkOperationResultSheet(
+                    report: report,
+                    onRetry: viewModel.retryBulkOperation,
+                    onClose: viewModel.dismissBulkOperationReport
+                )
+            } else {
+                ContentUnavailableView(
+                    "No Bulk Operation Result",
+                    systemImage: "checkmark.circle"
+                )
+            }
         }
         .tint(theme.accent)
         .task {
@@ -197,6 +222,15 @@ struct ContentView: View {
         }
         .onChange(of: settings.showCatalogsInSidebar) { _, isVisible in
             if !isVisible, sidebarSelection == .catalogs { sidebarSelection = .all }
+        }
+        .onChange(of: settings.showUpdatesInSidebar) { _, isVisible in
+            if !isVisible, sidebarSelection == .updates { sidebarSelection = .all }
+        }
+        .onChange(of: settings.showOperationsInSidebar) { _, isVisible in
+            if !isVisible, sidebarSelection == .operations { sidebarSelection = .all }
+        }
+        .onChange(of: operationCenterProjection, initial: true) {
+            syncOperationReports()
         }
         .onChange(of: importReviewPresentation) { _, presentation in
             guard let presentation else {
@@ -329,6 +363,152 @@ struct ContentView: View {
         }
     }
 
+    private struct OperationCenterProjection: Equatable {
+        let bulkProgress: BulkOperationProgress?
+        let bulkReport: BulkOperationPresentationReport?
+        let importBatch: PreparedImportBatch?
+        let pendingEditionCount: Int
+        let convertingCount: Int
+        let importRecoveryCount: Int
+        let importRecoveryError: String?
+        let pendingTransferCount: Int
+        let hasUnresolvedDelivery: Bool
+        let validBookTargetIDs: Set<String>
+    }
+
+    private static let editionReviewReportID = UUID(
+        uuidString: "E1100000-0000-4000-8000-000000000001"
+    )!
+    private static let conversionReportID = UUID(
+        uuidString: "C0000000-0000-4000-8000-000000000001"
+    )!
+    private static let importRecoveryReportID = UUID(
+        uuidString: "1A900000-0000-4000-8000-000000000001"
+    )!
+    private static let transferRecoveryReportID = UUID(
+        uuidString: "7A900000-0000-4000-8000-000000000001"
+    )!
+
+    private var operationCenterProjection: OperationCenterProjection {
+        OperationCenterProjection(
+            bulkProgress: viewModel.activeBulkOperationProgress,
+            bulkReport: viewModel.bulkOperationReport,
+            importBatch: viewModel.preparedImportBatch,
+            pendingEditionCount: viewModel.editions.pendingCount,
+            convertingCount: viewModel.convertingUUIDs.count,
+            importRecoveryCount: viewModel.importRecoveryItems.count,
+            importRecoveryError: viewModel.importRecoveryQueueError,
+            pendingTransferCount: transferQueue.pendingTransferCount,
+            hasUnresolvedDelivery: transferQueue.hasUnresolvedDelivery,
+            validBookTargetIDs: Set(projectionStore.books.map {
+                "book:\($0.uuid.uuidString)"
+            })
+        )
+    }
+
+    private func syncOperationReports() {
+        let projection = operationCenterProjection
+        if let progress = projection.bulkProgress {
+            operationReports.upsert(.runningBulk(progress))
+        }
+        if let report = projection.bulkReport {
+            operationReports.upsert(.bulk(report))
+        }
+        if let batch = projection.importBatch {
+            operationReports.upsert(.importBatch(batch))
+        }
+
+        if projection.pendingEditionCount > 0 {
+            operationReports.upsert(.reviewLink(
+                id: Self.editionReviewReportID,
+                source: .reconciliation,
+                count: projection.pendingEditionCount,
+                route: .editionReview
+            ))
+        } else {
+            operationReports.remove(id: Self.editionReviewReportID)
+        }
+
+        if projection.convertingCount > 0 {
+            operationReports.upsert(.runningConversion(
+                id: Self.conversionReportID,
+                count: projection.convertingCount
+            ))
+        } else {
+            operationReports.remove(id: Self.conversionReportID)
+        }
+
+        var durableLinks: [OperationReport] = []
+        if projection.importRecoveryCount > 0 || projection.importRecoveryError != nil {
+            durableLinks.append(.reviewLink(
+                id: Self.importRecoveryReportID,
+                source: .importRecovery,
+                count: max(1, projection.importRecoveryCount),
+                route: .importRecovery,
+                persistence: .durableRecovery,
+                detail: projection.importRecoveryError
+            ))
+        }
+        if projection.pendingTransferCount > 0 || projection.hasUnresolvedDelivery {
+            durableLinks.append(.reviewLink(
+                id: Self.transferRecoveryReportID,
+                source: .transferRecovery,
+                count: max(1, projection.pendingTransferCount),
+                route: .kindle,
+                persistence: .durableRecovery,
+                detail: projection.hasUnresolvedDelivery
+                    ? String(localized: "A Kindle delivery needs review before retrying.")
+                    : nil
+            ))
+        }
+        operationReports.replaceDurableLinks(durableLinks)
+        operationReports.reconcileSessionTargets(
+            validTargetIDs: projection.validBookTargetIDs
+        )
+    }
+
+    private func handleOperationReportAction(
+        _ report: OperationReport,
+        _ action: OperationReportAction
+    ) {
+        switch action {
+        case .dismiss:
+            operationReports.dismiss(id: report.id)
+            if report.source == .bulkLibrary {
+                viewModel.dismissBulkOperationReport()
+            }
+        case .retry:
+            guard report.source == .bulkLibrary, report.canRetry else { return }
+            operationReports.remove(id: report.id)
+            sidebarSelection = .all
+            viewModel.retryBulkOperation()
+        case .open:
+            switch report.route {
+            case .editionReview:
+                openEditionReview()
+            case .importReview:
+                if viewModel.preparedImportBatch != nil {
+                    showImportReview = true
+                } else {
+                    showImportIssues()
+                }
+            case .importRecovery:
+                showImportIssues()
+            case .bulkResult:
+                if viewModel.bulkOperationReport != nil {
+                    showBulkOperationResult = true
+                }
+            case .kindle:
+                sidebarSelection = .device
+            case .libraryIntegrity:
+                sidebarSelection = .all
+                activeLibrarySheet = .libraryIntegrity
+            case nil:
+                break
+            }
+        }
+    }
+
     private var isWishlistSelected: Bool {
         guard case .collection(let id) = sidebarSelection else { return false }
         return projectionStore.collections.contains { $0.id == id && $0.isWishlist }
@@ -337,7 +517,9 @@ struct ContentView: View {
     private func normalizeRestoredDestination() {
         switch sidebarSelection {
         case .discover where !settings.showDiscoverInSidebar,
-             .catalogs where !settings.showCatalogsInSidebar:
+             .catalogs where !settings.showCatalogsInSidebar,
+             .updates where !settings.showUpdatesInSidebar,
+             .operations where !settings.showOperationsInSidebar:
             sidebarSelection = .all
         case .collection(let id)
             where !projectionStore.collections.contains(where: { $0.id == id }):
@@ -511,7 +693,7 @@ private struct LibraryProjectionStatusBanner: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(.bar)
+            .themedChrome(role: .toolbar)
             .overlay(alignment: .bottom) { Divider() }
 
         case .stale(_, _, let failure):
@@ -555,7 +737,7 @@ private struct LibraryProjectionStatusBanner: View {
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .themedChrome(role: .toolbar)
         .overlay(alignment: .bottom) { Divider() }
     }
 }

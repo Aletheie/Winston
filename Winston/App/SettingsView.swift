@@ -135,7 +135,9 @@ struct SettingsView: View {
 
             SidebarVisibilitySettingsSection(
                 showDiscover: $settings.showDiscoverInSidebar,
-                showCatalogs: $settings.showCatalogsInSidebar
+                showCatalogs: $settings.showCatalogsInSidebar,
+                showUpdates: $settings.showUpdatesInSidebar,
+                showOperations: $settings.showOperationsInSidebar
             )
         }
         .formStyle(.grouped)
@@ -390,12 +392,16 @@ private struct KindleTransferSettingsSection: View {
 private struct SidebarVisibilitySettingsSection: View {
     @Binding var showDiscover: Bool
     @Binding var showCatalogs: Bool
+    @Binding var showUpdates: Bool
+    @Binding var showOperations: Bool
 
     var body: some View {
         Section("Sidebar") {
             Toggle("Show Discover", isOn: $showDiscover)
             Toggle("Show Catalogs", isOn: $showCatalogs)
-            Text("Choose which online browsing destinations appear in the library sidebar.")
+            Toggle("Show Updates", isOn: $showUpdates)
+            Toggle("Show Review & Operations", isOn: $showOperations)
+            Text("Choose which optional destinations appear in the library sidebar.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

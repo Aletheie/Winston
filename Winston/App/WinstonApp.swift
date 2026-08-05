@@ -47,6 +47,7 @@ struct WinstonApp: App {
     @State private var deviceMonitor = DeviceMonitor()
     @State private var kindleSyncProfiles: KindleSyncProfileStore
     @State private var transferQueue: TransferQueue
+    @State private var operationReports = OperationReportStore()
     @State private var pluginService: PluginService
     @State private var discoveryViewModel: DiscoveryViewModel
     @State private var opdsViewModel: OPDSViewModel
@@ -132,6 +133,7 @@ struct WinstonApp: App {
                 .environment(deviceMonitor)
                 .environment(kindleSyncProfiles)
                 .environment(transferQueue)
+                .environment(operationReports)
                 .environment(toastCenter)
                 .environment(pluginService)
                 .environment(discoveryViewModel)
@@ -211,12 +213,12 @@ struct WinstonApp: App {
             }.value
             if removed > 0 {
                 Log.persistence.info(
-                    "Pruned \(removed) stale device import lease(s)"
+                    "Pruned \(removed) stale import source lease(s)"
                 )
             }
         } catch {
             Log.persistence.error(
-                "Could not prune stale device import leases: \(error.localizedDescription, privacy: .public)"
+                "Could not prune stale import source leases: \(error.localizedDescription, privacy: .public)"
             )
         }
         libraryStartupState = .ready
@@ -243,24 +245,22 @@ private struct ManagedFileRecoveryUnavailableView: View {
     let onRetry: () -> Void
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "externaldrive.badge.exclamationmark")
-                .font(.largeTitle)
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            Text("Library Files Need Attention")
-                .font(.title2.bold())
+        ContentUnavailableView {
+            Label(
+                "Library Files Need Attention",
+                systemImage: "externaldrive.badge.exclamationmark"
+            )
+        } description: {
             Text("Winston could not safely finish \(pendingItemCount) pending file operation(s). The catalog remains closed so it cannot expose incomplete books or covers.")
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
                 .frame(maxWidth: 560)
+        } actions: {
             HStack {
                 Button("Retry", action: onRetry)
-                Button("Quit Winston") { NSApplication.shared.terminate(nil) }
+                    .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
+                Button("Quit Winston") { NSApplication.shared.terminate(nil) }
             }
         }
-        .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -269,27 +269,25 @@ private struct StoreUnavailableView: View {
     let recovery: PersistenceController.Recovery
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "externaldrive.badge.exclamationmark")
-                .font(.largeTitle)
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            Text("Library Unavailable")
-                .font(.title2.bold())
-            Text(message)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: 560)
-            if let snapshotURL {
-                Text("Recovery files: \(snapshotURL.path(percentEncoded: false))")
+        ContentUnavailableView {
+            Label(
+                "Library Unavailable",
+                systemImage: "externaldrive.badge.exclamationmark"
+            )
+        } description: {
+            VStack(spacing: 8) {
+                Text(message)
+                    .frame(maxWidth: 560)
+                if let snapshotURL {
+                    Text("Recovery files: \(snapshotURL.path(percentEncoded: false))")
+                        .font(.caption)
+                        .textSelection(.enabled)
+                }
+                Text(failureMessage)
                     .font(.caption)
                     .textSelection(.enabled)
-                    .foregroundStyle(.secondary)
             }
-            Text(failureMessage)
-                .font(.caption)
-                .textSelection(.enabled)
-                .foregroundStyle(.secondary)
+        } actions: {
             HStack {
                 if let snapshotURL {
                     Button("Show Recovery Files") {
@@ -302,7 +300,6 @@ private struct StoreUnavailableView: View {
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 

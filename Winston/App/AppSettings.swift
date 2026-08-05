@@ -205,6 +205,8 @@ final class AppSettings {
         static let gridZoom = "gridZoom"
         static let showDiscoverInSidebar = "showDiscoverInSidebar"
         static let showCatalogsInSidebar = "showCatalogsInSidebar"
+        static let showUpdatesInSidebar = "showUpdatesInSidebar"
+        static let showOperationsInSidebar = "showOperationsInSidebar"
         static let inspectBeforeKindleTransfer = "inspectBeforeKindleTransfer"
         static let alwaysReviewImports = "alwaysReviewImports"
         static let opdsCatalogConfigurations = "opdsCatalogConfigurations"
@@ -292,6 +294,14 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(showCatalogsInSidebar, forKey: Keys.showCatalogsInSidebar) }
     }
 
+    var showUpdatesInSidebar: Bool {
+        didSet { UserDefaults.standard.set(showUpdatesInSidebar, forKey: Keys.showUpdatesInSidebar) }
+    }
+
+    var showOperationsInSidebar: Bool {
+        didSet { UserDefaults.standard.set(showOperationsInSidebar, forKey: Keys.showOperationsInSidebar) }
+    }
+
     var inspectBeforeKindleTransfer: Bool {
         didSet {
             UserDefaults.standard.set(
@@ -363,6 +373,8 @@ final class AppSettings {
         gridZoom = min(1, max(0, storedZoom))
         showDiscoverInSidebar = UserDefaults.standard.object(forKey: Keys.showDiscoverInSidebar) as? Bool ?? true
         showCatalogsInSidebar = UserDefaults.standard.object(forKey: Keys.showCatalogsInSidebar) as? Bool ?? true
+        showUpdatesInSidebar = UserDefaults.standard.object(forKey: Keys.showUpdatesInSidebar) as? Bool ?? true
+        showOperationsInSidebar = UserDefaults.standard.object(forKey: Keys.showOperationsInSidebar) as? Bool ?? true
         inspectBeforeKindleTransfer = UserDefaults.standard.object(
             forKey: Keys.inspectBeforeKindleTransfer
         ) as? Bool ?? false

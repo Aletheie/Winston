@@ -113,6 +113,54 @@ final class WinstonUITests: XCTestCase {
     }
 
     @MainActor
+    func testCatalogsAndOperationsFillTheExistingWindow() throws {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-ApplePersistenceIgnoreState", "YES",
+            "-onlineMetadataEnabled", "YES",
+        ]
+        app.launchEnvironment["XCTestConfigurationFilePath"] =
+            "/private/tmp/WinstonTopLevelWidthUITest-\(UUID().uuidString)"
+        app.launch()
+
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+        let initialWindowFrame = window.frame
+
+        let catalogs = app.descendants(matching: .any)["sidebar.catalogs"]
+        XCTAssertTrue(catalogs.waitForExistence(timeout: 5))
+        catalogs.click()
+
+        let catalogList = app.descendants(matching: .any)["opds.catalogList"].firstMatch
+        XCTAssertTrue(catalogList.waitForExistence(timeout: 5))
+        XCTAssertEqual(window.frame.width, initialWindowFrame.width, accuracy: 1)
+        XCTAssertEqual(window.frame.height, initialWindowFrame.height, accuracy: 1)
+        XCTAssertLessThanOrEqual(
+            abs(catalogList.frame.maxY - window.frame.maxY),
+            24
+        )
+
+        let catalogAttachment = XCTAttachment(screenshot: app.screenshot())
+        catalogAttachment.name = "Catalogs Full Width"
+        catalogAttachment.lifetime = .keepAlways
+        add(catalogAttachment)
+
+        let operations = app.descendants(matching: .any)["sidebar.operations"]
+        XCTAssertTrue(operations.waitForExistence(timeout: 5))
+        operations.click()
+
+        let operationsCenter = app.descendants(matching: .any)["operationsCenter"].firstMatch
+        XCTAssertTrue(operationsCenter.waitForExistence(timeout: 5))
+        XCTAssertEqual(window.frame.width, initialWindowFrame.width, accuracy: 1)
+        XCTAssertEqual(window.frame.height, initialWindowFrame.height, accuracy: 1)
+
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "Catalogs and Operations Full Width"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    @MainActor
     func testLaunchPerformance() throws {
         measure(metrics: [XCTApplicationLaunchMetric()]) {
             XCUIApplication().launch()

@@ -5,6 +5,7 @@ struct LibraryStatusToasts: View {
     let maintenance: MaintenanceScheduler
     let onReviewEditions: () -> Void
     let onReviewImport: () -> Void
+    let onReviewBulkOperation: () -> Void
     let onResolveDigitalFile: (UUID) -> Void
 
     @Environment(\.theme) private var theme
@@ -14,57 +15,82 @@ struct LibraryStatusToasts: View {
     @Environment(DeviceMonitor.self) private var deviceMonitor
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            if let progress = viewModel.standardImportProgress {
-                ProgressToastCard(
-                    title: standardImportTitle(progress),
-                    progress: progress.fraction,
-                    isCancelling: progress.isCancelling,
-                    onCancel: {
-                        viewModel.cancelImportSession(id: progress.sessionID)
-                    }
-                )
-                .transition(toastTransition)
-            }
-            if transferQueue.isTransferring {
-                ProgressToastCard(title: transferTitle,
-                                  progress: transferQueue.overallProgress,
-                                  isCancelling: transferQueue.activeItem?.stage == .cancelling,
-                                  onCancel: { transferQueue.cancel() })
-                    .transition(toastTransition)
-            }
-            if let progress = deviceMonitor.deviceDeleteProgress {
-                ProgressToastCard(
-                    title: deviceMonitor.isCancellingDeviceDelete
-                        ? String(localized: "Cancelling Kindle removal…")
-                        : String(
-                            localized: "Removing \(progress.completedTargetCount) of \(progress.totalTargetCount) from the Kindle…"
-                        ),
-                    progress: progress.fraction,
-                    isCancelling: deviceMonitor.isCancellingDeviceDelete,
-                    onCancel: { deviceMonitor.cancelDeviceDelete() }
-                )
-                .transition(toastTransition)
-            }
-            if viewModel.isImportingCalibre {
-                ProgressToastCard(
-                    title: viewModel.calibreImportProgressText
-                        ?? String(localized: "Importing from Calibre\u{2026}"),
-                    progress: viewModel.calibreImportFraction ?? 0,
-                    isCancelling: viewModel.isCancellingCalibreImport,
-                    onCancel: { viewModel.cancelCalibreImport() }
-                )
-                    .transition(toastTransition)
-            }
+        GlassEffectContainer(spacing: 4) {
             VStack(alignment: .trailing, spacing: 8) {
+                if let progress = viewModel.activeBulkOperationProgress {
+                    ProgressToastCard(
+                        title: bulkOperationTitle(progress),
+                        progress: progress.fraction,
+                        isCancelling: viewModel.isCancellingBulkOperation,
+                        onCancel: viewModel.cancelBulkOperation
+                    )
+                    .transition(toastTransition)
+                } else if let report = viewModel.bulkOperationReport {
+                    BulkOperationResultToastCard(
+                        report: report,
+                        onDetails: onReviewBulkOperation,
+                        onDismiss: viewModel.dismissBulkOperationReport
+                    )
+                    .transition(toastTransition)
+                }
+                if let progress = viewModel.standardImportProgress {
+                    ProgressToastCard(
+                        title: standardImportTitle(progress),
+                        progress: progress.fraction,
+                        isCancelling: progress.isCancelling,
+                        onCancel: {
+                            viewModel.cancelImportSession(id: progress.sessionID)
+                        }
+                    )
+                    .transition(toastTransition)
+                }
+                if transferQueue.isTransferring {
+                    ProgressToastCard(title: transferTitle,
+                                      progress: transferQueue.overallProgress,
+                                      isCancelling: transferQueue.activeItem?.stage == .cancelling,
+                                      onCancel: { transferQueue.cancel() })
+                        .transition(toastTransition)
+                }
+                if let progress = deviceMonitor.deviceDeleteProgress {
+                    ProgressToastCard(
+                        title: deviceMonitor.isCancellingDeviceDelete
+                            ? String(localized: "Cancelling Kindle removal…")
+                            : String(
+                                localized: "Removing \(progress.completedTargetCount) of \(progress.totalTargetCount) from the Kindle…"
+                            ),
+                        progress: progress.fraction,
+                        isCancelling: deviceMonitor.isCancellingDeviceDelete,
+                        onCancel: { deviceMonitor.cancelDeviceDelete() }
+                    )
+                    .transition(toastTransition)
+                }
+                if viewModel.isImportingCalibre {
+                    ProgressToastCard(
+                        title: viewModel.calibreImportProgressText
+                            ?? String(localized: "Importing from Calibre\u{2026}"),
+                        progress: viewModel.calibreImportFraction ?? 0,
+                        isCancelling: viewModel.isCancellingCalibreImport,
+                        onCancel: { viewModel.cancelCalibreImport() }
+                    )
+                        .transition(toastTransition)
+                }
                 ForEach(activeToasts) { toast in
-                    ToastCard(toast: toast, onAction: { handleAction(toast) })
+                    ToastCard(
+                        toast: toast,
+                        onAction: { handleAction(toast) },
+                        onDismiss: {
+                            guard let id = toast.messageID else { return }
+                            toastCenter.dismiss(id)
+                        }
+                    )
                         .transition(toastTransition)
                 }
             }
         }
         .padding(16)
         .animation(toastAnimation, value: activeToasts.map(\.id))
+        .animation(toastAnimation, value: viewModel.activeBulkOperationProgress)
+        .animation(toastAnimation, value: viewModel.bulkOperationReport?.id)
         .animation(toastAnimation, value: viewModel.standardImportProgress)
         .animation(toastAnimation, value: transferQueue.isTransferring)
         .animation(toastAnimation, value: deviceMonitor.deviceDeleteProgress)
@@ -115,18 +141,17 @@ struct LibraryStatusToasts: View {
         )
     }
 
+    private func bulkOperationTitle(_ progress: BulkOperationProgress) -> String {
+        if viewModel.isCancellingBulkOperation {
+            return String(localized: "Cancelling bulk operation…")
+        }
+        return String(
+            localized: "Applying \(progress.completedTargetCount) of \(progress.totalTargetCount) library items…"
+        )
+    }
+
     private var activeToasts: [Toast] {
         var toasts: [Toast] = []
-
-        if let plan = viewModel.activeBulkOperationPlan {
-            toasts.append(Toast(
-                id: "bulk-operation",
-                style: .progress,
-                message: String(
-                    localized: "Applying \(plan.changeCount) changes (\(plan.conflictCount) conflicts)\u{2026}"
-                )
-            ))
-        }
 
         if let progress = viewModel.managedFileProgress {
             toasts.append(Toast(
@@ -148,19 +173,10 @@ struct LibraryStatusToasts: View {
                 message: maintenanceMessage(for: progress.job),
                 progress: progress.fraction
             ))
-        case .paused(let progress, let reason):
-            let message = switch reason {
-            case .requested:
-                String(localized: "Library maintenance paused.")
-            case .lowPower:
-                String(localized: "Library maintenance paused in Low Power Mode.")
-            }
-            toasts.append(Toast(
-                id: "maintenance",
-                style: .info,
-                message: message,
-                progress: progress.fraction
-            ))
+        case .paused:
+            // Pausing background maintenance is expected (especially in Low
+            // Power Mode), so it should not occupy a permanent toast slot.
+            break
         case .failed(let job, _):
             toasts.append(Toast(
                 id: "maintenance",
@@ -285,7 +301,7 @@ struct LibraryStatusToasts: View {
     }
 }
 
-private extension ImportSessionStep {
+extension ImportSessionStep {
     var localizedProgressLabel: String {
         switch self {
         case .sourceDiscovery:
@@ -350,17 +366,17 @@ private struct Toast: Identifiable, Equatable {
 private struct ToastCard: View {
     let toast: Toast
     let onAction: () -> Void
+    let onDismiss: () -> Void
 
     @Environment(\.theme) private var theme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         HStack(spacing: 10) {
             icon
             VStack(alignment: .leading, spacing: 5) {
                 Text(verbatim: toast.message)
-                    .font(theme.label(size: 11, weight: .medium))
-                    .foregroundStyle(theme.textPrimary)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                 if let progress = toast.progress {
@@ -369,24 +385,28 @@ private struct ToastCard: View {
                 if toast.action != nil {
                     Button(actionTitle, action: onAction)
                         .buttonStyle(.link)
-                        .font(theme.label(size: 10, weight: .semibold))
+                        .font(.caption.weight(.semibold))
                 }
+            }
+            if toast.messageID != nil {
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .help("Dismiss")
+                .accessibilityLabel("Dismiss notification")
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: 280, alignment: .leading)
-        .background(
-            reduceTransparency
-                ? AnyShapeStyle(theme.surface)
-                : AnyShapeStyle(.regularMaterial),
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .glassEffect(
+            .regular,
+            in: RoundedRectangle(
+                cornerRadius: WinstonLayout.cornerLarge,
+                style: .continuous
+            )
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(theme.borderSubtle, lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
     }
 
     private var actionTitle: LocalizedStringResource {
@@ -431,7 +451,6 @@ private struct ProgressToastCard: View {
     let onCancel: () -> Void
 
     @Environment(\.theme) private var theme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         HStack(spacing: 10) {
@@ -440,17 +459,21 @@ private struct ProgressToastCard: View {
                 .tint(theme.accent)
             VStack(alignment: .leading, spacing: 5) {
                 Text(verbatim: title)
-                    .font(theme.label(size: 11, weight: .medium))
-                    .foregroundStyle(theme.textPrimary)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 ToastProgressBar(fraction: progress)
+                    .accessibilityLabel("Progress")
+                    .accessibilityValue(
+                        Text("\(Int((max(0, min(1, progress)) * 100).rounded())) percent")
+                    )
             }
             Button(action: onCancel) {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 14))
                     .foregroundStyle(theme.textTertiary)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .disabled(isCancelling)
             .help("Cancel")
             .accessibilityLabel("Cancel")
@@ -458,17 +481,83 @@ private struct ProgressToastCard: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: 280, alignment: .leading)
-        .background(
-            reduceTransparency
-                ? AnyShapeStyle(theme.surface)
-                : AnyShapeStyle(.regularMaterial),
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .glassEffect(
+            .regular,
+            in: RoundedRectangle(
+                cornerRadius: WinstonLayout.cornerLarge,
+                style: .continuous
+            )
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(theme.borderSubtle, lineWidth: 1)
+    }
+}
+
+private struct BulkOperationResultToastCard: View {
+    let report: BulkOperationPresentationReport
+    let onDetails: () -> Void
+    let onDismiss: () -> Void
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
+                .foregroundStyle(color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(summary)
+                    .font(.callout)
+                    .lineLimit(2)
+                HStack(spacing: 10) {
+                    Button("Details", action: onDetails)
+                        .buttonStyle(.link)
+                    Button("Dismiss", action: onDismiss)
+                        .buttonStyle(.link)
+                }
+                .font(.caption.weight(.semibold))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 300, alignment: .leading)
+        .glassEffect(
+            .regular,
+            in: RoundedRectangle(
+                cornerRadius: WinstonLayout.cornerLarge,
+                style: .continuous
+            )
         )
-        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var summary: String {
+        switch report.outcomeKind {
+        case .success:
+            String(localized: "Bulk operation completed with \(report.appliedChangeCount) changes.")
+        case .partialSuccess:
+            String(localized: "Bulk operation partially completed; \(report.pendingCount) items remain.")
+        case .cancelled:
+            String(localized: "Bulk operation cancelled; \(report.pendingCount) items remain.")
+        case .conflict:
+            String(localized: "Bulk operation found \(report.conflictCount) conflicts.")
+        case .failure:
+            String(localized: "Bulk operation failed; \(report.pendingCount) items remain.")
+        }
+    }
+
+    private var systemImage: String {
+        switch report.outcomeKind {
+        case .success: "checkmark.circle.fill"
+        case .partialSuccess, .cancelled, .conflict: "exclamationmark.circle.fill"
+        case .failure: "xmark.octagon.fill"
+        }
+    }
+
+    private var color: Color {
+        switch report.outcomeKind {
+        case .success: theme.success
+        case .partialSuccess, .cancelled, .conflict: theme.highlight
+        case .failure: theme.destructive
+        }
     }
 }
 
