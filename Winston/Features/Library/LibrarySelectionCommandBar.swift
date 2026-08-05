@@ -7,6 +7,7 @@ nonisolated struct LibrarySelectionCommandBarModel: Equatable, Sendable {
     let availability: BookActionAvailability
     let deviceIsConnected: Bool
     let kindleOperationIsActive: Bool
+    let libraryOperationIsActive: Bool
 
     var hiddenCount: Int { max(selectedCount - visibleSelectedCount, 0) }
     var canSelectAllVisible: Bool {
@@ -15,6 +16,7 @@ nonisolated struct LibrarySelectionCommandBarModel: Equatable, Sendable {
     var canSend: Bool {
         deviceIsConnected && !kindleOperationIsActive && availability.canTransmit
     }
+    var canSetStatus: Bool { !libraryOperationIsActive }
 }
 
 struct LibrarySelectionCommandBar: View {
@@ -75,6 +77,10 @@ struct LibrarySelectionCommandBar: View {
                 Button(status.label) { onSetStatus(status) }
             }
         }
+        .disabled(!model.canSetStatus)
+        .help(model.canSetStatus
+            ? "Change reading status"
+            : "Wait for the current library operation to finish")
     }
 
     private var collectionMenu: some View {

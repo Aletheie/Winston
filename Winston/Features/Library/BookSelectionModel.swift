@@ -47,6 +47,10 @@ final class BookSelectionModel {
         selectedBookIDs = Set(books.map(\.id))
     }
 
+    func selectAllVisible(_ books: [Book]) {
+        selectedBookIDs.formUnion(books.map(\.id))
+    }
+
     func remove(_ id: Book.ID) {
         selectedBookIDs.remove(id)
         if lastClickedBookID == id { lastClickedBookID = nil }
