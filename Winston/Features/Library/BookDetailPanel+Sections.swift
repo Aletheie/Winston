@@ -48,7 +48,6 @@ private struct EntityDetailWorkspace: View {
     var body: some View {
         VStack(spacing: 0) {
             EntityBreadcrumb(model: $navigation)
-            Divider().opacity(WinstonLayout.dividerOpacity)
             switch navigation.level {
             case .work:
                 DetailWorkWorkspace(
@@ -203,20 +202,20 @@ struct DetailMultiSelection: View {
 
             VStack(spacing: 6) {
                 DetailActionButton(title: theme.styledText(terminal: "EDIT", native: "Edit Metadata"),
-                                   icon: "pencil", color: theme.accentSecondary) {
+                                   icon: "pencil") {
                     actions.editSelection()
                 }
                 if convertibleCount > 0 {
                     DetailActionButton(
                         title: theme.styledText(terminal: "CONVERT \(convertibleCount)",
                                                 native: "Convert \(convertibleCount) for Kindle"),
-                        icon: "arrow.triangle.2.circlepath", color: theme.accent
+                        icon: "arrow.triangle.2.circlepath"
                     ) {
                         actions.convertSelection()
                     }
                 }
                 DetailActionButton(title: theme.styledText(terminal: "DELETE", native: "Delete"),
-                                   icon: "trash", color: theme.destructive) {
+                                   icon: "trash") {
                     actions.deleteSelection()
                 }
             }
@@ -583,75 +582,117 @@ struct DetailActions: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            if book.hasCatalogDigitalFile {
-                HStack(spacing: 6) {
+            HStack(spacing: 6) {
+                if book.hasCatalogDigitalFile {
                     DetailActionButton(title: theme.styledText(terminal: "OPEN", native: "Open"),
-                                       icon: "book", color: theme.accentSecondary) {
+                                       icon: "book") {
                         actions.open(book)
                     }
                     DetailActionButton(title: theme.styledText(terminal: "FINDER", native: "Finder"),
-                                       icon: "folder", color: theme.accentSecondary) {
+                                       icon: "folder") {
                         actions.showInFinder(book)
                     }
-                }
-            } else {
-                DetailActionButton(title: theme.styledText(terminal: "ATTACH", native: "Attach Digital File"),
-                                   icon: "doc.badge.plus", color: theme.accentSecondary) {
-                    actions.relink(book)
-                }
-            }
-            HStack(spacing: 6) {
-                DetailActionButton(title: theme.styledText(terminal: "EDIT", native: "Edit"),
-                                   icon: "pencil", color: theme.accentTertiary) {
-                    actions.edit(book)
-                }
-                DetailActionButton(title: theme.styledText(terminal: "DELETE", native: "Delete"),
-                                   icon: "trash", color: theme.destructive) {
-                    actions.delete(book)
-                }
-            }
-            DetailActionButton(
-                title: theme.styledText(
-                    terminal: "OTHER EDITIONS",
-                    native: "Find Other Editions"
-                ),
-                icon: "books.vertical",
-                color: theme.accentSecondary
-            ) {
-                actions.findOtherEditions(book)
-            }
-            .help("Find other editions in Catalogs")
-            if book.hasCatalogDigitalFile && EbookConverter.needsConversion(format: book.format) {
-                if isConverting {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text(theme.usesTerminalCopy ? "converting..." : "Converting\u{2026}")
-                            .font(theme.label(size: 9, weight: .semibold))
-                            .foregroundStyle(theme.textSecondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 5)
                 } else {
-                    DetailActionButton(title: theme.styledText(terminal: "CONVERT", native: "Convert for Kindle"),
-                                       icon: "arrow.triangle.2.circlepath", color: theme.accent) {
-                        actions.convert(book)
+                    DetailActionButton(
+                        title: theme.styledText(
+                            terminal: "ATTACH",
+                            native: "Attach File"
+                        ),
+                        icon: "doc.badge.plus"
+                    ) {
+                        actions.relink(book)
                     }
-                    .disabled(!canConvertForKindle)
-                    .help(canConvertForKindle ? "Convert to a Kindle-friendly format"
-                                              : "Install calibre to convert books")
                 }
+
+                DetailMoreActionsMenu(
+                    book: book,
+                    actions: actions,
+                    canConvertForKindle: canConvertForKindle,
+                    isConverting: isConverting
+                )
             }
-            DetailActionButton(
-                title: theme.styledText(terminal: "HISTORY", native: "Reading History"),
-                icon: "clock.arrow.circlepath",
-                color: theme.accentTertiary
-            ) {
-                actions.readingHistory(book)
+
+            if isConverting {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(theme.usesTerminalCopy ? "converting..." : "Converting\u{2026}")
+                        .font(theme.label(size: 9, weight: .semibold))
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
             }
-            .help("Show reading history")
-            .accessibilityIdentifier("bookDetail.readingHistory")
         }
         .padding(.vertical, 4)
+    }
+}
+
+private struct DetailMoreActionsMenu: View {
+    let book: Book
+    let actions: BookActions
+    let canConvertForKindle: Bool
+    let isConverting: Bool
+
+    @Environment(\.theme) private var theme
+
+    private var offersKindleConversion: Bool {
+        book.hasCatalogDigitalFile
+            && EbookConverter.needsConversion(format: book.format)
+    }
+
+    var body: some View {
+        Menu {
+            Button {
+                actions.edit(book)
+            } label: {
+                Label("Edit Metadata…", systemImage: "pencil")
+            }
+
+            Button {
+                actions.readingHistory(book)
+            } label: {
+                Label("Reading History…", systemImage: "clock.arrow.circlepath")
+            }
+            .accessibilityIdentifier("bookDetail.readingHistory")
+
+            if offersKindleConversion {
+                Button {
+                    actions.convert(book)
+                } label: {
+                    Label("Convert for Kindle", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(!canConvertForKindle || isConverting)
+            }
+
+            Divider()
+
+            Button {
+                actions.findOtherEditions(book)
+            } label: {
+                Label("Find Other Editions in Catalogs", systemImage: "books.vertical")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                actions.delete(book)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        } label: {
+            Label {
+                theme.styledText(terminal: "MORE", native: "More")
+            } icon: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .font(.caption)
+            .frame(maxWidth: .infinity)
+        }
+        .menuStyle(.button)
+        .controlSize(.small)
+        .tint(.gray)
+        .help("More book actions")
+        .accessibilityIdentifier("bookDetail.moreActions")
     }
 }
 
@@ -1243,29 +1284,34 @@ private struct DetailFileRow: View {
                 .fill(validationColor)
                 .frame(width: 7, height: 7)
                 .accessibilityLabel(Text(validationLabel))
-            Text(asset.format)
-                .font(theme.label(size: 10, weight: .bold))
-                .foregroundStyle(theme.accentSecondary)
-                .frame(width: 42, alignment: .leading)
-            Text(asset.sizeDisplay)
-                .font(theme.label(size: 9))
-                .foregroundStyle(theme.textSecondary)
-            Group {
-                switch asset.origin {
-                case .original:
-                    theme.styledText(terminal: "ORIG", native: "Original")
-                case .generated:
-                    theme.styledText(terminal: "GEN", native: "Generated")
-                case .imported:
-                    theme.styledText(terminal: "IMPORT", native: "Imported")
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(asset.format)
+                        .font(theme.label(size: 10, weight: .bold))
+                        .foregroundStyle(theme.accentSecondary)
+                        .fixedSize()
+                    Text(asset.sizeDisplay)
+                        .font(theme.label(size: 9))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
                 }
+                Group {
+                    switch asset.origin {
+                    case .original:
+                        theme.styledText(terminal: "ORIG", native: "Original")
+                    case .generated:
+                        theme.styledText(terminal: "GEN", native: "Generated")
+                    case .imported:
+                        theme.styledText(terminal: "IMPORT", native: "Imported")
+                    }
+                }
+                .font(theme.label(size: 8, weight: .medium))
+                .foregroundStyle(theme.textTertiary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
             }
-            .font(theme.label(size: 8, weight: .semibold))
-            .foregroundStyle(theme.textTertiary)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 2)
-            .background(theme.surface.opacity(0.5), in: Capsule())
-            Spacer()
+            .layoutPriority(1)
+            Spacer(minLength: 3)
             if isPrimary {
                 Image(systemName: "star.fill")
                     .font(.system(size: 9))

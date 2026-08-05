@@ -3,7 +3,6 @@ import SwiftUI
 struct DetailActionButton: View {
     let title: Text
     let icon: String
-    let color: Color
     let action: () -> Void
 
     var body: some View {
@@ -18,6 +17,6 @@ struct DetailActionButton: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
-        .tint(color)
+        .tint(.gray)
     }
 }
