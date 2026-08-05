@@ -206,7 +206,7 @@ struct LibraryView: View {
             },
             setStatus: { book, status in
                 let ids = Set(targetBooks(for: book).map(\.uuid))
-                Task { await viewModel.setReadingStatus(status, bookIDs: ids) }
+                scheduleReadingStatusChange(status, bookIDs: ids)
             },
             readingHistory: { activeSheet = .readingHistory($0) },
             addToCollection: { book, collection in
@@ -222,7 +222,12 @@ struct LibraryView: View {
             setCoverData: { book, data in viewModel.setCustomCover(for: book, from: data) },
             resetCover: { book in viewModel.resetCover(for: book) },
             relink: { book in Task { await LibraryExternalActions.relink(book, via: viewModel) } },
-            inspect: { book in presentBookDoctor(for: [book], purpose: .review) },
+            inspect: { book in
+                presentBookDoctor(
+                    for: targetBooks(for: book),
+                    purpose: .review
+                )
+            },
             convert: { book in
                 guard validatedPrimaryURL(for: book) != nil else { return }
                 viewModel.convert(book)
@@ -265,13 +270,67 @@ struct LibraryView: View {
         }.count
     }
 
+    private var selectionCommandBarModel: LibrarySelectionCommandBarModel {
+        let displayedIDs = Set(displayed.map(\.id))
+        return LibrarySelectionCommandBarModel(
+            selectedCount: selection.count,
+            visibleSelectedCount: selection.selectedBookIDs.intersection(displayedIDs).count,
+            displayedCount: displayed.count,
+            availability: commandAvailability,
+            deviceIsConnected: deviceMonitor.isConnected,
+            kindleOperationIsActive: transferQueue.isTransferring
+                || deviceMonitor.isDeletingBooks
+                || deviceMonitor.isEjecting,
+            libraryOperationIsActive: viewModel.activeBulkOperationProgress != nil
+        )
+    }
+
     // MARK: - Body
 
     var body: some View {
         let _ = LibraryPerformanceDiagnostics.recordBody("LibraryViewBody")
         content
             .background { ThemedBackground() }
+            .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+                LibraryExternalActions.handleDrop(
+                    providers: providers,
+                    viewModel: viewModel
+                )
+                return true
+            }
+            .overlay {
+                if isDropTargeted {
+                    LibraryDropZone()
+                        .padding(WinstonLayout.space5)
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                }
+            }
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.18),
+                value: isDropTargeted
+            )
             .safeAreaInset(edge: .top, spacing: 0) { topBar }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if selection.hasSelection {
+                    LibrarySelectionCommandBar(
+                        model: selectionCommandBarModel,
+                        collections: collections,
+                        onSelectAllVisible: { selection.selectAllVisible(displayed) },
+                        onClear: selection.clear,
+                        onEdit: editSelectedBooks,
+                        onSetStatus: setStatusForSelection,
+                        onAddToCollection: addSelectionToCollection,
+                        onNewCollection: createCollectionForSelection,
+                        onSend: transmitSelected,
+                        onDelete: { prepareDeletion(selectedBooks) }
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.18),
+                value: selection.hasSelection
+            )
             .inspector(isPresented: $showInspector) {
                 BookDetailPanel(
                     book: primarySelectedBook,
@@ -280,6 +339,7 @@ struct LibraryView: View {
                     viewModel: viewModel,
                     actions: bookActions
                 )
+                .themedChrome(role: .inspector)
                 .inspectorColumnWidth(min: 240, ideal: 270, max: 360)
             }
             .toolbar {
@@ -288,7 +348,6 @@ struct LibraryView: View {
                     sortPreference: $sortPreference,
                     showInspector: $showInspector,
                     kindlePresenceFilter: $kindlePresenceFilter,
-                    showsKindleFilter: deviceMonitor.isConnected,
                     availability: commandAvailability,
                     deviceIsConnected: deviceMonitor.isConnected,
                     kindleOperationIsActive: transferQueue.isTransferring
@@ -534,36 +593,25 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var topBar: some View {
-        VStack(spacing: 6) {
-            if !temporaryRevealIDs.isEmpty {
-                HStack {
-                    Label(
-                        "Showing \(temporaryRevealIDs.count) imported books",
-                        systemImage: "checkmark.circle"
-                    )
+        if !temporaryRevealIDs.isEmpty {
+            HStack {
+                InlineStatusBanner(
+                    kind: .success,
+                    systemImage: "checkmark.circle"
+                ) {
+                    Text("Showing \(temporaryRevealIDs.count) imported books")
                     .font(.caption)
-                    Spacer()
+                } actions: {
                     Button("Back to Current View") {
                         temporaryRevealIDs = []
                     }
                     .controlSize(.small)
                 }
-                .padding(.horizontal, 4)
             }
-            LibraryDropZone(
-                isTargeted: $isDropTargeted,
-                onDrop: {
-                    LibraryExternalActions.handleDrop(
-                        providers: $0,
-                        viewModel: viewModel
-                    )
-                }
-            )
+            .padding(.horizontal, WinstonLayout.space4)
+            .padding(.vertical, WinstonLayout.space2)
+            .themedChrome(role: .toolbar)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 6)
-        .background(.ultraThinMaterial)
     }
 
     // MARK: - Content (grid or table)
@@ -731,7 +779,7 @@ struct LibraryView: View {
             activeSheet = .readingRecommendation
         case .markSelection(let status):
             let ids = Set(selectedBooks.map(\.uuid))
-            Task { await viewModel.setReadingStatus(status, bookIDs: ids) }
+            scheduleReadingStatusChange(status, bookIDs: ids)
         case .replaceSelected:
             if let book = primarySelectedBook {
                 Task { await LibraryExternalActions.relink(book, via: viewModel) }
@@ -745,6 +793,51 @@ struct LibraryView: View {
         let available = booksWithValidatedFiles(selectedBooks)
         guard !available.isEmpty else { return }
         viewModel.convertBooks(available)
+    }
+
+    private func editSelectedBooks() {
+        guard selection.hasSelection else { return }
+        if selection.count > 1 {
+            activeSheet = .bulkEdit(Set(selectedBooks.map(\.uuid)))
+        } else if let book = primarySelectedBook {
+            activeSheet = .edit(book)
+        }
+    }
+
+    private func setStatusForSelection(_ status: ReadingStatus) {
+        let ids = Set(selectedBooks.map(\.uuid))
+        guard !ids.isEmpty else { return }
+        scheduleReadingStatusChange(status, bookIDs: ids)
+    }
+
+    private func scheduleReadingStatusChange(
+        _ status: ReadingStatus,
+        bookIDs: Set<UUID>
+    ) {
+        guard !bookIDs.isEmpty,
+              viewModel.activeBulkOperationProgress == nil else { return }
+        Task { @MainActor in
+            // Menu actions can arrive while AppKit is still updating the
+            // backing NSTableView. Yielding keeps the catalog mutation out of
+            // that delegate callback and prevents a re-entrant table update.
+            await Task.yield()
+            guard !Task.isCancelled,
+                  viewModel.activeBulkOperationProgress == nil else { return }
+            await viewModel.setReadingStatus(status, bookIDs: bookIDs)
+        }
+    }
+
+    private func addSelectionToCollection(_ collection: BookCollection) {
+        let ids = Set(selectedBooks.map(\.uuid))
+        guard !ids.isEmpty else { return }
+        Task { await viewModel.add(bookIDs: ids, to: collection) }
+    }
+
+    private func createCollectionForSelection() {
+        guard !selectedBooks.isEmpty else { return }
+        newCollectionTargets = selectedBooks
+        newCollectionName = ""
+        showNewCollectionAlert = true
     }
 
     private func openBook(_ book: Book) {

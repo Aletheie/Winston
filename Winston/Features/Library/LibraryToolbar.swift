@@ -83,7 +83,6 @@ struct LibraryToolbar: ToolbarContent {
     @Binding var sortPreference: LibrarySortPreference
     @Binding var showInspector: Bool
     @Binding var kindlePresenceFilter: KindlePresenceFilter
-    let showsKindleFilter: Bool
     let availability: BookActionAvailability
     let deviceIsConnected: Bool
     let kindleOperationIsActive: Bool
@@ -139,10 +138,9 @@ struct LibraryToolbar: ToolbarContent {
             .help("Add books")
         }
 
-        if showsKindleFilter {
-            ToolbarItem(placement: .primaryAction) {
-                KindlePresenceFilterControl(selection: $kindlePresenceFilter)
-            }
+        ToolbarItem(placement: .primaryAction) {
+            KindlePresenceFilterControl(selection: $kindlePresenceFilter)
+                .disabled(!deviceIsConnected)
         }
 
         ToolbarItem(placement: .primaryAction) {
