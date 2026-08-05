@@ -28,12 +28,17 @@ struct EditionReviewSheet: View {
 
     var body: some View {
         let proposals = service.pendingProposals
+        let scanIsActive = isScanning || service.isRefreshingCandidates
 
         VStack(spacing: 0) {
-            ReconciliationHeader(isScanning: isScanning)
+            ReconciliationHeader(isScanning: scanIsActive)
             Divider()
-            if proposals.isEmpty, !isScanning {
-                ReconciliationEmptyState()
+            if proposals.isEmpty {
+                if scanIsActive {
+                    ReconciliationScanningState()
+                } else {
+                    ReconciliationEmptyState()
+                }
             } else {
                 ReconciliationFilterBar(
                     verdict: $verdictFilter,
@@ -51,7 +56,7 @@ struct EditionReviewSheet: View {
                         isEnabled: !batchController.isRunning,
                         onDismiss: dismissProposal
                     )
-                    .frame(minWidth: 300, idealWidth: 360)
+                    .frame(minWidth: 360, idealWidth: 420, maxWidth: 500)
 
                     ReconciliationWorkspaceDetail(
                         proposal: focusedProposal,
@@ -63,7 +68,7 @@ struct EditionReviewSheet: View {
                         onResolved: proposalWasResolved
                     )
                     .id(focusedProposal?.pairKey)
-                    .frame(minWidth: 340, idealWidth: 460)
+                    .frame(minWidth: 500, idealWidth: 620)
                 }
             }
             if let progress = batchController.progress {
@@ -84,7 +89,7 @@ struct EditionReviewSheet: View {
             }
             Divider()
             ReconciliationWorkspaceCommandBar(
-                isScanning: isScanning,
+                isScanning: scanIsActive,
                 selectedCount: selectedPairKeys.count,
                 hiddenSelectedCount: selectedPairKeys.subtracting(
                     Set(visibleProposals.map(\.pairKey))
@@ -102,7 +107,13 @@ struct EditionReviewSheet: View {
                 onDone: { dismiss() }
             )
         }
-        .frame(minWidth: 620, idealWidth: 760, maxWidth: 1050, minHeight: 560, idealHeight: 720)
+        .frame(
+            minWidth: 900,
+            idealWidth: 1080,
+            maxWidth: 1280,
+            minHeight: 620,
+            idealHeight: 760
+        )
         .onChange(of: LibraryMutationLog.shared.revision, initial: true) {
             rebuildBookIndex()
         }
@@ -198,6 +209,21 @@ struct EditionReviewSheet: View {
     }
 }
 
+private struct ReconciliationScanningState: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.large)
+            Text("Updating reconciliation suggestions…")
+                .font(.headline)
+            Text("Winston is checking the remaining books after the last change.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct ReconciliationReviewRequest: Identifiable {
     let proposal: EditionMatchProposal
     let books: [Book]
@@ -215,10 +241,10 @@ private struct ReconciliationHeader: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(theme.usesTerminalCopy ? "// reconcile_books" : "Book Reconciliation")
-                    .font(theme.body(size: 15, weight: .bold))
+                    .font(.headline)
                 Text("Every proposal requires review. Only byte-identical files may be removed.")
-                    .font(theme.label(size: 10))
-                    .foregroundStyle(theme.textSecondary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
             if isScanning {
@@ -253,36 +279,44 @@ private struct ReconciliationFilterBar: View {
     let totalCount: Int
 
     var body: some View {
-        HStack(spacing: 10) {
-            Picker("Proposal type", selection: $verdict) {
-                Text("All Types").tag(nil as EditionVerdict?)
-                ForEach(EditionVerdict.allCases, id: \.self) { value in
-                    Text(verdictTitle(value)).tag(value as EditionVerdict?)
+        HStack(spacing: 20) {
+            HStack(spacing: 7) {
+                Text("Proposal type")
+                    .foregroundStyle(.secondary)
+                Picker("Proposal type", selection: $verdict) {
+                    Text("All Types").tag(nil as EditionVerdict?)
+                    ForEach(EditionVerdict.allCases, id: \.self) { value in
+                        Text(verdictTitle(value)).tag(value as EditionVerdict?)
+                    }
                 }
+                .labelsHidden()
+                .frame(width: 180)
+                .accessibilityLabel("Proposal type filter")
             }
-            .labelsHidden()
-            .frame(maxWidth: 220)
-            .accessibilityLabel("Proposal type filter")
 
-            Picker("Confidence", selection: $confidence) {
-                Text("All Confidence Levels").tag(nil as MatchConfidence?)
-                ForEach(MatchConfidence.allCases, id: \.self) { value in
-                    Text(value.label).tag(value as MatchConfidence?)
+            HStack(spacing: 7) {
+                Text("Confidence")
+                    .foregroundStyle(.secondary)
+                Picker("Confidence", selection: $confidence) {
+                    Text("All Confidence Levels").tag(nil as MatchConfidence?)
+                    ForEach(MatchConfidence.allCases, id: \.self) { value in
+                        Text(value.label).tag(value as MatchConfidence?)
+                    }
                 }
+                .labelsHidden()
+                .frame(width: 210)
+                .accessibilityLabel("Confidence filter")
             }
-            .labelsHidden()
-            .frame(maxWidth: 190)
-            .accessibilityLabel("Confidence filter")
 
-            Spacer()
+            Spacer(minLength: 12)
             Text("Showing \(visibleCount) of \(totalCount)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Showing \(visibleCount) of \(totalCount) proposals")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .themedChrome(role: .toolbar)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .controlSize(.regular)
     }
 
     private func verdictTitle(_ verdict: EditionVerdict) -> LocalizedStringResource {
@@ -310,20 +344,11 @@ private struct ReconciliationWorkspaceDetail: View {
         if let proposal {
             let books = proposal.memberUUIDs.compactMap { booksByUUID[$0] }
             VStack(spacing: 0) {
-                HStack {
-                    ReconciliationReviewHeader(proposal: proposal)
-                    Spacer()
-                    Button(action: onPrevious) {
-                        Label("Previous Proposal", systemImage: "chevron.up")
-                            .labelStyle(.iconOnly)
-                    }
-                    .help("Previous Proposal")
-                    Button(action: onNext) {
-                        Label("Next Proposal", systemImage: "chevron.down")
-                            .labelStyle(.iconOnly)
-                    }
-                    .help("Next Proposal")
-                }
+                ReconciliationWorkspaceHeader(
+                    proposal: proposal,
+                    onPrevious: onPrevious,
+                    onNext: onNext
+                )
                 Divider()
                 if books.count == proposal.memberUUIDs.count {
                     ScrollView {
@@ -404,6 +429,48 @@ private struct ReconciliationWorkspaceDetail: View {
         case .sameEditionOtherFormat: "Merge Edition Records"
         case .sameWorkOtherEdition: "Group Editions"
         case .similarItem: "Keep Separate"
+        }
+    }
+}
+
+private struct ReconciliationWorkspaceHeader: View {
+    let proposal: EditionMatchProposal
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Review Reconciliation")
+                    .font(.headline)
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            ControlGroup {
+                Button(action: onPrevious) {
+                    Label("Previous Proposal", systemImage: "chevron.up")
+                        .labelStyle(.iconOnly)
+                }
+                .help("Previous Proposal")
+                Button(action: onNext) {
+                    Label("Next Proposal", systemImage: "chevron.down")
+                        .labelStyle(.iconOnly)
+                }
+                .help("Next Proposal")
+            }
+            .controlSize(.small)
+        }
+        .padding(16)
+    }
+
+    private var summary: LocalizedStringResource {
+        switch proposal.verdict {
+        case .duplicateFile: "The files have identical content hashes."
+        case .sameEditionOtherFormat: "Edition identifiers match, but the files are different."
+        case .sameWorkOtherEdition: "The books appear to be distinct editions of one work."
+        case .similarItem: "The available evidence is too weak to merge or group these books."
         }
     }
 }
@@ -587,13 +654,15 @@ private struct ReconciliationWorkspaceCommandBar: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Button("Select All Visible", action: onSelectAllVisible)
-                    .disabled(visibleCount == 0 || isRunning)
-                Button("Clear", action: onClearSelection)
+                Menu("Selection") {
+                    Button("Select All Visible", action: onSelectAllVisible)
+                        .disabled(visibleCount == 0 || isRunning)
+                    Button("Clear Selection", action: onClearSelection)
+                        .disabled(isRunning)
+                }
+                Button("Keep Separate", action: onKeepSeparate)
                     .disabled(isRunning)
-                Button("Keep Separate Selected", action: onKeepSeparate)
-                    .disabled(isRunning)
-                Button("Apply Selected", action: onApply)
+                Button("Apply", action: onApply)
                     .buttonStyle(.borderedProminent)
                     .disabled(!canApply || isRunning)
             } else {
@@ -602,7 +671,7 @@ private struct ReconciliationWorkspaceCommandBar: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Rescan", action: onRescan)
+            Button("Rescan", systemImage: "arrow.clockwise", action: onRescan)
                 .disabled(isScanning || isRunning)
             Button("Done", action: onDone)
                 .keyboardShortcut(.defaultAction)
@@ -644,15 +713,8 @@ private struct EditionProposalList: View {
                         EditionProposalRow(
                             proposal: proposal,
                             books: proposal.memberUUIDs.compactMap { booksByUUID[$0] },
-                            isSelected: selection.contains(proposal.pairKey),
+                            isSelected: $selection[contains: proposal.pairKey],
                             isEnabled: isEnabled,
-                            onToggleSelection: {
-                                if selection.contains(proposal.pairKey) {
-                                    selection.remove(proposal.pairKey)
-                                } else {
-                                    selection.insert(proposal.pairKey)
-                                }
-                            },
                             onDismiss: { onDismiss(proposal) },
                             onFocus: { focus = proposal.pairKey }
                         )
@@ -709,20 +771,16 @@ private struct ReconciliationFooter: View {
 private struct EditionProposalRow: View {
     let proposal: EditionMatchProposal
     let books: [Book]
-    let isSelected: Bool
+    @Binding var isSelected: Bool
     let isEnabled: Bool
-    let onToggleSelection: () -> Void
     let onDismiss: () -> Void
     let onFocus: () -> Void
 
     @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Toggle(isOn: Binding(
-                get: { isSelected },
-                set: { _ in onToggleSelection() }
-            )) {
+        HStack(alignment: .center, spacing: 10) {
+            Toggle(isOn: $isSelected) {
                 Text("Select proposal")
             }
             .labelsHidden()
@@ -730,10 +788,10 @@ private struct EditionProposalRow: View {
             .disabled(!isEnabled)
             .accessibilityLabel("Select proposal")
             .accessibilityValue(isSelected ? "Selected" : "Not selected")
-            HStack(spacing: -8) {
-                ForEach(books) { book in
+            HStack(spacing: -10) {
+                ForEach(books.prefix(2)) { book in
                     BookCoverImageView(book: book, tier: .thumb)
-                        .frame(width: 34, height: 48)
+                        .frame(width: 38, height: 54)
                         .clipShape(RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall))
                         .overlay {
                             RoundedRectangle(cornerRadius: WinstonLayout.cornerSmall)
@@ -741,52 +799,74 @@ private struct EditionProposalRow: View {
                         }
                 }
             }
-            VStack(alignment: .leading, spacing: 5) {
+            .frame(width: 66, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 4) {
                 Text(books.map(\.displayTitle).formatted())
-                    .font(theme.body(size: 12, weight: .semibold))
+                    .font(.callout.weight(.semibold))
                     .lineLimit(2)
-                HStack(spacing: 5) {
-                    Group {
-                        if theme.usesTerminalCopy {
-                            Text(verbatim: proposal.confidence.terminalLabel)
-                        } else {
-                            Text(proposal.confidence.label)
-                        }
-                    }
-                    .font(theme.label(size: 9, weight: .bold))
-                    .foregroundStyle(confidenceColor)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(confidenceColor.opacity(0.12), in: Capsule())
-                    ForEach(proposal.signals, id: \.self) { signal in
-                        Group {
-                            if theme.usesTerminalCopy {
-                                Text(verbatim: signal.terminalLabel)
-                            } else {
-                                Text(signal.label)
-                            }
-                        }
-                        .font(theme.label(size: 9))
-                        .foregroundStyle(theme.textSecondary)
+                HStack(spacing: 6) {
+                    confidenceLabel
+                    if !signalSummary.isEmpty {
+                        Text(signalSummary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .foregroundStyle(.secondary)
                     }
                 }
+                .font(.caption)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             Spacer()
-            Button("Dismiss", action: onDismiss)
-                .buttonStyle(.borderless)
-                .disabled(!isEnabled)
-            Button("View", action: onFocus)
-                .buttonStyle(.borderedProminent)
+            Menu {
+                Button("Keep Separate", action: onDismiss)
+            } label: {
+                Label("More actions", systemImage: "ellipsis.circle")
+                    .labelStyle(.iconOnly)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(!isEnabled)
+            .help("More actions")
         }
-        .padding(.vertical, 5)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onFocus)
+        .contextMenu {
+            Button("Keep Separate", action: onDismiss)
+                .disabled(!isEnabled)
+        }
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
-    private var confidenceColor: Color {
-        switch proposal.confidence {
-        case .high: theme.success
-        case .likely: theme.accent
-        case .uncertain: theme.highlight
+    @ViewBuilder
+    private var confidenceLabel: some View {
+        if theme.usesTerminalCopy {
+            Text(verbatim: proposal.confidence.terminalLabel)
+        } else {
+            Text(proposal.confidence.label)
+        }
+    }
+
+    private var signalSummary: String {
+        if theme.usesTerminalCopy {
+            return proposal.signals.map(\.terminalLabel).formatted()
+        }
+        return proposal.signals.map { String(localized: $0.label) }.formatted()
+    }
+
+}
+
+private extension Set {
+    subscript(contains element: Element) -> Bool {
+        get { contains(element) }
+        set {
+            if newValue {
+                insert(element)
+            } else {
+                remove(element)
+            }
         }
     }
 }
