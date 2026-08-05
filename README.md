@@ -17,7 +17,6 @@
 <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-arm64-333333?style=flat-square">
 <img alt="early access" src="https://img.shields.io/badge/status-early%20access%200.2-e8590c?style=flat-square">
 <img alt="MIT" src="https://img.shields.io/badge/license-MIT-4c9a2a?style=flat-square">
-<img alt="249 tests" src="https://img.shields.io/badge/tests-249-4c9a2a?style=flat-square">
 </p>
 
 https://github.com/user-attachments/assets/488cb698-cd61-4d0a-9fb2-f569d8ae6b86
@@ -57,7 +56,7 @@ Winston models **works, editions and files** separately. Two translations of Dun
 ### Kindle
 
 - Older Kindles are detected as USB drives. An MTP backend for newer models is implemented but still needs real-hardware testing.
-- A transfer converts when needed, copies the book and its home-screen thumbnail, removes macOS `._` files, then ejects the device so the Kindle can reindex.
+- A transfer converts when needed, copies the book and its home-screen thumbnail, and removes macOS `._` files. Use the explicit eject control afterward so the Kindle can reindex; a failed eject stays visible and the device remains connected.
 - Send a whole series from either its inspector detail or the Series sheet; Winston skips DRM-protected and already-present books and preserves series order.
 - Books can be copied from the device into the library. `My Clippings.txt` becomes structured notes matched to their books and can be exported.
 
@@ -169,14 +168,14 @@ Tests:
 xcodebuild test -workspace Winston.xcworkspace -scheme Winston -only-testing:WinstonTests
 ```
 
-All test fixtures are generated at runtime; there are no binary fixtures in the repository.
+All current test fixtures are generated at runtime; there are no binary fixtures in the repository. Before a future SwiftData schema migration ships, the suite must add a real store fixture created by the preceding public release.
 
 ## The Kindle part, explained
 
 Three details matter when sideloading:
 
 - A Kindle does not read a raw EPUB. Winston converts it to MOBI natively or to AZW3 through Calibre before transfer.
-- A sideloaded book appears after the device reindexes on eject. Winston ejects it after the transfer.
+- A sideloaded book appears after the device reindexes. After a transfer, use Winston’s explicit eject control; transfers do not eject automatically. If eject fails, Winston reports the error and keeps the device connected so you can retry or close busy files.
 - The home screen cover comes from the file itself. Winston embeds the cover selected in the library.
 
 If a stubborn Kindle still refuses a converted MOBI: `defaults write cz.annajung.Winston preferKindleAZW3 -bool YES` switches every transfer to AZW3. Needs Calibre.
