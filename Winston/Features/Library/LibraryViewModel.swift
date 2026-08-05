@@ -169,8 +169,13 @@ final class LibraryViewModel {
         health.canUndoMetadataCleanup
     }
     private(set) var activeBulkOperationPlan: BulkOperationPlan?
+    private(set) var activeBulkOperationProgress: BulkOperationProgress?
+    private(set) var isCancellingBulkOperation = false
     private(set) var lastBulkOperationResult: BulkOperationResult?
+    private(set) var bulkOperationReport: BulkOperationPresentationReport?
     @ObservationIgnored private var activeBulkOperationSession: BulkOperationSession?
+    @ObservationIgnored private var bulkOperationRetryHandler: (@MainActor @Sendable () async -> Void)?
+    @ObservationIgnored private var bulkOperationRetryTask: Task<Void, Never>?
     private var managedFileProgressByID: [UUID: ManagedFileProgress] = [:]
     private var managedFileOperationOrder: [UUID] = []
 
@@ -241,6 +246,26 @@ final class LibraryViewModel {
     }
     func setAllImportReviewSelections(_ isSelected: Bool) {
         importer.setAllImportReviewSelections(isSelected)
+    }
+    func setImportReviewSelections(itemIDs: Set<UUID>, isSelected: Bool) {
+        importer.setImportReviewSelections(
+            itemIDs: itemIDs,
+            isSelected: isSelected
+        )
+    }
+    func setImportReviewActions(itemIDs: Set<UUID>, action: ImportReviewAction) {
+        importer.setImportReviewActions(itemIDs: itemIDs, action: action)
+    }
+    func applyImportReviewMetadata(
+        field: ImportReviewMetadataField,
+        sourceItemID: UUID,
+        targetItemIDs: Set<UUID>
+    ) {
+        importer.applyImportReviewMetadata(
+            field: field,
+            sourceItemID: sourceItemID,
+            targetItemIDs: targetItemIDs
+        )
     }
     func setImportReviewAction(itemID: UUID, action: ImportReviewAction) {
         importer.setImportReviewAction(itemID: itemID, action: action)
@@ -1449,24 +1474,101 @@ final class LibraryViewModel {
                 throw BulkOperationDurableError(.operationInProgress)
             }
             lastBulkOperationResult = result
+            bulkOperationReport = BulkOperationPresentationReport.make(
+                from: result,
+                targetNames: bulkOperationTargetNames(for: plan.requestedTargetIDs)
+            )
             return result
         }
 
         let session = BulkOperationSession(plan: plan)
+        let targetNames = bulkOperationTargetNames(for: plan.requestedTargetIDs)
         activeBulkOperationSession = session
         activeBulkOperationPlan = plan
-        let result = await session.execute(applying: applyChunk)
-        if activeBulkOperationPlan?.id == plan.id {
+        activeBulkOperationProgress = BulkOperationProgress(
+            sessionID: session.id,
+            operation: plan.operation,
+            completedTargetCount: 0,
+            totalTargetCount: plan.actionableTargetIDs.count
+        )
+        isCancellingBulkOperation = false
+        let result = await session.execute(onProgress: { [weak self, weak session] progress in
+            guard let self, let session,
+                  self.activeBulkOperationSession === session else { return }
+            self.activeBulkOperationProgress = progress
+        }, applying: applyChunk)
+        if activeBulkOperationSession === session {
             activeBulkOperationSession = nil
             activeBulkOperationPlan = nil
+            activeBulkOperationProgress = nil
+            isCancellingBulkOperation = false
         }
         lastBulkOperationResult = result
+        bulkOperationReport = BulkOperationPresentationReport.make(
+            from: result,
+            targetNames: targetNames
+        )
+        installBulkOperationRetry(
+            for: result,
+            applying: applyChunk
+        )
         return result
     }
 
     func cancelBulkOperation() {
         guard let session = activeBulkOperationSession else { return }
+        isCancellingBulkOperation = true
         Task { await session.cancel() }
+    }
+
+    func dismissBulkOperationReport() {
+        bulkOperationReport = nil
+    }
+
+    func retryBulkOperation() {
+        guard activeBulkOperationSession == nil,
+              bulkOperationRetryTask == nil,
+              let retry = bulkOperationRetryHandler else { return }
+        bulkOperationReport = nil
+        bulkOperationRetryTask = Task { @MainActor [weak self] in
+            await retry()
+            self?.bulkOperationRetryTask = nil
+        }
+    }
+
+    private func installBulkOperationRetry(
+        for result: BulkOperationResult,
+        applying applyChunk: @escaping @MainActor @Sendable (
+            BulkOperationChunk
+        ) async throws -> BulkOperationChunkOutcome
+    ) {
+        guard let retryPlan = result.safeRetryPlan else {
+            bulkOperationRetryHandler = nil
+            return
+        }
+        bulkOperationRetryHandler = { [weak self] in
+            guard let self else { return }
+            let retryResult = await self.runBulkOperation(
+                plan: retryPlan,
+                applying: applyChunk
+            )
+            self.reportBulkOperationResult(retryResult)
+        }
+    }
+
+    private func bulkOperationTargetNames(
+        for targetIDs: [BulkOperationTargetID]
+    ) -> [BulkOperationTargetID: String] {
+        Dictionary(uniqueKeysWithValues: targetIDs.map { targetID in
+            let name: String
+            switch targetID {
+            case .catalogBook(let id):
+                name = (try? mutations.book(id: id))?.displayTitle ?? id.uuidString
+            case .deviceBook(let id):
+                name = id
+            }
+            return (targetID, name)
+        })
     }
 
     private func reportBulkOperationResult(_ result: BulkOperationResult) {
