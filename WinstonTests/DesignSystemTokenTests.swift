@@ -50,38 +50,40 @@ struct DesignSystemTokenTests {
     }
 
     @Test func reduceTransparencyAlwaysSelectsReadableOpaqueFallback() {
-        for theme in [Theme.black, .white, .purple],
-            role in ThemeStructuralRole.allCases {
-            let presentation = ThemedChromePresentation.resolve(
-                theme: theme,
-                role: role,
-                reduceTransparency: true,
-                increaseContrast: false
-            )
+        for theme in [Theme.black, .white, .purple] {
+            for role in ThemeStructuralRole.allCases {
+                let presentation = ThemedChromePresentation.resolve(
+                    theme: theme,
+                    role: role,
+                    reduceTransparency: true,
+                    increaseContrast: false
+                )
 
-            #expect(!presentation.usesMaterial)
-            #expect(presentation.opaqueFill == theme.structuralColor(for: role))
+                #expect(!presentation.usesMaterial)
+                #expect(presentation.opaqueFill == theme.structuralColor(for: role))
+            }
         }
     }
 
     @Test func increasedContrastMakesStructuralBoundariesExplicit() {
-        for theme in [Theme.black, .white, .purple],
-            role in ThemeStructuralRole.allCases {
-            let normal = ThemedChromePresentation.resolve(
-                theme: theme,
-                role: role,
-                reduceTransparency: false,
-                increaseContrast: false
-            )
-            let increased = ThemedChromePresentation.resolve(
-                theme: theme,
-                role: role,
-                reduceTransparency: false,
-                increaseContrast: true
-            )
+        for theme in [Theme.black, .white, .purple] {
+            for role in ThemeStructuralRole.allCases {
+                let normal = ThemedChromePresentation.resolve(
+                    theme: theme,
+                    role: role,
+                    reduceTransparency: false,
+                    increaseContrast: false
+                )
+                let increased = ThemedChromePresentation.resolve(
+                    theme: theme,
+                    role: role,
+                    reduceTransparency: false,
+                    increaseContrast: true
+                )
 
-            #expect(increased.borderWidth >= normal.borderWidth)
-            #expect(increased.borderWidth > 0)
+                #expect(increased.borderWidth >= normal.borderWidth)
+                #expect(increased.borderWidth > 0)
+            }
         }
     }
 

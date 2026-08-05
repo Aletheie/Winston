@@ -44,10 +44,12 @@ struct SelectionCommandBar<Actions: View, CompactActions: View>: View {
         .controlSize(.small)
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .background(.regularMaterial)
-        .overlay(alignment: .top) {
-            Divider()
-        }
+        .themedChrome(
+            role: .floating,
+            cornerRadius: WinstonLayout.radius(.structural)
+        )
+        .padding(.horizontal, WinstonLayout.space3)
+        .padding(.bottom, WinstonLayout.space2)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Selection actions")
     }

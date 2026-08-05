@@ -160,7 +160,7 @@ struct MetadataFixesSheet: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
-        .background(.bar)
+        .themedChrome(role: .sheetAction)
     }
 
     private func loadAnalysis() async {
