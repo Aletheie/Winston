@@ -8,9 +8,9 @@
 
 **Your books, on your Mac, on your Kindle.**
 
-<sub>7 MB download · zero dependencies · zero network calls · one cable</sub>
+<sub>Native macOS · offline by default · one cable to Kindle</sub>
 
-[Download](https://github.com/Aletheie/Winston/releases) · [What it does](#what-it-does) · [Where it's going](#where-its-going) · [Build it](#build-from-source)
+[Download](https://github.com/Aletheie/Winston/releases) · [What's new in 0.2](docs/releases/v0.2.md) · [What it does](#what-it-does) · [Build it](#build-from-source)
 
 <p>
 <img alt="macOS 26.4+" src="https://img.shields.io/badge/macOS-26.4%2B-000000?style=flat-square&logo=apple">
@@ -35,15 +35,21 @@ Winston models **works, editions and files** separately. Two translations of Dun
 
 ### Library
 
-- Grid and table views, search, filters, collections, smart collections, reading status, duplicate detection and bulk editing.
-- Rename an author, series or tag once and it changes across the library. Author names such as "Tolkien, J. R. R." can be flipped to "J. R. R. Tolkien."
-- Import an existing Calibre library with its metadata, or watch a folder for new books. Rescans and online lookups leave manually edited fields alone.
-- Group translations and editions under one work. Each edition can keep several file formats, with reviewable matching suggestions instead of automatic merges.
-- A series row in the book inspector opens that series directly, showing its owned books, reading progress, and missing Hardcover volumes. It also appears for a single owned book when the enabled Hardcover catalog confirms more volumes; the full all-series overview remains available from the Library menu.
-- Hardcover series results are cached for the app session and refreshed when the local books, authors, or positions in that series change.
-- Statistics, a yearly reading goal, **Surprise Me** for picking a random unread book, and cover sizing with `Cmd +` and `Cmd -`.
-- Real page counts for PDFs and estimates for other formats. Very short books are flagged as probable store samples.
-- Automatic backups of the catalog and covers. The catalog exports as CSV; highlights export as plain text.
+- Import EPUB, MOBI, AZW3, PDF, TXT and HTML by dragging them in, choosing files, watching a folder, or bringing over an existing Calibre library with its metadata and covers.
+- **Review Import** inspects batches and anything suspicious before it touches the library. You see duplicates, DRM, damaged files, metadata differences, and whether each file will become a new work, a new edition, or another format of an edition.
+- Works, editions and files stay separate. Two translations can belong to one work, while an EPUB and its Kindle-ready copy stay with the same edition. Matching suggestions wait for your approval.
+- Grid and table views, field search, filters, collections, rule-based smart shelves, reading status, Kindle-presence filtering, keyboard selection and bulk editing.
+- Search inside local EPUB, PDF, TXT and HTML files. The full-text index stays on this Mac and only rebuilds books whose contents changed.
+- Add a book you own on paper even when there is no digital file. Physical-only entries stay out of conversion and Kindle actions.
+- **Metadata Cleanup**, **Book Doctor** and **Library Integrity** find fixable metadata, damaged book files, missing assets and inconsistent catalog relationships. Safe repairs are separated from decisions that need you.
+- Automatic catalog-and-cover backups include a browsable **Library Time Machine**. Compare a snapshot with today and restore one book's metadata, cover, or full catalog record without replacing its ebook file.
+
+### Reading
+
+- Reading history, statistics and a yearly goal. Goodreads, StoryGraph and Hardcover CSV exports can be reviewed and imported without creating duplicate reading cycles.
+- **What Should I Read Today?** recommends from books you already own, taking length, language, mood, reading state and series order into account, and tells you why it picked each one.
+- Series pages collect the editions you own, reading progress and missing Hardcover volumes. An optional Updates inbox checks those series for newly released books.
+- Kindle highlights and notes become searchable records attached to their books and export as one Markdown file per title.
 
 ### Conversion
 
@@ -56,16 +62,17 @@ Winston models **works, editions and files** separately. Two translations of Dun
 ### Kindle
 
 - Older Kindles are detected as USB drives. An MTP backend for newer models is implemented but still needs real-hardware testing.
-- A transfer converts when needed, copies the book and its home-screen thumbnail, and removes macOS `._` files. Use the explicit eject control afterward so the Kindle can reindex; a failed eject stays visible and the device remains connected.
-- Send a whole series from either its inspector detail or the Series sheet; Winston skips DRM-protected and already-present books and preserves series order.
-- Books can be copied from the device into the library. `My Clippings.txt` becomes structured notes matched to their books and can be exported.
+- **Review Sync Plan** previews additions, refreshed conversions, cover repairs and optional removals. Each Kindle can keep its own local sync profile.
+- Transfers convert when needed, copy the book and home-screen thumbnail, clean up macOS sidecar files, report each outcome, and can resume work whose result could not be verified. Nothing is silently retried when delivery is uncertain.
+- Send a selection or a whole series; Winston skips DRM-protected and already-present books and preserves series order. Use the explicit eject control afterward so a USB-drive Kindle can reindex.
+- Copy books from the device into **Review Import**, remove device copies without touching the library, and turn `My Clippings.txt` into structured highlights and notes.
 
 ### Discovery
 
-- [Hardcover](https://hardcover.app) integration matches the series you own and shows missing volumes.
-- **Discover** browses by genre or search. Results can be saved to a wishlist, with search links to your preferred bookstore or library catalog.
-- **Open Catalogs** searches Project Gutenberg, Standard Ebooks, Unglue.it, and a Wikisource matched to Winston’s effective English or Czech language. Wikisource search uses its public API and requests an EPUB from WS Export only when you choose Import.
-- Discover and Open Catalogs can each be hidden from the sidebar in Settings.
+- [Hardcover](https://hardcover.app) integration matches the series you own, shows missing volumes and powers optional new-release checks.
+- **Discover** browses by genre or search. Results can be saved to a wishlist, with links to your preferred bookstore or library catalog.
+- **Catalogs** searches and browses OPDS 1 and OPDS 2 sources. Winston includes Project Gutenberg, Standard Ebooks, Unglue.it and a Wikisource matched to its English or Czech language; public and password-protected custom catalogs can be added in Settings.
+- Catalog results keep their editions, formats, prices and acquisition types visible. Free compatible files go through **Review Import**; borrow, buy, sample and subscription links open at their source.
 - All network features stay off until you enable them in Settings.
 
 ### Plugins
@@ -80,8 +87,8 @@ Winston models **works, editions and files** separately. Two translations of Dun
 - Quick Look previews for MOBI and AZW3 in Finder.
 - Standard menus and keyboard shortcuts.
 - Three themes, including the retro terminal theme, plus an app-wide font setting.
-- English and Czech localization and a built-in Help book.
-- A corrupted library store is moved aside so the app can recover instead of entering a crash loop.
+- English and Czech localization, a built-in Help book, and adaptations for Reduce Motion, Reduce Transparency, Increase Contrast and Larger Text.
+- A **Review & Operations** page keeps actionable results from imports, bulk edits, repairs and Kindle work. Interrupted file transactions and a corrupted library store have explicit recovery paths instead of disappearing or entering a crash loop.
 
 ## Screenshots
 
@@ -138,11 +145,12 @@ Longer term:
 
 **Requirements:** macOS 26.4 or newer and Apple Silicon. Calibre is optional and only needed for formats Winston cannot convert itself.
 
-1. Download the zip from [Releases](https://github.com/Aletheie/Winston/releases).
-2. Move `Winston.app` to Applications.
-3. On first launch, right-click the app and choose **Open**.
+1. Download the DMG from [Releases](https://github.com/Aletheie/Winston/releases).
+2. If you are updating 0.1, quit Winston and make a backup of `~/Library/Application Support/Winston` first.
+3. Open the DMG and drag `Winston.app` to Applications. Choose **Replace** when macOS asks.
+4. On first launch, right-click the app and choose **Open**.
 
-The app is signed but **not notarized yet**, so the third step is currently required once.
+The app is signed but **not notarized yet**, so the last step is currently required once. Version 0.2 upgrades the local catalog on first launch. Do not open that upgraded catalog with 0.1 again; restore the backup first if you need to roll back.
 
 ## Build from source
 
@@ -168,7 +176,7 @@ Tests:
 xcodebuild test -workspace Winston.xcworkspace -scheme Winston -only-testing:WinstonTests
 ```
 
-All current test fixtures are generated at runtime; there are no binary fixtures in the repository. Before a future SwiftData schema migration ships, the suite must add a real store fixture created by the preceding public release.
+The migration suite includes an anonymized catalog created by the public 0.1 build and verifies that its books, metadata, collections, highlights, wishlist, reading state and files survive the 0.2 schema upgrade and backfill.
 
 ## The Kindle part, explained
 

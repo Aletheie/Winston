@@ -83,8 +83,8 @@ let project = Project(
         "ARCHS": "arm64",
         "ENABLE_ENHANCED_SECURITY": "YES",
         // single source of truth for the app + QuickLook extension versions
-        "MARKETING_VERSION": "0.1",
-        "CURRENT_PROJECT_VERSION": "1",
+        "MARKETING_VERSION": "0.2",
+        "CURRENT_PROJECT_VERSION": "2",
     ]),
     targets: [
         .target(
@@ -195,6 +195,7 @@ let project = Project(
             bundleId: "cz.annajung.WinstonTests",
             deploymentTargets: .macOS("26.4"),
             sources: ["WinstonTests/**/*.swift"],
+            resources: ["WinstonTests/Fixtures/**"],
             dependencies: [
                 .target(name: "Winston"),
                 .package(product: "ZIPFoundation"),
