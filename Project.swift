@@ -92,8 +92,8 @@ let project = Project(
         "ARCHS": "arm64",
         "ENABLE_ENHANCED_SECURITY": "YES",
         // single source of truth for the app + QuickLook extension versions
-        "MARKETING_VERSION": "0.2",
-        "CURRENT_PROJECT_VERSION": "2",
+        "MARKETING_VERSION": "0.2.1",
+        "CURRENT_PROJECT_VERSION": "3",
     ]),
     targets: [
         .target(
@@ -208,7 +208,6 @@ let project = Project(
             resources: ["WinstonTests/Fixtures/**"],
             dependencies: [
                 .target(name: "Winston"),
-                .package(product: "ZIPFoundation"),
             ],
             settings: .settings(base: testSettings)
         ),
