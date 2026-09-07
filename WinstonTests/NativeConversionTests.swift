@@ -130,6 +130,48 @@ struct NativeConversionTests {
         #expect(MetadataExtractor.extractMetadata(from: output).title == "HTML Book")
     }
 
+    @Test func htmlInliningPreservesUnicodeAndRepeatedQuotedAndUnquotedImages() throws {
+        let directory = TempFile.makeDir()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let image = Data([0, 1, 2, 3])
+        try image.write(to: directory.appending(path: "image.png"))
+        let source = directory.appending(path: "page.html")
+        let html = "Příliš 🐈 <img src='image.png'> text <img src=image.png alt='🐈'> konec."
+        try Data(html.utf8).write(to: source)
+        let uri = "data:image/png;base64,\(image.base64EncodedString())"
+
+        let portable = try #require(try HTMLAssetInliner.portableData(for: source))
+
+        #expect(String(decoding: portable, as: UTF8.self)
+            == "Příliš 🐈 <img src='\(uri)'> text <img src=\"\(uri)\" alt='🐈'> konec.")
+    }
+
+    @Test func repeatedCachedImagesStopBeforeUnboundedHTMLExpansion() throws {
+        let directory = TempFile.makeDir()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data(repeating: 0, count: 1_024 * 1_024)
+            .write(to: directory.appending(path: "image.png"))
+        let source = directory.appending(path: "page.html")
+        // Expanding every reference before checking the limit would allocate
+        // over 13 GB from this small HTML file and a single cached image.
+        try Data(String(repeating: "<img src='image.png'>", count: 10_000).utf8)
+            .write(to: source)
+
+        #expect(throws: (any Error).self) {
+            try HTMLAssetInliner.portableData(for: source)
+        }
+    }
+
+    @Test func cancelledHTMLImportDoesNotStartReadingItsSource() async {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try HTMLAssetInliner.portableData(
+                for: URL(fileURLWithPath: "/unavailable-cancelled-import.html")
+            )
+        }
+        await #expect(throws: CancellationError.self) { try await task.value }
+    }
+
     @Test func htmlReaderToleratesCommentsScriptsAndBodyAttributes() throws {
         let dir = TempFile.makeDir()
         defer { try? FileManager.default.removeItem(at: dir) }

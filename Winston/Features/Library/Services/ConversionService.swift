@@ -381,7 +381,10 @@ final class ConversionService {
         let extractedCover = await Task.detached(priority: .utility) { () -> (NSImage, Data)? in
             if request.selectedCoverOwner == .edition(request.uuid),
                !CoverStore.exists(for: .edition(request.uuid)),
-               let cover = CoverExtractor.extractCover(from: request.sourceURL),
+               let cover = CoverExtractor.extractCover(
+                   from: request.sourceURL,
+                   maxPixel: Int(CoverCache.Tier.display.maxDimension)
+               ),
                let data = ImageTranscoder.jpegData(from: cover) {
                 return (cover, data)
             }

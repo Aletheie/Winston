@@ -6,7 +6,12 @@ import os
 
 private nonisolated final class CoverBox: @unchecked Sendable {
     let image: NSImage?
-    init(_ image: NSImage?) { self.image = image }
+    let revision: CoverCache.Revision?
+
+    init(_ image: NSImage?, revision: CoverCache.Revision?) {
+        self.image = image
+        self.revision = revision
+    }
 }
 
 nonisolated struct CoverCacheDiagnostics: Sendable, Equatable {
@@ -69,6 +74,13 @@ nonisolated final class CoverLease: @unchecked Sendable {
 actor CoverCache {
     static let shared = CoverCache()
 
+    /// File names alone do not identify an extracted preview: selecting a new
+    /// primary asset or replacing its contents must also invalidate misses.
+    struct Revision: Hashable, Sendable {
+        let version: Int
+        let derivedKey: DerivedCoverKey?
+    }
+
     enum Tier: Sendable, Hashable {
         case thumb
         case display
@@ -85,6 +97,7 @@ actor CoverCache {
     private let cancellationGrace: Duration
     private struct PendingLoad {
         let id: UUID
+        let revision: Revision?
         let task: Task<NSImage?, Never>
         var subscribers: Set<UUID>
         var keepAlive: Bool
@@ -117,13 +130,19 @@ actor CoverCache {
     func lease(
         for url: URL,
         tier: Tier,
+        revision: Revision? = nil,
         keepAlive: Bool = false,
         loader: @escaping @Sendable () async -> NSImage?
     ) -> CoverLease {
         let cacheKey = key(url, tier)
-        if let cached = cache.object(forKey: cacheKey as NSString) {
+        if let cached = cache.object(forKey: cacheKey as NSString),
+           revision == nil || cached.revision == revision {
             return CoverLease(resolve: { cached.image }, release: {})
         }
+        if pendingLoads[cacheKey]?.revision != revision {
+            cancelPendingLoad(for: cacheKey)
+        }
+        cache.removeObject(forKey: cacheKey as NSString)
 
         let subscriberID = UUID()
         let pending: PendingLoad
@@ -140,6 +159,7 @@ actor CoverCache {
             let task = Task(priority: .utility) { await loader() }
             pending = PendingLoad(
                 id: id,
+                revision: revision,
                 task: task,
                 subscribers: [subscriberID],
                 keepAlive: keepAlive,
@@ -149,17 +169,19 @@ actor CoverCache {
             diagnosticTotals.startedJobCount += 1
         }
 
+        let task = pending.task
+        let jobID = pending.id
         return CoverLease(
             resolve: { [weak self] in
-                let loaded = await pending.task.value
+                let loaded = await task.value
                 guard let self else { return nil }
                 return await self.complete(
                     loaded,
                     for: url,
                     tier: tier,
                     cacheKey: cacheKey,
-                    jobID: pending.id,
-                    wasCancelled: pending.task.isCancelled
+                    jobID: jobID,
+                    wasCancelled: task.isCancelled
                 )
             },
             release: { [weak self] in
@@ -168,7 +190,7 @@ actor CoverCache {
                     await self.release(
                         subscriberID,
                         cacheKey: cacheKey,
-                        jobID: pending.id
+                        jobID: jobID
                     )
                 }
             }
@@ -178,18 +200,21 @@ actor CoverCache {
     func resolve(
         for url: URL,
         tier: Tier,
+        revision: Revision? = nil,
         keepAlive: Bool = false,
         loader: @escaping @Sendable () async -> NSImage?
     ) async -> NSImage? {
-        let lease = lease(for: url, tier: tier, keepAlive: keepAlive, loader: loader)
+        let lease = lease(for: url, tier: tier, revision: revision, keepAlive: keepAlive, loader: loader)
         return await lease.image()
     }
 
     @discardableResult
-    func insert(_ image: NSImage?, for url: URL, tier: Tier) -> NSImage? {
+    func insert(
+        _ image: NSImage?, for url: URL, tier: Tier, revision: Revision? = nil
+    ) -> NSImage? {
         let scaled = image.map { CoverCache.downscaled($0, maxDimension: tier.maxDimension) }
         let cost = scaled.map { Int($0.size.width * $0.size.height * 4) } ?? 16
-        cache.setObject(CoverBox(scaled), forKey: key(url, tier) as NSString, cost: cost)
+        cache.setObject(CoverBox(scaled, revision: revision), forKey: key(url, tier) as NSString, cost: cost)
         return scaled
     }
 
@@ -224,7 +249,7 @@ actor CoverCache {
         wasCancelled: Bool
     ) -> NSImage? {
         guard let pending = pendingLoads[cacheKey], pending.id == jobID else {
-            return cache.object(forKey: cacheKey as NSString)?.image
+            return wasCancelled ? nil : cache.object(forKey: cacheKey as NSString)?.image
         }
         pending.cancellationTask?.cancel()
         pendingLoads.removeValue(forKey: cacheKey)
@@ -234,7 +259,7 @@ actor CoverCache {
         }
         diagnosticTotals.completedJobCount += 1
         if let cached = cache.object(forKey: cacheKey as NSString) { return cached.image }
-        return insert(loaded, for: url, tier: tier)
+        return insert(loaded, for: url, tier: tier, revision: pending.revision)
     }
 
     private func release(_ subscriberID: UUID, cacheKey: String, jobID: UUID) {
@@ -276,10 +301,9 @@ actor CoverCache {
     }
 
     nonisolated static func downscaled(_ image: NSImage, maxDimension: CGFloat) -> NSImage {
-        let size = image.size
-        let longest = max(size.width, size.height)
-        guard longest > maxDimension, longest > 0,
-              let cg = ImageTranscoder.cgImage(from: image) else { return image }
+        // NSImage.size is in points; a tiny logical size can still retain a
+        // multi-megapixel bitmap. Normalize by actual pixels before costing.
+        guard let cg = ImageTranscoder.cgImage(from: image) else { return image }
         let scaled = ImageTranscoder.downscaled(cg, maxPixel: Int(maxDimension))
         return NSImage(cgImage: scaled, size: NSSize(width: scaled.width, height: scaled.height))
     }
@@ -316,38 +340,7 @@ actor CoverWorkScheduler {
     }
 
     func storedCover(for owner: CoverOwner, maxPixel: Int) async -> NSImage? {
-        let data: Data?
-        do {
-            data = try await ioPermits.run {
-                try Task.checkCancellation()
-                return await cancellationPropagatingDetached(priority: .background) {
-                    guard !Task.isCancelled else { return nil }
-                    return CoverStore.loadData(for: owner)
-                }
-            }
-        } catch {
-            return nil
-        }
-        guard let data, !Task.isCancelled else { return nil }
-
-        do {
-            return try await cpuPermits.run {
-                try Task.checkCancellation()
-                return await cancellationPropagatingDetached(priority: .utility) {
-                    guard !Task.isCancelled,
-                          let decoded = ImageTranscoder.decodedImage(
-                              from: data,
-                              maxPixel: maxPixel
-                          ) else { return nil }
-                    return NSImage(
-                        cgImage: decoded,
-                        size: NSSize(width: decoded.width, height: decoded.height)
-                    )
-                }
-            }
-        } catch {
-            return nil
-        }
+        await storedImage(at: CoverStore.url(for: owner), maxPixel: maxPixel)
     }
 
     func storedCover(for uuid: UUID, maxPixel: Int) async -> NSImage? {
@@ -358,69 +351,60 @@ actor CoverWorkScheduler {
         for key: DerivedCoverKey,
         maxPixel: Int
     ) async -> NSImage? {
-        let data: Data?
-        do {
-            data = try await ioPermits.run {
-                try Task.checkCancellation()
-                return await DerivedCoverStore.shared.loadData(for: key)
-            }
-        } catch {
-            return nil
-        }
-        guard let data, !Task.isCancelled else { return nil }
+        let url = await DerivedCoverStore.shared.fileURL(for: key)
+        return await storedImage(at: url, maxPixel: maxPixel)
+    }
 
-        do {
-            return try await cpuPermits.run {
-                try Task.checkCancellation()
-                return await cancellationPropagatingDetached(priority: .utility) {
-                    guard !Task.isCancelled,
-                          let decoded = ImageTranscoder.decodedImage(
-                              from: data,
-                              maxPixel: maxPixel
-                          ) else { return nil }
-                    return NSImage(
-                        cgImage: decoded,
-                        size: NSSize(width: decoded.width, height: decoded.height)
-                    )
-                }
+    func storedImage(at url: URL, maxPixel: Int) async -> NSImage? {
+        await runImageWork {
+            guard let decoded = ImageTranscoder.decodedImage(from: url, maxPixel: maxPixel) else {
+                return nil
             }
-        } catch {
-            return nil
+            return NSImage(
+                cgImage: decoded,
+                size: NSSize(width: decoded.width, height: decoded.height)
+            )
         }
     }
 
     func extractAndEncode(
         from url: URL,
-        maxDimension: CGFloat
+        maxDimension: CGFloat,
+        validatingManagedDirectory directory: URL? = nil
     ) async -> (image: NSImage, data: Data)? {
-        let extracted: NSImage?
-        do {
-            extracted = try await ioPermits.run {
-                try Task.checkCancellation()
-                return await cancellationPropagatingDetached(priority: .background) {
-                    guard !Task.isCancelled else { return nil }
-                    let image = CoverExtractor.extractCover(from: url)
-                    return Task.isCancelled ? nil : image
+        await runImageWork {
+            // View construction uses catalog paths only. Resolve symlinks on
+            // the bounded worker immediately before I/O, against the captured
+            // directory rather than a possibly changed process-wide root.
+            if let directory {
+                guard BookFileStore.validatedURL(for: url.lastPathComponent, in: directory) == url else {
+                    return nil
                 }
             }
-        } catch {
-            return nil
+            guard let image = CoverExtractor.extractCover(
+                from: url, maxPixel: Int(maxDimension)
+            ), !Task.isCancelled,
+            let data = ImageTranscoder.jpegData(from: image) else { return nil }
+            return (image, data)
         }
-        guard let extracted, !Task.isCancelled else { return nil }
+    }
 
+    /// Hold both permits until temporary compressed bytes and full decoder
+    /// state are released. Splitting read and decode into separate queues let
+    /// an arbitrarily large backlog retain image Data between the two lanes.
+    private func runImageWork<Value: Sendable>(
+        _ operation: @escaping @Sendable () -> Value?
+    ) async -> Value? {
         do {
-            return try await cpuPermits.run {
-                try Task.checkCancellation()
-                return await cancellationPropagatingDetached(priority: .utility) {
-                    guard !Task.isCancelled else { return nil }
-                    let scaled = CoverCache.downscaled(
-                        extracted,
-                        maxDimension: maxDimension
-                    )
-                    guard let data = ImageTranscoder.jpegData(from: scaled) else {
-                        return nil
+            return try await ioPermits.run { [cpuPermits] in
+                try await cpuPermits.run {
+                    await cancellationPropagatingDetached(priority: .utility) {
+                        autoreleasepool {
+                            guard !Task.isCancelled else { return nil }
+                            let result = operation()
+                            return Task.isCancelled ? nil : result
+                        }
                     }
-                    return Task.isCancelled ? nil : (scaled, data)
                 }
             }
         } catch {
@@ -461,21 +445,46 @@ actor CoverWorkScheduler {
 
 enum CoverExtractor {
 
-    nonisolated static func extractCover(from url: URL) -> NSImage? {
+    nonisolated static func extractCover(from url: URL, maxPixel: Int? = nil) -> NSImage? {
         guard !Task.isCancelled else { return nil }
         switch url.pathExtension.lowercased() {
-        case "epub":                return extractEPUBCover(from: url)
-        case "mobi", "azw", "azw3": return extractMOBICover(from: url)
-        case "pdf":                 return extractPDFCover(from: url)
+        case "epub":                return extractEPUBCover(from: url, maxPixel: maxPixel)
+        case "mobi", "azw", "azw3": return coverImage(MOBICoverExtractor.coverData(from: url), maxPixel: maxPixel)
+        case "pdf":                 return extractPDFCover(from: url, maxPixel: maxPixel)
         default:                    return nil
         }
     }
 
     // MARK: EPUB
 
-    nonisolated private static func extractEPUBCover(from url: URL) -> NSImage? {
+    nonisolated private static func extractEPUBCover(from url: URL, maxPixel: Int?) -> NSImage? {
         guard let archive = try? EPUBArchive(url: url) else { return nil }
-        return epubCoverData(from: archive).flatMap(NSImage.init(data:))
+        return coverImage(epubCoverData(from: archive), maxPixel: maxPixel)
+    }
+
+    nonisolated private static func coverImage(_ data: Data?, maxPixel: Int?) -> NSImage? {
+        guard let data else { return nil }
+        guard let maxPixel else { return NSImage(data: data) }
+        let image: CGImage
+        if let bitmap = ImageTranscoder.decodedImage(from: data, maxPixel: maxPixel) {
+            image = bitmap
+        } else {
+            // AppKit supports SVG covers, but ImageIO's thumbnail API does
+            // not. Size the vector before rasterizing so this compatibility
+            // path never falls back to decoding a full-size raster image.
+            guard let document = try? XMLDocument(data: data, options: .nodeLoadExternalEntitiesNever),
+                  document.rootElement()?.localName == "svg",
+                  let vector = NSImage(data: data) else { return nil }
+            let longest = max(vector.size.width, vector.size.height)
+            guard longest.isFinite, longest > 0 else { return nil }
+            let scale = min(1, CGFloat(max(1, maxPixel)) / longest)
+            vector.size = NSSize(width: vector.size.width * scale, height: vector.size.height * scale)
+            guard let bitmap = ImageTranscoder.cgImage(from: vector) else { return nil }
+            // AppKit may rasterize points at the connected display's Retina
+            // scale. Normalize the resulting pixels to the requested tier.
+            image = ImageTranscoder.downscaled(bitmap, maxPixel: max(1, maxPixel))
+        }
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
     nonisolated static func epubCoverData(from archive: EPUBArchive) -> Data? {
@@ -575,18 +584,13 @@ enum CoverExtractor {
         return hrefs
     }
 
-    // MARK: MOBI / AZW3
-
-    nonisolated private static func extractMOBICover(from url: URL) -> NSImage? {
-        MOBICoverExtractor.coverData(from: url).flatMap(NSImage.init(data:))
-    }
-
     // MARK: PDF
 
-    nonisolated private static func extractPDFCover(from url: URL) -> NSImage? {
+    nonisolated private static func extractPDFCover(from url: URL, maxPixel: Int?) -> NSImage? {
         guard let doc = PDFDocument(url: url),
               let page = doc.page(at: 0) else { return nil }
-        return page.thumbnail(of: CGSize(width: 400, height: 600), for: .mediaBox)
+        let dimension = CGFloat(max(1, maxPixel ?? 600))
+        return page.thumbnail(of: CGSize(width: dimension * 2 / 3, height: dimension), for: .mediaBox)
     }
 
     // MARK: Helpers

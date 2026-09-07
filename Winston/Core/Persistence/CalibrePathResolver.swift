@@ -194,11 +194,7 @@ nonisolated struct CalibrePathResolver: Sendable {
     }
 
     private static func isSafeLeaf(_ value: String) -> Bool {
-        !value.isEmpty
-            && value != "."
-            && value != ".."
-            && !value.contains("/")
-            && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+        ManagedLeafName(rawValue: value) != nil
     }
 
     private static func isSafeFormat(_ value: String) -> Bool {

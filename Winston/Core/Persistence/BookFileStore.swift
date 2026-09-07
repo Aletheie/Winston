@@ -7,10 +7,14 @@ nonisolated struct ManagedLeafName: RawRepresentable, Sendable, Hashable {
     init?(rawValue: String) {
         guard !rawValue.isEmpty,
               rawValue != ".",
-              rawValue != "..",
-              !rawValue.contains("/"),
-              !rawValue.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+              rawValue != ".."
         else { return nil }
+        // Keep the predicate explicit: optimized Swift builds can incorrectly
+        // share contains/allSatisfy specializations of bound CharacterSet methods.
+        let controls = CharacterSet.controlCharacters
+        for scalar in rawValue.unicodeScalars where scalar == "/" || controls.contains(scalar) {
+            return nil
+        }
         self.rawValue = rawValue
     }
 
@@ -25,15 +29,19 @@ nonisolated struct ManagedLeafName: RawRepresentable, Sendable, Hashable {
 enum BookFileStore {
     /// Constructs a managed URL from catalog data without touching the
     /// filesystem. Callers that perform I/O must still use `validatedURL`.
-    nonisolated static func catalogURL(for fileName: String) -> URL? {
+    nonisolated static func catalogURL(
+        for fileName: String, in directory: URL = AppPaths.booksDirectory
+    ) -> URL? {
         guard let leaf = ManagedLeafName(rawValue: fileName),
-              let candidate = leaf.appending(to: AppPaths.booksDirectory) else { return nil }
+              let candidate = leaf.appending(to: directory) else { return nil }
         return candidate
     }
 
-    nonisolated static func validatedURL(for fileName: String) -> URL? {
-        guard let candidate = catalogURL(for: fileName) else { return nil }
-        let root = AppPaths.booksDirectory.standardizedFileURL.resolvingSymlinksInPath()
+    nonisolated static func validatedURL(
+        for fileName: String, in directory: URL = AppPaths.booksDirectory
+    ) -> URL? {
+        guard let candidate = catalogURL(for: fileName, in: directory) else { return nil }
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
         let resolved = candidate.resolvingSymlinksInPath()
         guard resolved.deletingLastPathComponent() == root else { return nil }
         return candidate
@@ -65,6 +73,7 @@ nonisolated enum HTMLAssetInliner {
 
     static func portableData(for source: URL) throws -> Data? {
         guard ["html", "htm"].contains(source.pathExtension.lowercased()) else { return nil }
+        try Task.checkCancellation()
         if let size = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize,
            size > maxHTMLBytes {
             throw ImportError.sourceTooLarge
@@ -74,36 +83,62 @@ nonisolated enum HTMLAssetInliner {
         guard let html = String(data: sourceData, encoding: .utf8)
                 ?? String(data: sourceData, encoding: .isoLatin1) else { return nil }
 
-        let imageTags = try NSRegularExpression(pattern: "<img\\b[^>]*>", options: [.caseInsensitive])
         let ns = html as NSString
-        var replacements: [(NSRange, String)] = []
         var cachedURIs: [String: String] = [:]
         var totalImageBytes = 0
+        var output = Data()
+        var cursor = 0
+        var failure: (any Error)?
+        output.reserveCapacity(sourceData.count)
 
-        for imageTag in imageTags.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
-            let tag = ns.substring(with: imageTag.range)
-            guard let sourceAttribute = sourceAttribute(in: tag),
-                  let uri = dataURI(
-                for: sourceAttribute.value,
-                relativeTo: source.deletingLastPathComponent(),
-                cached: &cachedURIs,
-                totalBytes: &totalImageBytes
-            ) else { continue }
-            var rewrittenTag = tag
-            guard let valueRange = Range(sourceAttribute.range, in: rewrittenTag) else { continue }
-            let replacement = sourceAttribute.quoted ? uri : "\"\(uri)\""
-            rewrittenTag.replaceSubrange(valueRange, with: replacement)
-            replacements.append((imageTag.range, rewrittenTag))
+        imageTagsRegex.enumerateMatches(
+            in: html,
+            options: [.reportProgress],
+            range: NSRange(location: 0, length: ns.length)
+        ) { match, _, stop in
+            do {
+                try Task.checkCancellation()
+                guard let match,
+                      let attribute = sourceAttribute(in: ns.substring(with: match.range)),
+                      let uri = dataURI(
+                        for: attribute.value,
+                        relativeTo: source.deletingLastPathComponent(),
+                        cached: &cachedURIs,
+                        totalBytes: &totalImageBytes
+                      ) else { return }
+                let valueRange = NSRange(
+                    location: match.range.location + attribute.range.location,
+                    length: attribute.range.length
+                )
+                try append(ns.substring(with: NSRange(
+                    location: cursor,
+                    length: valueRange.location - cursor
+                )), to: &output)
+                try append(attribute.quoted ? uri : "\"\(uri)\"", to: &output)
+                cursor = NSMaxRange(valueRange)
+            } catch {
+                failure = error
+                stop.pointee = true
+            }
         }
-
-        let portable = NSMutableString(string: html)
-        for (range, replacement) in replacements.reversed() {
-            portable.replaceCharacters(in: range, with: replacement)
-        }
-        let data = Data((portable as String).utf8)
-        guard data.count <= maxPortableHTMLBytes else { throw ImportError.sourceTooLarge }
-        return data
+        if let failure { throw failure }
+        try Task.checkCancellation()
+        try append(ns.substring(from: cursor), to: &output)
+        return output
     }
+
+    // Count every reference, including repeated cached images, before growing
+    // the result. Appending once avoids repeatedly shifting an expanding HTML string.
+    private static func append(_ fragment: String, to output: inout Data) throws {
+        guard fragment.utf8.count <= maxPortableHTMLBytes - output.count else {
+            throw ImportError.sourceTooLarge
+        }
+        output.append(contentsOf: fragment.utf8)
+    }
+
+    private static let imageTagsRegex = try! NSRegularExpression(
+        pattern: "<img\\b[^>]*>", options: [.caseInsensitive]
+    )
 
     private static let sourceAttributeRegex = try! NSRegularExpression(
         pattern: "(?:^|\\s)src\\s*=\\s*(?:([\\\"'])([^\\\"']*)\\1|([^\\s\\\"'>]+))",

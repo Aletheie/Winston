@@ -101,6 +101,7 @@ final class Book {
     /// Persisted catalog availability used by read models and other hot paths.
     /// Filesystem validation belongs to explicit health/transfer operations.
     var hasCatalogDigitalFile: Bool {
+        let primaryAsset = self.primaryAsset
         let primaryFileName = primaryAsset?.fileName ?? fileName
         guard !primaryFileName.isEmpty else { return false }
         guard let primaryAsset else {
@@ -333,7 +334,8 @@ final class Book {
     }
 
     func isOnDevice(fileNames: Set<String>) -> Bool {
-        fileNames.contains(allocatedDeviceMatchKey)
+        guard !fileNames.isEmpty else { return false }
+        return fileNames.contains(allocatedDeviceMatchKey)
             || fileNames.contains(deviceMatchKey)
     }
 

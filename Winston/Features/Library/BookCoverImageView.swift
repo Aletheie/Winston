@@ -1,6 +1,12 @@
 import SwiftUI
 import SwiftData
 
+private nonisolated struct BookCoverRequest: Hashable, Sendable {
+    let reference: CoverReference
+    let sourceURL: URL?
+    let derivedKey: DerivedCoverKey
+}
+
 struct BookCoverImageView: View {
     let book: Book
     var tier: CoverCache.Tier = .display
@@ -12,13 +18,17 @@ struct BookCoverImageView: View {
         let accents = theme.coverAccents(for: book)
         let coverReference = book.coverReference
         let primaryAsset = book.primaryAsset
-        let sourceURL = book.fileURL
-        let derivedKey = DerivedCoverKey(
-            assetID: primaryAsset?.uuid ?? book.uuid,
-            contentHash: primaryAsset?.contentHash,
-            fileName: primaryAsset?.fileName ?? book.fileName,
-            sizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
-            maxPixel: Int(tier.maxDimension)
+        let fileName = primaryAsset?.fileName ?? book.fileName
+        let request = BookCoverRequest(
+            reference: coverReference,
+            sourceURL: BookFileStore.catalogURL(for: fileName),
+            derivedKey: DerivedCoverKey(
+                assetID: primaryAsset?.uuid ?? book.uuid,
+                contentHash: primaryAsset?.contentHash,
+                fileName: fileName,
+                sizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
+                maxPixel: Int(tier.maxDimension)
+            )
         )
         Color.clear
             .overlay {
@@ -29,29 +39,37 @@ struct BookCoverImageView: View {
                 }
             }
             .clipped()
-            .task(
-                id: "\(coverReference.owner.scope.rawValue)#\(coverReference.owner.id)#\(book.fileName)#\(coverReference.version)"
-            ) {
+            .task(id: request) {
+                coverImage = nil
                 let resolved = await resolvedCover(
-                    sourceURL: sourceURL,
-                    cacheURL: book.coverCacheURL,
-                    reference: coverReference,
-                    derivedKey: derivedKey
+                    sourceURL: request.sourceURL,
+                    reference: request.reference,
+                    derivedKey: request.derivedKey
                 )
                 guard !Task.isCancelled else { return }
                 coverImage = resolved
+            }
+            .onDisappear {
+                // Lazy containers preserve state for offscreen rows. Keeping
+                // their bitmaps here would bypass the byte-limited cache.
+                coverImage = nil
             }
     }
 
     private func resolvedCover(
         sourceURL: URL?,
-        cacheURL: URL,
         reference: CoverReference,
         derivedKey: DerivedCoverKey
     ) async -> NSImage? {
         let maxDimension = tier.maxDimension
         let maxPixel = Int(maxDimension)
-        let lease = await CoverCache.shared.lease(for: cacheURL, tier: tier) {
+        let revision = CoverCache.Revision(
+            version: reference.version,
+            derivedKey: reference.owner.scope == .edition ? derivedKey : nil
+        )
+        let lease = await CoverCache.shared.lease(
+            for: CoverStore.url(for: reference.owner), tier: tier, revision: revision
+        ) {
             if let stored = await CoverWorkScheduler.shared.storedCover(
                 for: reference.owner,
                 maxPixel: maxPixel
@@ -61,8 +79,7 @@ struct BookCoverImageView: View {
             // Merely displaying an edition must never create or replace a
             // shared work/asset cover as a side effect.
             guard reference.owner.scope == .edition else { return nil }
-            guard let sourceURL else { return nil }
-            guard !Task.isCancelled else { return nil }
+            guard let sourceURL, !Task.isCancelled else { return nil }
 
             if let derived = await CoverWorkScheduler.shared.storedDerivedCover(
                 for: derivedKey,
@@ -72,7 +89,8 @@ struct BookCoverImageView: View {
             }
             guard let prepared = await CoverWorkScheduler.shared.extractAndEncode(
                 from: sourceURL,
-                maxDimension: maxDimension
+                maxDimension: maxDimension,
+                validatingManagedDirectory: sourceURL.deletingLastPathComponent()
             ), !Task.isCancelled else { return nil }
             if await CoverWorkScheduler.shared.installDerived(
                 prepared.data,

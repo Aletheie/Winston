@@ -173,4 +173,106 @@ struct MOBIByteLayoutTests {
                     "text record \(index) does not decode as standalone UTF-8")
         }
     }
+
+    @Test(arguments: ["cover", "thumbnail", "legacy", "magic", "no-exth"])
+    func coverReaderPreservesPointerAndFallbackVariants(mode: String) throws {
+        let file = try makeMOBI()
+        var data = file.data
+        let mobi = file.offsets[0] + 16
+        let firstImage = Int(data.readUInt32BE(at: mobi + 92))
+        let alternateImage = file.recordCount - 2
+        let alternateOffset = UInt32(alternateImage - firstImage)
+        data.replaceSubrange(file.offsets[alternateImage]..<(file.offsets[alternateImage] + 4),
+                             with: [0xFF, 0xD8, 0xFF, 0xE0])
+        let exth = mobi + Int(data.readUInt32BE(at: mobi + 4))
+        let count = Int(data.readUInt32BE(at: exth + 8))
+        var cursor = exth + 12
+        for _ in 0..<count {
+            let type = data.readUInt32BE(at: cursor)
+            let length = Int(data.readUInt32BE(at: cursor + 4))
+            if type == 201 {
+                data.replaceUInt32BE(at: cursor + 8, with: mode == "thumbnail" ? .max : alternateOffset)
+            } else if type == 202 {
+                data.replaceUInt32BE(at: cursor + 8, with: alternateOffset)
+            }
+            cursor += length
+        }
+        if mode == "legacy" || mode == "magic" {
+            data.replaceUInt32BE(at: mobi + 92, with: .max)
+        }
+        if mode == "magic" {
+            data.replaceUInt32BE(at: mobi + 108, with: .max)
+        }
+        if mode == "no-exth" {
+            data.replaceUInt32BE(at: mobi + 80, with: 0)
+            data.replaceUInt32BE(at: mobi + 112, with: 0)
+        }
+        let expected = MOBIFile(data: data).record(mode == "no-exth" ? firstImage : alternateImage)
+        let url = FileManager.default.temporaryDirectory.appending(path: "MOBICover-\(UUID().uuidString).azw3")
+        try data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(MOBICoverExtractor.coverData(from: data) == expected)
+        #expect(MOBICoverExtractor.coverData(from: url) == expected)
+    }
+
+    @Test func coverReaderSkipsThreeGigabytesOfBookPayload() throws {
+        let file = try makeMOBI()
+        let firstImage = Int(file.data.readUInt32BE(at: file.offsets[0] + 16 + 92))
+        let split = file.offsets[firstImage]
+        let padding = 3 * 1_024 * 1_024 * 1_024
+        var prefix = file.data.subdata(in: 0..<split)
+        let suffix = file.data.subdata(in: split..<file.data.count)
+        for index in firstImage..<file.recordCount {
+            prefix.replaceUInt32BE(at: 78 + index * 8, with: UInt32(file.offsets[index] + padding))
+        }
+
+        var bytesRead = 0
+        var largestRead = 0
+        let extracted = MOBICoverExtractor.coverData(byteCount: file.data.count + padding) { range in
+            bytesRead += range.count
+            largestRead = max(largestRead, range.count)
+            if range.upperBound <= prefix.count { return prefix.subdata(in: range) }
+            if range.lowerBound >= split + padding {
+                return suffix.subdata(in: (range.lowerBound - split - padding)..<(range.upperBound - split - padding))
+            }
+            Issue.record("Cover extraction read unrelated book text: \(range)")
+            return nil
+        }
+        let expected = file.record(firstImage)
+        #expect(extracted == expected)
+        #expect(bytesRead < expected.count + 4_096)
+        #expect(largestRead <= max(expected.count, 4_096))
+
+        let url = FileManager.default.temporaryDirectory.appending(path: "MOBICoverSparse-\(UUID().uuidString).mobi")
+        try prefix.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(split + padding))
+        try handle.write(contentsOf: suffix)
+        #expect(MOBICoverExtractor.coverData(from: url) == expected)
+    }
+
+    @Test func coverReaderRejectsTruncatedAndOverlappingRecords() throws {
+        let file = try makeMOBI()
+        #expect(MOBICoverExtractor.coverData(byteCount: file.data.count) { range in
+            file.data.subdata(in: range).dropLast()
+        } == nil)
+        var overlapping = file.data
+        overlapping.replaceUInt32BE(at: 86, with: UInt32(file.offsets[0] - 1))
+        #expect(MOBICoverExtractor.coverData(from: overlapping) == nil)
+    }
+
+    @Test func cancelledCoverReaderDoesNotReadContainer() async {
+        var readCount = 0
+        let request = Task {
+            MOBICoverExtractor.coverData(byteCount: 3 * 1_024 * 1_024 * 1_024) { _ in
+                readCount += 1
+                return nil
+            }
+        }
+        request.cancel()
+        #expect(await request.value == nil)
+        #expect(readCount == 0)
+    }
 }

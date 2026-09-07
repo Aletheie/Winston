@@ -16,6 +16,18 @@ nonisolated enum ImageTranscoder {
     static func decodedImage(from data: Data, maxPixel: Int? = nil) -> CGImage? {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
+        return decodedImage(from: source, maxPixel: maxPixel)
+    }
+
+    /// Lets ImageIO read compressed bytes on demand without first retaining the
+    /// entire file in a Data value for every queued thumbnail request.
+    static func decodedImage(from url: URL, maxPixel: Int? = nil) -> CGImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else { return nil }
+        return decodedImage(from: source, maxPixel: maxPixel)
+    }
+
+    private static func decodedImage(from source: CGImageSource, maxPixel: Int?) -> CGImage? {
         if let (width, height) = dimensions(of: source),
            width > maxSourcePixels / max(1, height) {
             return nil
@@ -25,7 +37,7 @@ nonisolated enum ImageTranscoder {
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true,
         ]
-        options[kCGImageSourceThumbnailMaxPixelSize] = maxPixel ?? defaultMaxPixel
+        options[kCGImageSourceThumbnailMaxPixelSize] = max(1, maxPixel ?? defaultMaxPixel)
         return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 

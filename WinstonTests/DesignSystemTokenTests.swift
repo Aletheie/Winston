@@ -5,6 +5,20 @@ import Testing
 @MainActor
 @Suite("Design system semantic tokens")
 struct DesignSystemTokenTests {
+    @Test func digitalCoverPaletteUsesCatalogIdentityEvenWhenFileIsUnavailableOnDisk() {
+        let first = Book(
+            uuid: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            fileName: "catalog-only-palette.epub", originalFileName: "Book.epub"
+        )
+        let second = Book(
+            uuid: UUID(uuidString: "00000000-0000-4000-8000-000000000002")!,
+            fileName: first.fileName, originalFileName: first.originalFileName
+        )
+        for theme in [Theme.black, .white, .purple] {
+            #expect(theme.coverAccents(for: first) == theme.coverAccents(for: second))
+        }
+    }
+
     @Test func everyThemeResolvesEveryStructuralRole() {
         for theme in [Theme.black, .white, .purple] {
             let resolved = ThemeStructuralRole.allCases.map {

@@ -93,6 +93,155 @@ struct ImageTranscoderTests {
         #expect(fittedTall.height <= 470)
     }
 
+    @Test func fileDecodeDownsamplesAndNormalizesInvalidPixelLimit() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "cover-decode-\(UUID().uuidString).png")
+        try pngData(width: 1_200, height: 800).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let decoded = try #require(ImageTranscoder.decodedImage(from: url, maxPixel: 160))
+        #expect(decoded.width == 160)
+        #expect(decoded.height <= 107)
+        let smallest = try #require(ImageTranscoder.decodedImage(from: url, maxPixel: 0))
+        #expect(max(smallest.width, smallest.height) == 1)
+    }
+
+    @Test func cacheBoundsActualPixelsEvenWhenLogicalImageSizeIsTiny() async throws {
+        let bitmap = try #require(ImageTranscoder.decodedImage(from: pngData(width: 1_200, height: 800)))
+        let image = NSImage(cgImage: bitmap, size: NSSize(width: 12, height: 8))
+        let cached = try #require(await CoverCache().insert(
+            image, for: URL(fileURLWithPath: "/cover-retina.png"), tier: .thumb
+        ))
+        let pixels = try #require(ImageTranscoder.cgImage(from: cached))
+        #expect(max(pixels.width, pixels.height) <= 160)
+        #expect(cached.size.width == CGFloat(pixels.width))
+        #expect(cached.size.height == CGFloat(pixels.height))
+    }
+
+    @Test func newAssetRevisionDoesNotReusePreviouslyMissingCover() async throws {
+        let cache = CoverCache()
+        let url = URL(fileURLWithPath: "/cover-revision.jpg")
+        let assetID = UUID()
+        let first = CoverCache.Revision(version: 1, derivedKey: DerivedCoverKey(
+            assetID: assetID, contentHash: "first", fileName: "book.epub", sizeBytes: 10, maxPixel: 600
+        ))
+        let second = CoverCache.Revision(version: 1, derivedKey: DerivedCoverKey(
+            assetID: assetID, contentHash: "second", fileName: "book.epub", sizeBytes: 10, maxPixel: 600
+        ))
+        let counter = CoverLoadCounter()
+        let image = try #require(NSImage(data: pngData(width: 120, height: 180)))
+        #expect(await cache.resolve(for: url, tier: .display, revision: first) { nil } == nil)
+        for _ in 0..<2 {
+            let resolved = await cache.resolve(for: url, tier: .display, revision: second) {
+                await counter.increment()
+                return image
+            }
+            #expect(resolved != nil)
+        }
+        #expect(await counter.value == 1)
+    }
+
+    @Test func replacingCoverRevisionCancelsOldLoadWithoutOverwritingNewImage() async throws {
+        let cache = CoverCache()
+        let url = URL(fileURLWithPath: "/cover-pending-revision.jpg")
+        let loader = CancellationAwareCoverLoad()
+        let first = Task {
+            await cache.resolve(
+                for: url, tier: .display,
+                revision: CoverCache.Revision(version: 1, derivedKey: nil)
+            ) { await loader.load() }
+        }
+        await loader.waitUntilStarted()
+        let image = try #require(NSImage(data: pngData(width: 120, height: 180)))
+        let resolved = await cache.resolve(
+            for: url, tier: .display,
+            revision: CoverCache.Revision(version: 2, derivedKey: nil)
+        ) { image }
+        #expect(resolved != nil)
+        #expect(await first.value == nil)
+        #expect(await loader.wasCancelled)
+        let diagnostics = await cache.diagnostics()
+        #expect(diagnostics.cancelledJobCount == 1)
+        #expect(diagnostics.completedJobCount == 1)
+    }
+
+    @Test func scheduledFileDecodesStayWithinBothWorkerLimits() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "cover-workers-\(UUID().uuidString).png")
+        try pngData(width: 1_200, height: 800).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let scheduler = CoverWorkScheduler(ioLimit: 3, cpuLimit: 2)
+        let dimensions = await withTaskGroup(of: NSSize?.self, returning: [NSSize?].self) { group in
+            for _ in 0..<48 {
+                group.addTask {
+                    await scheduler.storedImage(at: url, maxPixel: 160)?.size
+                }
+            }
+            var result: [NSSize?] = []
+            for await size in group { result.append(size) }
+            return result
+        }
+        #expect(dimensions.count == 48)
+        #expect(dimensions.allSatisfy { $0?.width == 160 })
+        let diagnostics = await scheduler.diagnostics()
+        #expect(diagnostics.peakIOCount <= 3)
+        #expect(diagnostics.peakCPUCount <= 2)
+        #expect(diagnostics.activeIOCount == 0)
+        #expect(diagnostics.activeCPUCount == 0)
+    }
+
+    @Test(arguments: ["png", "svg"])
+    func extractedPreviewUsesRequestedTierBeforeEncoding(format: String) async throws {
+        let opf = """
+        <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+          <manifest><item id="cover" href="cover.\(format)" media-type="image/\(format)" properties="cover-image"/></manifest>
+        </package>
+        """
+        let data = format == "png" ? pngData(width: 1_200, height: 1_800) : Data("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1800">
+          <rect width="1200" height="1800" fill="red"/>
+        </svg>
+        """.utf8)
+        let url = try EPUBFixture.makeWithOPF(opf, additionalEntries: [
+            "OEBPS/cover.\(format)": data,
+        ])
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let result = try #require(await CoverWorkScheduler().extractAndEncode(from: url, maxDimension: 160))
+        let encoded = try #require(ImageTranscoder.decodedImage(from: result.data))
+        #expect(result.image.size.height == 160)
+        #expect(encoded.height == 160)
+        #expect(encoded.width <= 107)
+    }
+
+    @Test func managedPreviewValidatesAgainstCapturedDirectory() async throws {
+        let url = try EPUBFixture.make(title: "Captured cover root", author: "Reader")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // This fixture deliberately lives outside the current AppPaths root.
+        // A queued request must keep using the root from its catalog snapshot.
+        let result = await CoverWorkScheduler().extractAndEncode(
+            from: url, maxDimension: 160,
+            validatingManagedDirectory: url.deletingLastPathComponent()
+        )
+        #expect(result != nil)
+    }
+
+    @Test func managedPreviewRejectsEscapingSymlinkBeforeOpeningBook() async throws {
+        let target = try EPUBFixture.make(title: "Outside managed root", author: "Reader")
+        defer { try? FileManager.default.removeItem(at: target.deletingLastPathComponent()) }
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "ManagedCover-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let link = directory.appending(path: "linked.epub")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        #expect(BookFileStore.catalogURL(for: "linked.epub", in: directory) == link)
+        let result = await CoverWorkScheduler().extractAndEncode(
+            from: link, maxDimension: 160, validatingManagedDirectory: directory
+        )
+        #expect(result == nil)
+        #expect(EPUBArchive.openCount(for: link) == 0)
+    }
+
     @Test func concurrentCoverRequestsShareOneLoad() async {
         let url = FileManager.default.temporaryDirectory
             .appending(path: "cover-cache-\(UUID().uuidString).epub")
