@@ -61,7 +61,7 @@ Winston models **works, editions and files** separately. Two translations of Dun
 
 ### Kindle
 
-- Older Kindles are detected as USB drives. An MTP backend for newer models is implemented but still needs real-hardware testing.
+- Older Kindles are detected as USB drives. MTP transfers for newer models have also been verified on a current Kindle.
 - **Review Sync Plan** previews additions, refreshed conversions, cover repairs and optional removals. Each Kindle can keep its own local sync profile.
 - Transfers convert when needed, copy the book and home-screen thumbnail, clean up macOS sidecar files, report each outcome, and can resume work whose result could not be verified. Nothing is silently retried when delivery is uncertain.
 - Send a selection or a whole series; Winston skips DRM-protected and already-present books and preserves series order. Use the explicit eject control afterward so a USB-drive Kindle can reindex.
@@ -125,14 +125,16 @@ Completed:
 
 - [x] **Works and editions:** separate works, editions and files, with multiple formats per edition.
 - [x] **Series watch:** release notifications for series already in the library.
+- [x] **MTP:** verified on a current Kindle.
 
 Near term:
 
 - [ ] Notarized releases
 - [ ] Automatic updates (not currently included; reintroduce only with a complete signed feed and release process)
 - [ ] Native AZW3 output
-- [ ] MTP verified on a current Kindle
 - [ ] Layered app icon with the full glass treatment
+- [ ] **Upgrade checks:** verify existing file links after an update and explain any repair needed.
+- [ ] **Troubleshooting report:** export app version, operation failures and file checks without including book contents.
 
 Longer term:
 
@@ -140,6 +142,7 @@ Longer term:
 - [ ] **Import inbox:** preview changes before import, with one-click undo
 - [ ] **Metadata provenance:** store the source of each value and lock hand-edited fields
 - [ ] **Highlight remapping:** carry highlights over when an EPUB is replaced
+- [ ] **Portable library:** choose a library location and move it between Macs with file verification.
 
 ## Install
 
@@ -192,7 +195,6 @@ Verified on a Paperwhite 11th generation.
 
 ## Known limits
 
-- **MTP still needs real-hardware verification.** The path for newer Kindles is implemented; the USB-drive path used by older models is proven.
 - **No App Store, no iCloud sync.** Raw USB access means the sandbox is off, which rules out both. Your backups are plain files you can copy.
 - **Not notarized yet**, hence the right click on first launch.
 - **No automatic updater.** Install newer releases manually; automatic updates must be introduced later as a complete signed-feed project.
