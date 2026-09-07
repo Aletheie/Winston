@@ -89,6 +89,7 @@ nonisolated enum LibrarySnapshotCoordinator {
         case invalidManifest(String)
         case sourceChanged(String)
         case unsafeEntry(String)
+        case unsafeBackupDestination(String)
         case insufficientSpace(required: Int64, available: Int64)
         case inconsistentRestore(String)
         case unsupportedVolume(String)
@@ -105,6 +106,8 @@ nonisolated enum LibrarySnapshotCoordinator {
                 "The \(component) files changed repeatedly while the snapshot was being created"
             case .unsafeEntry(let path):
                 "The snapshot contains an unsafe filesystem entry: \(path)"
+            case .unsafeBackupDestination(let path):
+                "The backup folder must be outside the library file directories: \(path)"
             case .insufficientSpace(let required, let available):
                 "The restore requires \(required) bytes but only \(available) bytes are available"
             case .inconsistentRestore(let message):
@@ -262,6 +265,14 @@ nonisolated enum LibrarySnapshotCoordinator {
             ?? siblingDirectory(named: "Books", of: coversDirectory)
         let managedFilesDirectory = managedFilesDirectory
             ?? siblingDirectory(named: "ManagedFiles", of: coversDirectory)
+        try requireBackupDestinationOutsideSources(
+            folder,
+            sources: [
+                coversDirectory,
+                booksDirectory,
+                managedFilesDirectory,
+            ]
+        )
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
 
         let sourceBytes = try sqliteFamilyByteCount(at: storeURL)
@@ -1507,6 +1518,64 @@ nonisolated enum LibrarySnapshotCoordinator {
 
     private static func standardizedPath(_ url: URL) -> String {
         url.standardizedFileURL.path(percentEncoded: false)
+    }
+
+    private static func requireBackupDestinationOutsideSources(
+        _ destination: URL,
+        sources: [URL]
+    ) throws {
+        let canonicalDestination = canonicalizingExistingAncestors(
+            of: destination
+        )
+        for source in sources {
+            let canonicalSource = canonicalizingExistingAncestors(of: source)
+            guard !isSameOrDescendant(
+                canonicalDestination,
+                of: canonicalSource
+            ) else {
+                throw SnapshotError.unsafeBackupDestination(
+                    standardizedPath(canonicalDestination)
+                )
+            }
+        }
+    }
+
+    private static func canonicalizingExistingAncestors(
+        of url: URL
+    ) -> URL {
+        let fileManager = FileManager.default
+        var existingAncestor = url.standardizedFileURL
+        var missingComponents: [String] = []
+        while !fileManager.fileExists(
+            atPath: existingAncestor.path(percentEncoded: false)
+        ) {
+            let parent = existingAncestor.deletingLastPathComponent()
+            guard parent != existingAncestor else { break }
+            missingComponents.append(existingAncestor.lastPathComponent)
+            existingAncestor = parent
+        }
+        var canonical = existingAncestor
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        for component in missingComponents.reversed() {
+            canonical.append(path: component)
+        }
+        return canonical.standardizedFileURL
+    }
+
+    private static func isSameOrDescendant(
+        _ candidate: URL,
+        of ancestor: URL
+    ) -> Bool {
+        let candidateComponents = candidate.pathComponents
+        let ancestorComponents = ancestor.pathComponents
+        guard candidateComponents.count >= ancestorComponents.count else {
+            return false
+        }
+        return zip(
+            candidateComponents.prefix(ancestorComponents.count),
+            ancestorComponents
+        ).allSatisfy { $0.0 == $0.1 }
     }
 
     private static func siblingDirectory(named name: String, of directory: URL) -> URL {

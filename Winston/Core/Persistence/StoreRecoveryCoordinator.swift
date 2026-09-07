@@ -33,6 +33,7 @@ nonisolated struct StoreQuarantineManifest: Codable, Equatable, Sendable {
         case preserved
         case cleanupFailed
         case readyForFreshStore
+        case freshStoreInstalled
         case completed
     }
 
@@ -212,14 +213,10 @@ struct StoreRecoveryCoordinator {
         if let unresolved = DispatchQueue.global(qos: .userInitiated).sync(execute: {
             fileSystem.unresolvedRecovery(storeURL)
         }) {
-            return .readOnlyRecovery(
-                snapshotURL: unresolved,
-                failure: StoreOpenFailure(
-                    kind: .retryable,
-                    domain: "Winston.StoreRecovery",
-                    code: 1,
-                    message: "A previous store recovery did not reach its completion checkpoint."
-                )
+            return resumeRecovery(
+                at: unresolved,
+                storeURL: storeURL,
+                opener: opener
             )
         }
         do {
@@ -276,30 +273,302 @@ struct StoreRecoveryCoordinator {
                     )
                 )
             case .ready(let snapshotURL, var manifest):
-                do {
-                    let container = try opener(storeURL)
-                    manifest.status = .completed
-                    do {
-                        try DispatchQueue.global(qos: .userInitiated).sync {
-                            try fileSystem.writeManifest(manifest, snapshotURL.appending(path: "manifest.json"))
-                        }
-                    } catch {
-                        return .readOnlyRecovery(
-                            snapshotURL: snapshotURL,
-                            failure: StoreOpenFailure(
-                                kind: .retryable,
-                                domain: "Winston.StoreRecovery",
-                                code: 2,
-                                message: "The fresh store opened, but its recovery completion checkpoint could not be saved: \(error.localizedDescription)"
-                            )
-                        )
-                    }
-                    return .quarantined(container, snapshotURL: snapshotURL)
-                } catch {
-                    let freshFailure = Self.classify(error)
-                    return .readOnlyRecovery(snapshotURL: snapshotURL, failure: freshFailure)
-                }
+                return installFreshStore(
+                    for: snapshotURL,
+                    manifest: &manifest,
+                    storeURL: storeURL,
+                    opener: opener
+                )
             }
+        }
+    }
+
+    private func resumeRecovery(
+        at snapshotURL: URL,
+        storeURL: URL,
+        opener: StoreOpener
+    ) -> Outcome {
+        let manifestURL = snapshotURL.appending(path: "manifest.json")
+        let manifest: StoreQuarantineManifest
+        do {
+            manifest = try DispatchQueue.global(qos: .userInitiated).sync {
+                try fileSystem.readManifest(manifestURL)
+            }
+        } catch {
+            return blockedRecovery(
+                snapshotURL: snapshotURL,
+                code: 3,
+                message: "The pending recovery checkpoint could not be read: \(error.localizedDescription)"
+            )
+        }
+
+        switch manifest.status {
+        case .readyForFreshStore:
+            var manifest = manifest
+            return installFreshStore(
+                for: snapshotURL,
+                manifest: &manifest,
+                storeURL: storeURL,
+                opener: opener
+            )
+        case .freshStoreInstalled:
+            return completeInstalledStore(
+                for: snapshotURL,
+                manifest: manifest,
+                storeURL: storeURL,
+                opener: opener
+            )
+        case .copying, .copyFailed, .preserved, .cleanupFailed, .completed:
+            return blockedRecovery(
+                snapshotURL: snapshotURL,
+                code: 1,
+                message: "A previous store recovery did not reach a resumable checkpoint."
+            )
+        }
+    }
+
+    private func installFreshStore(
+        for snapshotURL: URL,
+        manifest: inout StoreQuarantineManifest,
+        storeURL: URL,
+        opener: StoreOpener
+    ) -> Outcome {
+        if let validationFailure = validateRecoverySnapshot(
+            manifest,
+            at: snapshotURL,
+            for: storeURL
+        ) {
+            return blockedRecovery(
+                snapshotURL: snapshotURL,
+                code: 4,
+                message: validationFailure
+            )
+        }
+
+        do {
+            try DispatchQueue.global(qos: .userInitiated).sync {
+                try Self.removeUncommittedStoreFamily(
+                    at: storeURL,
+                    fileSystem: fileSystem
+                )
+            }
+        } catch {
+            return blockedRecovery(
+                snapshotURL: snapshotURL,
+                code: 5,
+                message: "The uncommitted fresh store could not be reset before recovery resumed: \(error.localizedDescription)"
+            )
+        }
+
+        let container: ModelContainer
+        do {
+            container = try opener(storeURL)
+        } catch {
+            return .readOnlyRecovery(
+                snapshotURL: snapshotURL,
+                failure: Self.classify(error)
+            )
+        }
+
+        if let failure = installedStoreFailure(at: storeURL) {
+            return .readOnlyRecovery(snapshotURL: snapshotURL, failure: failure)
+        }
+
+        manifest.status = .freshStoreInstalled
+        do {
+            try writeRecoveryManifest(manifest, at: snapshotURL)
+        } catch {
+            return blockedRecovery(
+                snapshotURL: snapshotURL,
+                code: 6,
+                message: "The fresh store opened, but its post-install checkpoint could not be saved: \(error.localizedDescription)"
+            )
+        }
+        return completeRecovery(
+            container: container,
+            snapshotURL: snapshotURL,
+            manifest: manifest
+        )
+    }
+
+    private func completeInstalledStore(
+        for snapshotURL: URL,
+        manifest: StoreQuarantineManifest,
+        storeURL: URL,
+        opener: StoreOpener
+    ) -> Outcome {
+        if let validationFailure = validateRecoverySnapshot(
+            manifest,
+            at: snapshotURL,
+            for: storeURL
+        ) {
+            return blockedRecovery(
+                snapshotURL: snapshotURL,
+                code: 4,
+                message: validationFailure
+            )
+        }
+
+        let container: ModelContainer
+        do {
+            container = try opener(storeURL)
+        } catch {
+            return .readOnlyRecovery(
+                snapshotURL: snapshotURL,
+                failure: Self.classify(error)
+            )
+        }
+        if let failure = installedStoreFailure(at: storeURL) {
+            return .readOnlyRecovery(snapshotURL: snapshotURL, failure: failure)
+        }
+        return completeRecovery(
+            container: container,
+            snapshotURL: snapshotURL,
+            manifest: manifest
+        )
+    }
+
+    private func completeRecovery(
+        container: ModelContainer,
+        snapshotURL: URL,
+        manifest: StoreQuarantineManifest
+    ) -> Outcome {
+        var manifest = manifest
+        manifest.status = .completed
+        do {
+            try writeRecoveryManifest(manifest, at: snapshotURL)
+        } catch {
+            return blockedRecovery(
+                snapshotURL: snapshotURL,
+                code: 2,
+                message: "The fresh store is installed, but its recovery completion checkpoint could not be saved: \(error.localizedDescription)"
+            )
+        }
+        return .quarantined(container, snapshotURL: snapshotURL)
+    }
+
+    private func writeRecoveryManifest(
+        _ manifest: StoreQuarantineManifest,
+        at snapshotURL: URL
+    ) throws {
+        try DispatchQueue.global(qos: .userInitiated).sync {
+            try fileSystem.writeManifest(
+                manifest,
+                snapshotURL.appending(path: "manifest.json")
+            )
+        }
+    }
+
+    private func installedStoreFailure(at storeURL: URL) -> StoreOpenFailure? {
+        let inspection = DispatchQueue.global(qos: .userInitiated).sync {
+            inspector.inspect(storeURL)
+        }
+        switch inspection {
+        case .healthy:
+            return nil
+        case .corrupt(let message):
+            return StoreOpenFailure(
+                kind: .corruption,
+                domain: "NSSQLiteErrorDomain",
+                code: Int(SQLITE_CORRUPT),
+                message: message
+            )
+        case .unavailable(let failure):
+            return failure
+        }
+    }
+
+    private func validateRecoverySnapshot(
+        _ manifest: StoreQuarantineManifest,
+        at snapshotURL: URL,
+        for storeURL: URL
+    ) -> String? {
+        do {
+            return try DispatchQueue.global(qos: .userInitiated).sync {
+                try Self.recoverySnapshotValidationFailure(
+                    manifest,
+                    at: snapshotURL,
+                    for: storeURL,
+                    fileSystem: fileSystem
+                )
+            }
+        } catch {
+            return "The recovery snapshot could not be revalidated: \(error.localizedDescription)"
+        }
+    }
+
+    private func blockedRecovery(
+        snapshotURL: URL,
+        code: Int,
+        message: String
+    ) -> Outcome {
+        .readOnlyRecovery(
+            snapshotURL: snapshotURL,
+            failure: StoreOpenFailure(
+                kind: .retryable,
+                domain: "Winston.StoreRecovery",
+                code: code,
+                message: message
+            )
+        )
+    }
+
+    private nonisolated static func recoverySnapshotValidationFailure(
+        _ manifest: StoreQuarantineManifest,
+        at snapshotURL: URL,
+        for storeURL: URL,
+        fileSystem: StoreRecoveryFileSystem
+    ) throws -> String? {
+        let expectedStorePath = storeURL.standardizedFileURL.path(percentEncoded: false)
+        guard URL(filePath: manifest.storePath).standardizedFileURL
+            .path(percentEncoded: false) == expectedStorePath else {
+            return "The recovery checkpoint belongs to a different store."
+        }
+        guard !manifest.files.isEmpty else {
+            return "The recovery checkpoint does not contain a preserved store file."
+        }
+
+        let expectedOriginalPaths = Set(["", "-wal", "-shm"].map {
+            expectedStorePath + $0
+        })
+        let snapshotDirectory = snapshotURL.standardizedFileURL
+        var originalPaths: Set<String> = []
+        for record in manifest.files {
+            let originalURL = URL(filePath: record.originalPath).standardizedFileURL
+            let originalPath = originalURL.path(percentEncoded: false)
+            guard expectedOriginalPaths.contains(originalPath),
+                  originalPaths.insert(originalPath).inserted else {
+                return "The recovery checkpoint contains an unexpected original store path."
+            }
+            guard record.copySucceeded,
+                  record.originalRemovalSucceeded,
+                  let checksum = record.checksum,
+                  !checksum.isEmpty else {
+                return "The recovery checkpoint is missing a verified preserved store file."
+            }
+
+            let preservedURL = URL(filePath: record.snapshotPath).standardizedFileURL
+            guard preservedURL.deletingLastPathComponent() == snapshotDirectory,
+                  preservedURL.lastPathComponent == originalURL.lastPathComponent,
+                  fileSystem.fileExists(preservedURL.path(percentEncoded: false)) else {
+                return "The recovery checkpoint points outside its verified snapshot."
+            }
+            guard try fileSystem.checksum(preservedURL) == checksum else {
+                return "A preserved recovery file no longer matches its recorded checksum."
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func removeUncommittedStoreFamily(
+        at storeURL: URL,
+        fileSystem: StoreRecoveryFileSystem
+    ) throws {
+        let base = storeURL.path(percentEncoded: false)
+        for suffix in ["-shm", "-wal", "-journal", ""] {
+            let url = URL(filePath: base + suffix)
+            guard fileSystem.fileExists(url.path(percentEncoded: false)) else { continue }
+            try fileSystem.removeItem(url)
         }
     }
 

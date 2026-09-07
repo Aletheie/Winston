@@ -136,6 +136,82 @@ struct LibraryBackupTests {
         ])
     }
 
+    @Test func rejectsBackupFoldersInsideEveryCopiedSource() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appending(
+            path: "BackupRecursion-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        let store = root.appending(path: "Winston.store")
+        let covers = root.appending(path: "covers", directoryHint: .isDirectory)
+        let books = root.appending(path: "Books", directoryHint: .isDirectory)
+        let managedFiles = root.appending(
+            path: "ManagedFiles",
+            directoryHint: .isDirectory
+        )
+        for directory in [covers, books, managedFiles] {
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+        }
+        try makeDatabase(at: store, value: "store")
+        defer { try? fileManager.removeItem(at: root) }
+
+        for source in [covers, books, managedFiles] {
+            let destination = source.appending(
+                path: "Backups",
+                directoryHint: .isDirectory
+            )
+            var reachedCopy = false
+            #expect(throws: (any Error).self) {
+                try LibraryBackup.backup(
+                    storeURL: store,
+                    coversDirectory: covers,
+                    to: destination,
+                    booksDirectory: books,
+                    managedFilesDirectory: managedFiles,
+                    testingHooks: LibrarySnapshotCoordinator.TestingHooks(
+                        event: { _ in
+                            reachedCopy = true
+                            throw CocoaError(.fileWriteUnknown)
+                        },
+                        availableCapacity: { _ in Int64.max }
+                    )
+                )
+            }
+            #expect(!reachedCopy)
+        }
+
+        let alias = root.appending(
+            path: "cover-backup-alias",
+            directoryHint: .isDirectory
+        )
+        try fileManager.createSymbolicLink(at: alias, withDestinationURL: covers)
+        let aliasedDestination = alias.appending(
+            path: "Backups",
+            directoryHint: .isDirectory
+        )
+        var reachedAliasedCopy = false
+        #expect(throws: (any Error).self) {
+            try LibraryBackup.backup(
+                storeURL: store,
+                coversDirectory: covers,
+                to: aliasedDestination,
+                booksDirectory: books,
+                managedFilesDirectory: managedFiles,
+                testingHooks: LibrarySnapshotCoordinator.TestingHooks(
+                    event: { _ in
+                        reachedAliasedCopy = true
+                        throw CocoaError(.fileWriteUnknown)
+                    },
+                    availableCapacity: { _ in Int64.max }
+                )
+            )
+        }
+        #expect(!reachedAliasedCopy)
+    }
+
     @MainActor
     @Test func manualBackupUsesManagedFileCoordinatorSnapshot() async throws {
         let library = try await TestLibrary()

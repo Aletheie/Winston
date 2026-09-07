@@ -3,6 +3,30 @@ import SwiftData
 import Testing
 @testable import Winston
 
+private struct InjectedRecoveryCheckpointFailure: Error {}
+
+private final class RecoveryCheckpointFault: @unchecked Sendable {
+    private let lock = NSLock()
+    private let status: StoreQuarantineManifest.Status
+    private var failuresRemaining: Int
+
+    init(
+        status: StoreQuarantineManifest.Status,
+        failuresRemaining: Int = 1
+    ) {
+        self.status = status
+        self.failuresRemaining = failuresRemaining
+    }
+
+    func check(_ manifest: StoreQuarantineManifest) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard manifest.status == status, failuresRemaining > 0 else { return }
+        failuresRemaining -= 1
+        throw InjectedRecoveryCheckpointFailure()
+    }
+}
+
 @MainActor
 @Suite(.serialized)
 struct PersistenceRecoveryTests {
@@ -54,6 +78,109 @@ struct PersistenceRecoveryTests {
         context.insert(Book(fileName: "b.epub", originalFileName: "B.epub"))
         try context.save()
         #expect(try context.fetchCount(FetchDescriptor<Book>()) == 1)
+    }
+
+    @Test func `Failed post-install checkpoint discards and recreates the uncommitted fresh store`() throws {
+        let storeURL = try makeStoreURL()
+        let dir = storeURL.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("corrupt database".utf8).write(to: storeURL)
+
+        var fileSystem = StoreRecoveryFileSystem.live
+        let liveWriteManifest = fileSystem.writeManifest
+        let fault = RecoveryCheckpointFault(status: .freshStoreInstalled)
+        fileSystem.writeManifest = { manifest, url in
+            try fault.check(manifest)
+            try liveWriteManifest(manifest, url)
+        }
+        var installedContainer: ModelContainer?
+        let firstOutcome = StoreRecoveryCoordinator(fileSystem: fileSystem).open(
+            storeURL: storeURL
+        ) { url in
+            let container = try PersistenceController.performanceContainer(at: url)
+            installedContainer = container
+            return container
+        }
+
+        guard case .readOnlyRecovery(let optionalSnapshotURL, _) = firstOutcome else {
+            Issue.record("Expected the injected post-install checkpoint failure to stop recovery")
+            return
+        }
+        let snapshotURL = try #require(optionalSnapshotURL)
+        #expect(try decodeManifest(at: snapshotURL).status == .readyForFreshStore)
+
+        do {
+            let context = ModelContext(try #require(installedContainer))
+            context.insert(Book(fileName: "uncommitted.epub", originalFileName: "Uncommitted.epub"))
+            try context.save()
+            #expect(try context.fetchCount(FetchDescriptor<Book>()) == 1)
+        }
+        installedContainer = nil
+
+        let resumedOutcome = StoreRecoveryCoordinator().open(storeURL: storeURL) { url in
+            try PersistenceController.performanceContainer(at: url)
+        }
+        guard case .quarantined(let resumedContainer, let resumedSnapshotURL) = resumedOutcome else {
+            Issue.record("Expected recovery to recreate and commit the fresh store")
+            return
+        }
+        #expect(
+            resumedSnapshotURL.resolvingSymlinksInPath()
+                == snapshotURL.resolvingSymlinksInPath()
+        )
+        #expect(try ModelContext(resumedContainer).fetchCount(FetchDescriptor<Book>()) == 0)
+        #expect(try decodeManifest(at: snapshotURL).status == .completed)
+    }
+
+    @Test func `Failed completion checkpoint resumes the installed fresh store without replacing it`() throws {
+        let storeURL = try makeStoreURL()
+        let dir = storeURL.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("corrupt database".utf8).write(to: storeURL)
+
+        var fileSystem = StoreRecoveryFileSystem.live
+        let liveWriteManifest = fileSystem.writeManifest
+        let fault = RecoveryCheckpointFault(status: .completed)
+        fileSystem.writeManifest = { manifest, url in
+            try fault.check(manifest)
+            try liveWriteManifest(manifest, url)
+        }
+        var installedContainer: ModelContainer?
+        let firstOutcome = StoreRecoveryCoordinator(fileSystem: fileSystem).open(
+            storeURL: storeURL
+        ) { url in
+            let container = try PersistenceController.performanceContainer(at: url)
+            installedContainer = container
+            return container
+        }
+
+        guard case .readOnlyRecovery(let optionalSnapshotURL, _) = firstOutcome else {
+            Issue.record("Expected the injected completion checkpoint failure to stop recovery")
+            return
+        }
+        let snapshotURL = try #require(optionalSnapshotURL)
+        #expect(try decodeManifest(at: snapshotURL).status == .freshStoreInstalled)
+
+        do {
+            let context = ModelContext(try #require(installedContainer))
+            context.insert(Book(fileName: "installed.epub", originalFileName: "Installed.epub"))
+            try context.save()
+        }
+        installedContainer = nil
+
+        let resumedOutcome = StoreRecoveryCoordinator().open(storeURL: storeURL) { url in
+            try PersistenceController.performanceContainer(at: url)
+        }
+        guard case .quarantined(let resumedContainer, let resumedSnapshotURL) = resumedOutcome else {
+            Issue.record("Expected recovery to finish the installed fresh store")
+            return
+        }
+        #expect(
+            resumedSnapshotURL.resolvingSymlinksInPath()
+                == snapshotURL.resolvingSymlinksInPath()
+        )
+        #expect(try ModelContext(resumedContainer).fetchCount(FetchDescriptor<Book>()) == 1)
+        #expect(try decodeManifest(at: snapshotURL).status == .completed)
     }
 
     @Test(
