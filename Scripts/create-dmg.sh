@@ -116,6 +116,7 @@ on run arguments
             set bounds of container window to {160, 120, 820, 540}
             update without registering applications
             delay 2
+            close
         end tell
     end tell
 end run
@@ -145,8 +146,17 @@ fi
 
 chmod -Rf go-w "$MOUNT_DIR" >/dev/null 2>&1 || true
 
-hdiutil detach "$DEVICE" >/dev/null
-DEVICE=""
+for attempt in {1..5}; do
+    if hdiutil detach "$DEVICE" >/dev/null; then
+        DEVICE=""
+        break
+    fi
+    sleep 1
+done
+if [[ -n "$DEVICE" ]]; then
+    echo "Could not detach the staging image after closing Finder." >&2
+    exit 1
+fi
 
 hdiutil convert "$RW_DMG" \
     -format UDZO \
