@@ -32,4 +32,27 @@ struct HighlightsExporterTests {
         #expect(!name.contains("/") && !name.contains(":"))
         #expect(name.contains("X"))
     }
+
+    @Test func markdownIncludesFavoriteTagsAndReflection() {
+        let book = HighlightsExporter.BookHighlights(
+            title: "Dune",
+            author: nil,
+            entries: [
+                .init(
+                    text: "A beginning is a delicate time.",
+                    isNote: false,
+                    location: nil,
+                    isFavorite: true,
+                    tags: ["Beginnings", "Politics"],
+                    reflection: "A useful warning before starting a project."
+                ),
+            ]
+        )
+
+        let markdown = HighlightsExporter.markdown(for: book)
+        #expect(markdown.contains("**Favorite**"))
+        #expect(markdown.contains("Tags: `Beginnings`, `Politics`"))
+        #expect(markdown.contains("**Reflection:**"))
+        #expect(markdown.contains("A useful warning before starting a project."))
+    }
 }

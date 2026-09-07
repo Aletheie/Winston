@@ -88,14 +88,6 @@ enum LibraryTimeMachineRestoreError: LocalizedError {
 
 @MainActor
 private struct LibraryTimeMachineBookPreimage {
-    private struct Session {
-        let model: ReadingSession
-        let startedAt: Date
-        let endedAt: Date?
-        let statusRaw: String
-        let progress: Double
-    }
-
     let book: Book
     let metadata: CatalogBookMetadataPreimage
     let readingStatusRaw: String?
@@ -105,8 +97,6 @@ private struct LibraryTimeMachineBookPreimage {
     let editionTypeRaw: String?
     let hasPhysicalCopyRaw: Bool?
     let collections: [BookCollection]
-    let highlights: [Highlight]
-    private let sessions: [Session]
 
     init(_ book: Book) {
         self.book = book
@@ -118,19 +108,9 @@ private struct LibraryTimeMachineBookPreimage {
         editionTypeRaw = book.editionTypeRaw
         hasPhysicalCopyRaw = book.hasPhysicalCopyRaw
         collections = book.collections
-        highlights = book.highlights
-        sessions = book.readingSessions.map {
-            Session(
-                model: $0,
-                startedAt: $0.startedAt,
-                endedAt: $0.endedAt,
-                statusRaw: $0.statusRaw,
-                progress: $0.progress
-            )
-        }
     }
 
-    func restore(in context: ModelContext) {
+    func restore() {
         metadata.restore()
         book.readingStatusRaw = readingStatusRaw
         book.dateStarted = dateStarted
@@ -139,30 +119,8 @@ private struct LibraryTimeMachineBookPreimage {
         book.editionTypeRaw = editionTypeRaw
         book.hasPhysicalCopyRaw = hasPhysicalCopyRaw
         book.collections = collections
-
-        let originalHighlights = Set(highlights.map(ObjectIdentifier.init))
-        for highlight in book.highlights
-        where !originalHighlights.contains(ObjectIdentifier(highlight)) {
-            highlight.book = nil
-            if highlight.modelContext != nil { context.delete(highlight) }
-        }
-        book.highlights = highlights
-        highlights.forEach { $0.book = book }
-
-        let originalSessions = Set(sessions.map { ObjectIdentifier($0.model) })
-        for session in book.readingSessions
-        where !originalSessions.contains(ObjectIdentifier(session)) {
-            session.book = nil
-            if session.modelContext != nil { context.delete(session) }
-        }
-        book.readingSessions = sessions.map(\.model)
-        for session in sessions {
-            session.model.startedAt = session.startedAt
-            session.model.endedAt = session.endedAt
-            session.model.statusRaw = session.statusRaw
-            session.model.progress = session.progress
-            session.model.book = book
-        }
+        // The write coordinator restores relationship insertions/deletions;
+        // this preimage restores only the already-materialized book fields.
     }
 }
 
@@ -335,7 +293,7 @@ struct LibraryTimeMachineRestorer {
 
         let rollbackMutation = {
             if let preimage {
-                preimage.restore(in: self.modelContext)
+                preimage.restore()
             } else if let restoredBook {
                 self.discardInsertedBook(
                     restoredBook,
@@ -367,12 +325,20 @@ struct LibraryTimeMachineRestorer {
                     self.modelContext.insert(book)
                 }
                 restoredBook = book
+                // Materialize every relationship before the first mutation,
+                // inside this no-suspension transaction. Otherwise SwiftData
+                // can retain a lazy relationship future in its undo snapshot
+                // and trap when rolling back a later relationship replacement.
+                let previousSessions = book.readingSessions
+                let previousHighlights = book.highlights
+                _ = book.collections
+                _ = book.assets
                 applyMetadata(snapshot.metadata, to: book)
                 book.readingStatusRaw = snapshot.reading.statusRaw
                 book.dateStarted = snapshot.reading.dateStarted
                 book.dateFinished = snapshot.reading.dateFinished
-                replaceReadingSessions(on: book, with: snapshot.reading.sessions)
-                replaceHighlights(on: book, with: snapshot.highlights)
+                replaceReadingSessions(on: book, replacing: previousSessions, with: snapshot.reading.sessions)
+                replaceHighlights(on: book, replacing: previousHighlights, with: snapshot.highlights)
                 skippedCollections = try restoreCollectionMemberships(
                     on: book,
                     from: snapshot.collections
@@ -595,9 +561,9 @@ struct LibraryTimeMachineRestorer {
 
     private func replaceReadingSessions(
         on book: Book,
+        replacing existing: [ReadingSession],
         with snapshots: [LibraryTimeMachineReadingSessionSnapshot]
     ) {
-        let existing = book.readingSessions
         book.readingSessions.removeAll()
         existing.forEach(modelContext.delete)
         for snapshot in snapshots {
@@ -616,9 +582,9 @@ struct LibraryTimeMachineRestorer {
 
     private func replaceHighlights(
         on book: Book,
+        replacing existing: [Highlight],
         with snapshots: [LibraryTimeMachineHighlightSnapshot]
     ) {
-        let existing = book.highlights
         book.highlights.removeAll()
         existing.forEach(modelContext.delete)
         for snapshot in snapshots {
@@ -630,6 +596,10 @@ struct LibraryTimeMachineRestorer {
             )
             highlight.kindRaw = snapshot.kindRaw
             highlight.dateImported = snapshot.dateImported
+            highlight.isFavoriteRaw = snapshot.isFavoriteRaw
+            highlight.userTagsRaw = snapshot.userTagsRaw
+            highlight.reflection = snapshot.reflection
+            highlight.lastReviewedAt = snapshot.lastReviewedAt
             highlight.book = book
             modelContext.insert(highlight)
         }
@@ -707,8 +677,10 @@ struct LibraryTimeMachineRestorer {
         from snapshot: LibraryTimeMachineWorkSnapshot?
     ) throws -> Work? {
         guard let snapshot else { return nil }
-        let works = try modelContext.fetch(FetchDescriptor<Work>())
-        if let existing = works.first(where: { $0.uuid == snapshot.id }) {
+        let workID = snapshot.id
+        var descriptor = FetchDescriptor<Work>(predicate: #Predicate { $0.uuid == workID })
+        descriptor.fetchLimit = 1
+        if let existing = try modelContext.fetch(descriptor).first {
             book.work = existing
             if let preferred = existing.preferredEditionUUID,
                preferred != book.uuid,

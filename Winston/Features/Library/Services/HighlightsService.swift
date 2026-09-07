@@ -38,6 +38,48 @@ final class HighlightsService {
         self.mutations = mutations ?? CatalogMutationService(modelContext: modelContext)
     }
 
+    func workspaceItems() throws -> [HighlightWorkspaceItem] {
+        var descriptor = FetchDescriptor<Highlight>(
+            sortBy: [SortDescriptor(\Highlight.dateImported)]
+        )
+        descriptor.relationshipKeyPathsForPrefetching = [\Highlight.book]
+        return try modelContext.fetch(descriptor)
+            .compactMap(HighlightWorkspaceItem.init)
+            .sorted(by: Self.workspaceOrder)
+    }
+
+    func updateHighlight(
+        id: PersistentIdentifier,
+        patch: HighlightPatch
+    ) -> Result<HighlightWorkspaceItem, CatalogMutationError> {
+        switch mutations.execute(.updateHighlight(CatalogHighlightUpdate(
+            highlightID: id,
+            patch: patch
+        ))) {
+        case .success:
+            guard let item = try? mutations.highlight(id: id),
+                  let snapshot = HighlightWorkspaceItem(item) else {
+                return .failure(.modelNotFound)
+            }
+            return .success(snapshot)
+        case .failure(let error):
+            return .failure(error)
+        }
+    }
+
+    private nonisolated static func workspaceOrder(
+        _ lhs: HighlightWorkspaceItem,
+        _ rhs: HighlightWorkspaceItem
+    ) -> Bool {
+        let titleOrder = lhs.bookTitle.localizedStandardCompare(rhs.bookTitle)
+        if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
+        if lhs.bookID != rhs.bookID { return lhs.bookID.uuidString < rhs.bookID.uuidString }
+        let locationOrder = (lhs.location ?? "").localizedStandardCompare(rhs.location ?? "")
+        if locationOrder != .orderedSame { return locationOrder == .orderedAscending }
+        if lhs.dateImported != rhs.dateImported { return lhs.dateImported < rhs.dateImported }
+        return lhs.text.localizedStandardCompare(rhs.text) == .orderedAscending
+    }
+
     func importHighlights(via monitor: DeviceMonitor) async {
         guard let connection = monitor.connection, !isImportingHighlights else { return }
         isImportingHighlights = true

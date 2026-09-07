@@ -229,6 +229,10 @@ struct LibraryTimeMachineTests {
             location: "Chapter 2",
             addedDate: Date(timeIntervalSince1970: 250)
         )
+        highlight.isFavorite = true
+        highlight.userTags = ["History", "Memory"]
+        highlight.reflection = "Keep this close."
+        highlight.lastReviewedAt = Date(timeIntervalSince1970: 275)
         highlight.book = book
         let collection = BookCollection(name: "Research")
         collection.books.append(book)
@@ -264,6 +268,10 @@ struct LibraryTimeMachineTests {
         #expect(archived.metadata.tags == ["History", "Local"])
         #expect(archived.reading.sessions.count == 1)
         #expect(archived.highlights.map(\.text) == ["Remember this"])
+        #expect(archived.highlights.first?.isFavoriteRaw == true)
+        #expect(archived.highlights.first?.userTagsRaw == ["History", "Memory"])
+        #expect(archived.highlights.first?.reflection == "Keep this close.")
+        #expect(archived.highlights.first?.lastReviewedAt == Date(timeIntervalSince1970: 275))
         #expect(archived.collections.map(\.name) == ["Research"])
         #expect(archived.work?.title == "Archived Work")
         #expect(archived.assets.map(\.contentHash) == ["content-hash"])
@@ -705,7 +713,11 @@ struct LibraryTimeMachineTests {
                     kindRaw: "highlight",
                     location: "12",
                     addedDate: nil,
-                    dateImported: Date(timeIntervalSince1970: 650)
+                    dateImported: Date(timeIntervalSince1970: 650),
+                    isFavoriteRaw: true,
+                    userTagsRaw: ["Recovered", "Important"],
+                    reflection: "Restored reflection",
+                    lastReviewedAt: Date(timeIntervalSince1970: 675)
                 ),
             ],
             collections: [
@@ -745,6 +757,11 @@ struct LibraryTimeMachineTests {
         #expect(restored.notes == "Personal note")
         #expect(restored.readingSessions.map(\.uuid) == [sessionID])
         #expect(restored.highlights.map(\.text) == ["Recovered highlight"])
+        let restoredHighlight = try #require(restored.highlights.first)
+        #expect(restoredHighlight.isFavorite)
+        #expect(restoredHighlight.userTags == ["Recovered", "Important"])
+        #expect(restoredHighlight.reflection == "Restored reflection")
+        #expect(restoredHighlight.lastReviewedAt == Date(timeIntervalSince1970: 675))
         #expect(restored.collections.map(\.id) == [collection.id])
         #expect(restored.assets.map(\.uuid) == [assetID])
     }
@@ -860,6 +877,7 @@ struct LibraryTimeMachineTests {
         ).first)
         #expect(stored.title == "Current")
         #expect(stored.notes == "unrelated")
+        #expect(stored.readingSessions.map(\.uuid) == [currentSession.uuid])
         #expect(stored.highlights.map(\.text) == ["Current quote"])
     }
 

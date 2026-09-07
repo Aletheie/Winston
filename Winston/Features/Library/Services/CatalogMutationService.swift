@@ -78,6 +78,7 @@ enum CatalogMutationCommand {
     case applyAnalysisBatch(bookIDs: [UUID], kind: CatalogAnalysisJobKind)
     case updateAssetValidation(assetIDs: [UUID], bookIDs: [UUID])
     case importHighlights(bookIDs: [UUID])
+    case updateHighlight(bookID: UUID)
     case maintenanceCleanup(workIDs: [UUID])
     case repairCatalogInvariants(bookIDs: [UUID], workIDs: [UUID])
     case restoreBook(bookID: UUID, fields: CatalogChangeFields, createsBook: Bool)
@@ -138,7 +139,7 @@ enum CatalogMutationCommand {
         case .updateAssetValidation:
             [.assetAvailability, .fullTextSource]
 
-        case .importHighlights:
+        case .importHighlights, .updateHighlight:
             [.displayMetadata]
 
         case .maintenanceCleanup:
@@ -201,6 +202,7 @@ enum CatalogMutationCommand {
              .addPhysicalBook,
              .updateCover,
              .importHighlights,
+             .updateHighlight,
              .maintenanceCleanup,
              .updateAuxiliaryStore:
             false
@@ -437,6 +439,7 @@ nonisolated enum CatalogMutationRequest: Sendable {
     case setPreferredEdition(workID: UUID, bookID: UUID)
     case updateAssetValidations([CatalogAssetValidationUpdate])
     case importHighlights([CatalogHighlightInsertion])
+    case updateHighlight(CatalogHighlightUpdate)
 }
 
 nonisolated enum EditionIdentityScope: String, CaseIterable, Identifiable, Sendable {
@@ -847,6 +850,29 @@ private struct CatalogCollectionPreimage {
         collection.savedSearch = savedSearch
         collection.smartShelfRulesData = smartShelfRulesData
         collection.books = books
+    }
+}
+
+private struct CatalogHighlightPreimage {
+    let highlight: Highlight
+    let isFavoriteRaw: Bool?
+    let userTagsRaw: [String]?
+    let reflection: String?
+    let lastReviewedAt: Date?
+
+    init(_ highlight: Highlight) {
+        self.highlight = highlight
+        isFavoriteRaw = highlight.isFavoriteRaw
+        userTagsRaw = highlight.userTagsRaw
+        reflection = highlight.reflection
+        lastReviewedAt = highlight.lastReviewedAt
+    }
+
+    func restore() {
+        highlight.isFavoriteRaw = isFavoriteRaw
+        highlight.userTagsRaw = userTagsRaw
+        highlight.reflection = reflection
+        highlight.lastReviewedAt = lastReviewedAt
     }
 }
 
@@ -1513,6 +1539,49 @@ final class CatalogMutationService {
                     highlight.book = book
                     insertedHighlights.append(highlight)
                     self.modelContext.insert(highlight)
+                }
+            }
+
+        case .updateHighlight(let update):
+            guard !update.patch.fields.isEmpty else {
+                throw CatalogMutationError.invalidRequest
+            }
+            let storedHighlight = try highlight(id: update.highlightID)
+            guard let bookID = storedHighlight.book?.uuid else {
+                throw CatalogMutationError.modelNotFound
+            }
+            let preimage = CatalogHighlightPreimage(storedHighlight)
+            return try commit(
+                .updateHighlight(bookID: bookID),
+                affectedBookIDs: [bookID],
+                revertingOnFailure: preimage.restore
+            ) {
+                guard generationIsCurrent() else {
+                    throw CatalogMutationError.staleGeneration
+                }
+                let highlight = try self.highlight(id: update.highlightID)
+                let patch = update.patch
+                if patch.fields.contains(.favorite) {
+                    guard let favorite = patch.favorite else {
+                        throw CatalogMutationError.invalidRequest
+                    }
+                    highlight.isFavorite = favorite
+                }
+                if patch.fields.contains(.tags) {
+                    guard let tags = patch.tags else {
+                        throw CatalogMutationError.invalidRequest
+                    }
+                    highlight.userTags = HighlightTagNormalizer.normalize(tags)
+                }
+                if patch.fields.contains(.reflection) {
+                    let trimmed = patch.reflection?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    highlight.reflection = trimmed?.isEmpty == false
+                        ? patch.reflection
+                        : nil
+                }
+                if patch.fields.contains(.lastReviewedAt) {
+                    highlight.lastReviewedAt = patch.lastReviewedAt
                 }
             }
         }
@@ -2311,7 +2380,7 @@ final class CatalogMutationService {
 
         case .setReadingStatus, .setReadingProgress,
              .createCollection, .updateCollection, .deleteCollection,
-             .updateCover, .importHighlights, .maintenanceCleanup,
+             .updateCover, .importHighlights, .updateHighlight, .maintenanceCleanup,
              .updateAuxiliaryStore:
             break
         }
@@ -2369,7 +2438,7 @@ final class CatalogMutationService {
              .createCollection, .updateCollection, .deleteCollection,
              .addPhysicalBook, .importBooks, .calibreImport, .conversionOutput, .legacyMigration,
              .updateCover, .applyAnalysis, .applyAnalysisBatch,
-             .updateAssetValidation, .importHighlights, .maintenanceCleanup,
+             .updateAssetValidation, .importHighlights, .updateHighlight, .maintenanceCleanup,
              .updateAuxiliaryStore:
             break
         }
@@ -2384,6 +2453,14 @@ final class CatalogMutationService {
             throw CatalogMutationError.modelNotFound
         }
         return book
+    }
+
+    func highlight(id: PersistentIdentifier) throws -> Highlight {
+        guard let highlight = modelContext.model(for: id) as? Highlight,
+              highlight.modelContext != nil else {
+            throw CatalogMutationError.modelNotFound
+        }
+        return highlight
     }
 
     func books(ids: Set<UUID>) throws -> [Book] {

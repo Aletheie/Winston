@@ -8,6 +8,11 @@ final class Highlight {
     var location: String?
     var addedDate: Date?
     var dateImported: Date
+    // Optional storage keeps additive migration from the public 0.2 store safe.
+    var isFavoriteRaw: Bool?
+    var userTagsRaw: [String]?
+    var reflection: String?
+    var lastReviewedAt: Date?
     var book: Book?
 
     init(text: String, isNote: Bool, location: String?, addedDate: Date?) {
@@ -19,4 +24,18 @@ final class Highlight {
     }
 
     var isNote: Bool { kindRaw == "note" }
+
+    var isFavorite: Bool {
+        get { isFavoriteRaw ?? false }
+        set { isFavoriteRaw = newValue }
+    }
+
+    var userTags: [String] {
+        get { userTagsRaw ?? [] }
+        set { userTagsRaw = newValue.isEmpty ? nil : newValue }
+    }
+
+    var hasReflection: Bool {
+        reflection?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
 }

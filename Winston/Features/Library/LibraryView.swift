@@ -407,7 +407,7 @@ struct LibraryView: View {
                 case .statistics:
                     StatisticsView(books: books)
                 case .highlights:
-                    HighlightsView()
+                    HighlightsView(service: viewModel.highlights)
                 case .series(let name):
                     SeriesView(
                         books: books,

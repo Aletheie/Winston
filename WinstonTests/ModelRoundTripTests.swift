@@ -85,6 +85,34 @@ struct ModelRoundTripTests {
         #expect(try context.fetchCount(FetchDescriptor<Highlight>()) == 0)
     }
 
+    @Test func highlightEnrichmentRoundTripsThroughPersistence() throws {
+        let (container, context) = makeContext()
+        _ = container
+        let book = Book(fileName: "a.epub", originalFileName: "A.epub")
+        let highlight = Highlight(
+            text: "Marked passage",
+            isNote: false,
+            location: "Location 12",
+            addedDate: nil
+        )
+        let reviewedAt = Date(timeIntervalSince1970: 1_234)
+        context.insert(book)
+        context.insert(highlight)
+        highlight.book = book
+        highlight.isFavorite = true
+        highlight.userTags = ["Ideas", "Research"]
+        highlight.reflection = "This changes how I see the chapter."
+        highlight.lastReviewedAt = reviewedAt
+        try context.save()
+
+        let fetched = try #require(try context.fetch(FetchDescriptor<Highlight>()).first)
+        #expect(fetched.text == "Marked passage")
+        #expect(fetched.isFavorite)
+        #expect(fetched.userTags == ["Ideas", "Research"])
+        #expect(fetched.reflection == "This changes how I see the chapter.")
+        #expect(fetched.lastReviewedAt == reviewedAt)
+    }
+
     @Test func deletingBookCascadesItsReadingHistory() throws {
         let (container, context) = makeContext()
         _ = container

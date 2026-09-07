@@ -247,6 +247,59 @@ struct CatalogMutationFailureTests {
         #expect(stored.notes == "unrelated")
     }
 
+    @Test func failedHighlightEnrichmentRestoresEveryPersonalField() async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library, title: "Original")
+        let highlight = Highlight(
+            text: "Immutable imported text",
+            isNote: false,
+            location: "12",
+            addedDate: nil
+        )
+        highlight.isFavorite = false
+        highlight.userTags = ["Original"]
+        highlight.reflection = "Original reflection"
+        highlight.lastReviewedAt = Date(timeIntervalSince1970: 100)
+        highlight.book = book
+        library.context.insert(highlight)
+        try library.context.save()
+
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            saveAdapter: failingSaveAdapter
+        )
+        let result = mutations.execute(.updateHighlight(CatalogHighlightUpdate(
+            highlightID: highlight.persistentModelID,
+            patch: HighlightPatch(
+                fields: [.favorite, .tags, .reflection, .lastReviewedAt],
+                favorite: true,
+                tags: ["Changed"],
+                reflection: "Changed reflection",
+                lastReviewedAt: Date(timeIntervalSince1970: 200)
+            )
+        )))
+
+        guard case .failure(.saveFailed) = result else {
+            Issue.record("Expected highlight enrichment persistence to fail")
+            return
+        }
+        #expect(highlight.text == "Immutable imported text")
+        #expect(!highlight.isFavorite)
+        #expect(highlight.userTags == ["Original"])
+        #expect(highlight.reflection == "Original reflection")
+        #expect(highlight.lastReviewedAt == Date(timeIntervalSince1970: 100))
+        #expect(!library.context.hasChanges)
+
+        book.notes = "unrelated"
+        try library.context.save()
+        let verification = ModelContext(library.container)
+        let stored = try #require(try verification.fetch(FetchDescriptor<Highlight>()).first)
+        #expect(!stored.isFavorite)
+        #expect(stored.userTags == ["Original"])
+        #expect(stored.reflection == "Original reflection")
+        #expect(stored.lastReviewedAt == Date(timeIntervalSince1970: 100))
+    }
+
     @Test func failedWorkIdentityEditRestoresEveryEditionAndMatchKey() async throws {
         let library = try await TestLibrary()
         let work = Work(title: "Original Work", author: "Original Author")

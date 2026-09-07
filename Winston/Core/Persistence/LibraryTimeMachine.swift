@@ -116,6 +116,10 @@ nonisolated struct LibraryTimeMachineHighlightSnapshot: Equatable, Sendable {
     var location: String?
     var addedDate: Date?
     var dateImported: Date
+    var isFavoriteRaw: Bool? = nil
+    var userTagsRaw: [String]? = nil
+    var reflection: String? = nil
+    var lastReviewedAt: Date? = nil
 }
 
 nonisolated struct LibraryTimeMachineAssetSnapshot: Equatable, Sendable, Identifiable {
@@ -772,7 +776,11 @@ private nonisolated enum LibraryTimeMachineSnapshotBuilder {
                 kindRaw: $0.kindRaw,
                 location: $0.location,
                 addedDate: $0.addedDate,
-                dateImported: $0.dateImported
+                dateImported: $0.dateImported,
+                isFavoriteRaw: $0.isFavoriteRaw,
+                userTagsRaw: $0.userTagsRaw,
+                reflection: $0.reflection,
+                lastReviewedAt: $0.lastReviewedAt
             )
         }
         .sorted {
