@@ -83,7 +83,6 @@ struct SidebarView: View {
     var readModel: LibraryReadModel
     var viewModel: LibraryViewModel
     @Binding var selection: SidebarItem?
-    let onReviewEditions: () -> Void
 
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
@@ -187,16 +186,6 @@ struct SidebarView: View {
                                systemImage: "star", count: facets.rated)
                         .tag(SidebarItem.rated)
                 }
-                if viewModel.editions.pendingCount > 0 {
-                    Button(action: onReviewEditions) {
-                        SidebarRow(
-                            title: theme.styledText(terminal: "NAVRHY", native: "Suggestions"),
-                            systemImage: "rectangle.stack.badge.plus",
-                            count: viewModel.editions.pendingCount
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
             } header: {
                 header(terminal: "LIBRARY", native: "Library")
             }
@@ -234,29 +223,27 @@ struct SidebarView: View {
             }
 
             Section {
-                if deviceMonitor.info != nil {
-                    DeviceSidebarRow(info: deviceMonitor.info)
-                        .tag(SidebarItem.device)
-                } else {
-                    DeviceSidebarRow(info: nil)
-                }
+                DeviceSidebarRow(info: deviceMonitor.info)
+                    .tag(SidebarItem.device)
             } header: {
                 header(terminal: "DEVICE", native: "Device")
             }
 
-            Section {
-                ForEach(ReadingStatus.allCases) { status in
-                    SidebarRow(
-                        title: Text(verbatim: theme.usesTerminalCopy
-                            ? status.terminalLabel.uppercased()
-                            : status.label),
-                        systemImage: status == .unread ? "book.closed" : status.systemImage,
-                        count: facets.statusCounts[status, default: 0]
-                    )
-                    .tag(SidebarItem.status(status))
+            if !visibleReadingStatuses.isEmpty {
+                Section {
+                    ForEach(visibleReadingStatuses) { status in
+                        SidebarRow(
+                            title: Text(verbatim: theme.usesTerminalCopy
+                                ? status.terminalLabel.uppercased()
+                                : status.label),
+                            systemImage: status == .unread ? "book.closed" : status.systemImage,
+                            count: facets.statusCounts[status, default: 0]
+                        )
+                        .tag(SidebarItem.status(status))
+                    }
+                } header: {
+                    header(terminal: "STATUS", native: "Reading Status")
                 }
-            } header: {
-                header(terminal: "STATUS", native: "Reading Status")
             }
         }
         .listStyle(.sidebar)
@@ -386,6 +373,13 @@ struct SidebarView: View {
             .font(theme.label(size: 10, weight: .semibold))
     }
 
+    private var visibleReadingStatuses: [ReadingStatus] {
+        ReadingStatus.allCases.filter { status in
+            facets.statusCounts[status, default: 0] > 0
+                || selection == .status(status)
+        }
+    }
+
     private func saveSmartShelf(
         request: SmartShelfEditorRequest,
         name: String,
@@ -416,8 +410,7 @@ struct SidebarView: View {
         collections: [],
         readModel: LibraryReadModel(),
         viewModel: LibraryViewModel(modelContext: container.mainContext, settings: AppSettings(), toasts: ToastCenter()),
-        selection: .constant(.all),
-        onReviewEditions: {}
+        selection: .constant(.all)
     )
     .modelContainer(container)
     .environment(DeviceMonitor())

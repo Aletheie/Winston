@@ -732,7 +732,6 @@ struct MetadataServiceTests {
             settings: settings,
             metadata: metadata,
             wishlist: wishlist,
-            toasts: ToastCenter(),
             analyzeBook: { url in await gate.analyze(url) }
         )
 
@@ -776,7 +775,6 @@ struct MetadataServiceTests {
             settings: settings,
             metadata: metadata,
             wishlist: WishlistService(modelContext: lib.context, toasts: ToastCenter()),
-            toasts: ToastCenter(),
             analyzeBook: { url in await gate.analyze(url) }
         )
 
@@ -838,7 +836,6 @@ struct MetadataServiceTests {
                 online: FakeOnlineClient()
             ),
             wishlist: WishlistService(modelContext: lib.context, toasts: toasts),
-            toasts: toasts,
             analyzeBook: { _ in
                 ImportBookAnalysis(
                     metadata: inspected,
@@ -890,8 +887,7 @@ struct MetadataServiceTests {
             modelContext: lib.context,
             settings: settings,
             metadata: MetadataService(modelContext: lib.context, settings: settings),
-            wishlist: WishlistService(modelContext: lib.context, toasts: toasts),
-            toasts: toasts
+            wishlist: WishlistService(modelContext: lib.context, toasts: toasts)
         )
 
         var session: ImportSession?
@@ -930,7 +926,6 @@ struct MetadataServiceTests {
                 modelContext: lib.context,
                 toasts: toasts
             ),
-            toasts: toasts,
             analyzeBook: { _ in
                 ImportBookAnalysis(
                     metadata: BookMetadata(),
@@ -955,7 +950,7 @@ struct MetadataServiceTests {
         #expect(summary.failures.count == 1)
         #expect(summary.failures.first?.sourceURL == unsupported)
         #expect(summary.failures.first?.reason == .unsupportedFormat)
-        #expect(toasts.messages.last?.action == .reviewImport)
+        #expect(toasts.messages.isEmpty)
     }
 
     @Test func importRefreshesWorkIdentityAfterOnlineEnrichment() async throws {
@@ -979,7 +974,6 @@ struct MetadataServiceTests {
             settings: settings,
             metadata: metadata,
             wishlist: WishlistService(modelContext: lib.context, toasts: ToastCenter()),
-            toasts: ToastCenter(),
             analyzeBook: { _ in ImportBookAnalysis(metadata: BookMetadata(), drmProtected: false) }
         )
 

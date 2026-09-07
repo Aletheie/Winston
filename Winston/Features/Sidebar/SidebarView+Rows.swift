@@ -22,25 +22,29 @@ struct DeviceSidebarRow: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        if let info {
-            Label {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(info.name)
-                        .font(theme.label(size: 14, weight: .medium))
-                        .lineLimit(1)
-                    detail(for: info)
-                        .font(theme.label(size: 10, weight: .regular))
-                        .foregroundStyle(theme.textTertiary)
+        Group {
+            if let info {
+                Label {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(info.name)
+                            .font(theme.label(size: 14, weight: .medium))
+                            .lineLimit(1)
+                        detail(for: info)
+                            .font(theme.label(size: 10, weight: .regular))
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                } icon: {
+                    Image(systemName: "ipad.landscape")
+                        .foregroundStyle(theme.success)
                 }
-            } icon: {
-                Image(systemName: "ipad.landscape")
-                    .foregroundStyle(theme.success)
+            } else {
+                Label(theme.usesTerminalCopy ? "NO DEVICE" : "No device", systemImage: "bolt.horizontal.circle")
+                    .font(theme.label(size: 14))
+                    .foregroundStyle(theme.textTertiary)
             }
-        } else {
-            Label(theme.usesTerminalCopy ? "NO DEVICE" : "No device", systemImage: "bolt.horizontal.circle")
-                .font(theme.label(size: 14))
-                .foregroundStyle(theme.textTertiary)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("sidebar.device")
     }
 
     private func detail(for info: DeviceInfo) -> Text {

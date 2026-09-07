@@ -2,7 +2,7 @@ import Foundation
 
 nonisolated enum OperationReportSource: String, CaseIterable, Sendable, Equatable {
     case reconciliation
-    case importReview
+    case bookImport
     case bulkLibrary
     case kindleSync
     case conversion
@@ -31,9 +31,7 @@ nonisolated enum OperationReportAction: String, CaseIterable, Sendable, Equatabl
 
 nonisolated enum OperationReportRoute: Sendable, Equatable {
     case editionReview
-    case importReview
     case importRecovery
-    case bulkResult
     case kindle
     case libraryIntegrity
 }
@@ -243,7 +241,7 @@ extension OperationReport {
             items: items,
             detail: report.durableFailureDetail,
             actions: actions,
-            route: .bulkResult
+            route: nil
         )
     }
 
@@ -350,60 +348,136 @@ extension OperationReport {
         )
     }
 
-    static func importBatch(
-        _ batch: PreparedImportBatch,
+    static func runningImport(
+        _ progress: ImportSessionProgress,
         now: Date = .now
     ) -> OperationReport {
-        let items = batch.items.map { item in
-            let batchOutcome = batch.itemOutcomes[item.id]
-            let outcome: OperationReportItemOutcome = switch batchOutcome {
-            case .imported: .succeeded
-            case .skipped: .skipped
-            case .failed: .failed
-            case .cancelled: .pending
-            case nil: item.willImport ? .pending : .skipped
-            }
-            return OperationReportItem(
-                id: item.id.uuidString,
-                targetID: "import:\(item.id.uuidString)",
-                title: item.sourceName,
-                outcome: outcome,
-                detail: (item.reasons + item.warnings).first,
-                retryEligibility: outcome == .failed || outcome == .pending
-                    ? .safe
-                    : .notEligible
+        OperationReport(
+            id: progress.sessionID,
+            operationID: progress.sessionID.uuidString,
+            source: .bookImport,
+            status: .running,
+            persistence: .sessionOnly,
+            startedAt: now,
+            updatedAt: now,
+            counts: OperationReportCounts(
+                total: progress.requestedCount,
+                completed: progress.completedCount,
+                failed: 0,
+                pending: max(
+                    0,
+                    progress.requestedCount - progress.completedCount
+                ),
+                warnings: 0
+            ),
+            items: [],
+            detail: progress.currentFilename,
+            actions: [],
+            route: nil
+        )
+    }
+
+    static func importSummary(
+        _ summary: ImportSummary,
+        now: Date = .now
+    ) -> OperationReport {
+        let items = summary.failures.enumerated().map { index, failure in
+            OperationReportItem(
+                id: failure.requestedBookID?.uuidString
+                    ?? "\(summary.sessionID.uuidString)-failure-\(index)",
+                targetID: nil,
+                title: failure.sourceURL?.lastPathComponent
+                    ?? String(localized: "Unknown import source"),
+                outcome: .failed,
+                detail: failure.detail,
+                retryEligibility: .requiresDurableRecovery
             )
         }
-        let status: OperationReportStatus = switch batch.phase {
-        case .preparing, .committing: .running
-        case .ready: .review
-        case .failed: .failed
-        case .completed(let summary): summary.hasIssues ? .failed : .completed
-        }
-        let completed = items.count { $0.outcome == .succeeded || $0.outcome == .skipped }
-        let failed = items.count { $0.outcome == .failed }
-        let pending = items.count { $0.outcome == .pending }
-        var actions: Set<OperationReportAction> = status == .running ? [] : [.open]
-        if status == .completed { actions.insert(.dismiss) }
+        let status: OperationReportStatus = summary.hasIssues
+            ? .failed
+            : .completed
         return OperationReport(
-            id: batch.id,
-            operationID: batch.sessionID.uuidString,
-            source: .importReview,
+            id: summary.sessionID,
+            operationID: summary.sessionID.uuidString,
+            source: .bookImport,
             status: status,
             persistence: .sessionOnly,
             startedAt: now,
             updatedAt: now,
             counts: OperationReportCounts(
-                total: items.count,
-                completed: completed,
-                failed: failed,
-                pending: pending,
-                warnings: batch.items.reduce(0) { $0 + $1.warnings.count }
+                total: summary.requestedCount,
+                completed: summary.importedItemCount + summary.skippedCount,
+                failed: summary.failedCount + summary.recoveryDeferredCount,
+                pending: summary.cancelledCount,
+                warnings: summary.skippedCount + summary.recoveryDeferredCount
             ),
             items: items,
-            detail: batch.phase.failureDetail,
-            actions: actions,
-            route: .importReview
+            detail: summary.wasCancelled
+                ? String(localized: "The import was cancelled before every file finished.")
+                : nil,
+            actions: [.dismiss],
+            route: nil
+        )
+    }
+
+    static func databaseRecovery(
+        id: UUID,
+        snapshotURL: URL,
+        now: Date = .now
+    ) -> OperationReport {
+        let snapshotPath = snapshotURL.path(percentEncoded: false)
+        return OperationReport(
+            id: id,
+            operationID: id.uuidString,
+            source: .libraryHealth,
+            status: .review,
+            persistence: .sessionOnly,
+            startedAt: now,
+            updatedAt: now,
+            counts: OperationReportCounts(
+                total: 1,
+                completed: 1,
+                failed: 0,
+                pending: 0,
+                warnings: 1
+            ),
+            items: [],
+            detail: String(
+                localized: "Winston confirmed that the library database was corrupt and preserved a verified recovery snapshot at \(snapshotPath) before creating a fresh database."
+            ),
+            actions: [.dismiss],
+            route: nil
+        )
+    }
+
+    static func managedFileRecovery(
+        id: UUID,
+        report: ManagedFileRecoveryReport,
+        now: Date = .now
+    ) -> OperationReport {
+        let detail = Array(Set(report.failureMessages))
+            .sorted()
+            .joined(separator: "\n")
+        let count = max(1, report.pendingItemCount)
+        return OperationReport(
+            id: id,
+            operationID: id.uuidString,
+            source: .importRecovery,
+            status: .failed,
+            persistence: .sessionOnly,
+            startedAt: now,
+            updatedAt: now,
+            counts: OperationReportCounts(
+                total: count,
+                completed: 0,
+                failed: count,
+                pending: 0,
+                warnings: 0
+            ),
+            items: [],
+            detail: detail.isEmpty ? nil : detail,
+            actions: [.open, .dismiss],
+            route: .importRecovery
         )
     }
 
@@ -445,12 +519,5 @@ private extension BulkOperationTargetID {
         case .catalogBook(let id): "book:\(id.uuidString)"
         case .deviceBook(let id): "device:\(id)"
         }
-    }
-}
-
-private extension ImportReviewPhase {
-    var failureDetail: String? {
-        if case .failed(let detail) = self { return detail }
-        return nil
     }
 }

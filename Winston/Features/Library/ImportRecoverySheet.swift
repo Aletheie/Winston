@@ -46,7 +46,7 @@ struct ImportRecoverySheet: View {
             VStack(alignment: .leading, spacing: 4) {
                 theme.styledText(
                     terminal: "// import_recovery",
-                    native: "Import Review & Recovery"
+                    native: "Import Recovery"
                 )
                 .font(theme.display(size: 22, weight: .bold))
                 .foregroundStyle(theme.textPrimary)

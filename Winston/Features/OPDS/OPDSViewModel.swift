@@ -75,7 +75,6 @@ final class OPDSViewModel {
     private(set) var isLoadingNextPage = false
     private(set) var refreshFailure: OPDSFailure?
     private(set) var downloadingPublicationIDs: Set<String> = []
-    private(set) var downloadedPublicationIDs: Set<String> = []
 
     private(set) var searchQuery = ""
     private(set) var searchStates: [String: OPDSCatalogSearchState] = [:]
@@ -501,15 +500,6 @@ final class OPDSViewModel {
         )
     }
 
-    func isDownloaded(
-        _ publication: OPDSPublication,
-        catalogID: String? = nil
-    ) -> Bool {
-        downloadedPublicationIDs.contains(
-            downloadID(publication, catalogID: catalogID)
-        )
-    }
-
     func cancelDownload(
         _ publication: OPDSPublication,
         catalogID: String? = nil
@@ -563,7 +553,7 @@ final class OPDSViewModel {
                 )
                 downloadedSource = source
                 try Task.checkCancellation()
-                library.reviewCatalogBook(
+                library.addCatalogBook(
                     from: source,
                     context: CatalogImportContext(
                         catalogID: catalog.id,
@@ -584,12 +574,6 @@ final class OPDSViewModel {
                     self.downloadingPublicationIDs.remove(id)
                     self.downloadTasks[id] = nil
                     guard !imported.isEmpty else { return }
-                    self.downloadedPublicationIDs.insert(id)
-                    self.toasts.success(
-                        String(
-                            localized: "Imported “\(publication.title)” from \(catalog.name)."
-                        )
-                    )
                     onSuccessfulImport?(imported)
                 }
             } catch is CancellationError {

@@ -208,7 +208,6 @@ final class AppSettings {
         static let showUpdatesInSidebar = "showUpdatesInSidebar"
         static let showOperationsInSidebar = "showOperationsInSidebar"
         static let inspectBeforeKindleTransfer = "inspectBeforeKindleTransfer"
-        static let alwaysReviewImports = "alwaysReviewImports"
         static let opdsCatalogConfigurations = "opdsCatalogConfigurations"
         static let enabledPlugins = "enabledPluginIDs"
         static let pluginGrants = "pluginGrants"
@@ -311,15 +310,6 @@ final class AppSettings {
         }
     }
 
-    var alwaysReviewImports: Bool {
-        didSet {
-            UserDefaults.standard.set(
-                alwaysReviewImports,
-                forKey: Keys.alwaysReviewImports
-            )
-        }
-    }
-
     var catalogConfigurations: [OPDSCatalogConfiguration] {
         didSet {
             Self.persistCatalogs(catalogConfigurations, to: defaults)
@@ -377,9 +367,6 @@ final class AppSettings {
         showOperationsInSidebar = UserDefaults.standard.object(forKey: Keys.showOperationsInSidebar) as? Bool ?? true
         inspectBeforeKindleTransfer = UserDefaults.standard.object(
             forKey: Keys.inspectBeforeKindleTransfer
-        ) as? Bool ?? false
-        alwaysReviewImports = UserDefaults.standard.object(
-            forKey: Keys.alwaysReviewImports
         ) as? Bool ?? false
         appLanguage = resolvedAppLanguage
         catalogConfigurations = Self.loadCatalogs(

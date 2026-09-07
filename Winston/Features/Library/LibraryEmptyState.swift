@@ -2,7 +2,10 @@ import SwiftUI
 
 struct LibraryEmptyState: View {
     enum Kind {
-        case emptyLibrary(onImport: () -> Void, onImportCalibre: () -> Void)
+        case emptyLibrary(
+            onImport: () -> Void,
+            onImportCalibre: () -> Void
+        )
         case noSearchResults(query: String, onClear: () -> Void)
         case noFilterMatches(onShowAll: () -> Void)
     }
@@ -13,21 +16,14 @@ struct LibraryEmptyState: View {
 
     var body: some View {
         switch kind {
-        case .emptyLibrary(let onImport, let onImportCalibre):
-            ContentUnavailableView {
-                Label(theme.copy.emptyLibrary, systemImage: "books.vertical")
-            } description: {
-                Text(theme.copy.dropIdle)
-            } actions: {
-                Button(action: onImport) {
-                    Label(theme.copy.addFiles, systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button(action: onImportCalibre) {
-                    theme.styledText(terminal: "import_calibre", native: "Import from Calibre")
-                }
-            }
+        case .emptyLibrary(
+            let onImport,
+            let onImportCalibre
+        ):
+            EmptyLibraryOnboarding(
+                onImport: onImport,
+                onImportCalibre: onImportCalibre
+            )
 
         case .noSearchResults(let query, let onClear):
             ContentUnavailableView {
@@ -48,5 +44,61 @@ struct LibraryEmptyState: View {
                     .buttonStyle(.borderedProminent)
             }
         }
+    }
+}
+
+private struct EmptyLibraryOnboarding: View {
+    let onImport: () -> Void
+    let onImportCalibre: () -> Void
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack {
+            ContentUnavailableView {
+                Label(theme.copy.emptyLibrary, systemImage: "books.vertical")
+            } description: {
+                Text("Drop book files here or choose files to begin.")
+            } actions: {
+                ImportSetupActions(
+                    onImport: onImport,
+                    onImportCalibre: onImportCalibre
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(WinstonLayout.space5)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("library.onboarding")
+    }
+}
+
+private struct ImportSetupActions: View {
+    let onImport: () -> Void
+    let onImportCalibre: () -> Void
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: WinstonLayout.space2) {
+                actionButtons
+            }
+            VStack(alignment: .leading, spacing: WinstonLayout.space2) {
+                actionButtons
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        Button(action: onImport) {
+            Label("Add Files", systemImage: "plus")
+        }
+        .buttonStyle(.borderedProminent)
+        .accessibilityIdentifier("library.onboarding.addFiles")
+
+        Button(action: onImportCalibre) {
+            Text("Import from Calibre")
+        }
+        .accessibilityIdentifier("library.onboarding.importCalibre")
     }
 }

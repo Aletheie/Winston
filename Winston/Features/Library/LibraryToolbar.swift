@@ -89,6 +89,7 @@ struct LibraryToolbar: ToolbarContent {
     let onImport: () -> Void
     let onAddPhysicalBook: () -> Void
     let onTransmit: () -> Void
+    let onPerformCommand: (LibraryCommand) -> Void
 
     @Environment(\.theme) private var theme
 
@@ -126,6 +127,75 @@ struct LibraryToolbar: ToolbarContent {
 
         ToolbarItem(placement: .primaryAction) {
             Menu {
+                Section("Reading Tools") {
+                    Button {
+                        onPerformCommand(.recommendReading)
+                    } label: {
+                        Label("What Should I Read Today…", systemImage: "sparkles")
+                    }
+                    .accessibilityIdentifier("library.tools.recommendation")
+
+                    Button {
+                        onPerformCommand(.searchInsideBooks)
+                    } label: {
+                        Label("Search Inside Books…", systemImage: "doc.text.magnifyingglass")
+                    }
+                    .accessibilityIdentifier("library.tools.fullTextSearch")
+
+                    Button {
+                        onPerformCommand(.showStatistics)
+                    } label: {
+                        Label("Statistics…", systemImage: "chart.bar")
+                    }
+                    .accessibilityIdentifier("library.tools.statistics")
+
+                    Button {
+                        onPerformCommand(.showHighlights)
+                    } label: {
+                        Label("Highlights…", systemImage: "quote.bubble")
+                    }
+                    .accessibilityIdentifier("library.tools.highlights")
+
+                    Button {
+                        onPerformCommand(.showSeries)
+                    } label: {
+                        Label("Series…", systemImage: "books.vertical.fill")
+                    }
+                    .accessibilityIdentifier("library.tools.series")
+                }
+
+                Section("Library Health") {
+                    Button {
+                        onPerformCommand(.showLibraryIntegrity)
+                    } label: {
+                        Label("Library Integrity…", systemImage: "checkmark.shield")
+                    }
+                    .accessibilityIdentifier("library.tools.integrity")
+
+                    Button {
+                        onPerformCommand(.showMetadataFixes)
+                    } label: {
+                        Label("Metadata Cleanup…", systemImage: "wand.and.sparkles")
+                    }
+                    .accessibilityIdentifier("library.tools.metadataCleanup")
+
+                    Button {
+                        onPerformCommand(.reviewEditions)
+                    } label: {
+                        Label("Reconcile Books…", systemImage: "rectangle.stack.badge.plus")
+                    }
+                    .accessibilityIdentifier("library.tools.reconcile")
+
+                }
+            } label: {
+                Label("Library Tools", systemImage: "wrench.and.screwdriver")
+            }
+            .help("Reading and library health tools")
+            .accessibilityIdentifier("library.tools")
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
                 Button(action: onImport) {
                     Label("Import Book Files…", systemImage: "doc.badge.plus")
                 }
@@ -157,6 +227,7 @@ struct LibraryToolbar: ToolbarContent {
             } label: {
                 Label("Inspector", systemImage: "sidebar.trailing")
             }
+            .disabled(!availability.libraryHasBooks)
             .help("Toggle the inspector")
         }
     }

@@ -4,10 +4,15 @@ import OSLog
 
 @MainActor
 enum WinstonHelp {
+    enum Topic: String {
+        case overview = "index"
+        case kindle
+    }
+
     private static let bookName = "cz.annajung.Winston.helpbook"
     private static let logger = Logger(subsystem: "cz.annajung.Winston", category: "Help")
 
-    static func open(for language: AppLanguage) {
+    static func open(_ topic: Topic = .overview, for language: AppLanguage) {
         let registrationStatus = AHRegisterHelpBookWithURL(Bundle.main.bundleURL as CFURL)
         guard registrationStatus == noErr else {
             logger.error("Help Book registration failed with status \(registrationStatus)")
@@ -19,7 +24,7 @@ enum WinstonHelp {
             for: language,
             preferredLocalizations: Bundle.main.preferredLocalizations
         )
-        let pagePath = "\(localization).lproj/index.html"
+        let pagePath = "\(localization).lproj/\(topic.rawValue).html"
         let openStatus = AHGotoPage(bookName as CFString, pagePath as CFString, nil)
         guard openStatus != noErr else { return }
 

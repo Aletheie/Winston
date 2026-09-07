@@ -337,10 +337,16 @@ nonisolated struct ManagedFileRecoveryReport: Sendable, Equatable {
     var completedTransactionIDs: [UUID] = []
     var abortedTransactionIDs: [UUID] = []
     var supersededTransactionIDs: [UUID] = []
+    var quarantinedJournalURLs: [URL] = []
     var failedTransactionIDs: [UUID] = []
     var unreadableJournalURLs: [URL] = []
     var removedOrphanStagingURLs: [URL] = []
     var failureMessages: [String] = []
+
+    var pendingItemCount: Int {
+        let identifiedItems = failedTransactionIDs.count + unreadableJournalURLs.count
+        return identifiedItems > 0 ? identifiedItems : failureMessages.count
+    }
 
     var hasPendingWork: Bool {
         !failedTransactionIDs.isEmpty
@@ -389,6 +395,33 @@ nonisolated enum ManagedFileCoordinatorError: Error, Equatable {
     case fileGenerationChanged(String)
     case unsupportedManagedFile(String)
     case injectedFailure(ManagedFileFaultPoint)
+}
+
+extension ManagedFileCoordinatorError: LocalizedError {
+    nonisolated var errorDescription: String? {
+        switch self {
+        case .unsafeRelativeName(let name):
+            "The managed-file name is unsafe: \(name)"
+        case .missingStagedFile(let name):
+            "The staged data needed to finish \(name) is missing."
+        case .destinationConflict(let name):
+            "A different file already exists at the destination for \(name)."
+        case .journalNotFound(let id):
+            "The recovery record \(id.uuidString) is missing."
+        case .catalogRequirementMismatch(let id):
+            "The catalog no longer matches recovery operation \(id.uuidString)."
+        case .cleanupContentChanged(let name):
+            "Winston did not remove \(name) because its contents changed."
+        case .cleanupHashFailed(let name):
+            "Winston could not verify \(name) before cleanup."
+        case .fileGenerationChanged(let name):
+            "Winston did not modify \(name) because the file changed during the operation."
+        case .unsupportedManagedFile(let name):
+            "The managed file is not a supported regular file: \(name)"
+        case .injectedFailure:
+            "A managed-file test fault was injected."
+        }
+    }
 }
 
 nonisolated enum ManagedFileOperationPhase: Sendable, Equatable, Hashable {
@@ -836,10 +869,29 @@ actor ManagedFileCoordinator {
                         report.supersededTransactionIDs.append(journal.transaction.id)
                     }
                 } catch {
-                    report.failedTransactionIDs.append(journal.transaction.id)
-                    Log.persistence.error(
-                        "Managed file recovery failed for \(journal.transaction.id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
-                    )
+                    if let coordinatorError = error as? ManagedFileCoordinatorError,
+                       case .catalogRequirementMismatch = coordinatorError,
+                       canQuarantineAbandonedImport(journal, against: snapshot) {
+                        do {
+                            let quarantinedURL = try quarantine(journal)
+                            report.quarantinedJournalURLs.append(quarantinedURL)
+                            Log.persistence.notice(
+                                "Quarantined abandoned managed-file import \(journal.transaction.id.uuidString, privacy: .public) at \(quarantinedURL.path(percentEncoded: false), privacy: .public)"
+                            )
+                        } catch {
+                            report.failedTransactionIDs.append(journal.transaction.id)
+                            report.failureMessages.append(error.localizedDescription)
+                            Log.persistence.error(
+                                "Quarantining managed-file recovery record \(journal.transaction.id.uuidString, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                            )
+                        }
+                    } else {
+                        report.failedTransactionIDs.append(journal.transaction.id)
+                        report.failureMessages.append(error.localizedDescription)
+                        Log.persistence.error(
+                            "Managed file recovery failed for \(journal.transaction.id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                        )
+                    }
                 }
             }
         } catch {
@@ -847,6 +899,77 @@ actor ManagedFileCoordinator {
             Log.persistence.error("Managed file recovery scan failed: \(error.localizedDescription, privacy: .public)")
         }
         return report
+    }
+
+    /// Quarantine only when the catalog, destination and staging area no longer
+    /// contain any part of the import. Preserve its journal for inspection.
+    private func canQuarantineAbandonedImport(
+        _ journal: Journal,
+        against snapshot: ManagedFileCatalogSnapshot
+    ) -> Bool {
+        let transaction = journal.transaction
+        let requirement = transaction.requirement
+        guard journal.catalogCommitConfirmed == true,
+              journal.publishedFileIDs.isEmpty,
+              journal.completedCleanupIDs.isEmpty,
+              transaction.intent == .importBook,
+              !transaction.files.isEmpty,
+              transaction.cleanups.isEmpty,
+              requirement.presentBookIDs.isEmpty,
+              requirement.absentBookIDs.isEmpty,
+              requirement.unreferencedBookFileNames.isEmpty,
+              requirement.coverVersions.isEmpty,
+              (requirement.coverRequirements ?? []).isEmpty else {
+            return false
+        }
+
+        let names = Set(transaction.files.map(\.finalRelativeName))
+        guard names == requirement.referencedBookFileNames,
+              names.isDisjoint(with: snapshot.referencedBookFileNames) else {
+            return false
+        }
+
+        for file in transaction.files {
+            guard file.generation == transaction.id else { return false }
+            switch file.kind {
+            case .book:
+                break
+            case .cover:
+                return false
+            }
+            guard let destination = try? destinationURL(
+                kind: file.kind,
+                relativeName: file.finalRelativeName
+            ),
+                  !fileManager.fileExists(
+                    atPath: destination.path(percentEncoded: false)
+                  ),
+                  !fileManager.fileExists(
+                    atPath: resolvedStagedURL(for: file).path(percentEncoded: false)
+                  ) else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func quarantine(_ journal: Journal) throws -> URL {
+        let directory = stateDirectory.appending(
+            path: "Quarantine",
+            directoryHint: .isDirectory
+        )
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let source = journalURL(for: journal.transaction.id)
+        var destination = directory.appending(
+            path: "\(journal.transaction.id.uuidString).json"
+        )
+        if fileManager.fileExists(atPath: destination.path(percentEncoded: false)) {
+            destination = directory.appending(
+                path: "\(journal.transaction.id.uuidString)-\(UUID().uuidString).json"
+            )
+        }
+        try fileManager.moveItem(at: source, to: destination)
+        return destination
     }
 
     func pendingTransactions() -> [ManagedFileTransaction] {

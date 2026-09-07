@@ -61,6 +61,7 @@ final class MetadataService {
     }
 
     var isFetchingOnline: Bool { !enrichingUUIDs.isEmpty }
+    var isManualFetchActive: Bool { manualFetchTask != nil }
 
     // MARK: - Manual edits
 

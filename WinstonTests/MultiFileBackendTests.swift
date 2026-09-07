@@ -520,8 +520,7 @@ struct MultiFileBackendTests {
             modelContext: library.context,
             settings: settings,
             metadata: MetadataService(modelContext: library.context, settings: settings),
-            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
-            toasts: ToastCenter()
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter())
         )
 
         await importer.backfillMissingSizes()
@@ -556,7 +555,6 @@ struct MultiFileBackendTests {
             settings: settings,
             metadata: MetadataService(modelContext: library.context, settings: settings),
             wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
-            toasts: ToastCenter(),
             measureFile: { url in await gate.value(for: url) }
         )
         let task = Task { @MainActor in await importer.backfillMissingSizes() }
@@ -596,7 +594,6 @@ struct MultiFileBackendTests {
             settings: settings,
             metadata: MetadataService(modelContext: library.context, settings: settings),
             wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
-            toasts: ToastCenter(),
             inspectDRM: { url in await gate.value(for: url) }
         )
         let task = Task { @MainActor in await importer.detectMissingDRM() }
@@ -634,7 +631,6 @@ struct MultiFileBackendTests {
             settings: settings,
             metadata: MetadataService(modelContext: library.context, settings: settings),
             wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
-            toasts: ToastCenter(),
             analyzeBook: { url in await probe.analyze(url) }
         )
 
@@ -659,7 +655,6 @@ struct MultiFileBackendTests {
             settings: settings,
             metadata: MetadataService(modelContext: library.context, settings: settings),
             wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
-            toasts: ToastCenter(),
             analyzeBook: { url in await probe.analyze(url) }
         )
 
@@ -691,7 +686,6 @@ struct MultiFileBackendTests {
             settings: settings,
             metadata: MetadataService(modelContext: library.context, settings: settings),
             wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
-            toasts: ToastCenter(),
             maximumConcurrentMetadataJobs: 2,
             analyzeBook: { url in await gate.analyze(url) }
         )
@@ -734,7 +728,6 @@ struct MultiFileBackendTests {
             settings: settings,
             metadata: MetadataService(modelContext: library.context, settings: settings),
             wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
-            toasts: ToastCenter(),
             mutations: mutations,
             maximumConcurrentMetadataJobs: 2,
             importCommitChunkSize: 3,
@@ -804,7 +797,6 @@ struct MultiFileBackendTests {
             settings: settings,
             metadata: metadata,
             wishlist: wishlist,
-            toasts: ToastCenter(),
             editions: editions
         )
 
@@ -899,7 +891,6 @@ struct MultiFileBackendTests {
             settings: settings,
             metadata: metadata,
             wishlist: wishlist,
-            toasts: ToastCenter(),
             editions: editions
         )
         let work = Work(title: "Collected Work")
@@ -934,8 +925,7 @@ struct MultiFileBackendTests {
             modelContext: library.context,
             settings: settings,
             metadata: MetadataService(modelContext: library.context, settings: settings),
-            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter()),
-            toasts: ToastCenter()
+            wishlist: WishlistService(modelContext: library.context, toasts: ToastCenter())
         )
 
         importer.addBooks(from: [first, second])

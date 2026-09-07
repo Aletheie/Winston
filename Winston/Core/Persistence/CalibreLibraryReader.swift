@@ -25,13 +25,6 @@ nonisolated struct CalibreBook: Codable, Sendable, Equatable {
     var coverURL: URL? { coverSourceFile?.url }
 }
 
-nonisolated struct CalibreSourceRevalidationResult: Sendable, Equatable {
-    let primaryURL: URL?
-    let additionalURLs: [URL]
-    let coverURL: URL?
-    let rejectedSources: [CalibreRejectedSource]
-}
-
 nonisolated enum CalibreSourceRole: Sendable, Equatable {
     case bookFormat(String)
     case cover
@@ -183,64 +176,6 @@ nonisolated enum CalibreLibraryReader {
             ))
         }
         return CalibreLibraryReadResult(books: result, rejectedSources: rejectedSources)
-    }
-
-    /// Re-checks the filesystem boundary immediately before the importer stages bytes.
-    /// A rejected additional format or cover does not prevent importing a safe primary.
-    @concurrent
-    static func revalidateSources(
-        for book: CalibreBook
-    ) async -> CalibreSourceRevalidationResult {
-        var rejectedSources: [CalibreRejectedSource] = []
-
-        func revalidate(_ source: CalibreSourceFile, role: CalibreSourceRole) -> URL? {
-            do {
-                return try source.revalidatedURL()
-            } catch let reason as CalibrePathError {
-                let rejection = CalibreRejectedSource(
-                    bookID: book.calibreID,
-                    role: role,
-                    reason: reason
-                )
-                rejectedSources.append(rejection)
-                log(rejection)
-                return nil
-            } catch {
-                let rejection = CalibreRejectedSource(
-                    bookID: book.calibreID,
-                    role: role,
-                    reason: .unreadablePath
-                )
-                rejectedSources.append(rejection)
-                log(rejection)
-                return nil
-            }
-        }
-
-        let primaryURL = revalidate(
-            book.sourceFile,
-            role: .bookFormat(book.sourceFile.declaredFormat)
-        )
-        let additionalURLs = book.additionalSourceFiles.compactMap {
-            revalidate($0, role: .bookFormat($0.declaredFormat))
-        }
-        let coverURL = book.coverSourceFile.flatMap { revalidate($0, role: .cover) }
-        return CalibreSourceRevalidationResult(
-            primaryURL: primaryURL,
-            additionalURLs: additionalURLs,
-            coverURL: coverURL,
-            rejectedSources: rejectedSources
-        )
-    }
-
-    // MARK: - Pure mapping (unit-tested)
-
-    static func pickFormat(_ formats: [(format: String, name: String)],
-                           preference: [String]) -> (format: String, name: String)? {
-        for pref in preference {
-            if let match = formats.first(where: { $0.format.lowercased() == pref }) { return match }
-        }
-        return nil
     }
 
     private static func orderedFormats(

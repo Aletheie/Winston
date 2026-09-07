@@ -5,8 +5,8 @@ struct SettingsView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(AppSettings.self) private var settings
     @Bindable var maintenance: MaintenanceScheduler
+    let languageAtLaunch: AppLanguage
 
-    @State private var showRelaunchPrompt = false
     @State private var backups: [URL] = []
     @State private var restoreCandidate: URL?
     @State private var showLibraryTimeMachine = false
@@ -33,12 +33,6 @@ struct SettingsView: View {
             reloadBackups()
         }
         .onChange(of: settings.backupFolderPath) { reloadBackups() }
-        .alert("Relaunch to change language?", isPresented: $showRelaunchPrompt) {
-            Button("Relaunch Now") { relaunch() }
-            Button("Later", role: .cancel) {}
-        } message: {
-            Text("Winston needs to relaunch for the new language to take effect.")
-        }
         .confirmationDialog(
             "Restore this backup?",
             isPresented: Binding(
@@ -158,22 +152,19 @@ struct SettingsView: View {
                 Text("Changing the language takes effect after Winston relaunches.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if settings.appLanguage != languageAtLaunch {
+                    HStack {
+                        Label("Relaunch to apply the new language", systemImage: "arrow.clockwise")
+                            .font(.caption)
+                        Spacer()
+                        Button("Relaunch", action: relaunch)
+                    }
+                }
             }
-            .onChange(of: settings.appLanguage) { showRelaunchPrompt = true }
 
             Section("Metadata") {
                 Toggle("Fetch metadata online", isOn: $settings.onlineMetadataEnabled)
                 Text("Looks up covers and details from free catalogs (Open Library, Google Books) for imported books, filling in only what's missing. When off, Winston stays fully offline and uses the metadata embedded in your files.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Imports") {
-                Toggle(
-                    "Always review imports before adding them",
-                    isOn: $settings.alwaysReviewImports
-                )
-                Text("Multiple selections and files with duplicate, matching, damaged, unsupported, or DRM-protected content are always reviewed. Leave this off to add a single clean new book immediately.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

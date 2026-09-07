@@ -7,7 +7,6 @@ import OSLog
 private enum LibraryStartupState: Equatable {
     case preparing
     case ready
-    case managedFileRecoveryFailed(pendingItemCount: Int)
 }
 
 @main
@@ -39,6 +38,7 @@ private enum WinstonEntryPoint {
 
 struct WinstonApp: App {
     private let container: ModelContainer
+    private let languageAtLaunch: AppLanguage
     @State private var themeManager = ThemeManager()
     @State private var settings: AppSettings
     @State private var toastCenter: ToastCenter
@@ -51,25 +51,21 @@ struct WinstonApp: App {
     @State private var pluginService: PluginService
     @State private var discoveryViewModel: DiscoveryViewModel
     @State private var opdsViewModel: OPDSViewModel
-    @State private var showStoreRecoveryNotice: Bool
     @State private var libraryStartupState: LibraryStartupState
 
     init() {
         let isRunningUnitTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         let container = isRunningUnitTests ? PersistenceController.inMemory() : PersistenceController.shared
         self.container = container
-        _showStoreRecoveryNotice = State(
-            initialValue: !isRunningUnitTests && {
-                if case .quarantined = PersistenceController.lastRecovery { return true }
-                return false
-            }()
-        )
         let context = container.mainContext
         let mayUseLibrary = PersistenceController.lastRecovery?.allowsLibraryAccess ?? true
         _libraryStartupState = State(
-            initialValue: !isRunningUnitTests && mayUseLibrary ? .preparing : .ready
+            initialValue: !isRunningUnitTests && mayUseLibrary
+                ? .preparing
+                : .ready
         )
         let settings = AppSettings()
+        languageAtLaunch = settings.appLanguage
         let toastCenter = ToastCenter()
         _settings = State(initialValue: settings)
         _toastCenter = State(initialValue: toastCenter)
@@ -120,11 +116,6 @@ struct WinstonApp: App {
                                 }
                                 await pluginService.refresh()
                             }
-                    case .managedFileRecoveryFailed(let pendingItemCount):
-                        ManagedFileRecoveryUnavailableView(
-                            pendingItemCount: pendingItemCount,
-                            onRetry: { libraryStartupState = .preparing }
-                        )
                     }
                 }
             }
@@ -141,13 +132,6 @@ struct WinstonApp: App {
                 .accessibleTheme(themeManager.theme)
                 .font(themeManager.defaultFont)
                 .preferredColorScheme(themeManager.theme.colorScheme)
-                .alert("Library Database Recovered", isPresented: $showStoreRecoveryNotice) {
-                    Button("OK", role: .cancel) {}
-                } message: {
-                    if case .quarantined(let snapshotURL) = PersistenceController.lastRecovery {
-                        Text("Winston confirmed that the library database was corrupt and preserved a verified recovery snapshot at \(snapshotURL.path(percentEncoded: false)) before creating a fresh database.")
-                    }
-                }
         }
         .modelContainer(container)
         .windowStyle(.hiddenTitleBar)
@@ -163,7 +147,10 @@ struct WinstonApp: App {
                    !recovery.allowsLibraryAccess {
                     StoreUnavailableView(recovery: recovery)
                 } else if libraryStartupState == .ready {
-                    SettingsView(maintenance: viewModel.maintenance)
+                    SettingsView(
+                        maintenance: viewModel.maintenance,
+                        languageAtLaunch: languageAtLaunch
+                    )
                 } else {
                     LibraryStartupProgressView()
                 }
@@ -191,21 +178,27 @@ struct WinstonApp: App {
         )
         defer { signposter.endInterval("CriticalStartupRecovery", interval) }
 
-        let recovery = await viewModel.recoverManagedFiles()
-        guard !recovery.hasPendingWork else {
-            LibraryPerformanceDiagnostics.writeOutput(
-                "WINSTON_LIBRARY_PERFORMANCE_RECOVERY_BLOCKED"
-            )
-            libraryStartupState = .managedFileRecoveryFailed(
-                pendingItemCount: recovery.failedTransactionIDs.count
-                    + recovery.unreadableJournalURLs.count
-                    + recovery.failureMessages.count
-            )
-            return
+        if case .quarantined(let snapshotURL) = PersistenceController.lastRecovery {
+            operationReports.upsert(.databaseRecovery(
+                id: Self.databaseRecoveryReportID,
+                snapshotURL: snapshotURL
+            ))
         }
-        LibraryPerformanceDiagnostics.writeOutput(
-            "WINSTON_LIBRARY_PERFORMANCE_RECOVERY_FINISHED"
-        )
+        let recovery = await viewModel.recoverManagedFiles()
+        guard libraryStartupState == .preparing else { return }
+        if recovery.hasPendingWork {
+            LibraryPerformanceDiagnostics.writeOutput(
+                "WINSTON_LIBRARY_PERFORMANCE_RECOVERY_FINISHED_WITH_ISSUES"
+            )
+            operationReports.upsert(.managedFileRecovery(
+                id: Self.managedFileRecoveryReportID,
+                report: recovery
+            ))
+        } else {
+            LibraryPerformanceDiagnostics.writeOutput(
+                "WINSTON_LIBRARY_PERFORMANCE_RECOVERY_FINISHED"
+            )
+        }
         let leaseStore = ImportSourceLeaseStore()
         do {
             let removed = try await Task.detached(priority: .utility) {
@@ -223,6 +216,13 @@ struct WinstonApp: App {
         }
         libraryStartupState = .ready
     }
+
+    private static let managedFileRecoveryReportID = UUID(
+        uuidString: "A1100000-0000-4000-8000-000000000001"
+    )!
+    private static let databaseRecoveryReportID = UUID(
+        uuidString: "DA7A0000-0000-4000-8000-000000000001"
+    )!
 }
 
 private struct LibraryStartupProgressView: View {
@@ -236,31 +236,6 @@ private struct LibraryStartupProgressView: View {
                 .multilineTextAlignment(.center)
         }
         .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-private struct ManagedFileRecoveryUnavailableView: View {
-    let pendingItemCount: Int
-    let onRetry: () -> Void
-
-    var body: some View {
-        ContentUnavailableView {
-            Label(
-                "Library Files Need Attention",
-                systemImage: "externaldrive.badge.exclamationmark"
-            )
-        } description: {
-            Text("Winston could not safely finish \(pendingItemCount) pending file operation(s). The catalog remains closed so it cannot expose incomplete books or covers.")
-                .frame(maxWidth: 560)
-        } actions: {
-            HStack {
-                Button("Retry", action: onRetry)
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                Button("Quit Winston") { NSApplication.shared.terminate(nil) }
-            }
-        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

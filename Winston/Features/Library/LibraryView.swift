@@ -81,7 +81,9 @@ struct LibraryView: View {
     @State private var kindlePresenceFilter: KindlePresenceFilter = .all
     @State private var displayed: [Book] = []
     @State private var displayedIDs: [UUID] = []
+    @State private var displayedSelectionIDs: Set<Book.ID> = []
     @State private var displayedReadModelGeneration = 0
+    @State private var displayedRelativeFilterRevision = 0
     @State private var displayedQuery: LibraryQuerySpec?
     @State private var temporaryRevealIDs: Set<UUID> = []
     @State private var animateNextDisplayChange = false
@@ -110,6 +112,20 @@ struct LibraryView: View {
         return readModel.book(id: id)
     }
 
+    private var inspectorIsAvailable: Bool {
+        readModel.bookCount > 0
+    }
+
+    private var inspectorPresentation: Binding<Bool> {
+        Binding(
+            get: { inspectorIsAvailable && showInspector },
+            set: { isPresented in
+                guard inspectorIsAvailable else { return }
+                showInspector = isPresented
+            }
+        )
+    }
+
     private enum ContentState: Hashable {
         case empty
         case grid
@@ -128,6 +144,7 @@ struct LibraryView: View {
 
     private struct DisplayRevision: Hashable {
         let readModelGeneration: Int
+        let relativeFilterRevision: Int
         let readModelIsReady: Bool
         let query: LibraryQuerySpec
         let hasInvalidSmartShelf: Bool
@@ -149,6 +166,9 @@ struct LibraryView: View {
         let smartShelf = smartShelfDisplayConfiguration
         return DisplayRevision(
             readModelGeneration: readModel.generation,
+            relativeFilterRevision: filter == .recentlyAdded
+                ? readModel.relativeFilterRevision
+                : 0,
             readModelIsReady: readModel.isReady,
             query: LibraryQuerySpec(
                 filter: filter,
@@ -261,20 +281,10 @@ struct LibraryView: View {
         (selection.count > 1 && selection.isSelected(book)) ? selectedBooks : [book]
     }
 
-    private var convertibleSelectionCount: Int {
-        selectedBooks.filter {
-            $0.hasCatalogDigitalFile
-                && $0.primaryDRMProtected != true
-                && EbookConverter.needsConversion(format: $0.format)
-                && viewModel.conversion.canConvertForKindle($0.format)
-        }.count
-    }
-
     private var selectionCommandBarModel: LibrarySelectionCommandBarModel {
-        let displayedIDs = Set(displayed.map(\.id))
-        return LibrarySelectionCommandBarModel(
+        LibrarySelectionCommandBarModel(
             selectedCount: selection.count,
-            visibleSelectedCount: selection.selectedBookIDs.intersection(displayedIDs).count,
+            visibleSelectedCount: selection.selectedBookIDs.intersection(displayedSelectionIDs).count,
             displayedCount: displayed.count,
             availability: commandAvailability,
             deviceIsConnected: deviceMonitor.isConnected,
@@ -331,11 +341,11 @@ struct LibraryView: View {
                 reduceMotion ? nil : .easeOut(duration: 0.18),
                 value: selection.hasSelection
             )
-            .inspector(isPresented: $showInspector) {
+            .inspector(isPresented: inspectorPresentation) {
                 BookDetailPanel(
                     book: primarySelectedBook,
                     multiCount: selection.count,
-                    convertibleSelectionCount: convertibleSelectionCount,
+                    convertibleSelectionCount: commandAvailability.conversionEligibleCount,
                     viewModel: viewModel,
                     actions: bookActions
                 )
@@ -355,7 +365,8 @@ struct LibraryView: View {
                         || deviceMonitor.isEjecting,
                     onImport: { isImporting = true },
                     onAddPhysicalBook: { activeSheet = .addPhysicalBook },
-                    onTransmit: transmitSelected
+                    onTransmit: transmitSelected,
+                    onPerformCommand: { performCommand($0) }
                 )
             }
             .quickLookPreview($quickLookURL)
@@ -555,7 +566,7 @@ struct LibraryView: View {
         switch result {
         case .success(let urls):
             guard !urls.isEmpty else { return }
-            viewModel.reviewAndAddBooks(from: urls)
+            viewModel.addBooks(from: urls)
         case .failure(let error):
             if error is CancellationError {
                 return
@@ -654,8 +665,14 @@ struct LibraryView: View {
 
     private var emptyStateKind: LibraryEmptyState.Kind {
         if readModel.bookCount == 0 {
-            .emptyLibrary(onImport: { isImporting = true },
-                          onImportCalibre: { Task { await LibraryExternalActions.importFromCalibre(via: viewModel) } })
+            .emptyLibrary(
+                onImport: { isImporting = true },
+                onImportCalibre: {
+                    Task {
+                        await LibraryExternalActions.importFromCalibre(via: viewModel)
+                    }
+                }
+            )
         } else if !searchText.isEmpty {
             .noSearchResults(query: searchText, onClear: { searchText = "" })
         } else {
@@ -669,27 +686,17 @@ struct LibraryView: View {
     // MARK: - Menu actions
 
     private var commandAvailability: BookActionAvailability {
-        BookActionAvailability(
-            selectionCount: selection.count,
-            hasPrimarySelection: primarySelectedBook != nil,
-            primaryHasPersistedDigitalFile: primarySelectedBook?.hasCatalogDigitalFile == true,
-            persistedDigitalFileCount: selectedBooks.filter(\.hasCatalogDigitalFile).count,
-            sendableDigitalFileCount: selectedBooks.filter {
-                $0.hasCatalogDigitalFile && $0.primaryDRMProtected != true
-            }.count,
-            drmProtectedDigitalFileCount: selectedBooks.filter {
-                $0.hasCatalogDigitalFile && $0.primaryDRMProtected == true
-            }.count,
-            conversionEligibleCount: convertibleSelectionCount,
+        var result = BookActionAvailability.forBooks(
+            selectedBooks,
+            primary: primarySelectedBook,
             calibreAvailable: viewModel.conversion.isCalibreAvailable,
             onlineMetadataEnabled: viewModel.onlineMetadataEnabled,
-            onDeviceSelectionCount: selectedBooks.filter {
-                $0.isOnDevice(fileNames: deviceMonitor.deviceFileNames)
-            }.count,
-            hasMeaningfulSearch: !searchText
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty
+            deviceFileNames: deviceMonitor.deviceFileNames
         )
+        result.libraryHasBooks = readModel.bookCount > 0
+        result.selectionCount = selection.count
+        result.hasMeaningfulSearch = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return result
     }
 
     private func performCommand(_ command: LibraryCommand?) {
@@ -731,7 +738,9 @@ struct LibraryView: View {
                 columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
             }
         case .toggleInspector:
-            showInspector.toggle()
+            if inspectorIsAvailable {
+                showInspector.toggle()
+            }
         case .setGridView:
             viewMode = .grid
         case .setListView:
@@ -744,8 +753,6 @@ struct LibraryView: View {
             viewModel.fetchOnlineMetadata(for: selectedBooks)
         case .showLibraryIntegrity:
             activeSheet = .libraryIntegrity
-        case .showImportRecovery:
-            activeSheet = .importRecovery
         case .showMetadataFixes:
             let displayedBookIDs = Set(displayed.map(\.uuid))
             if displayedBookIDs.count == readModel.bookCount,
@@ -983,8 +990,10 @@ struct LibraryView: View {
         if revision.hasInvalidSmartShelf
             && revision.temporaryRevealIDs.isEmpty {
             displayedIDs = []
+            displayedSelectionIDs = []
             displayed = []
             displayedReadModelGeneration = revision.readModelGeneration
+            displayedRelativeFilterRevision = revision.relativeFilterRevision
             displayedQuery = revision.query
             return
         }
@@ -1002,6 +1011,7 @@ struct LibraryView: View {
             requiresBookResolution = true
             resultGeneration = revision.readModelGeneration
         } else if displayedQuery == revision.query,
+           displayedRelativeFilterRevision == revision.relativeFilterRevision,
            let incremental = readModel.incrementallyUpdatingDisplayIDs(
                displayedIDs,
                with: delta,
@@ -1026,10 +1036,12 @@ struct LibraryView: View {
 
         displayedIDs = ids
         displayedReadModelGeneration = revision.readModelGeneration
+        displayedRelativeFilterRevision = revision.relativeFilterRevision
         displayedQuery = revision.query
         guard requiresBookResolution else { return }
 
         let updated = readModel.books(for: ids)
+        displayedSelectionIDs = Set(updated.map(\.id))
         if animateNextDisplayChange {
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
                 displayed = updated

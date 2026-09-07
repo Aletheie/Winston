@@ -14,9 +14,9 @@
         <li>Přetáhněte soubory do okna, použijte tlačítko <span class="badge">Přidat soubory</span> v panelu nástrojů nebo stiskněte <kbd>⌘O</kbd>.</li>
         <li>Podporované formáty: EPUB, MOBI, AZW3, PDF, TXT a HTML.</li>
         <li>Importované soubory se <b>zkopírují</b> do složky knihovny Winston, takže přesunutí nebo smazání originálů vaši knihovnu neovlivní.</li>
-        <li>Při výběru více souborů se před přidáním vždy otevře <b>Kontrola importu</b>. Tabulka ukáže formát, velikost, stav ověření a DRM, shody s duplicitou či vydáním a Winstonem navržený cíl. Přesné duplicity jsou předvolené jako <b>Přeskočit</b>; u nejednoznačných shod musíte vybrat dílo nebo vydání. Před schválením dávky můžete upravit vložená metadata.</li>
-        <li>Jedna bezproblémová nová kniha se ve výchozím stavu přidá okamžitě. Kontrola se přesto otevře u duplicitního, nejednoznačného, poškozeného, nepodporovaného nebo DRM chráněného souboru. Chcete-li kontrolovat i každý jednotlivý import, zapněte <b>Nastavení → Importy → Vždy před přidáním zkontrolovat import</b>.</li>
-        <li>Zrušení kontroly odstraní dočasná data a katalog ani spravovanou knihovnu nezmění. Po schválení použijte <b>Zobrazit importované knihy</b>; výsledek se dočasně ukáže beze změny uloženého filtru, řazení, režimu zobrazení a inspektoru. Selhání a odloženou obnovu otevře <b>Zkontrolovat problémy importu</b>.</li>
+        <li>Vybrané soubory se importují přímo. Winston zkontroluje jejich obsah, přeskočí přesné duplicity a spojí odpovídající vydání a formáty, pokud je dokáže bezpečně přiřadit.</li>
+        <li>Průběh a výsledky najdete v části <b>Kontrola a operace</b>, včetně přeskočených souborů a případných problémů importu.</li>
+        <li>Ve výsledku použijte <b>Zobrazit importované knihy</b>. Selhání a přerušené operace se soubory můžete prohlédnout v <b>Obnově importu</b>.</li>
         <li>Pro automatický import zapněte v Nastavení → Automatický import <b>sledovanou složku</b>. Nové knihy vložené do této složky se přidají automaticky, duplicity se přeskočí.</li>
     </ul>
 
@@ -75,7 +75,7 @@
     <ul>
         <li>Jednu knihu upravíte tlačítkem <b>Upravit</b> v inspektoru. Více knih upravíte najednou jejich výběrem a volbou <b>Upravit metadata pro N…</b>.</li>
         <li>Autora, sérii nebo štítek můžete v celé knihovně přejmenovat z jejich kontextové nabídky v sidebaru.</li>
-        <li>Pokud se autor importoval v obráceném pořadí (například „Tolkien, J. R. R.“), tip ve spodní části sidebaru nabídne opravu na „J. R. R. Tolkien“ jedním kliknutím.</li>
+
         <li>Volbou <b>Knihovna → Vyčištění metadat…</b> analyzujete aktuálně filtrované zobrazení. Z kontextové nabídky výběru knih lze analyzovat jen vybrané knihy a ze Stavu knihovny celou knihovnu.</li>
         <li>Vyčištění odděluje deterministické změny <b>Bezpečné k použití</b> od návrhů <b>Vyžaduje kontrolu</b> a informativních hodnot, které Winston nedokáže opravit automaticky. Rozbalením skupiny uvidíte přesné hodnoty před a po pro každou knihu, můžete vybrat jednotlivé změny nebo upravit upřednostněnou náhradu.</li>
         <li>Každá schválená změna ověří, že kniha stále obsahuje hodnotu, kterou jste kontrolovali. Souběžné úpravy se oznámí jako konflikty a nikdy se nepřepíší. <b>Vrátit vyčištění</b> používá stejnou ochranu, takže zachová i novější změny.</li>
@@ -86,7 +86,8 @@
     <h2 id="highlights">Zvýraznění</h2>
     <ul>
         <li>Winston shromažďuje zvýraznění a poznámky vytvořené na Kindlu. Importujte je ze zobrazení zařízení (viz <a href="kindle.html#highlights">Odesílání a synchronizace</a>); kniha se zvýrazněními má odznak 💬.</li>
-        <li>V nabídce <b>Knihovna → Zvýraznění…</b> můžete procházet a prohledávat všechna zvýraznění seskupená podle knih.</li>
+        <li>V nabídce <b>Knihovna → Zvýraznění…</b> můžete procházet úryvky podle knih, prohledávat jejich text, označovat oblíbené a přidávat štítky nebo vlastní zamyšlení.</li>
+        <li>Spuštěním opakování si projdete uložené úryvky jeden po druhém. Průběh opakování zůstává uložený v knihovně.</li>
         <li>Kliknutím na <b>Exportovat…</b> je uložíte jako <b>Markdown</b> — jeden soubor „Autor - Název.md“ pro každou knihu — připravený pro Obsidian, poznámkové aplikace nebo zálohu.</li>
     </ul>
 

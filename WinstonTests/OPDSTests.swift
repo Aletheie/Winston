@@ -550,6 +550,59 @@ struct OPDSServiceTests {
         #expect(SlowOPDSDownloadURLProtocol.didStop)
         #expect(remaining.isEmpty)
     }
+
+    @Test func `Oversized catalog download is cancelled from response progress`() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(
+            path: "WinstonCatalogDownloadLimit-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        SlowOPDSDownloadURLProtocol.prepare(contentLength: 65_536)
+        let service = OPDSService(
+            session: URLSession(
+                configuration: SlowOPDSDownloadURLProtocol.configuration
+            ),
+            importSourceLeases: ImportSourceLeaseStore(
+                rootDirectory: root
+            ),
+            maximumDownloadBytes: 512
+        )
+        let acquisition = try #require(OPDSAcquisition.make(
+            url: URL(string: "https://download.example/oversized.epub")!,
+            mediaType: "application/epub+zip",
+            title: "EPUB"
+        ))
+        let configuration = OPDSCatalogConfiguration(
+            id: "download-limit",
+            name: "Download Limit",
+            rootURL: URL(string: "https://download.example/opds")!
+        )
+
+        await #expect(throws: OPDSServiceError.downloadTooLarge) {
+            try await service.download(
+                acquisition,
+                title: "Oversized Book",
+                access: OPDSCatalogAccess(
+                    configuration: configuration,
+                    credential: nil
+                )
+            )
+        }
+
+        #expect(SlowOPDSDownloadURLProtocol.didStart)
+        #expect(SlowOPDSDownloadURLProtocol.didStop)
+        let remaining = if FileManager.default.fileExists(
+            atPath: root.path(percentEncoded: false)
+        ) {
+            try FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil
+            )
+        } else {
+            []
+        }
+        #expect(remaining.isEmpty)
+    }
 }
 
 @MainActor
@@ -618,7 +671,7 @@ struct OPDSViewModelTests {
         #expect(viewModel.feed?.nextURL == nil)
     }
 
-    @Test func `Downloaded EPUB waits for Import Review then commits normally`() async throws {
+    @Test func `Downloaded EPUB imports directly and preserves catalog provenance`() async throws {
         let testLibrary = try await TestLibrary()
         let settings = AppSettings()
         let oldOnline = settings.onlineMetadataEnabled
@@ -674,34 +727,13 @@ struct OPDSViewModelTests {
 
         let deadline = Date.now.addingTimeInterval(8)
         while Date.now < deadline {
-            if library.preparedImportBatch?.phase == .ready {
-                break
-            }
-            try? await Task.sleep(for: .milliseconds(25))
-        }
-
-        #expect(testLibrary.context.allBooks().isEmpty)
-        #expect(library.preparedImportBatch?.phase == .ready)
-        #expect(
-            library.preparedImportBatch?.items.first?
-                .catalogContext?.contributors == ["Ada", "Charles"]
-        )
-        #expect(successfulImportCount == 0)
-        library.commitImportReview()
-
-        let commitDeadline = Date.now.addingTimeInterval(8)
-        while Date.now < commitDeadline {
-            if !testLibrary.context.allBooks().isEmpty {
+            if !testLibrary.context.allBooks().isEmpty,
+               successfulImportCount == 1 {
                 break
             }
             try? await Task.sleep(for: .milliseconds(25))
         }
         let book = try #require(testLibrary.context.allBooks().first)
-        #expect(viewModel.isDownloaded(
-            publication,
-            catalogID:
-                OPDSBuiltInCatalog.projectGutenberg.stableID
-        ))
         #expect(book.format.lowercased() == "epub")
         #expect(book.primaryAsset?.sourceProvenance == .catalogImport)
         #expect(
@@ -768,7 +800,7 @@ struct OPDSViewModelTests {
 
         #expect(sendCallbackCount == 0)
         #expect(testLibrary.context.allBooks().isEmpty)
-        #expect(library.preparedImportBatch == nil)
+        #expect(library.lastImportSummary == nil)
     }
 
     @Test func `Cancelled search cannot publish obsolete results`() async throws {
@@ -1061,6 +1093,7 @@ private final class SlowOPDSDownloadURLProtocol:
     private static let lock = NSLock()
     nonisolated(unsafe) private static var started = false
     nonisolated(unsafe) private static var stopped = false
+    nonisolated(unsafe) private static var responseContentLength: Int64 = 65_536
     private var deliveryWorkItem: DispatchWorkItem?
 
     static var configuration: URLSessionConfiguration {
@@ -1077,10 +1110,11 @@ private final class SlowOPDSDownloadURLProtocol:
         lock.withLock { stopped }
     }
 
-    static func prepare() {
+    static func prepare(contentLength: Int64 = 65_536) {
         lock.withLock {
             started = false
             stopped = false
+            responseContentLength = contentLength
         }
     }
 
@@ -1095,14 +1129,17 @@ private final class SlowOPDSDownloadURLProtocol:
     }
 
     override func startLoading() {
-        Self.lock.withLock { Self.started = true }
+        let contentLength = Self.lock.withLock {
+            Self.started = true
+            return Self.responseContentLength
+        }
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: 200,
             httpVersion: nil,
             headerFields: [
                 "Content-Type": "application/epub+zip",
-                "Content-Length": "65536",
+                "Content-Length": String(contentLength),
             ]
         )!
         client?.urlProtocol(

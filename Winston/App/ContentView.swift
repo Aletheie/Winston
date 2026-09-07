@@ -30,8 +30,6 @@ struct ContentView: View {
     @State private var watchStability = WatchFolderStabilityTracker()
     @State private var watchScanTask: Task<Void, Never>?
     @State private var activeLibrarySheet: LibrarySheet?
-    @State private var showImportReview = false
-    @State private var showBulkOperationResult = false
     @State private var projectionStore = LibraryProjectionStore()
     init(
         viewModel: LibraryViewModel,
@@ -66,8 +64,7 @@ struct ContentView: View {
                 collections: collections,
                 readModel: libraryReadModel,
                 viewModel: viewModel,
-                selection: $sidebarSelection,
-                onReviewEditions: openEditionReview
+                selection: $sidebarSelection
             )
                 .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
         } detail: {
@@ -128,9 +125,6 @@ struct ContentView: View {
             LibraryStatusToasts(
                 viewModel: viewModel,
                 maintenance: viewModel.maintenance,
-                onReviewEditions: openEditionReview,
-                onReviewImport: openImportReview,
-                onReviewBulkOperation: { showBulkOperationResult = true },
                 onResolveDigitalFile: resolveDigitalFile
             )
         }
@@ -139,27 +133,14 @@ struct ContentView: View {
                 readModel: libraryReadModel,
                 projectionStore: projectionStore
             )
-        }
-        .sheet(isPresented: $showImportReview, onDismiss: importReviewDidDismiss) {
-            ImportReviewSheet(
-                viewModel: viewModel,
-                onShowImportedBooks: showImportedBooks,
-                onReviewIssues: showImportIssues
+            AppRefreshTasksView(
+                maintenance: viewModel.maintenance,
+                notices: viewModel.notices,
+                readModel: libraryReadModel
             )
-        }
-        .sheet(isPresented: $showBulkOperationResult) {
-            if let report = viewModel.bulkOperationReport {
-                BulkOperationResultSheet(
-                    report: report,
-                    onRetry: viewModel.retryBulkOperation,
-                    onClose: viewModel.dismissBulkOperationReport
-                )
-            } else {
-                ContentUnavailableView(
-                    "No Bulk Operation Result",
-                    systemImage: "checkmark.circle"
-                )
-            }
+#if DEBUG
+            UITestScenarioView(viewModel: viewModel)
+#endif
         }
         .tint(theme.accent)
         .task {
@@ -177,11 +158,6 @@ struct ContentView: View {
             normalizeRestoredDestination()
             deviceMonitor.start()
             restartWatcher()
-            await viewModel.notices.checkForNewReleasesIfDue()
-        }
-        .task(priority: .background) {
-            guard !LibraryPerformanceConfiguration.isScenarioEnabled else { return }
-            viewModel.maintenance.start()
         }
         .task(id: metadataBackfillConfiguration, priority: .background) {
             guard !LibraryPerformanceConfiguration.isScenarioEnabled else { return }
@@ -206,8 +182,9 @@ struct ContentView: View {
                 viewModel: viewModel
             )
         }
-        .onChange(of: deviceMonitor.isConnected) { _, connected in
-            if !connected, sidebarSelection == .device { sidebarSelection = .all }
+        .onChange(of: projectionStore.isReady) { _, isReady in
+            guard isReady else { return }
+            normalizeRestoredDestination()
         }
         .onChange(of: sidebarSelection) { _, selection in
             restoredSidebarSelection = selection?.rawValue ?? SidebarItem.all.rawValue
@@ -231,23 +208,6 @@ struct ContentView: View {
         }
         .onChange(of: operationCenterProjection, initial: true) {
             syncOperationReports()
-        }
-        .onChange(of: importReviewPresentation) { _, presentation in
-            guard let presentation else {
-                showImportReview = false
-                return
-            }
-            switch presentation.phase {
-            case .preparing:
-                if presentation.requestedCount > 1
-                    || settings.alwaysReviewImports {
-                    showImportReview = true
-                }
-            case .ready, .failed:
-                showImportReview = true
-            case .committing, .completed:
-                break
-            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .watchFolderChanged)) { _ in
             scheduleWatchScan()
@@ -274,62 +234,8 @@ struct ContentView: View {
         model.receiveSearchSeed(seed)
     }
 
-    private var metadataBackfillConfiguration: String {
-        "\(settings.onlineMetadataEnabled)|\(settings.hardcoverToken.hashValue)|\(settings.releaseCheckEnabled)"
-    }
-
-    private struct ImportReviewPresentation: Equatable {
-        enum Phase: Equatable {
-            case preparing
-            case ready
-            case committing
-            case completed
-            case failed
-        }
-
-        let id: UUID
-        let requestedCount: Int
-        let phase: Phase
-    }
-
-    private var importReviewPresentation: ImportReviewPresentation? {
-        guard let batch = viewModel.preparedImportBatch else { return nil }
-        let phase: ImportReviewPresentation.Phase = switch batch.phase {
-        case .preparing: .preparing
-        case .ready: .ready
-        case .committing: .committing
-        case .completed: .completed
-        case .failed: .failed
-        }
-        return ImportReviewPresentation(
-            id: batch.id,
-            requestedCount: batch.requestedCount,
-            phase: phase
-        )
-    }
-
-    private func importReviewDidDismiss() {
-        guard let batch = viewModel.preparedImportBatch else { return }
-        switch batch.phase {
-        case .preparing, .ready, .committing:
-            viewModel.cancelImportReview()
-        case .completed, .failed:
-            viewModel.dismissImportReviewResult()
-        }
-    }
-
-    private func showImportedBooks(_ bookIDs: [UUID]) {
-        if destination != .library {
-            sidebarSelection = .all
-        }
-        Task { @MainActor in
-            await Task.yield()
-            NotificationCenter.default.post(
-                name: .showImportedBooks,
-                object: nil,
-                userInfo: ["bookIDs": bookIDs]
-            )
-        }
+    private var metadataBackfillConfiguration: OnlineServicesConfiguration {
+        OnlineServicesConfiguration(settings: settings)
     }
 
     private func showImportIssues() {
@@ -348,14 +254,6 @@ struct ContentView: View {
         }
     }
 
-    private func openImportReview() {
-        sidebarSelection = .all
-        Task { @MainActor in
-            await Task.yield()
-            activeLibrarySheet = .importRecovery
-        }
-    }
-
     private func resolveDigitalFile(_ bookID: UUID) {
         guard let book = libraryReadModel.book(uuid: bookID) else { return }
         Task {
@@ -366,7 +264,8 @@ struct ContentView: View {
     private struct OperationCenterProjection: Equatable {
         let bulkProgress: BulkOperationProgress?
         let bulkReport: BulkOperationPresentationReport?
-        let importBatch: PreparedImportBatch?
+        let importProgress: ImportSessionProgress?
+        let importSummary: ImportSummary?
         let pendingEditionCount: Int
         let convertingCount: Int
         let importRecoveryCount: Int
@@ -393,7 +292,8 @@ struct ContentView: View {
         OperationCenterProjection(
             bulkProgress: viewModel.activeBulkOperationProgress,
             bulkReport: viewModel.bulkOperationReport,
-            importBatch: viewModel.preparedImportBatch,
+            importProgress: viewModel.standardImportProgress,
+            importSummary: viewModel.lastImportSummary,
             pendingEditionCount: viewModel.editions.pendingCount,
             convertingCount: viewModel.convertingUUIDs.count,
             importRecoveryCount: viewModel.importRecoveryItems.count,
@@ -414,8 +314,11 @@ struct ContentView: View {
         if let report = projection.bulkReport {
             operationReports.upsert(.bulk(report))
         }
-        if let batch = projection.importBatch {
-            operationReports.upsert(.importBatch(batch))
+        if let progress = projection.importProgress {
+            operationReports.upsert(.runningImport(progress))
+        }
+        if let summary = projection.importSummary {
+            operationReports.upsert(.importSummary(summary))
         }
 
         if projection.pendingEditionCount > 0 {
@@ -486,18 +389,8 @@ struct ContentView: View {
             switch report.route {
             case .editionReview:
                 openEditionReview()
-            case .importReview:
-                if viewModel.preparedImportBatch != nil {
-                    showImportReview = true
-                } else {
-                    showImportIssues()
-                }
             case .importRecovery:
                 showImportIssues()
-            case .bulkResult:
-                if viewModel.bulkOperationReport != nil {
-                    showBulkOperationResult = true
-                }
             case .kindle:
                 sidebarSelection = .device
             case .libraryIntegrity:
@@ -521,9 +414,11 @@ struct ContentView: View {
              .updates where !settings.showUpdatesInSidebar,
              .operations where !settings.showOperationsInSidebar:
             sidebarSelection = .all
-        case .collection(let id)
-            where !projectionStore.collections.contains(where: { $0.id == id }):
-            sidebarSelection = .all
+        case .collection(let id):
+            guard projectionStore.isReady else { return }
+            if !projectionStore.collections.contains(where: { $0.id == id }) {
+                sidebarSelection = .all
+            }
         default:
             break
         }
@@ -582,6 +477,69 @@ struct ContentView: View {
         }
     }
 
+}
+
+private struct OnlineServicesConfiguration: Hashable {
+    let onlineMetadataEnabled: Bool
+    let releaseCheckEnabled: Bool
+    let hardcoverToken: String
+
+    init(settings: AppSettings) {
+        onlineMetadataEnabled = settings.onlineMetadataEnabled
+        releaseCheckEnabled = settings.releaseCheckEnabled
+        hardcoverToken = settings.hardcoverToken
+    }
+}
+
+private struct AppRefreshTasksView: View {
+    let maintenance: MaintenanceScheduler
+    let notices: NoticeService
+    let readModel: LibraryReadModel
+
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(AppSettings.self) private var settings
+
+    private struct TaskID: Hashable {
+        let isActive: Bool
+        let onlineServices: OnlineServicesConfiguration
+        let automaticBackupEnabled: Bool
+        let backupFolderPath: String?
+    }
+
+    private var taskID: TaskID {
+        TaskID(
+            isActive: scenePhase == .active,
+            onlineServices: OnlineServicesConfiguration(settings: settings),
+            automaticBackupEnabled: settings.autoBackupEnabled,
+            backupFolderPath: settings.backupFolderPath
+        )
+    }
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .task(id: taskID, priority: .background) {
+                await runRefreshLoop()
+            }
+    }
+
+    private func runRefreshLoop() async {
+        guard !LibraryPerformanceConfiguration.isScenarioEnabled,
+              scenePhase == .active else {
+            return
+        }
+        while !Task.isCancelled {
+            maintenance.start()
+            readModel.refreshRelativeFacets()
+            await notices.checkForNewReleasesIfDue()
+            do {
+                try await Task.sleep(for: .seconds(3_600))
+            } catch {
+                return
+            }
+        }
+    }
 }
 
 private struct LibraryReadModelSyncView: View {

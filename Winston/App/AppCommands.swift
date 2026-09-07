@@ -27,7 +27,6 @@ enum LibraryCommand: Equatable {
     case convertSelected
     case fetchMetadata
     case showLibraryIntegrity
-    case showImportRecovery
     case showMetadataFixes
     case reviewEditions
     case showStatistics
@@ -42,6 +41,7 @@ enum LibraryCommand: Equatable {
 }
 
 nonisolated struct BookActionAvailability: Equatable, Sendable {
+    var libraryHasBooks = false
     var selectionCount = 0
     var hasPrimarySelection = false
     var primaryHasPersistedDigitalFile = false
@@ -169,7 +169,7 @@ struct AppCommands: Commands {
 
             Button("Toggle Inspector") { library?.perform(.toggleInspector) }
                 .keyboardShortcut("0", modifiers: [.command, .option])
-                .disabled(library == nil)
+                .disabled(library?.availability.libraryHasBooks != true)
 
             Divider()
 
@@ -248,13 +248,12 @@ struct AppCommands: Commands {
                 .disabled(library == nil)
             Button("Library Integrity\u{2026}") { library?.perform(.showLibraryIntegrity) }
                 .disabled(library == nil)
-            Button("Import Review & Recovery\u{2026}") { library?.perform(.showImportRecovery) }
-                .disabled(library == nil)
             Button("Metadata Cleanup\u{2026}") {
                 library?.perform(.showMetadataFixes)
             }
                 .disabled(library == nil)
             Button("Highlights\u{2026}") { library?.perform(.showHighlights) }
+                .keyboardShortcut("2", modifiers: [.command, .option])
                 .disabled(library == nil)
             Button("Series\u{2026}") { library?.perform(.showSeries) }
                 .disabled(library == nil)

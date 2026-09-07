@@ -31,17 +31,6 @@ struct CalibreMappingTests {
         #expect(CalibreLibraryReader.year(from: pubdate) == expected)
     }
 
-    @Test func pickFormatHonoursPreferenceOrder() {
-        let formats = [(format: "EPUB", name: "book"), (format: "AZW3", name: "book")]
-        #expect(CalibreLibraryReader.pickFormat(formats, preference: ["azw3", "epub"])?.format == "AZW3")
-        #expect(CalibreLibraryReader.pickFormat(formats, preference: ["epub", "azw3"])?.format == "EPUB")
-    }
-
-    @Test func pickFormatReturnsNilWhenNoneMatch() {
-        let formats = [(format: "FB2", name: "book")]
-        #expect(CalibreLibraryReader.pickFormat(formats, preference: CalibreImportService.kindlePreference) == nil)
-    }
-
     @Test func dateParsesCalibreTimestampAsUTC() throws {
         let date = try #require(CalibreLibraryReader.date(from: "2024-01-15 10:30:00.000000+00:00"))
         var cal = Calendar(identifier: .gregorian)
@@ -50,10 +39,6 @@ struct CalibreMappingTests {
         #expect(parts.year == 2024 && parts.month == 1 && parts.day == 15 && parts.hour == 10)
     }
 
-    @Test func displayedProgressIsOneBasedAndReachesTotal() {
-        #expect(CalibreImportService.displayedPosition(for: 0) == 1)
-        #expect(CalibreImportService.displayedPosition(for: 4) == 5)
-    }
 }
 
 // MARK: - Calibre path boundary

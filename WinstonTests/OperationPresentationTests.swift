@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Winston
 
@@ -42,7 +43,7 @@ struct OperationPresentationTests {
         center.post(
             "Review recovery",
             style: .info,
-            action: .reviewImport
+            action: .relinkBook(UUID())
         )
 
         #expect(center.messages.count == 2)

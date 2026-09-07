@@ -890,7 +890,7 @@ struct DetailHighlights: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        LazyVStack(alignment: .leading, spacing: 6) {
             Text(theme.usesTerminalCopy ? "HIGHLIGHTS (\(highlights.count))" : "Highlights (\(highlights.count))")
                 .font(theme.label(size: 10, weight: .semibold))
                 .foregroundStyle(theme.textTertiary)

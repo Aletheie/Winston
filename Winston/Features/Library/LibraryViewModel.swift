@@ -84,7 +84,6 @@ final class LibraryViewModel {
             settings: settings,
             metadata: metadata,
             wishlist: wishlist,
-            toasts: toasts,
             editions: editions,
             mutations: mutations,
             managedFiles: managedFiles
@@ -140,17 +139,12 @@ final class LibraryViewModel {
     var importRecoveryItems: [ImportRecoveryItem] { importer.importRecoveryItems }
     var importRecoveryQueueError: String? { importer.lastRecoveryQueueError }
     var lastImportSummary: ImportSummary? { importer.lastImportSummary }
-    var preparedImportBatch: PreparedImportBatch? {
-        importer.preparedImportBatch
-    }
     var standardImportProgress: ImportSessionProgress? {
         importer.activeStandardImportSession.map(ImportSessionProgress.init)
     }
     var convertingUUIDs: Set<UUID> { conversion.convertingUUIDs }
     var enrichingUUIDs: Set<UUID> { metadata.enrichingUUIDs }
-    var isExtracting: Bool { importer.isExtracting }
-    var pendingMetadataCount: Int { importer.pendingMetadataCount }
-    var isFetchingOnline: Bool { metadata.isFetchingOnline }
+    var isFetchingMetadataManually: Bool { metadata.isManualFetchActive }
     var onlineMetadataEnabled: Bool { settings.onlineMetadataEnabled }
     var isImportingCalibre: Bool { calibreImporter.isImporting }
     var isCancellingCalibreImport: Bool { calibreImporter.isCancelling }
@@ -206,81 +200,16 @@ final class LibraryViewModel {
         importer.addBooks(from: sources, completion: completion)
     }
     @discardableResult
-    func reviewAndAddBooks(
-        from urls: [URL],
-        completion: ImportService.ImportCompletion? = nil
-    ) -> ImportSession? {
-        importer.beginImportReview(
-            from: urls,
-            automaticallyCommitCleanSingle: urls.count == 1
-                && !settings.alwaysReviewImports,
-            completion: completion
-        )
-    }
-    @discardableResult
-    func reviewAndAddBooks(
-        from sources: [ImportSource],
-        completion: ImportService.ImportCompletion? = nil
-    ) -> ImportSession? {
-        importer.beginImportReview(
-            from: sources,
-            automaticallyCommitCleanSingle: sources.count == 1
-                && !settings.alwaysReviewImports,
-            completion: completion
-        )
-    }
-    @discardableResult
-    func reviewCatalogBook(
+    func addCatalogBook(
         from source: ImportSource,
         context: CatalogImportContext,
         completion: ImportService.ImportCompletion? = nil
     ) -> ImportSession? {
-        importer.beginCatalogImportReview(
+        importer.addCatalogBook(
             from: source,
             context: context,
             completion: completion
         )
-    }
-    func setImportReviewSelection(itemID: UUID, isSelected: Bool) {
-        importer.setImportReviewSelection(itemID: itemID, isSelected: isSelected)
-    }
-    func setAllImportReviewSelections(_ isSelected: Bool) {
-        importer.setAllImportReviewSelections(isSelected)
-    }
-    func setImportReviewSelections(itemIDs: Set<UUID>, isSelected: Bool) {
-        importer.setImportReviewSelections(
-            itemIDs: itemIDs,
-            isSelected: isSelected
-        )
-    }
-    func setImportReviewActions(itemIDs: Set<UUID>, action: ImportReviewAction) {
-        importer.setImportReviewActions(itemIDs: itemIDs, action: action)
-    }
-    func applyImportReviewMetadata(
-        field: ImportReviewMetadataField,
-        sourceItemID: UUID,
-        targetItemIDs: Set<UUID>
-    ) {
-        importer.applyImportReviewMetadata(
-            field: field,
-            sourceItemID: sourceItemID,
-            targetItemIDs: targetItemIDs
-        )
-    }
-    func setImportReviewAction(itemID: UUID, action: ImportReviewAction) {
-        importer.setImportReviewAction(itemID: itemID, action: action)
-    }
-    func updateImportReviewMetadata(itemID: UUID, metadata: BookMetadata) {
-        importer.updateImportReviewMetadata(itemID: itemID, metadata: metadata)
-    }
-    func commitImportReview() {
-        importer.commitImportReview()
-    }
-    func cancelImportReview() {
-        importer.cancelImportReview()
-    }
-    func dismissImportReviewResult() {
-        importer.dismissImportReviewResult()
     }
     @discardableResult
     func addEditions(from urls: [URL], to work: Work) -> ImportSession? {
@@ -288,10 +217,6 @@ final class LibraryViewModel {
     }
     func importCalibreLibrary(at root: URL) { calibreImporter.importLibrary(at: root) }
     func cancelCalibreImport() { calibreImporter.cancelImport() }
-    func cancelImportSession(id: UUID) {
-        importer.cancelImportSession(id: id)
-    }
-
     @discardableResult
     func addPhysicalBook(_ draft: PhysicalBookDraft) -> Book? {
         let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -7,6 +7,7 @@ struct DeviceView: View {
     var viewModel: LibraryViewModel
 
     @Environment(\.theme) private var theme
+    @Environment(AppSettings.self) private var settings
     @Environment(DeviceMonitor.self) private var monitor
     @Environment(TransferQueue.self) private var transferQueue
     @Environment(ToastCenter.self) private var toasts
@@ -96,10 +97,23 @@ struct DeviceView: View {
 
     var body: some View {
         Group {
-            if let info = monitor.info {
+            switch monitor.state {
+            case .connected(let info):
                 connectedBody(info: info)
-            } else {
-                DeviceDisconnectedState()
+            case .connecting:
+                DeviceConnectionStateView(
+                    isConnecting: true,
+                    errorMessage: nil,
+                    onRetry: retryConnection,
+                    onOpenHelp: openKindleHelp
+                )
+            case .disconnected:
+                DeviceConnectionStateView(
+                    isConnecting: false,
+                    errorMessage: monitor.lastError,
+                    onRetry: retryConnection,
+                    onOpenHelp: openKindleHelp
+                )
             }
         }
         .background { ThemedBackground() }
@@ -153,6 +167,14 @@ struct DeviceView: View {
         .onDisappear {
             cancelSidecarCleanup()
         }
+    }
+
+    private func retryConnection() {
+        Task { await monitor.retryConnection() }
+    }
+
+    private func openKindleHelp() {
+        WinstonHelp.open(.kindle, for: settings.appLanguage)
     }
 
     private func rebuildProjection(
@@ -307,7 +329,7 @@ struct DeviceView: View {
             defer { finish(.copyingToLibrary) }
             let leases = await transferQueue.copyToLibrary(books, via: monitor)
             if !leases.isEmpty {
-                viewModel.reviewAndAddBooks(
+                viewModel.addBooks(
                     from: leases.map(ImportSource.winstonOwned)
                 )
             }
@@ -461,6 +483,7 @@ private struct DeviceHeader: View {
                 .controlSize(.small)
                 .disabled(isBusy)
                 .help("Preview additions, updates, cover repairs, unchanged books, and optional removals before changing the Kindle.")
+                .accessibilityIdentifier("device.reviewSyncPlan")
 
                 Button(action: onImport) {
                     Label("Import \(deviceOnlyCount) to Library", systemImage: "arrow.down.circle")
@@ -575,17 +598,110 @@ private struct DeviceEmptyState: View {
     }
 }
 
-private struct DeviceDisconnectedState: View {
+private struct DeviceConnectionStateView: View {
+    let isConnecting: Bool
+    let errorMessage: String?
+    let onRetry: () -> Void
+    let onOpenHelp: () -> Void
+
     @Environment(\.theme) private var theme
 
     var body: some View {
-        ContentUnavailableView {
-            Label(theme.usesTerminalCopy ? "// no_device_connected" : "No device connected",
-                  systemImage: "cable.connector")
-        } description: {
-            Text(theme.usesTerminalCopy ? "connect a kindle via usb" : "Connect a Kindle with a USB cable")
-                .font(theme.label(size: 11))
+        ScrollView {
+            VStack(spacing: WinstonLayout.space5) {
+                ContentUnavailableView {
+                    Label(
+                        title,
+                        systemImage: isConnecting
+                            ? "cable.connector.horizontal"
+                            : "cable.connector"
+                    )
+                } description: {
+                    Text(
+                        theme.usesTerminalCopy
+                            ? "connect a kindle via usb"
+                            : "Connect a Kindle with a USB cable"
+                    )
+                }
+
+                if let errorMessage, !errorMessage.isEmpty {
+                    InlineStatusBanner(
+                        kind: .error,
+                        systemImage: "exclamationmark.triangle"
+                    ) {
+                        VStack(alignment: .leading, spacing: WinstonLayout.space1) {
+                            Text("Winston found a device but could not connect.")
+                                .font(.callout.weight(.semibold))
+                            Text(errorMessage)
+                                .font(.caption)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .accessibilityIdentifier("device.connectionError")
+                }
+
+                DeviceConnectionInstructions()
+
+                HStack(spacing: WinstonLayout.space2) {
+                    Button(action: onRetry) {
+                        if isConnecting {
+                            Label {
+                                Text("Looking for Kindle…")
+                            } icon: {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                        } else {
+                            Label("Try Again", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isConnecting)
+                    .accessibilityIdentifier("device.retry")
+
+                    Button(action: onOpenHelp) {
+                        Label("Connection Help", systemImage: "questionmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("device.help")
+                }
+            }
+            .frame(maxWidth: 620)
+            .padding(.horizontal, WinstonLayout.space6)
+            .padding(.vertical, 44)
+            .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("device.disconnected")
+    }
+
+    private var title: LocalizedStringKey {
+        if theme.usesTerminalCopy {
+            return isConnecting ? "// looking_for_device" : "// no_device_connected"
+        }
+        return isConnecting ? "Looking for a Kindle…" : "No device connected"
+    }
+}
+
+private struct DeviceConnectionInstructions: View {
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: WinstonLayout.space3) {
+            Label("Use a USB cable that supports data, not charging only.", systemImage: "cable.connector")
+            Label("Unlock the Kindle and leave it connected for a few seconds.", systemImage: "lock.open")
+            Label(
+                "Winston checks newer MTP Kindles and older USB-drive models automatically.",
+                systemImage: "externaldrive.connected.to.line.below"
+            )
+        }
+        .font(.callout)
+        .foregroundStyle(theme.textSecondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(WinstonLayout.space4)
+        .themedChrome(
+            role: .content,
+            cornerRadius: WinstonLayout.radius(.structural)
+        )
     }
 }

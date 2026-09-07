@@ -197,6 +197,59 @@ struct ManagedFileCoordinatorTests {
         #expect(try managedBookFiles().isEmpty)
     }
 
+    @Test func recoveryQuarantinesAnAbandonedImportWithoutCatalogOrFileState() async throws {
+        let library = try await TestLibrary()
+        let source = try sourceFile(in: library.root, contents: "abandoned")
+        let managedSource = try ManagedFileSource.book(sourceURL: source)
+        let coordinator = makeCoordinator()
+        let transaction = try await coordinator.stage(
+            intent: .importBook,
+            sources: [managedSource],
+            requirement: ManagedFileRequirement(
+                referencedBookFileNames: [managedSource.finalRelativeName]
+            )
+        )
+        try await coordinator.catalogDidCommit(transaction)
+        let staged = try #require(transaction.files.first)
+        try FileManager.default.removeItem(at: staged.stagedURL)
+
+        let report = await coordinator.recover(against: emptySnapshot)
+
+        #expect(!report.hasPendingWork)
+        #expect(report.quarantinedJournalURLs.count == 1)
+        #expect(report.quarantinedJournalURLs.first?.lastPathComponent == "\(transaction.id.uuidString).json")
+        #expect(report.quarantinedJournalURLs.allSatisfy {
+            FileManager.default.fileExists(atPath: $0.path(percentEncoded: false))
+        })
+        #expect(await coordinator.pendingTransactions().isEmpty)
+        #expect(try managedBookFiles().isEmpty)
+    }
+
+    @Test func recoveryKeepsCatalogMismatchPendingWhileStagedDataExists() async throws {
+        let library = try await TestLibrary()
+        let source = try sourceFile(in: library.root, contents: "recoverable")
+        let managedSource = try ManagedFileSource.book(sourceURL: source)
+        let coordinator = makeCoordinator()
+        let transaction = try await coordinator.stage(
+            intent: .importBook,
+            sources: [managedSource],
+            requirement: ManagedFileRequirement(
+                referencedBookFileNames: [managedSource.finalRelativeName]
+            )
+        )
+        try await coordinator.catalogDidCommit(transaction)
+
+        let report = await coordinator.recover(against: emptySnapshot)
+
+        #expect(report.hasPendingWork)
+        #expect(report.pendingItemCount == 1)
+        #expect(report.failedTransactionIDs == [transaction.id])
+        #expect(report.quarantinedJournalURLs.isEmpty)
+        #expect(report.failureMessages.first?.contains(transaction.id.uuidString) == true)
+        #expect(await coordinator.pendingTransactions().map(\.id) == [transaction.id])
+        await coordinator.abort(transaction)
+    }
+
     @Test(arguments: [
         CocoaError.Code.fileWriteOutOfSpace,
         CocoaError.Code.fileWriteNoPermission,
@@ -610,7 +663,6 @@ struct ManagedFileCoordinatorTests {
             settings: settings,
             metadata: MetadataService(modelContext: library.context, settings: settings),
             wishlist: WishlistService(modelContext: library.context, toasts: toasts),
-            toasts: toasts,
             mutations: mutations,
             managedFiles: coordinator
         )

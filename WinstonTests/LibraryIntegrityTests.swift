@@ -220,7 +220,6 @@ struct LibraryIntegrityTests {
                 modelContext: library.context,
                 toasts: toasts
             ),
-            toasts: toasts,
             recoveryQueue: queue
         )
 

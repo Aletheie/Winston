@@ -162,10 +162,6 @@ final class CalibreImportService {
         await importTask?.value
     }
 
-    nonisolated static func displayedPosition(for zeroBasedIndex: Int) -> Int {
-        zeroBasedIndex + 1
-    }
-
     private func performImport(
         at root: URL,
         pipelineSession: ImportSession
@@ -953,18 +949,7 @@ final class CalibreImportService {
         wishlist.fulfil(with: imported)
 
         if let editions {
-            let previousKeys = Set(editions.pendingProposals.map(\.pairKey))
             editions.evaluate(imported)
-            if editions.pendingProposals.contains(where: {
-                !previousKeys.contains($0.pairKey)
-                    && !$0.memberUUIDs.allSatisfy { !importedIDs.contains($0) }
-            }) {
-                toasts.post(
-                    String(localized: "Edition suggestions are ready to review."),
-                    style: .info,
-                    action: .reviewEditionProposals
-                )
-            }
         }
         if settings.onlineMetadataEnabled,
            !LibraryPerformanceConfiguration.isScenarioEnabled {

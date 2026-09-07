@@ -124,6 +124,100 @@ struct OperationReportStoreTests {
         #expect(report.safeRetryTargetIDs.contains("book:\(safeBookID.uuidString)"))
     }
 
+    @Test func importFailureBecomesOperationsHistoryWithoutADuplicateRecoveryLink() throws {
+        let importedID = UUID()
+        let failedID = UUID()
+        let source = URL(fileURLWithPath: "/tmp/Broken.epub")
+        let session = ImportSession(
+            requestedBookIDs: [importedID, failedID],
+            requestedSourceCount: 2,
+            completedSourceCount: 2
+        )
+        session.recordFailures([
+            ImportFailure(
+                sourceURL: source,
+                requestedBookID: failedID,
+                reason: .validation,
+                detail: "Invalid EPUB"
+            ),
+        ])
+        session.finish(as: .completed)
+
+        let report = OperationReport.importSummary(ImportSummary(
+            session: session,
+            importedBookIDs: [importedID]
+        ))
+
+        #expect(report.source == .bookImport)
+        #expect(report.status == .failed)
+        #expect(report.route == nil)
+        #expect(report.actions == [.dismiss])
+        #expect(report.counts.completed == 1)
+        #expect(report.counts.failed == 1)
+        #expect(report.items.first?.title == "Broken.epub")
+    }
+
+    @Test func bulkResultStaysInlineInOperationsWithoutAnotherPresentationRoute() {
+        let targetID = BulkOperationTargetID.catalogBook(UUID())
+        let presentation = BulkOperationPresentationReport(
+            id: UUID(),
+            operation: .metadataEdit,
+            completion: .completed,
+            outcomeKind: .success,
+            appliedChangeCount: 1,
+            conflictCount: 0,
+            warningCount: 0,
+            pendingCount: 0,
+            items: [
+                BulkOperationPresentationItem(
+                    targetID: targetID,
+                    title: "Book",
+                    outcome: .applied,
+                    detail: nil
+                ),
+            ],
+            durableFailureCode: nil,
+            durableFailureDetail: nil
+        )
+
+        let report = OperationReport.bulk(presentation)
+
+        #expect(report.route == nil)
+        #expect(report.actions == [.dismiss])
+        #expect(report.items.count == 1)
+    }
+
+    @Test func recoveredDatabaseBecomesNonmodalOperationsReview() {
+        let snapshotURL = URL(fileURLWithPath: "/tmp/Winston Recovery")
+        let report = OperationReport.databaseRecovery(
+            id: UUID(),
+            snapshotURL: snapshotURL
+        )
+
+        #expect(report.source == .libraryHealth)
+        #expect(report.status == .review)
+        #expect(report.actions == [.dismiss])
+        #expect(report.route == nil)
+        #expect(report.detail?.contains(snapshotURL.path) == true)
+    }
+
+    @Test func managedFileStartupFailureIsReportedWithoutBlockingTheCatalog() {
+        var recovery = ManagedFileRecoveryReport()
+        recovery.failedTransactionIDs = [UUID()]
+        recovery.failureMessages = ["A pending file could not be recovered."]
+
+        let report = OperationReport.managedFileRecovery(
+            id: UUID(),
+            report: recovery
+        )
+
+        #expect(report.source == .importRecovery)
+        #expect(report.status == .failed)
+        #expect(report.route == .importRecovery)
+        #expect(report.actions == [.open, .dismiss])
+        #expect(report.detail == "A pending file could not be recovered.")
+    }
+
     private func report(
         id: UUID = UUID(),
         source: OperationReportSource = .bulkLibrary,

@@ -21,7 +21,7 @@ private final class ImportDropBatch {
         guard remainingCount == 0 else { return }
         let batch = sources.compactMap { $0 }
         if !batch.isEmpty {
-            viewModel.reviewAndAddBooks(from: batch)
+            viewModel.addBooks(from: batch)
         }
     }
 }

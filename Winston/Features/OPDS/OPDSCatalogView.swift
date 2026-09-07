@@ -471,7 +471,10 @@ struct OPDSCatalogView: View {
                     OPDSPublicationSection(
                         publications: filteredPublications,
                         library: library,
-                        viewModel: viewModel
+                        viewModel: viewModel,
+                        access: viewModel.selectedCatalog.map {
+                            settings.catalogAccess(for: $0)
+                        }
                     )
                 }
 
@@ -780,10 +783,15 @@ private struct CatalogSearchResultLabel: View {
     let group: OPDSSearchResultGroup
 
     @Environment(\.theme) private var theme
+    @Environment(AppSettings.self) private var settings
 
     var body: some View {
         HStack(spacing: 12) {
-            OPDSCoverView(id: group.id, coverURL: group.coverURL)
+            OPDSCoverView(
+                id: group.id,
+                coverURL: group.coverURL,
+                access: coverAccess
+            )
                 .frame(width: 38, height: 56)
                 .clipShape(
                     RoundedRectangle(
@@ -837,6 +845,18 @@ private struct CatalogSearchResultLabel: View {
             }
         }
         .padding(.vertical, 5)
+    }
+
+    private var coverAccess: OPDSCatalogAccess? {
+        guard let catalogID = group.variants.first(where: {
+            $0.publication.coverURL != nil
+        })?.catalogID,
+        let catalog = settings.catalogConfigurations.first(where: {
+            $0.id == catalogID
+        }) else {
+            return nil
+        }
+        return settings.catalogAccess(for: catalog)
     }
 }
 
@@ -979,7 +999,7 @@ private struct AcquisitionSourceRow: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .help(
-                        "Download this exact format and open Import Review"
+                        "Download and import this exact format"
                     )
                     .accessibilityLabel(
                         "Import \(acquisition.formatLabel) from catalog"
@@ -1093,6 +1113,7 @@ private struct OPDSPublicationSection: View {
     let publications: [OPDSPublication]
     let library: LibraryViewModel
     let viewModel: OPDSViewModel
+    let access: OPDSCatalogAccess?
 
     @Environment(\.theme) private var theme
     @Environment(DeviceMonitor.self) private var deviceMonitor
@@ -1115,7 +1136,8 @@ private struct OPDSPublicationSection: View {
                         publication: publication,
                         isDownloading: viewModel.isDownloading(
                             publication
-                        )
+                        ),
+                        access: access
                     ) { acquisition in
                         viewModel.addToLibrary(
                             publication,
@@ -1148,6 +1170,7 @@ private struct OPDSPublicationSection: View {
 private struct OPDSPublicationCard: View {
     let publication: OPDSPublication
     let isDownloading: Bool
+    let access: OPDSCatalogAccess?
     let onAdd: (OPDSAcquisition) -> Void
     let onImportAndSend: (OPDSAcquisition) -> Void
     let onCancel: () -> Void
@@ -1159,7 +1182,8 @@ private struct OPDSPublicationCard: View {
         VStack(alignment: .leading, spacing: 8) {
             OPDSCoverView(
                 id: publication.id,
-                coverURL: publication.coverURL
+                coverURL: publication.coverURL,
+                access: access
             )
             .aspectRatio(WinstonLayout.coverAspect, contentMode: .fill)
             .clipped()
@@ -1252,6 +1276,7 @@ private struct OPDSPublicationCard: View {
 private struct OPDSCoverView: View {
     let id: String
     let coverURL: URL?
+    let access: OPDSCatalogAccess?
 
     @Environment(\.theme) private var theme
     @Environment(AppSettings.self) private var settings
@@ -1276,17 +1301,29 @@ private struct OPDSCoverView: View {
             .task(id: coverTaskID) {
                 image = nil
                 guard settings.onlineMetadataEnabled,
-                      let coverURL else {
+                      let coverURL,
+                      let access else {
                     return
                 }
                 image = await DiscoveryImageLoader.shared.image(
-                    for: coverURL
+                    for: coverURL,
+                    access: access
                 )
             }
     }
 
-    private var coverTaskID: String {
-        "\(settings.onlineMetadataEnabled)|\(coverURL?.absoluteString ?? "")"
+    private struct CoverTaskID: Hashable {
+        let onlineMetadataEnabled: Bool
+        let coverURL: URL?
+        let access: OPDSCatalogAccess?
+    }
+
+    private var coverTaskID: CoverTaskID {
+        CoverTaskID(
+            onlineMetadataEnabled: settings.onlineMetadataEnabled,
+            coverURL: coverURL,
+            access: access
+        )
     }
 
     private var palette: ColorPair {

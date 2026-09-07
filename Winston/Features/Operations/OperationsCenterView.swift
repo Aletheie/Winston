@@ -285,7 +285,7 @@ private extension OperationReportSource {
     var title: LocalizedStringResource {
         switch self {
         case .reconciliation: "Edition Review"
-        case .importReview: "Import Review"
+        case .bookImport: "Book Import"
         case .bulkLibrary: "Library Changes"
         case .kindleSync: "Kindle Sync"
         case .conversion: "Book Conversion"
@@ -298,7 +298,7 @@ private extension OperationReportSource {
     var systemImage: String {
         switch self {
         case .reconciliation: "rectangle.stack.badge.plus"
-        case .importReview: "tray.and.arrow.down"
+        case .bookImport: "tray.and.arrow.down"
         case .bulkLibrary: "checklist"
         case .kindleSync: "externaldrive.badge.checkmark"
         case .conversion: "arrow.triangle.2.circlepath"

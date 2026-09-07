@@ -36,7 +36,7 @@ Winston models **works, editions and files** separately. Two translations of Dun
 ### Library
 
 - Import EPUB, MOBI, AZW3, PDF, TXT and HTML by dragging them in, choosing files, watching a folder, or bringing over an existing Calibre library with its metadata and covers.
-- **Review Import** inspects batches and anything suspicious before it touches the library. You see duplicates, DRM, damaged files, metadata differences, and whether each file will become a new work, a new edition, or another format of an edition.
+- Files import directly after inspection. Exact duplicates are skipped, safe edition matches stay together, and results or failures remain available in **Review & Operations**.
 - Works, editions and files stay separate. Two translations can belong to one work, while an EPUB and its Kindle-ready copy stay with the same edition. Matching suggestions wait for your approval.
 - Grid and table views, field search, filters, collections, rule-based smart shelves, reading status, Kindle-presence filtering, keyboard selection and bulk editing.
 - Search inside local EPUB, PDF, TXT and HTML files. The full-text index stays on this Mac and only rebuilds books whose contents changed.
@@ -65,14 +65,14 @@ Winston models **works, editions and files** separately. Two translations of Dun
 - **Review Sync Plan** previews additions, refreshed conversions, cover repairs and optional removals. Each Kindle can keep its own local sync profile.
 - Transfers convert when needed, copy the book and home-screen thumbnail, clean up macOS sidecar files, report each outcome, and can resume work whose result could not be verified. Nothing is silently retried when delivery is uncertain.
 - Send a selection or a whole series; Winston skips DRM-protected and already-present books and preserves series order. Use the explicit eject control afterward so a USB-drive Kindle can reindex.
-- Copy books from the device into **Review Import**, remove device copies without touching the library, and turn `My Clippings.txt` into structured highlights and notes.
+- Copy books from the device into the library, remove device copies without touching the library, and turn `My Clippings.txt` into structured highlights and notes.
 
 ### Discovery
 
 - [Hardcover](https://hardcover.app) integration matches the series you own, shows missing volumes and powers optional new-release checks.
 - **Discover** browses by genre or search. Results can be saved to a wishlist, with links to your preferred bookstore or library catalog.
 - **Catalogs** searches and browses OPDS 1 and OPDS 2 sources. Winston includes Project Gutenberg, Standard Ebooks, Unglue.it and a Wikisource matched to its English or Czech language; public and password-protected custom catalogs can be added in Settings.
-- Catalog results keep their editions, formats, prices and acquisition types visible. Free compatible files go through **Review Import**; borrow, buy, sample and subscription links open at their source.
+- Catalog results keep their editions, formats, prices and acquisition types visible. Free compatible files import into the library; borrow, buy, sample and subscription links open at their source.
 - All network features stay off until you enable them in Settings.
 
 ### Plugins

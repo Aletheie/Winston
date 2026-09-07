@@ -584,23 +584,10 @@ final class ImportService {
         let proposal: CatalogAssetInspectionProposal<Value>
     }
 
-    private struct PendingImportReview {
-        let batchID: UUID
-        let session: ImportSession
-        let sources: [ImportSource]
-        let requests: [CopyRequest]
-        var preparedByID: [UUID: PreparedImport]
-        let validationFailures: [ImportFailure]
-        let catalogContextsBySourcePath: [String: CatalogImportContext]
-        let automaticallyCommitCleanSingle: Bool
-        let completion: ImportCompletion?
-    }
-
     private let modelContext: ModelContext
     private let settings: AppSettings
     private let metadata: MetadataService
     private let wishlist: WishlistService
-    private let toasts: ToastCenter
     private let editions: CatalogReconciliationService?
     private let mutations: CatalogMutationService
     private let analysisCoordinator: CatalogAnalysisCoordinator
@@ -621,7 +608,6 @@ final class ImportService {
     private(set) var importRecoveryItems: [ImportRecoveryItem] = []
     private(set) var lastRecoveryQueueError: String?
     private(set) var lastMaintenanceError: String?
-    private(set) var preparedImportBatch: PreparedImportBatch?
     private var activeImportOperationCount = 0
     private var activePreparationJobCount = 0
     private var preparingImportUUIDs: Set<UUID> = []
@@ -632,14 +618,12 @@ final class ImportService {
     private var activeMetadataTasks: [UUID: Task<Void, Never>] = [:]
     private var activeImportSessions: [UUID: ImportSession] = [:]
     private var recoveryQueueWriteTask: Task<Void, Never>?
-    @ObservationIgnored private var pendingImportReview: PendingImportReview?
 
     init(
         modelContext: ModelContext,
         settings: AppSettings,
         metadata: MetadataService,
         wishlist: WishlistService,
-        toasts: ToastCenter,
         editions: CatalogReconciliationService? = nil,
         mutations: CatalogMutationService? = nil,
         managedFiles: ManagedFileCoordinator = .shared,
@@ -663,7 +647,6 @@ final class ImportService {
         self.settings = settings
         self.metadata = metadata
         self.wishlist = wishlist
-        self.toasts = toasts
         self.editions = editions
         self.mutations = resolvedMutations
         self.analysisCoordinator = resolvedMutations.analysisCoordinator
@@ -773,232 +756,22 @@ final class ImportService {
         )
     }
 
-    /// Starts the interactive two-phase import path. Preparation only creates
-    /// recoverable staging transactions and immutable value proposals; the
-    /// catalog and managed library remain untouched until `commitImportReview`.
     @discardableResult
-    func beginImportReview(
-        from urls: [URL],
-        automaticallyCommitCleanSingle: Bool = false,
-        completion: ImportCompletion? = nil
-    ) -> ImportSession? {
-        beginImportReview(
-            from: urls.map(ImportSource.external),
-            automaticallyCommitCleanSingle: automaticallyCommitCleanSingle,
-            completion: completion
-        )
-    }
-
-    @discardableResult
-    func beginImportReview(
-        from sources: [ImportSource],
-        automaticallyCommitCleanSingle: Bool = false,
-        completion: ImportCompletion? = nil
-    ) -> ImportSession? {
-        beginImportReview(
-            from: sources,
-            catalogContextsBySourcePath: [:],
-            automaticallyCommitCleanSingle: automaticallyCommitCleanSingle,
-            completion: completion
-        )
-    }
-
-    @discardableResult
-    func beginCatalogImportReview(
+    func addCatalogBook(
         from source: ImportSource,
         context: CatalogImportContext,
         completion: ImportCompletion? = nil
     ) -> ImportSession? {
-        beginImportReview(
-            from: [source],
+        addBooks(
+            fromImportSources: [source],
+            assigningTo: nil,
             catalogContextsBySourcePath: [
                 source.url.standardizedFileURL.path(
                     percentEncoded: false
                 ): context,
             ],
-            automaticallyCommitCleanSingle: false,
             completion: completion
         )
-    }
-
-    @discardableResult
-    private func beginImportReview(
-        from sources: [ImportSource],
-        catalogContextsBySourcePath: [String: CatalogImportContext],
-        automaticallyCommitCleanSingle: Bool,
-        completion: ImportCompletion?
-    ) -> ImportSession? {
-        guard !sources.isEmpty else {
-            completion?([])
-            return nil
-        }
-        guard pendingImportReview == nil else {
-            Self.cleanupOwnedSources(sources, using: importSourceLeases)
-            toasts.info(String(localized: "Finish the current import review first."))
-            return nil
-        }
-
-        let preflight = preflightImportSources(sources)
-        let requestIDs = Set(preflight.requests.map(\.uuid))
-        let batchID = UUID()
-        let session = ImportSession(
-            requestedBookIDs: requestIDs,
-            requestedSourceCount: sources.count,
-            completedSourceCount: preflight.failures.count
-        )
-        session.discover(requestIDs)
-        pendingImportReview = PendingImportReview(
-            batchID: batchID,
-            session: session,
-            sources: preflight.requests.map(\.source),
-            requests: preflight.requests,
-            preparedByID: [:],
-            validationFailures: preflight.failures,
-            catalogContextsBySourcePath: catalogContextsBySourcePath,
-            automaticallyCommitCleanSingle: automaticallyCommitCleanSingle,
-            completion: completion
-        )
-        preparedImportBatch = PreparedImportBatch(
-            id: batchID,
-            sessionID: session.id,
-            requestedCount: sources.count,
-            phase: preflight.requests.isEmpty ? .ready : .preparing,
-            items: preflight.failures.map(blockedReviewItem),
-            completedPreparationCount: preflight.failures.count
-        )
-
-        guard !preflight.requests.isEmpty else {
-            session.finish(as: .modelProposal)
-            return session
-        }
-
-        pendingMetadataUUIDs.formUnion(requestIDs)
-        preparingImportUUIDs.formUnion(requestIDs)
-        activeImportOperationCount += 1
-        activeImportSessions[session.id] = session
-        let task = Task { [weak self, batchID, session] in
-            guard let self else { return }
-            let outcomes = await prepareImports(preflight.requests)
-            await finishImportReviewPreparation(
-                outcomes,
-                batchID: batchID,
-                session: session
-            )
-        }
-        session.start(task)
-        return session
-    }
-
-    func setImportReviewSelection(itemID: UUID, isSelected: Bool) {
-        updateImportReviewItem(id: itemID) { item in
-            guard item.isSelectable else { return }
-            item.isSelected = isSelected
-        }
-    }
-
-    func setAllImportReviewSelections(_ isSelected: Bool) {
-        guard var batch = preparedImportBatch, batch.phase == .ready else { return }
-        for index in batch.items.indices where batch.items[index].isSelectable {
-            batch.items[index].isSelected = isSelected
-                && batch.items[index].action.importsFile
-        }
-        preparedImportBatch = batch
-    }
-
-    func setImportReviewSelections(
-        itemIDs: Set<UUID>,
-        isSelected: Bool
-    ) {
-        guard var batch = preparedImportBatch, batch.phase == .ready else { return }
-        for index in batch.items.indices
-        where itemIDs.contains(batch.items[index].id)
-            && batch.items[index].isSelectable {
-            batch.items[index].isSelected = isSelected
-                && batch.items[index].action.importsFile
-        }
-        preparedImportBatch = batch
-    }
-
-    func setImportReviewActions(
-        itemIDs: Set<UUID>,
-        action: ImportReviewAction
-    ) {
-        guard var batch = preparedImportBatch, batch.phase == .ready else { return }
-        for index in batch.items.indices
-        where itemIDs.contains(batch.items[index].id) {
-            guard batch.items[index].supports(action) else { continue }
-            batch.items[index].action = action
-            batch.items[index].isSelected = action.importsFile
-        }
-        preparedImportBatch = batch
-    }
-
-    func applyImportReviewMetadata(
-        field: ImportReviewMetadataField,
-        sourceItemID: UUID,
-        targetItemIDs: Set<UUID>
-    ) {
-        guard var batch = preparedImportBatch,
-              batch.phase == .ready,
-              let source = batch.items.first(where: { $0.id == sourceItemID }) else {
-            return
-        }
-        for index in batch.items.indices
-        where targetItemIDs.contains(batch.items[index].id)
-            && batch.items[index].isSelectable {
-            field.copy(
-                from: source.metadata,
-                to: &batch.items[index].metadata
-            )
-        }
-        preparedImportBatch = batch
-    }
-
-    func setImportReviewAction(
-        itemID: UUID,
-        action: ImportReviewAction
-    ) {
-        updateImportReviewItem(id: itemID) { item in
-            guard item.supports(action) else { return }
-            item.action = action
-            item.isSelected = action.importsFile
-        }
-    }
-
-    func updateImportReviewMetadata(
-        itemID: UUID,
-        metadata: BookMetadata
-    ) {
-        updateImportReviewItem(id: itemID) { item in
-            guard item.isSelectable else { return }
-            item.metadata = metadata
-        }
-    }
-
-    func commitImportReview() {
-        guard let pending = pendingImportReview,
-              var batch = preparedImportBatch,
-              batch.id == pending.batchID,
-              batch.canCommit else { return }
-        batch.phase = .committing
-        preparedImportBatch = batch
-        activeImportOperationCount += 1
-        activeImportSessions[pending.session.id] = pending.session
-        let task = Task { [weak self, batchID = pending.batchID] in
-            guard let self else { return }
-            await performImportReviewCommit(batchID: batchID)
-        }
-        pending.session.start(task)
-    }
-
-    func cancelImportReview() {
-        guard let pending = pendingImportReview else { return }
-        pending.session.cancel()
-        if preparedImportBatch?.phase == .ready {
-            Task { [weak self, batchID = pending.batchID] in
-                await self?.discardImportReview(batchID: batchID)
-            }
-        }
     }
 
     @discardableResult
@@ -1017,6 +790,7 @@ final class ImportService {
     private func addBooks(
         fromImportSources sources: [ImportSource],
         assigningTo targetWork: Work?,
+        catalogContextsBySourcePath: [String: CatalogImportContext] = [:],
         completion: ImportCompletion?
     ) -> ImportSession? {
         guard !sources.isEmpty else {
@@ -1039,7 +813,6 @@ final class ImportService {
             lastImportSummary = summary
             scheduleImportFailurePersistence(validationFailures)
             logImportFailures(validationFailures)
-            reportImportSummary(summary)
             completion?([])
             return nil
         }
@@ -1092,7 +865,6 @@ final class ImportService {
                     scheduleImportFailurePersistence(importFailures)
                 }
                 logImportFailures(importFailures)
-                reportImportSummary(summary)
                 if activeImportSessions[session.id] === session {
                     activeImportSessions.removeValue(forKey: session.id)
                 }
@@ -1154,10 +926,20 @@ final class ImportService {
                     break
                 }
 
+                let catalogContextsByRequestID = Dictionary(
+                    uniqueKeysWithValues: prepared.compactMap { candidate in
+                        catalogContextsBySourcePath[
+                            candidate.request.sourceURL.standardizedFileURL.path(
+                                percentEncoded: false
+                            )
+                        ].map { (candidate.request.uuid, $0) }
+                    }
+                )
                 let chunkResult = await commitPreparedImports(
                     prepared,
                     assigningTo: targetWorkID,
-                    session: session
+                    session: session,
+                    catalogContexts: catalogContextsByRequestID
                 )
                 importedBookIDs.append(contentsOf: chunkResult.importedBookIDs)
                 reviewBookIDs.formUnion(chunkResult.reviewBookIDs)
@@ -1265,748 +1047,6 @@ final class ImportService {
         return session
     }
 
-    private func updateImportReviewItem(
-        id: UUID,
-        update: (inout PreparedImportItem) -> Void
-    ) {
-        guard var batch = preparedImportBatch,
-              batch.phase == .ready,
-              let index = batch.items.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-        update(&batch.items[index])
-        preparedImportBatch = batch
-    }
-
-    private func finishImportReviewPreparation(
-        _ outcomes: [PreparationOutcome],
-        batchID: UUID,
-        session: ImportSession
-    ) async {
-        guard var pending = pendingImportReview,
-              pending.batchID == batchID else {
-            let abandoned: [PreparedImport] = outcomes.compactMap {
-                guard case .prepared(let prepared) = $0 else { return nil }
-                return prepared
-            }
-            await abort(abandoned.flatMap(\.transactions))
-            return
-        }
-
-        var prepared: [PreparedImport] = []
-        var failures = pending.validationFailures
-        for outcome in outcomes {
-            switch outcome {
-            case .prepared(let value):
-                prepared.append(value)
-            case .failed(let failure):
-                failures.append(failure)
-            case .cancelled:
-                break
-            }
-        }
-
-        let requestIDs = Set(pending.requests.map(\.uuid))
-        preparingImportUUIDs.subtract(requestIDs)
-        pendingMetadataUUIDs.subtract(requestIDs)
-        activeImportOperationCount -= 1
-
-        guard !Task.isCancelled,
-              activeImportSessions[session.id] === session else {
-            await abort(prepared.flatMap(\.transactions))
-            finishImportReviewSession(
-                pending,
-                failures: failures,
-                finalStep: .cancelled,
-                reportResult: false
-            )
-            return
-        }
-
-        session.advance(to: .reconciliation)
-        let baseReconciler: ImportReconciler
-        do {
-            baseReconciler = try identityIndex.reconciler()
-        } catch {
-            await abort(prepared.flatMap(\.transactions))
-            failures.append(contentsOf: importFailures(
-                for: prepared,
-                reason: .catalog,
-                detail: error.localizedDescription
-            ))
-            finishImportReviewSession(
-                pending,
-                failures: failures,
-                finalStep: .failed,
-                reportResult: true
-            )
-            return
-        }
-
-        var reconciler = baseReconciler
-        var reviewItems = failures.map(blockedReviewItem)
-        var retained: [UUID: PreparedImport] = [:]
-        var virtualWorksByID: [UUID: ImportReviewWorkTarget] = [:]
-        var virtualWorkIDsByBookID: [UUID: UUID] = [:]
-        for candidate in prepared {
-            guard !Task.isCancelled else {
-                await abort(prepared.flatMap(\.transactions))
-                finishImportReviewSession(
-                    pending,
-                    failures: failures,
-                    finalStep: .cancelled,
-                    reportResult: false
-                )
-                return
-            }
-            let proposal = await ImportProposalBuilder.build(
-                candidate: candidate.reconciliationCandidate,
-                using: reconciler
-            )
-            let preview = await Self.reviewCoverPreview(
-                candidate.inspection.coverJPEGData
-            )
-            retained[candidate.request.uuid] = candidate
-            let targets = reviewTargets(
-                for: proposal.reconciliation,
-                virtualWorksByID: virtualWorksByID,
-                virtualWorkIDsByBookID: virtualWorkIDsByBookID
-            )
-            reviewItems.append(
-                makeReviewItem(
-                    for: candidate,
-                    proposal: proposal,
-                    coverPreview: preview,
-                    workTargets: targets,
-                    catalogContext:
-                        pending.catalogContextsBySourcePath[
-                            candidate.request.sourceURL
-                                .standardizedFileURL.path(
-                                    percentEncoded: false
-                                )
-                        ]
-                )
-            )
-            if case .ambiguousReview = proposal.reconciliation {
-                continue
-            }
-            reconciler.record(
-                candidate.reconciliationCandidate,
-                reconciliation: proposal.reconciliation
-            )
-            recordVirtualImportTarget(
-                candidate: candidate,
-                reconciliation: proposal.reconciliation,
-                existingTargets: targets,
-                worksByID: &virtualWorksByID,
-                workIDsByBookID: &virtualWorkIDsByBookID
-            )
-        }
-
-        pending.preparedByID = retained
-        pendingImportReview = pending
-        preparedImportBatch = PreparedImportBatch(
-            id: batchID,
-            sessionID: session.id,
-            requestedCount: preparedImportBatch?.requestedCount
-                ?? session.requestedSourceCount,
-            phase: .ready,
-            items: reviewItems.sorted {
-                $0.sourceName.localizedStandardCompare($1.sourceName)
-                    == .orderedAscending
-            },
-            completedPreparationCount: pending.sources.count
-        )
-        session.finish(as: .modelProposal)
-        activeImportSessions.removeValue(forKey: session.id)
-        if pending.automaticallyCommitCleanSingle,
-           reviewItems.count == 1,
-           reviewItems[0].isSelected,
-           reviewItems[0].warnings.isEmpty,
-           reviewItems[0].proposedAction == .createNewWork {
-            commitImportReview()
-        }
-    }
-
-    @concurrent
-    private static func reviewCoverPreview(_ data: Data?) async -> Data? {
-        guard !Task.isCancelled, let data else { return nil }
-        return ImageTranscoder.jpegData(from: data, maxPixel: 600)
-    }
-
-    private func blockedReviewItem(
-        _ failure: ImportFailure
-    ) -> PreparedImportItem {
-        PreparedImportItem(
-            id: failure.requestedBookID ?? UUID(),
-            sourceURL: failure.sourceURL ?? URL(filePath: "/"),
-            sourceName: failure.sourceURL?.lastPathComponent
-                ?? String(localized: "Unknown import source"),
-            format: failure.sourceURL?.pathExtension.lowercased() ?? "",
-            sizeBytes: 0,
-            sha256: nil,
-            drmProtected: false,
-            validation: nil,
-            coverPreviewJPEGData: nil,
-            metadata: BookMetadata(),
-            proposedAction: .skip,
-            action: .skip,
-            isSelected: false,
-            isSelectable: false,
-            reasons: [failure.reason.localizedLabel],
-            warnings: [failure.detail],
-            workTargets: [],
-            catalogContext: nil,
-            catalogMetadataDifferences: []
-        )
-    }
-
-    private func makeReviewItem(
-        for prepared: PreparedImport,
-        proposal: ImportModelProposal,
-        coverPreview: Data?,
-        workTargets: [ImportReviewWorkTarget],
-        catalogContext: CatalogImportContext?
-    ) -> PreparedImportItem {
-        let inspection = prepared.inspection
-        let proposedAction: ImportReviewAction
-        let reasons: [String]
-        switch proposal.reconciliation {
-        case .exactDuplicate:
-            proposedAction = .skip
-            reasons = [
-                String(localized: "The same file content is already in the library.")
-            ]
-        case .addFormatToEdition(let bookID, let workID):
-            proposedAction = .addFormat(bookID: bookID, workID: workID)
-            reasons = [
-                String(localized: "Strong metadata or file evidence matches an existing edition.")
-            ]
-        case .createAnotherEdition(let workID):
-            proposedAction = .createEdition(workID: workID)
-            reasons = [
-                String(localized: "The title and author match an existing work, but edition details differ.")
-            ]
-        case .createNewWork:
-            proposedAction = .createNewWork
-            reasons = [
-                String(localized: "No strong existing work or edition match was found.")
-            ]
-        case .ambiguousReview:
-            proposedAction = .skip
-            reasons = [
-                String(localized: "Several existing works match. Choose a destination or create a new work.")
-            ]
-        }
-
-        var warnings: [String] = []
-        if inspection.drmProtected {
-            warnings.append(
-                String(localized: "DRM-protected files cannot be imported.")
-            )
-        }
-        if inspection.validation == .corrupt {
-            warnings.append(
-                String(localized: "The file appears damaged or could not be fully validated.")
-            )
-        }
-        let title = inspection.metadata.title?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if title?.isEmpty != false {
-            warnings.append(
-                String(localized: "No embedded title was found; the filename will be used.")
-            )
-        }
-        let isSelectable = !inspection.drmProtected
-            && inspection.validation != .missing
-        let action = isSelectable ? proposedAction : .skip
-        return PreparedImportItem(
-            id: prepared.request.uuid,
-            sourceURL: prepared.request.sourceURL,
-            sourceName: prepared.request.originalName,
-            format: inspection.format,
-            sizeBytes: inspection.sizeBytes,
-            sha256: inspection.sha256,
-            drmProtected: inspection.drmProtected,
-            validation: inspection.validation,
-            coverPreviewJPEGData: coverPreview,
-            metadata: inspection.metadata,
-            proposedAction: proposedAction,
-            action: action,
-            isSelected: isSelectable && action.importsFile,
-            isSelectable: isSelectable,
-            reasons: reasons,
-            warnings: warnings,
-            workTargets: workTargets,
-            catalogContext: catalogContext,
-            catalogMetadataDifferences: Self.catalogMetadataDifferences(
-                context: catalogContext,
-                extracted: inspection.metadata
-            )
-        )
-    }
-
-    nonisolated private static func catalogMetadataDifferences(
-        context: CatalogImportContext?,
-        extracted: BookMetadata
-    ) -> [CatalogMetadataDifference] {
-        guard let context else { return [] }
-        var differences: [CatalogMetadataDifference] = []
-        appendCatalogDifference(
-            field: String(localized: "Title"),
-            catalogValue: context.publicationTitle,
-            extractedValue: extracted.title,
-            to: &differences
-        )
-        appendCatalogDifference(
-            field: String(localized: "Author"),
-            catalogValue: context.publicationAuthors.joined(
-                separator: ", "
-            ),
-            extractedValue: extracted.author,
-            to: &differences
-        )
-        if let language = context.publicationLanguage {
-            appendCatalogDifference(
-                field: String(localized: "Language"),
-                catalogValue: language,
-                extractedValue: extracted.language,
-                to: &differences
-            )
-        }
-        return differences
-    }
-
-    nonisolated private static func appendCatalogDifference(
-        field: String,
-        catalogValue: String,
-        extractedValue: String?,
-        to differences: inout [CatalogMetadataDifference]
-    ) {
-        let catalog = catalogValue.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        guard !catalog.isEmpty else { return }
-        let extracted = extractedValue?.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        guard catalog.localizedCaseInsensitiveCompare(
-            extracted ?? ""
-        ) != .orderedSame else {
-            return
-        }
-        differences.append(CatalogMetadataDifference(
-            field: field,
-            catalogValue: catalog,
-            extractedValue: extracted?.isEmpty == false ? extracted : nil
-        ))
-    }
-
-    private func reviewTargets(
-        for reconciliation: ImportReconciliation,
-        virtualWorksByID: [UUID: ImportReviewWorkTarget],
-        virtualWorkIDsByBookID: [UUID: UUID]
-    ) -> [ImportReviewWorkTarget] {
-        let workIDs: [UUID]
-        switch reconciliation {
-        case .exactDuplicate(let bookID),
-             .addFormatToEdition(let bookID, _):
-            if let workID = virtualWorkIDsByBookID[bookID] {
-                workIDs = [workID]
-            } else {
-                workIDs = (try? mutations.book(id: bookID).work?.uuid)
-                    .map { [$0] } ?? []
-            }
-        case .createAnotherEdition(let workID):
-            workIDs = [workID]
-        case .ambiguousReview(let candidateWorkIDs):
-            workIDs = candidateWorkIDs
-        case .createNewWork:
-            workIDs = []
-        }
-
-        return workIDs.compactMap { workID in
-            if let virtual = virtualWorksByID[workID] {
-                return virtual
-            }
-            guard let work = try? mutations.work(id: workID) else { return nil }
-            let editions = work.editions
-                .sorted {
-                    $0.displayTitle.localizedStandardCompare($1.displayTitle)
-                        == .orderedAscending
-                }
-                .map {
-                    ImportReviewEditionTarget(
-                        id: $0.uuid,
-                        title: $0.displayTitle,
-                        detail: $0.displayAuthor,
-                        workID: workID
-                    )
-                }
-            return ImportReviewWorkTarget(
-                id: workID,
-                title: work.displayTitle,
-                detail: work.author,
-                editions: editions
-            )
-        }
-    }
-
-    private func recordVirtualImportTarget(
-        candidate: PreparedImport,
-        reconciliation: ImportReconciliation,
-        existingTargets: [ImportReviewWorkTarget],
-        worksByID: inout [UUID: ImportReviewWorkTarget],
-        workIDsByBookID: inout [UUID: UUID]
-    ) {
-        let proposed = candidate.reconciliationCandidate
-        let inspection = candidate.inspection
-        let edition = ImportReviewEditionTarget(
-            id: proposed.proposedBookID,
-            title: inspection.metadata.title ?? candidate.request.originalName,
-            detail: inspection.metadata.author,
-            workID: nil
-        )
-        switch reconciliation {
-        case .createNewWork:
-            let workID = proposed.proposedWorkID
-            worksByID[workID] = ImportReviewWorkTarget(
-                id: workID,
-                title: inspection.metadata.title ?? candidate.request.originalName,
-                detail: inspection.metadata.author,
-                editions: [
-                    ImportReviewEditionTarget(
-                        id: edition.id,
-                        title: edition.title,
-                        detail: edition.detail,
-                        workID: workID
-                    ),
-                ]
-            )
-            workIDsByBookID[proposed.proposedBookID] = workID
-
-        case .createAnotherEdition(let workID):
-            guard var work = worksByID[workID] ?? existingTargets.first(
-                where: { $0.id == workID }
-            ) else { return }
-            work = ImportReviewWorkTarget(
-                id: work.id,
-                title: work.title,
-                detail: work.detail,
-                editions: work.editions + [
-                    ImportReviewEditionTarget(
-                        id: edition.id,
-                        title: edition.title,
-                        detail: edition.detail,
-                        workID: workID
-                    ),
-                ]
-            )
-            worksByID[workID] = work
-            workIDsByBookID[proposed.proposedBookID] = workID
-
-        case .exactDuplicate, .addFormatToEdition, .ambiguousReview:
-            break
-        }
-    }
-
-    private func performImportReviewCommit(batchID: UUID) async {
-        defer { activeImportOperationCount -= 1 }
-        guard let pending = pendingImportReview,
-              pending.batchID == batchID,
-              let batch = preparedImportBatch,
-              batch.id == batchID else { return }
-
-        let session = pending.session
-        var failures = pending.validationFailures
-        var importedBookIDs: [UUID] = []
-        var selected: [(PreparedImport, ImportReconciliation)] = []
-        var skippedTransactions: [ManagedFileTransaction] = []
-        var skippedCount = 0
-        var createdWorkIDs: Set<UUID> = []
-        var createdBookIDs: Set<UUID> = []
-        var itemOutcomes: [UUID: ImportReviewItemOutcome] = Dictionary(
-            uniqueKeysWithValues: batch.items.compactMap { item in
-                item.isSelectable ? nil : (item.id, .failed)
-            }
-        )
-
-        let itemsByID = Dictionary(
-            uniqueKeysWithValues: batch.items.map { ($0.id, $0) }
-        )
-        let catalogContextsByRequestID = Dictionary(
-            uniqueKeysWithValues: batch.items.compactMap { item in
-                item.catalogContext.map { (item.id, $0) }
-            }
-        )
-        for request in pending.requests {
-            guard let item = itemsByID[request.uuid],
-                  let prepared = pending.preparedByID[item.id] else {
-                continue
-            }
-            guard item.willImport,
-                  let decision = reconciliation(for: item.action) else {
-                skippedTransactions.append(contentsOf: prepared.transactions)
-                skippedCount += 1
-                itemOutcomes[item.id] = .skipped
-                continue
-            }
-            guard importReviewDecisionIsAvailable(
-                decision,
-                createdWorkIDs: createdWorkIDs,
-                createdBookIDs: createdBookIDs
-            ) else {
-                skippedTransactions.append(contentsOf: prepared.transactions)
-                failures.append(ImportFailure(
-                    sourceURL: prepared.request.sourceURL,
-                    requestedBookID: prepared.request.uuid,
-                    reason: .catalog,
-                    detail: String(
-                        localized: "The selected in-batch destination is unavailable because its source item is not being imported."
-                    )
-                ))
-                continue
-            }
-            selected.append((
-                PreparedImport(
-                    request: prepared.request,
-                    inspection: prepared.inspection.replacing(metadata: item.metadata),
-                    fileTransaction: prepared.fileTransaction
-                ),
-                decision
-            ))
-            switch decision {
-            case .createNewWork:
-                createdWorkIDs.insert(prepared.request.workID)
-                createdBookIDs.insert(prepared.request.uuid)
-            case .createAnotherEdition:
-                createdBookIDs.insert(prepared.request.uuid)
-            case .exactDuplicate, .addFormatToEdition, .ambiguousReview:
-                break
-            }
-        }
-        await abort(skippedTransactions)
-
-        let initialFailureCount = failures.count
-        var nextIndex = 0
-        while nextIndex < selected.count,
-              !Task.isCancelled,
-              activeImportSessions[session.id] === session {
-            let end = min(nextIndex + importCommitChunkSize, selected.count)
-            let chunk = Array(selected[nextIndex..<end])
-            session.updateProgress(
-                completed: initialFailureCount
-                    + skippedCount
-                    + nextIndex,
-                currentSourceURL: chunk.first?.0.request.sourceURL
-            )
-            let decisions = Dictionary(
-                uniqueKeysWithValues: chunk.map { ($0.0.request.uuid, $0.1) }
-            )
-            let result = await commitPreparedImports(
-                chunk.map(\.0),
-                assigningTo: nil,
-                session: session,
-                reviewDecisions: decisions,
-                catalogContexts: catalogContextsByRequestID
-            )
-            importedBookIDs.append(contentsOf: result.importedBookIDs)
-            failures.append(contentsOf: result.failures)
-            let failedRequestIDs = Set(result.failures.compactMap(\.requestedBookID))
-            for prepared in chunk.map(\.0) {
-                itemOutcomes[prepared.request.uuid] = failedRequestIDs.contains(
-                    prepared.request.uuid
-                ) ? .failed : .imported
-            }
-            nextIndex = end
-            session.updateProgress(
-                completed: initialFailureCount
-                    + skippedCount
-                    + nextIndex,
-                currentSourceURL: nextIndex < selected.count
-                    ? selected[nextIndex].0.request.sourceURL
-                    : nil
-            )
-            await Task.yield()
-        }
-
-        if nextIndex < selected.count {
-            await abort(selected[nextIndex...].flatMap { $0.0.transactions })
-            for prepared in selected[nextIndex...].map(\.0) {
-                itemOutcomes[prepared.request.uuid] = .cancelled
-            }
-        }
-
-        let wasCancelled = Task.isCancelled
-            || activeImportSessions[session.id] !== session
-            || session.step == .cancelling
-        for item in batch.items where itemOutcomes[item.id] == nil {
-            if !item.isSelectable {
-                itemOutcomes[item.id] = .failed
-            } else if !item.willImport {
-                itemOutcomes[item.id] = .skipped
-            } else {
-                itemOutcomes[item.id] = wasCancelled ? .cancelled : .failed
-            }
-        }
-        session.updateProgress(
-            completed: wasCancelled
-                ? initialFailureCount + skippedCount + nextIndex
-                : session.requestedSourceCount,
-            currentSourceURL: nil
-        )
-        session.replaceFailures(failures)
-
-        let uniqueImportedBookIDs = Array(Set(importedBookIDs))
-        if !wasCancelled {
-            session.advance(to: .derivedJobs)
-            for bookID in uniqueImportedBookIDs {
-                enqueueMetadataJob(
-                    bookID: bookID,
-                    requiresLocalAnalysis: false,
-                    evaluateMatch: false
-                )
-            }
-        }
-        session.finish(as: wasCancelled ? .cancelled : .completed)
-
-        let summary = ImportSummary(
-            session: session,
-            importedBookIDs: importedBookIDs,
-            skippedCount: skippedCount
-        )
-        lastImportFailures = failures
-        lastImportSummary = summary
-        await persistImportFailures(failures)
-        logImportFailures(failures)
-        reportImportSummary(summary)
-
-        let imported = uniqueImportedBookIDs.compactMap {
-            try? mutations.book(id: $0)
-        }
-        finishImportReviewResources(pending)
-        preparedImportBatch = PreparedImportBatch(
-            id: batch.id,
-            sessionID: batch.sessionID,
-            requestedCount: batch.requestedCount,
-            phase: .completed(summary),
-            items: batch.items,
-            completedPreparationCount: batch.completedPreparationCount,
-            itemOutcomes: itemOutcomes
-        )
-        pending.completion?(imported)
-    }
-
-    private func reconciliation(
-        for action: ImportReviewAction
-    ) -> ImportReconciliation? {
-        switch action {
-        case .skip:
-            nil
-        case .createNewWork:
-            .createNewWork
-        case .createEdition(let workID):
-            .createAnotherEdition(workID: workID)
-        case .addFormat(let bookID, let workID):
-            .addFormatToEdition(existingBookID: bookID, workID: workID)
-        }
-    }
-
-    private func importReviewDecisionIsAvailable(
-        _ decision: ImportReconciliation,
-        createdWorkIDs: Set<UUID>,
-        createdBookIDs: Set<UUID>
-    ) -> Bool {
-        switch decision {
-        case .createNewWork:
-            true
-        case .createAnotherEdition(let workID):
-            createdWorkIDs.contains(workID)
-                || (try? mutations.work(id: workID)) != nil
-        case .addFormatToEdition(let bookID, _):
-            createdBookIDs.contains(bookID)
-                || (try? mutations.book(id: bookID)) != nil
-        case .exactDuplicate(let bookID):
-            createdBookIDs.contains(bookID)
-                || (try? mutations.book(id: bookID)) != nil
-        case .ambiguousReview:
-            false
-        }
-    }
-
-    private func discardImportReview(batchID: UUID) async {
-        guard let pending = pendingImportReview,
-              pending.batchID == batchID else { return }
-        await abort(pending.preparedByID.values.flatMap(\.transactions))
-        pending.session.replaceFailures(pending.validationFailures)
-        pending.session.finish(as: .cancelled)
-        finishImportReviewResources(pending)
-        preparedImportBatch = nil
-        pending.completion?([])
-    }
-
-    func dismissImportReviewResult() {
-        guard pendingImportReview == nil else { return }
-        preparedImportBatch = nil
-    }
-
-    private func finishImportReviewSession(
-        _ pending: PendingImportReview,
-        failures: [ImportFailure],
-        finalStep: ImportSessionStep,
-        reportResult: Bool
-    ) {
-        pending.session.replaceFailures(failures)
-        pending.session.finish(as: finalStep)
-        let summary = ImportSummary(
-            session: pending.session,
-            importedBookIDs: []
-        )
-        finishImportReviewResources(pending)
-        if reportResult {
-            lastImportFailures = failures
-            lastImportSummary = summary
-            scheduleImportFailurePersistence(failures)
-            logImportFailures(failures)
-            reportImportSummary(summary)
-            if var batch = preparedImportBatch {
-                batch.phase = .failed(
-                    failures.first?.detail
-                        ?? String(localized: "The import could not be prepared.")
-                )
-                batch.items = failures.map(blockedReviewItem)
-                preparedImportBatch = batch
-            }
-        } else {
-            preparedImportBatch = nil
-        }
-        pending.completion?([])
-    }
-
-    private func finishImportReviewResources(
-        _ pending: PendingImportReview
-    ) {
-        if activeImportSessions[pending.session.id] === pending.session {
-            activeImportSessions.removeValue(forKey: pending.session.id)
-        }
-        let requestIDs = Set(pending.requests.map(\.uuid))
-        preparingImportUUIDs.subtract(requestIDs)
-        cancelledImportUUIDs.subtract(requestIDs)
-        pendingMetadataUUIDs.subtract(requestIDs)
-        for request in pending.requests {
-            pendingSourcePaths.remove(
-                request.sourceURL.standardizedFileURL.path(percentEncoded: false)
-            )
-        }
-        Self.cleanupOwnedSources(
-            pending.sources,
-            using: importSourceLeases
-        )
-        if pendingImportReview?.batchID == pending.batchID {
-            pendingImportReview = nil
-        }
-    }
-
     private func preflightImportSources(
         _ sources: [ImportSource]
     ) -> (requests: [CopyRequest], failures: [ImportFailure]) {
@@ -2087,15 +1127,10 @@ final class ImportService {
     }
 
     func cancelImportSession(id: UUID) {
-        if pendingImportReview?.session.id == id {
-            cancelImportReview()
-            return
-        }
         activeImportSessions[id]?.cancel()
     }
 
     func cancelAllSessions() {
-        cancelImportReview()
         for session in activeImportSessions.values {
             session.cancel()
         }
@@ -2993,13 +2028,6 @@ final class ImportService {
         if evaluateMatch, let editions {
             guard let currentBook = try? mutations.book(id: bookID) else { return }
             editions.evaluate(currentBook)
-            if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(bookID) }) {
-                toasts.post(
-                    String(localized: "Edition suggestions are ready to review."),
-                    style: .info,
-                    action: .reviewEditionProposals
-                )
-            }
         }
     }
 
@@ -3017,19 +2045,6 @@ final class ImportService {
             try? mutations.book(id: id)
         }
         editions.evaluate(books)
-        var hasSuggestions = false
-        for book in books {
-            if editions.pendingProposals.contains(where: { $0.memberUUIDs.contains(book.uuid) }) {
-                hasSuggestions = true
-            }
-        }
-        if hasSuggestions {
-            toasts.post(
-                String(localized: "Edition suggestions are ready to review."),
-                style: .info,
-                action: .reviewEditionProposals
-            )
-        }
     }
 
     private func collectMaintenance<Value: Sendable>(
@@ -3143,20 +2158,6 @@ final class ImportService {
                 "Import failed [\(failure.reason.rawValue, privacy: .public)] \(failure.sourceURL?.lastPathComponent ?? "unknown", privacy: .public): \(failure.detail, privacy: .public)"
             )
         }
-    }
-
-    private func reportImportSummary(_ summary: ImportSummary) {
-        let presentation = ImportSummaryPresentation(summary: summary)
-        let style: ToastCenter.Message.Style = switch presentation.style {
-        case .success: .success
-        case .info: .info
-        case .error: .error
-        }
-        toasts.post(
-            presentation.message,
-            style: style,
-            action: presentation.showsReviewAction ? .reviewImport : nil
-        )
     }
 
     private func persistImportFailures(_ failures: [ImportFailure]) async {

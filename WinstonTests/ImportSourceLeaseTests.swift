@@ -310,7 +310,6 @@ struct ImportSourceLeaseTests {
                 modelContext: library.context,
                 toasts: toasts
             ),
-            toasts: toasts,
             importSourceLeases: leaseStore,
             analyzeBook: analyzeBook
         )

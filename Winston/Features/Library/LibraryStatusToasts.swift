@@ -3,9 +3,6 @@ import SwiftUI
 struct LibraryStatusToasts: View {
     let viewModel: LibraryViewModel
     let maintenance: MaintenanceScheduler
-    let onReviewEditions: () -> Void
-    let onReviewImport: () -> Void
-    let onReviewBulkOperation: () -> Void
     let onResolveDigitalFile: (UUID) -> Void
 
     @Environment(\.theme) private var theme
@@ -23,24 +20,6 @@ struct LibraryStatusToasts: View {
                         progress: progress.fraction,
                         isCancelling: viewModel.isCancellingBulkOperation,
                         onCancel: viewModel.cancelBulkOperation
-                    )
-                    .transition(toastTransition)
-                } else if let report = viewModel.bulkOperationReport {
-                    BulkOperationResultToastCard(
-                        report: report,
-                        onDetails: onReviewBulkOperation,
-                        onDismiss: viewModel.dismissBulkOperationReport
-                    )
-                    .transition(toastTransition)
-                }
-                if let progress = viewModel.standardImportProgress {
-                    ProgressToastCard(
-                        title: standardImportTitle(progress),
-                        progress: progress.fraction,
-                        isCancelling: progress.isCancelling,
-                        onCancel: {
-                            viewModel.cancelImportSession(id: progress.sessionID)
-                        }
                     )
                     .transition(toastTransition)
                 }
@@ -90,8 +69,6 @@ struct LibraryStatusToasts: View {
         .padding(16)
         .animation(toastAnimation, value: activeToasts.map(\.id))
         .animation(toastAnimation, value: viewModel.activeBulkOperationProgress)
-        .animation(toastAnimation, value: viewModel.bulkOperationReport?.id)
-        .animation(toastAnimation, value: viewModel.standardImportProgress)
         .animation(toastAnimation, value: transferQueue.isTransferring)
         .animation(toastAnimation, value: deviceMonitor.deviceDeleteProgress)
         .animation(toastAnimation, value: viewModel.isImportingCalibre)
@@ -126,21 +103,6 @@ struct LibraryStatusToasts: View {
         return "\(base) (\(current)/\(total))"
     }
 
-    private func standardImportTitle(_ progress: ImportSessionProgress) -> String {
-        if progress.isCancelling {
-            return String(localized: "Cancelling import…")
-        }
-        let step = progress.step.localizedProgressLabel
-        if let filename = progress.currentFilename {
-            return String(
-                localized: "Importing \(progress.completedCount) of \(progress.requestedCount): \(filename) — \(step)…"
-            )
-        }
-        return String(
-            localized: "Importing \(progress.completedCount) of \(progress.requestedCount) — \(step)…"
-        )
-    }
-
     private func bulkOperationTitle(_ progress: BulkOperationProgress) -> String {
         if viewModel.isCancellingBulkOperation {
             return String(localized: "Cancelling bulk operation…")
@@ -153,7 +115,8 @@ struct LibraryStatusToasts: View {
     private var activeToasts: [Toast] {
         var toasts: [Toast] = []
 
-        if let progress = viewModel.managedFileProgress {
+        if let progress = viewModel.managedFileProgress,
+           progress.intent != .importBook {
             toasts.append(Toast(
                 id: "managed-files",
                 style: .progress,
@@ -166,16 +129,7 @@ struct LibraryStatusToasts: View {
         }
 
         switch maintenance.phase {
-        case .running(let progress):
-            toasts.append(Toast(
-                id: "maintenance",
-                style: .progress,
-                message: maintenanceMessage(for: progress.job),
-                progress: progress.fraction
-            ))
-        case .paused:
-            // Pausing background maintenance is expected (especially in Low
-            // Power Mode), so it should not occupy a permanent toast slot.
+        case .running, .paused:
             break
         case .failed(let job, _):
             toasts.append(Toast(
@@ -198,12 +152,7 @@ struct LibraryStatusToasts: View {
             toasts.append(Toast(id: "calibre", style: style, message: summary))
         }
 
-        if viewModel.isExtracting, viewModel.standardImportProgress == nil {
-            toasts.append(Toast(id: "extract", style: .progress,
-                                message: theme.copy.extracting(remaining: viewModel.pendingMetadataCount)))
-        }
-
-        if viewModel.isFetchingOnline {
+        if viewModel.isFetchingMetadataManually {
             toasts.append(Toast(id: "online", style: .progress,
                                 message: theme.usesTerminalCopy ? "fetching_metadata..." : String(localized: "Fetching metadata online\u{2026}")))
         } else if let summary = viewModel.metadataFetchSummary {
@@ -264,10 +213,6 @@ struct LibraryStatusToasts: View {
         }
     }
 
-    private func maintenanceMessage(for job: MaintenanceJob) -> String {
-        String(localized: "Library maintenance: \(maintenanceJobName(job))…")
-    }
-
     private func maintenanceJobName(_ job: MaintenanceJob) -> String {
         switch job {
         case .legacyLibrary:
@@ -290,45 +235,10 @@ struct LibraryStatusToasts: View {
     private func handleAction(_ toast: Toast) {
         guard let action = toast.action else { return }
         switch action {
-        case .reviewEditionProposals:
-            onReviewEditions()
-        case .reviewImport:
-            onReviewImport()
         case .relinkBook(let bookID), .attachDigitalFile(let bookID):
             onResolveDigitalFile(bookID)
         }
         if let id = toast.messageID { toastCenter.dismiss(id) }
-    }
-}
-
-extension ImportSessionStep {
-    var localizedProgressLabel: String {
-        switch self {
-        case .sourceDiscovery:
-            String(localized: "discovering sources")
-        case .staging:
-            String(localized: "staging files")
-        case .inspection:
-            String(localized: "inspecting files")
-        case .reconciliation:
-            String(localized: "reconciling editions")
-        case .modelProposal:
-            String(localized: "preparing catalog changes")
-        case .chunkCommit:
-            String(localized: "saving imported books")
-        case .publishing:
-            String(localized: "publishing library changes")
-        case .derivedJobs:
-            String(localized: "scheduling metadata work")
-        case .cancelling:
-            String(localized: "cancelling")
-        case .cancelled:
-            String(localized: "cancelled")
-        case .failed:
-            String(localized: "failed")
-        case .completed:
-            String(localized: "completed")
-        }
     }
 }
 
@@ -411,8 +321,6 @@ private struct ToastCard: View {
 
     private var actionTitle: LocalizedStringResource {
         switch toast.action {
-        case .reviewEditionProposals: "Review"
-        case .reviewImport: "Review"
         case .relinkBook: "Relink"
         case .attachDigitalFile: "Attach"
         case nil: "Open"
@@ -488,76 +396,6 @@ private struct ProgressToastCard: View {
                 style: .continuous
             )
         )
-    }
-}
-
-private struct BulkOperationResultToastCard: View {
-    let report: BulkOperationPresentationReport
-    let onDetails: () -> Void
-    let onDismiss: () -> Void
-
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: systemImage)
-                .foregroundStyle(color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(summary)
-                    .font(.callout)
-                    .lineLimit(2)
-                HStack(spacing: 10) {
-                    Button("Details", action: onDetails)
-                        .buttonStyle(.link)
-                    Button("Dismiss", action: onDismiss)
-                        .buttonStyle(.link)
-                }
-                .font(.caption.weight(.semibold))
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: 300, alignment: .leading)
-        .glassEffect(
-            .regular,
-            in: RoundedRectangle(
-                cornerRadius: WinstonLayout.cornerLarge,
-                style: .continuous
-            )
-        )
-        .accessibilityElement(children: .contain)
-    }
-
-    private var summary: String {
-        switch report.outcomeKind {
-        case .success:
-            String(localized: "Bulk operation completed with \(report.appliedChangeCount) changes.")
-        case .partialSuccess:
-            String(localized: "Bulk operation partially completed; \(report.pendingCount) items remain.")
-        case .cancelled:
-            String(localized: "Bulk operation cancelled; \(report.pendingCount) items remain.")
-        case .conflict:
-            String(localized: "Bulk operation found \(report.conflictCount) conflicts.")
-        case .failure:
-            String(localized: "Bulk operation failed; \(report.pendingCount) items remain.")
-        }
-    }
-
-    private var systemImage: String {
-        switch report.outcomeKind {
-        case .success: "checkmark.circle.fill"
-        case .partialSuccess, .cancelled, .conflict: "exclamationmark.circle.fill"
-        case .failure: "xmark.octagon.fill"
-        }
-    }
-
-    private var color: Color {
-        switch report.outcomeKind {
-        case .success: theme.success
-        case .partialSuccess, .cancelled, .conflict: theme.highlight
-        case .failure: theme.destructive
-        }
     }
 }
 
