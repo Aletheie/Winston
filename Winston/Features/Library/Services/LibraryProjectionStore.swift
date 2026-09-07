@@ -75,6 +75,7 @@ final class LibraryProjectionStore {
     @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private var synchronizationToken = 0
     @ObservationIgnored private var lastSuccessAt: Date?
+    @ObservationIgnored private var bookIndexByID: [UUID: Int] = [:]
 
     var isReady: Bool { generation >= 0 }
     var lastError: String? { status.failure?.message }
@@ -251,6 +252,9 @@ final class LibraryProjectionStore {
         ))
 
         books = fetchedBooks
+        bookIndexByID = Dictionary(uniqueKeysWithValues: fetchedBooks.enumerated().map {
+            ($0.element.uuid, $0.offset)
+        })
         collections = fetchedCollections
         self.generation = generation
         fullRebuildCount += 1
@@ -291,15 +295,19 @@ final class LibraryProjectionStore {
                 projectedByID[id] = changedByID[id]
             }
             books = projectedByID.values.sorted(by: Self.sourcePrecedes)
+            bookIndexByID = Dictionary(uniqueKeysWithValues: books.enumerated().map {
+                ($0.element.uuid, $0.offset)
+            })
             return
         }
 
-        let existingIDs = Set(books.map(\.uuid))
-        for id in ids where changedByID[id] == nil && existingIDs.contains(id) {
+        for id in ids where changedByID[id] == nil && bookIndexByID[id] != nil {
             throw LibraryProjectionStoreError.missingChangedBook(id)
         }
-        guard !changedBooks.isEmpty else { return }
-        books = books.map { changedByID[$0.uuid] ?? $0 }
+        for book in changedBooks {
+            guard let index = bookIndexByID[book.uuid], books[index] !== book else { continue }
+            books[index] = book
+        }
     }
 
     private func reloadCollections(context: ModelContext) throws {

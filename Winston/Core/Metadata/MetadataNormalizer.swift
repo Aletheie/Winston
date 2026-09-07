@@ -369,8 +369,10 @@ nonisolated enum MetadataNormalizer {
     }
 
     static func languageMatches(actual rawActual: String?, operand rawOperand: String) -> Bool {
-        let actual = language(rawActual)
-        let operand = language(rawOperand)
+        languageMatches(actual: language(rawActual), operand: language(rawOperand))
+    }
+
+    static func languageMatches(actual: NormalizedLanguage, operand: NormalizedLanguage) -> Bool {
         guard operand.status != .unrecognized else {
             return rawComparisonKey(actual.normalizedRawValue)
                 == rawComparisonKey(operand.normalizedRawValue)

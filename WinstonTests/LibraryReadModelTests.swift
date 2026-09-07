@@ -36,6 +36,31 @@ private actor ReadModelSynchronizationGate {
     }
 }
 
+private final class LockedReadModelClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(_ value: Date) {
+        self.value = value
+    }
+
+    var now: Date {
+        lock.withLock { value }
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.withLock { value = value.addingTimeInterval(interval) }
+    }
+
+    func readAndAdvance(by interval: TimeInterval) -> Date {
+        lock.withLock {
+            let current = value
+            value = value.addingTimeInterval(interval)
+            return current
+        }
+    }
+}
+
 @MainActor
 @Suite(.serialized)
 struct LibraryReadModelTests {
@@ -189,6 +214,285 @@ struct LibraryReadModelTests {
         )
     }
 
+    @Test func relativeFacetsRefreshWhenTimeCrossesTheRecentCutoff() async {
+        let initialNow = Date(timeIntervalSince1970: 2_000_000_000)
+        let clock = LockedReadModelClock(initialNow)
+        let book = Book(
+            fileName: "aging.epub",
+            originalFileName: "Aging.epub",
+            dateAdded: initialNow.addingTimeInterval(-13 * 24 * 3600)
+        )
+        let model = LibraryReadModel(now: { clock.now })
+        await bootstrap(model, books: [book])
+        #expect(model.facets.recent == 1)
+
+        clock.advance(by: 2 * 24 * 3600)
+        model.refreshRelativeFacets()
+
+        #expect(model.facets.recent == 0)
+        #expect(model.relativeFilterRevision == 1)
+        let recentIDs = await model.displayIDs(
+            query: query(filter: .recentlyAdded)
+        )
+        #expect(recentIDs.isEmpty)
+    }
+
+    @Test func bulkSortChangesRemoveEveryOldPositionBeforeInsertion() async throws {
+        let alpha = Book(fileName: "alpha.epub", originalFileName: "Alpha.epub")
+        alpha.title = "Alpha"
+        let bravo = Book(fileName: "bravo.epub", originalFileName: "Bravo.epub")
+        bravo.title = "Bravo"
+        let charlie = Book(
+            fileName: "charlie.epub",
+            originalFileName: "Charlie.epub"
+        )
+        charlie.title = "Charlie"
+        let delta = Book(fileName: "delta.epub", originalFileName: "Delta.epub")
+        delta.title = "Delta"
+        let books = [alpha, bravo, charlie, delta]
+        let model = LibraryReadModel()
+        await bootstrap(model, books: books)
+        let titleQuery = query(
+            filter: .all,
+            sort: LibraryDisplaySort(field: .title, ascending: true)
+        )
+        let originalIDs = await model.displayIDs(query: titleQuery)
+        let oldAlpha = try #require(model.record(for: alpha.uuid))
+        let oldCharlie = try #require(model.record(for: charlie.uuid))
+
+        alpha.title = "Able"
+        charlie.title = "Aaa"
+        await model.synchronize(
+            books: books,
+            collections: [],
+            delta: LibraryCatalogDelta(
+                fromRevision: 0,
+                toRevision: 1,
+                affectedBookIDs: [alpha.uuid, charlie.uuid],
+                affectedCollectionIDs: [],
+                fields: [.displayMetadata],
+                requiresFullRebuild: false,
+                changesBookMembership: false
+            ),
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+        let newAlpha = try #require(model.record(for: alpha.uuid))
+        let newCharlie = try #require(model.record(for: charlie.uuid))
+        let orderedChanges = LibraryReadModelDisplayDelta(
+            fromGeneration: 0,
+            toGeneration: 1,
+            changes: [
+                LibraryReadModelRecordChange(
+                    id: alpha.uuid,
+                    old: oldAlpha,
+                    new: newAlpha
+                ),
+                LibraryReadModelRecordChange(
+                    id: charlie.uuid,
+                    old: oldCharlie,
+                    new: newCharlie
+                ),
+            ],
+            requiresFullRebuild: false
+        )
+
+        let incremental = try #require(
+            model.incrementallyUpdatingDisplayIDs(
+                originalIDs,
+                with: orderedChanges,
+                query: titleQuery
+            )
+        )
+
+        #expect(incremental.ids == [
+            charlie.uuid,
+            alpha.uuid,
+            bravo.uuid,
+            delta.uuid,
+        ])
+        let rebuiltIDs = await model.displayIDs(query: titleQuery)
+        #expect(incremental.ids == rebuiltIDs)
+    }
+
+    @Test func thousandRecordBatchPreservesDisplayPluginOrderAndFacetIndexes() async throws {
+        let books = makeBooks(1_000)
+        let model = LibraryReadModel()
+        await bootstrap(model, books: books)
+        let titleQuery = query(filter: .all, sort: LibraryDisplaySort(field: .title, ascending: true))
+        let previousIDs = await model.displayIDs(query: titleQuery)
+        for (index, book) in books.enumerated() {
+            book.title = "Changed \(books.count - index)"
+            book.readingStatus = .reading
+        }
+        await model.synchronize(
+            books: books,
+            collections: [],
+            delta: LibraryCatalogDelta(
+                fromRevision: 0,
+                toRevision: 1,
+                affectedBookIDs: Set(books.map(\.uuid)),
+                affectedCollectionIDs: [],
+                fields: [.displayMetadata, .readingState],
+                requiresFullRebuild: false,
+                changesBookMembership: false
+            ),
+            deviceFileNames: [],
+            deviceIsConnected: false
+        )
+        let referenceIDs = LibraryQuery.displayIDs(for: model.recordSnapshot(), query: titleQuery)
+        let incremental = try #require(model.incrementallyUpdatingDisplayIDs(
+            previousIDs,
+            with: model.displayDelta(since: 0),
+            query: titleQuery
+        ))
+        #expect(incremental.ids == referenceIDs)
+        #expect(await model.displayIDs(query: titleQuery) == referenceIDs)
+        #expect(await model.displayIDs(query: query(filter: .status(.unread))).isEmpty)
+        #expect(await model.displayIDs(query: query(filter: .status(.reading))) == books.map(\.uuid))
+        #expect(model.facets.statusCounts[.reading] == books.count)
+        #expect(model.facets.authors["Author 0"] == 4)
+        #expect(model.facets.tags["tag-0"] == 20)
+        let page = try #require(await model.pluginBooks(
+            matching: "", offset: 0, limit: books.count,
+            scanLimit: books.count, maximumOffset: books.count
+        ))
+        #expect(page.items == books.map(PluginBookDTO.init).sorted(by: PluginBookDTO.precedes))
+        #expect(model.diagnostics.fullRebuildCount == 1)
+    }
+
+    @Test func incrementalSourceOrderUsesLiveRanksAfterMultipleInsertions() async throws {
+        let original = makeBooks(3)
+        original[1].readingStatus = .reading
+        original[2].readingStatus = .reading
+        let model = LibraryReadModel()
+        await bootstrap(model, books: original)
+        let additions = makeBooks(3)
+        let books = additions + original
+        await model.synchronize(
+            books: books, collections: [],
+            delta: LibraryCatalogDelta(
+                fromRevision: 0, toRevision: 1,
+                affectedBookIDs: Set(additions.map(\.uuid)),
+                affectedCollectionIDs: [], fields: .all,
+                requiresFullRebuild: false, changesBookMembership: true
+            ),
+            deviceFileNames: [], deviceIsConnected: false
+        )
+        let readingQuery = query(filter: .status(.reading))
+        let previousIDs = await model.displayIDs(query: readingQuery)
+        original[0].readingStatus = .reading
+        await model.synchronize(
+            books: books, collections: [],
+            delta: LibraryCatalogDelta(
+                fromRevision: 1, toRevision: 2,
+                affectedBookIDs: [original[0].uuid],
+                affectedCollectionIDs: [], fields: [.readingState],
+                requiresFullRebuild: false, changesBookMembership: false
+            ),
+            deviceFileNames: [], deviceIsConnected: false
+        )
+        let incremental = try #require(model.incrementallyUpdatingDisplayIDs(
+            previousIDs, with: model.displayDelta(since: 1), query: readingQuery
+        ))
+        #expect(incremental.ids == original.map(\.uuid))
+        #expect(incremental.ids == (await model.displayIDs(query: readingQuery)))
+    }
+
+    @Test func cancelledIndexedQueryReturnsNoPartialResults() async {
+        let records = makeRecords(1_000)
+        let engine = LibraryMetadataQueryEngine(now: { .now })
+        await engine.rebuild(records: records, sourceOrder: records.map(\.id), generation: 1)
+        let specification = query(filter: .all, sort: LibraryDisplaySort(field: .title, ascending: false))
+        let cancelledQuery = Task { await engine.query(specification) }
+        cancelledQuery.cancel()
+        #expect(await cancelledQuery.value.ids.isEmpty)
+        #expect(await engine.query(allBooksQuery).ids == records.map(\.id))
+    }
+
+    @Test func overlappingDeltasRemoveTheActuallyIndexedDeviceKeys() async {
+        #expect(ManagedLeafName(rawValue: "Intermediate device name.epub") != nil)
+        #expect(ManagedLeafName(rawValue: "Final device name.epub") != nil)
+        let book = makeBooks(1)[0]
+        func capture() -> LibraryBookRecord {
+            LibraryBookRecord(book, sourceOrdinal: 0, includeCollections: true, includeHighlights: true)
+        }
+        let initial = capture()
+        let engine = LibraryMetadataQueryEngine(now: { .now })
+        await engine.rebuild(records: [initial], sourceOrder: [book.uuid], generation: 0)
+        book.originalFileName = "Intermediate device name.epub"
+        book.title = "Intermediate"
+        let intermediate = capture()
+        await engine.apply(
+            changes: [LibraryReadModelRecordChange(id: book.uuid, old: initial, new: intermediate)],
+            sourceOrder: nil, generation: 1
+        )
+        book.originalFileName = "Final device name.epub"
+        book.title = "Final"
+        let final = capture()
+        #expect(initial.deviceMatchKeys.isDisjoint(with: intermediate.deviceMatchKeys),
+                "Initial keys: \(initial.deviceMatchKeys); intermediate keys: \(intermediate.deviceMatchKeys)")
+        #expect(intermediate.deviceMatchKeys.isDisjoint(with: final.deviceMatchKeys),
+                "Intermediate keys: \(intermediate.deviceMatchKeys); final keys: \(final.deviceMatchKeys)")
+        // The newer task captured its delta before the first task published.
+        await engine.apply(
+            changes: [LibraryReadModelRecordChange(id: book.uuid, old: initial, new: final)],
+            sourceOrder: nil, generation: 2
+        )
+        let result = await engine.query(query(
+            filter: .all, deviceFileNames: intermediate.deviceMatchKeys,
+            deviceIsConnected: true, kindlePresenceFilter: .notOnKindle
+        ))
+        #expect(result.ids == [book.uuid])
+        #expect(result.generation == 2)
+        #expect(await engine.records(matchingDeviceKeys: intermediate.deviceMatchKeys).isEmpty)
+    }
+
+    @Test func recentExpirationTracksInsertedRecordsAndClockReversal() async {
+        let initialNow = Date(timeIntervalSince1970: 2_000_000_000)
+        let clock = LockedReadModelClock(initialNow)
+        let model = LibraryReadModel(now: { clock.now })
+        await bootstrap(model, books: [])
+        let book = Book(
+            fileName: "expiring.epub", originalFileName: "Expiring.epub",
+            dateAdded: initialNow.addingTimeInterval(-LibraryRelativeDateFilter.recentlyAddedInterval + 1)
+        )
+        await model.synchronize(
+            books: [book], collections: [],
+            delta: LibraryCatalogDelta(
+                fromRevision: 0, toRevision: 1, affectedBookIDs: [book.uuid],
+                affectedCollectionIDs: [], fields: .all,
+                requiresFullRebuild: false, changesBookMembership: true
+            ),
+            deviceFileNames: [], deviceIsConnected: false
+        )
+        #expect(model.facets.recent == 1)
+        clock.advance(by: 1)
+        model.refreshRelativeFacets()
+        #expect(model.facets.recent == 0)
+        clock.advance(by: -1)
+        model.refreshRelativeFacets()
+        #expect(model.facets.recent == 1)
+        #expect(model.relativeFilterRevision == 2)
+    }
+
+    @Test func cutoffBetweenFacetCalculationAndPublicationRemainsScheduled() async {
+        let initialNow = Date(timeIntervalSince1970: 2_000_000_000)
+        let clock = LockedReadModelClock(initialNow)
+        let model = LibraryReadModel(now: { clock.readAndAdvance(by: 1) })
+        let book = Book(
+            fileName: "publication-cutoff.epub", originalFileName: "Publication cutoff.epub",
+            dateAdded: initialNow.addingTimeInterval(-LibraryRelativeDateFilter.recentlyAddedInterval + 2)
+        )
+        await bootstrap(model, books: [book])
+        #expect(model.facets.recent == 1)
+
+        model.refreshRelativeFacets()
+
+        #expect(model.facets.recent == 0)
+        #expect(model.relativeFilterRevision == 1)
+    }
+
     @Test func statusFilterRemovesOnlyTheChangedBook() async throws {
         let books = makeBooks(100)
         let changed = books[42]
@@ -274,6 +578,51 @@ struct LibraryReadModelTests {
 
         #expect(model.facets.smartCounts[collection.id] == 19)
         #expect(model.diagnostics.lastCapturedRecordCount == 1)
+    }
+
+    @Test(arguments: ["notes", "shelf", "year"])
+    func savedSearchCountsTrackSearchOnlyMetadataChanges(_ field: String) async {
+        let book = makeBooks(1)[0]
+        func setMatchingValue(_ matches: Bool) {
+            switch field {
+            case "notes": book.notes = matches ? "needle" : "changed"
+            case "shelf": book.shelfLocation = matches ? "needle" : "changed"
+            default: book.year = matches ? "2020" : "2021"
+            }
+        }
+        setMatchingValue(true)
+        let searchText = field == "year" ? "year:2020" : "needle"
+        let saved = BookCollection(name: "Saved search", savedSearch: searchText)
+        let structured = BookCollection(name: "Unread")
+        structured.smartShelfDefinition = SmartShelfDefinition(rules: [
+            SmartShelfRule(field: .readingStatus, value: ReadingStatus.unread.rawValue),
+        ])
+        let model = LibraryReadModel()
+        await model.synchronize(
+            books: [book], collections: [saved, structured], delta: fullDelta(to: 0),
+            deviceFileNames: [], deviceIsConnected: false
+        )
+        #expect(model.facets.smartCounts[saved.id] == 1)
+
+        for generation in 1 ... 2 {
+            setMatchingValue(generation == 2)
+            await model.synchronize(
+                books: [book], collections: [saved, structured],
+                delta: LibraryCatalogDelta(
+                    fromRevision: generation - 1, toRevision: generation,
+                    affectedBookIDs: [book.uuid], affectedCollectionIDs: [],
+                    fields: [.displayMetadata], requiresFullRebuild: false,
+                    changesBookMembership: false
+                ),
+                deviceFileNames: [], deviceIsConnected: false
+            )
+            let displayed = await model.displayIDs(query: query(filter: .all, savedSearch: searchText))
+            #expect(model.facets.smartCounts[saved.id, default: 0] == displayed.count)
+            #expect(displayed.count == generation - 1)
+            #expect(model.facets.smartCounts[structured.id] == 1)
+            #expect(model.diagnostics.lastSmartShelfEvaluationCount == 2)
+            #expect(model.diagnostics.lastCapturedRecordCount == 1)
+        }
     }
 
     @Test func pluginPagesComeFromTheSharedImmutableSnapshot() async throws {
@@ -695,7 +1044,7 @@ struct LibraryReadModelTests {
         let records = makeRecords(count)
         let clock = ContinuousClock()
         let startedAt = clock.now
-        let ids = await LibraryQuery.displayIDsConcurrently(
+        let ids = LibraryQuery.displayIDs(
             for: records,
             filter: .all,
             searchText: "",
@@ -729,6 +1078,40 @@ struct LibraryReadModelTests {
         print("Library indexed query benchmark (\(count) records): \(elapsed)")
         #expect(ids.count == count / 100)
         #expect(elapsed < .seconds(1))
+    }
+
+    @Test(
+        .enabled(if: ProcessInfo.processInfo.environment["WINSTON_PERFORMANCE_BENCHMARKS"] == "1"),
+        arguments: [1_000, 10_000, 50_000]
+    )
+    func immutableIndexedQueryScalingBenchmark(_ count: Int) async {
+        let records = makeRecords(count, varyMetadata: true)
+        let engine = LibraryMetadataQueryEngine(now: { .now })
+        let clock = ContinuousClock()
+        var startedAt = clock.now
+        await engine.rebuild(records: records, sourceOrder: records.map(\.id), generation: 1)
+        print("PERF immutable index build [\(count)]: \(startedAt.duration(to: clock.now))")
+        let specifications = [
+            allBooksQuery,
+            query(filter: .tag("TAG"), searchText: "author:Author format:EPUB"),
+            query(filter: .all, searchText: "Book", sort: LibraryDisplaySort(field: .title, ascending: false)),
+            query(filter: .status(.reading)),
+        ]
+        for (index, specification) in specifications.enumerated() {
+            startedAt = clock.now
+            let result = await engine.query(specification)
+            print("PERF immutable query \(index) [\(count), \(result.ids.count) matches]: \(startedAt.duration(to: clock.now))")
+            #expect(result.ids == LibraryQuery.displayIDs(for: records, query: specification))
+            #expect(result.ids.count == (index == 3 ? count / 100 : count))
+        }
+        let removals = records.prefix(min(1_000, count)).map {
+            LibraryReadModelRecordChange(id: $0.id, old: $0, new: nil)
+        }
+        let remaining = Array(records.dropFirst(removals.count))
+        startedAt = clock.now
+        await engine.apply(changes: removals, sourceOrder: remaining.map(\.id), generation: 2)
+        print("PERF immutable remove batch [\(count), \(removals.count) changes]: \(startedAt.duration(to: clock.now))")
+        #expect(await engine.query(allBooksQuery).ids == remaining.map(\.id))
     }
 
     @Test func normalizedFacetIndexesGroupTagCaseAndAliasHTMLFormats() async {
@@ -873,27 +1256,29 @@ struct LibraryReadModelTests {
         }
     }
 
-    private func makeRecords(_ count: Int) -> [LibraryBookRecord] {
+    private func makeRecords(_ count: Int, varyMetadata: Bool = false) -> [LibraryBookRecord] {
         return (0..<count).map { index in
             let id = UUID()
+            let title = varyMetadata ? "Book \(count - index)" : "Book"
+            let author = varyMetadata ? "Author \(index % 250)" : "Author"
             return LibraryBookRecord(
                 id: id,
                 sourceOrdinal: index,
-                displayTitle: "Book",
-                displayAuthor: "Author",
-                title: "Book",
-                author: "Author",
+                displayTitle: title,
+                displayAuthor: author,
+                title: title,
+                author: author,
                 dateAdded: Date(timeIntervalSince1970: TimeInterval(index)),
                 rating: 0,
-                readingStatus: .unread,
+                readingStatus: varyMetadata && index.isMultiple(of: 100) ? .reading : .unread,
                 format: "EPUB",
                 tags: ["tag"],
                 series: nil,
                 seriesIndex: .greatestFiniteMagnitude,
                 collectionIDs: [],
                 normalized: LibraryNormalizedStrings(
-                    title: "Book",
-                    author: "Author",
+                    title: title,
+                    author: author,
                     tags: ["tag"],
                     format: "EPUB"
                 )

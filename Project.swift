@@ -2,6 +2,7 @@ import ProjectDescription
 
 private let mobiTypeIdentifier = "cz.annajung.Winston.mobi-ebook"
 private let azw3TypeIdentifier = "cz.annajung.Winston.azw3-ebook"
+private let bookReferenceTypeIdentifier = "cz.annajung.Winston.book-reference"
 private let kindleTypeDeclarations: Plist.Value = [
     [
         "UTTypeIdentifier": .string(mobiTypeIdentifier),
@@ -20,6 +21,14 @@ private let kindleTypeDeclarations: Plist.Value = [
             "public.filename-extension": ["azw3"],
             "public.mime-type": ["application/vnd.amazon.ebook"],
         ],
+    ],
+]
+
+private let bookReferenceTypeDeclarations: Plist.Value = [
+    [
+        "UTTypeIdentifier": .string(bookReferenceTypeIdentifier),
+        "UTTypeDescription": "Winston Book Reference",
+        "UTTypeConformsTo": ["public.data"],
     ],
 ]
 
@@ -104,6 +113,7 @@ let project = Project(
                 "CFBundleLocalizations": .array([.string("en"), .string("cs")]),
                 "LSApplicationCategoryType": "public.app-category.reference",
                 "UTImportedTypeDeclarations": kindleTypeDeclarations,
+                "UTExportedTypeDeclarations": bookReferenceTypeDeclarations,
             ]),
             sources: ["Winston/**/*.swift"],
             resources: [

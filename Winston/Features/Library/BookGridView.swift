@@ -14,7 +14,21 @@ struct BookDragItem: Codable, Sendable, Transferable {
 
     static var transferRepresentation: some TransferRepresentation {
         CodableRepresentation(contentType: .winstonBookReference)
-        ProxyRepresentation(exporting: \.fileURL)
+        ProxyRepresentation(exporting: { item throws -> URL in
+            try item.validatedFileURL()
+        })
+    }
+
+    // Validate only when the transfer framework actually requests the URL,
+    // never while constructing a row. Keep the native URL representations.
+    nonisolated func validatedFileURL() throws -> URL {
+        try Task.checkCancellation()
+        guard let validated = BookFileStore.validatedURL(
+            for: fileURL.lastPathComponent, in: fileURL.deletingLastPathComponent()
+        ), validated == fileURL.standardizedFileURL else {
+            throw CocoaError(.fileReadNoPermission)
+        }
+        return validated
     }
 }
 
@@ -23,8 +37,9 @@ private struct BookFileDragModifier: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if book.hasCatalogDigitalFile {
-            content.draggable(BookDragItem(bookID: book.uuid, fileURL: book.fileURL))
+        if book.hasCatalogDigitalFile,
+           let url = BookFileStore.catalogURL(for: book.primaryAsset?.fileName ?? book.fileName) {
+            content.draggable(BookDragItem(bookID: book.uuid, fileURL: url))
         } else {
             content
         }
@@ -46,9 +61,6 @@ struct BookGridView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focusedBookID: Book.ID?
-
-    private var convertingUUIDs: Set<UUID> { conversion.convertingUUIDs }
-    private var missingUUIDs: Set<UUID> { health.missingFileUUIDs }
 
     private var columns: [GridItem] { WinstonLayout.coverGridColumns(zoom: settings.gridZoom) }
 
@@ -76,79 +88,42 @@ struct BookGridView: View {
     ) -> some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 16) {
-                ForEach(books) { book in
-                    BookCardView(
+                ForEach(books.enumerated(), id: \.element.id) { index, book in
+                    BookGridCell(
                         book: book,
-                        isSelected: selection.isSelected(book),
-                        isFocused: focusedBookID == book.id,
-                        isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
-                        isConverting: convertingUUIDs.contains(book.uuid),
-                        isMissing: missingUUIDs.contains(book.uuid),
-                        editionCount: editions.editionCounts[book.uuid] ?? 1,
-                        onDelete: { actions.delete(book) }
+                        selection: selection,
+                        deviceFileNames: deviceFileNames,
+                        conversion: conversion,
+                        health: health,
+                        editions: editions,
+                        collections: collections,
+                        actions: actions,
+                        focusedBookID: $focusedBookID,
+                        onClick: onClick,
+                        onMove: { direction in
+                            moveFocus(
+                                from: index,
+                                direction: direction,
+                                availableWidth: availableWidth,
+                                scrollProxy: scrollProxy
+                            )
+                        },
+                        availability: { actionAvailability(for: book) }
                     )
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) {
-                        focusedBookID = book.id
-                        actions.open(book)
-                    }
-                    .onTapGesture {
-                        focusedBookID = book.id
-                        onClick(book)
-                    }
-                    .modifier(BookFileDragModifier(book: book))
-                    .focusable()
-                    .focused($focusedBookID, equals: book.id)
-                    .onMoveCommand { direction in
-                        moveFocus(
-                            from: book,
-                            direction: direction,
-                            availableWidth: availableWidth,
-                            scrollProxy: scrollProxy
-                        )
-                    }
-                    .onKeyPress(.return) {
-                        actions.open(book)
-                        return .handled
-                    }
-                    .onKeyPress(.space) {
-                        onClick(book)
-                        return .handled
-                    }
-                    .contextMenu {
-                        BookContextMenu(
-                            book: book,
-                            availability: actionAvailability(for: book),
-                            isInSelection: selection.isSelected(book),
-                            collections: collections,
-                            isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
-                            actions: actions
-                        )
-                    }
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityAction {
-                        actions.open(book)
-                    }
-                    .accessibilityAction(named: Text("Delete")) {
-                        actions.delete(book)
-                    }
-                    .accessibilityHint(book.hasCatalogDigitalFile
-                        ? "Press Return to open in Reader"
-                        : "Physical copy without a digital file")
                 }
             }
             .padding(.horizontal, WinstonLayout.coverGridHorizontalPadding)
             .padding(.vertical, 14)
         }
+        .accessibilityIdentifier("library.grid")
     }
 
     private func moveFocus(
-        from book: Book,
+        from index: Int,
         direction: MoveCommandDirection,
         availableWidth: CGFloat,
         scrollProxy: ScrollViewProxy
     ) {
-        guard let index = books.firstIndex(where: { $0.id == book.id }) else { return }
         guard let navigationDirection = GridKeyboardDirection(direction),
               let destination = GridKeyboardNavigation.destinationIndex(
                   from: index,
@@ -169,29 +144,82 @@ struct BookGridView: View {
         let targets = selection.count > 1 && selection.isSelected(book)
             ? books.filter { selection.isSelected($0) }
             : [book]
-        return BookActionAvailability(
-            selectionCount: targets.count,
-            hasPrimarySelection: true,
-            primaryHasPersistedDigitalFile: book.hasCatalogDigitalFile,
-            persistedDigitalFileCount: targets.filter(\.hasCatalogDigitalFile).count,
-            sendableDigitalFileCount: targets.filter {
-                $0.hasCatalogDigitalFile && $0.primaryDRMProtected != true
-            }.count,
-            drmProtectedDigitalFileCount: targets.filter {
-                $0.hasCatalogDigitalFile && $0.primaryDRMProtected == true
-            }.count,
-            conversionEligibleCount: targets.filter {
-                $0.hasCatalogDigitalFile
-                    && $0.primaryDRMProtected != true
-                    && EbookConverter.needsConversion(format: $0.format)
-                    && conversion.canConvertForKindle($0.format)
-            }.count,
+        return BookActionAvailability.forBooks(
+            targets,
+            primary: book,
             calibreAvailable: conversion.isCalibreAvailable,
             onlineMetadataEnabled: settings.onlineMetadataEnabled,
-            onDeviceSelectionCount: targets.filter {
-                $0.isOnDevice(fileNames: deviceFileNames)
-            }.count
+            deviceFileNames: deviceFileNames
         )
+    }
+}
+
+/// Narrow direct observation of selection, focus and background operations to
+/// cells. The library parent can still update for its inspector and toolbar.
+private struct BookGridCell: View {
+    let book: Book
+    let selection: BookSelectionModel
+    let deviceFileNames: Set<String>
+    let conversion: ConversionService
+    let health: LibraryHealthService
+    let editions: CatalogReconciliationService
+    let collections: [BookCollection]
+    let actions: BookActions
+    var focusedBookID: FocusState<Book.ID?>.Binding
+    let onClick: (Book) -> Void
+    let onMove: (MoveCommandDirection) -> Void
+    let availability: () -> BookActionAvailability
+
+    var body: some View {
+        BookCardView(
+            book: book,
+            isSelected: selection.isSelected(book),
+            isFocused: focusedBookID.wrappedValue == book.id,
+            isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
+            isConverting: conversion.convertingUUIDs.contains(book.uuid),
+            isMissing: health.missingFileUUIDs.contains(book.uuid),
+            editionCount: editions.editionCounts[book.uuid] ?? 1,
+            onDelete: { actions.delete(book) }
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            focusedBookID.wrappedValue = book.id
+            actions.open(book)
+        }
+        .onTapGesture {
+            focusedBookID.wrappedValue = book.id
+            onClick(book)
+        }
+        .modifier(BookFileDragModifier(book: book))
+        .focusable()
+        .focusEffectDisabled()
+        .focused(focusedBookID, equals: book.id)
+        .onMoveCommand(perform: onMove)
+        .onKeyPress(.return) {
+            actions.open(book)
+            return .handled
+        }
+        .onKeyPress(.space) {
+            onClick(book)
+            return .handled
+        }
+        .contextMenu {
+            BookContextMenu(
+                book: book,
+                availability: availability(),
+                isInSelection: selection.isSelected(book),
+                collections: collections,
+                isOnDevice: book.isOnDevice(fileNames: deviceFileNames),
+                actions: actions
+            )
+        }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier("library.book.\(book.uuid.uuidString)")
+        .accessibilityAction { actions.open(book) }
+        .accessibilityAction(named: Text("Delete")) { actions.delete(book) }
+        .accessibilityHint(book.hasCatalogDigitalFile
+            ? "Press Return to open in Reader"
+            : "Physical copy without a digital file")
     }
 }
 

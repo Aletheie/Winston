@@ -61,3 +61,40 @@ final class BookSelectionModel {
         lastClickedBookID = nil
     }
 }
+
+extension BookActionAvailability {
+    /// Share one catalog-only pass between the toolbar, grid and table menus.
+    @MainActor
+    static func forBooks(
+        _ books: [Book],
+        primary: Book?,
+        calibreAvailable: Bool,
+        onlineMetadataEnabled: Bool,
+        deviceFileNames: Set<String>
+    ) -> Self {
+        var result = Self(
+            selectionCount: books.count,
+            hasPrimarySelection: primary != nil,
+            primaryHasPersistedDigitalFile: primary?.hasCatalogDigitalFile == true,
+            calibreAvailable: calibreAvailable,
+            onlineMetadataEnabled: onlineMetadataEnabled
+        )
+        for book in books {
+            if !deviceFileNames.isEmpty, book.isOnDevice(fileNames: deviceFileNames) {
+                result.onDeviceSelectionCount += 1
+            }
+            guard book.hasCatalogDigitalFile else { continue }
+            result.persistedDigitalFileCount += 1
+            if book.primaryDRMProtected == true {
+                result.drmProtectedDigitalFileCount += 1
+            } else {
+                result.sendableDigitalFileCount += 1
+                if EbookConverter.needsConversion(format: book.format),
+                   EbookConverter.canConvertForKindle(book.format, calibreAvailable: calibreAvailable) {
+                    result.conversionEligibleCount += 1
+                }
+            }
+        }
+        return result
+    }
+}

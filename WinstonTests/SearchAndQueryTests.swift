@@ -377,7 +377,7 @@ struct LibraryQueryTests {
         #expect(ids == [dune.uuid, dispossessed.uuid])
     }
 
-    @Test func concurrentDisplayPathMatchesLegacyQuerySemantics() async {
+    @Test func displayPathMatchesLegacyQuerySemantics() {
         let dune = makeBook("Dune", author: "Frank Herbert", tags: ["sci-fi"], status: .reading)
         let dispossessed = makeBook(
             "The Dispossessed",
@@ -403,7 +403,7 @@ struct LibraryQueryTests {
             )
         }
 
-        let actual = await LibraryQuery.displayIDsConcurrently(
+        let actual = LibraryQuery.displayIDs(
             for: snapshots,
             filter: .status(.reading),
             searchText: "tag:sci-fi",

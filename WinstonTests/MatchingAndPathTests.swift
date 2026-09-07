@@ -226,19 +226,92 @@ struct CoverServiceTests {
     }
 }
 
+// MARK: - File drag export
+
+@MainActor
+struct BookDragItemTests {
+    @Test func exportValidatesTheCapturedCatalogDirectory() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonDrag-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "Válka a mír.epub")
+        try Data("book".utf8).write(to: url)
+        let item = BookDragItem(bookID: UUID(), fileURL: url)
+
+        // Export remains tied to the directory captured by the row, even when
+        // it differs from the current process-global library root.
+        #expect(try item.validatedFileURL() == url)
+        let exportedURL = try await item.exported(as: .fileURL)
+        #expect(try await URL(importing: exportedURL, contentType: .fileURL) == url)
+        let reference = try await item.exported(as: .winstonBookReference)
+        let imported = try await BookDragItem(importing: reference, contentType: .winstonBookReference)
+        #expect(imported.bookID == item.bookID)
+        #expect(imported.fileURL == url)
+    }
+
+    @Test func exportRejectsSymlinkThatEscapesCapturedDirectory() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "WinstonDragEscape-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let directory = root.appending(path: "Books", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outside = root.appending(path: "outside.epub")
+        try Data("outside".utf8).write(to: outside)
+        let link = directory.appending(path: "linked.epub")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        let item = BookDragItem(bookID: UUID(), fileURL: link)
+
+        do {
+            _ = try item.validatedFileURL()
+            Issue.record("An escaping symlink was exported")
+        } catch {
+            #expect((error as NSError).domain == NSCocoaErrorDomain)
+            #expect((error as NSError).code == CocoaError.fileReadNoPermission.rawValue)
+        }
+    }
+
+    @Test func cancelledExportDoesNotResolveItsPath() async {
+        let item = BookDragItem(
+            bookID: UUID(), fileURL: URL(fileURLWithPath: "/unavailable-library/book.epub")
+        )
+        let request = Task { try item.validatedFileURL() }
+        request.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await request.value
+        }
+    }
+}
+
 // MARK: - Managed file replacement
 
 @MainActor
 struct BookFileStoreTests {
 
-    @Test(arguments: ["", ".", "..", "../outside.epub", "/tmp/book.epub", "nested/book.epub", "bad\0name"])
+    @Test(arguments: [
+        "", ".", "..", "../outside.epub", "/tmp/book.epub", "nested/book.epub", "bad\0name",
+        "bad\nname", "bad\rname", "bad\tname", "bad\u{7F}name", "bad\u{85}name", "bad\u{202E}name",
+    ])
     func managedLeafRejectsUnsafeNames(_ value: String) {
         #expect(ManagedLeafName(rawValue: value) == nil)
     }
 
-    @Test(arguments: ["book.epub", "Válka a mír.azw3", ".hidden.mobi", "back\\slash.pdf"])
+    @Test(arguments: ["book.epub", "Válka a mír.azw3", ".hidden.mobi", "back\\slash.pdf", "📚.epub"])
     func managedLeafAcceptsSingleComponents(_ value: String) {
         #expect(ManagedLeafName(rawValue: value)?.rawValue == value)
+    }
+
+    @Test func managedNamesAndDeviceTokenPredicatesRemainIndependent() {
+        let token = "0123456789abcdefABCDEF0123456789"
+        #expect(token.count == 32)
+        let validName = "Book--winston-\(token).epub"
+        let invalidToken = "Book--winston-\(String(repeating: "z", count: 32)).epub"
+
+        #expect(ManagedLeafName(rawValue: validName) != nil)
+        #expect(DevicePathAllocator.legacyMatchKey(for: validName) == "book")
+        #expect(DevicePathAllocator.legacyMatchKey(for: invalidToken)
+            == (invalidToken as NSString).deletingPathExtension.lowercased())
+        #expect(ManagedLeafName(rawValue: "book\n.epub") == nil)
     }
 
     @Test func unsafePersistedNameCannotEscapeManagedDirectory() async throws {

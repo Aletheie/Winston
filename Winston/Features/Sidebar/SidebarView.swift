@@ -101,8 +101,6 @@ struct SidebarView: View {
     @State private var browseRenameText = ""
     @State private var deleteCollectionTarget: BookCollection?
     @State private var deleteTagTarget: String?
-    @State private var dismissedAuthorTips: Set<String> = []
-    @State private var dismissedSeriesTips: Set<String> = []
 
     enum BrowseRename: Identifiable {
         case author(String), series(String), tag(String)
@@ -276,44 +274,6 @@ struct SidebarView: View {
             }
         }
         .tint(theme.accent)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                if let tip = authorTip {
-                    SidebarFixTip(
-                        title: theme.styledText(terminal: "fix_author?", native: "Author name looks reversed"),
-                        applyHelp: theme.styledText(
-                            terminal: "rename author everywhere",
-                            native: "Rename this author across the library"
-                        ),
-                        original: tip.original,
-                        suggestion: tip.suggestion,
-                        onApply: { viewModel.renameAuthor(tip.original, to: tip.suggestion) },
-                        onDismiss: { dismissedAuthorTips.insert(tip.original) }
-                    )
-                    Divider().opacity(0.3)
-                } else if let tip = seriesTip {
-                    SidebarFixTip(
-                        title: theme.styledText(terminal: "fix_series?", native: "Series name looks duplicated"),
-                        applyHelp: theme.styledText(
-                            terminal: "rename series everywhere",
-                            native: "Rename this series across the library"
-                        ),
-                        original: tip.original,
-                        suggestion: tip.suggestion,
-                        onApply: { viewModel.renameSeries(tip.original, to: tip.suggestion) },
-                        onDismiss: { dismissedSeriesTips.insert(tip.original) }
-                    )
-                    Divider().opacity(0.3)
-                }
-                Text(verbatim: "v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")")
-                    .font(theme.label(size: 9, weight: .regular))
-                    .foregroundStyle(theme.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-            }
-            .background(.ultraThinMaterial)
-        }
     }
 
     private var sidebarPresentation: some View {
@@ -444,16 +404,6 @@ struct SidebarView: View {
         }
         selection = .collection(collection.id)
         return true
-    }
-
-    // MARK: - Author tip
-
-    private var authorTip: LibraryFacetTip? {
-        facets.authorTips.first { !dismissedAuthorTips.contains($0.original) }
-    }
-
-    private var seriesTip: LibraryFacetTip? {
-        facets.seriesTips.first { !dismissedSeriesTips.contains($0.original) }
     }
 }
 

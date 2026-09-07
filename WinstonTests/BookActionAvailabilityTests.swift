@@ -68,4 +68,43 @@ struct BookActionAvailabilityTests {
         #expect(availability.hasDRMOnlyDigitalSelection)
         #expect(!availability.canTransmit)
     }
+
+    @Test @MainActor func sharedSelectionPassPreservesMixedFileCapabilities() {
+        let epub = Book(fileName: "available.epub", originalFileName: "Available.epub")
+        let protected = Book(fileName: "locked.pdf", originalFileName: "Locked.pdf")
+        protected.drmProtected = true
+        let kindle = Book(fileName: "ready.mobi", originalFileName: "Ready.mobi")
+        let physical = Book(fileName: "", originalFileName: "Paper")
+        let books = [epub, protected, kindle, physical]
+
+        let result = BookActionAvailability.forBooks(
+            books,
+            primary: physical,
+            calibreAvailable: false,
+            onlineMetadataEnabled: true,
+            deviceFileNames: [kindle.deviceMatchKey]
+        )
+
+        #expect(result.selectionCount == 4)
+        #expect(result.hasPrimarySelection)
+        #expect(!result.canUsePrimaryFile)
+        #expect(result.persistedDigitalFileCount == 3)
+        #expect(result.sendableDigitalFileCount == 2)
+        #expect(result.drmProtectedDigitalFileCount == 1)
+        #expect(result.conversionEligibleCount == 1)
+        #expect(result.onDeviceSelectionCount == 1)
+        #expect(result.canFetchMetadata)
+    }
+
+    @Test @MainActor func emptySelectionHasNoFileCapabilities() {
+        let result = BookActionAvailability.forBooks(
+            [], primary: nil, calibreAvailable: true,
+            onlineMetadataEnabled: true, deviceFileNames: []
+        )
+        #expect(!result.hasSelection)
+        #expect(!result.hasPrimarySelection)
+        #expect(!result.canConvertForKindle)
+        #expect(!result.canTransmit)
+        #expect(!result.canFetchMetadata)
+    }
 }

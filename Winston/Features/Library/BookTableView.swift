@@ -187,28 +187,12 @@ struct BookTableView: View {
         for books: [Book],
         primary: Book
     ) -> BookActionAvailability {
-        BookActionAvailability(
-            selectionCount: books.count,
-            hasPrimarySelection: true,
-            primaryHasPersistedDigitalFile: primary.hasCatalogDigitalFile,
-            persistedDigitalFileCount: books.filter(\.hasCatalogDigitalFile).count,
-            sendableDigitalFileCount: books.filter {
-                $0.hasCatalogDigitalFile && $0.primaryDRMProtected != true
-            }.count,
-            drmProtectedDigitalFileCount: books.filter {
-                $0.hasCatalogDigitalFile && $0.primaryDRMProtected == true
-            }.count,
-            conversionEligibleCount: books.filter {
-                $0.hasCatalogDigitalFile
-                    && $0.primaryDRMProtected != true
-                    && EbookConverter.needsConversion(format: $0.format)
-                    && conversion.canConvertForKindle($0.format)
-            }.count,
+        BookActionAvailability.forBooks(
+            books,
+            primary: primary,
             calibreAvailable: conversion.isCalibreAvailable,
             onlineMetadataEnabled: settings.onlineMetadataEnabled,
-            onDeviceSelectionCount: books.filter {
-                $0.isOnDevice(fileNames: deviceFileNames)
-            }.count
+            deviceFileNames: deviceFileNames
         )
     }
 
