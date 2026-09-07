@@ -292,26 +292,6 @@ struct ReadingRecommendationTests {
         #expect(result.map(\.bookID) == [available.id])
     }
 
-    @Test func reopeningRotatesOnlyNearEqualTopMatches() {
-        let firstID = UUID()
-        let secondID = UUID()
-        let thirdID = UUID()
-        let weakID = UUID()
-        let ranked = [
-            ReadingRecommendation(bookID: firstID, score: 100, reasons: [.readyNow]),
-            ReadingRecommendation(bookID: secondID, score: 96, reasons: [.readyNow]),
-            ReadingRecommendation(bookID: thirdID, score: 91, reasons: [.readyNow]),
-            ReadingRecommendation(bookID: weakID, score: 60, reasons: [.readyNow]),
-        ]
-
-        let rotated = ReadingRecommendationService.rotatingStrongMatches(
-            ranked,
-            after: firstID
-        )
-
-        #expect(rotated.map(\.bookID) == [secondID, thirdID, firstID, weakID])
-    }
-
     @Test func strongMatchesAreInterleavedAcrossAuthors() {
         let first = candidate(title: "A1", author: "Author A")
         let second = candidate(title: "A2", author: "Author A")

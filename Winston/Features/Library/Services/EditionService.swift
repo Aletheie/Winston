@@ -327,20 +327,6 @@ final class CatalogReconciliationService {
         synchronizeCandidateIndex(regenerateProposals: true)
     }
 
-    func refreshEditionCountsInChunks(chunkSize: Int = 256) async {
-        guard let snapshot = await loadCandidatesInChunks(chunkSize: chunkSize) else { return }
-        installCandidateIndex(
-            snapshot.index,
-            candidateCount: snapshot.candidateCount,
-            catalogRevision: snapshot.catalogRevision
-        )
-        lastIndexPageCount = snapshot.pageCount
-        synchronizeCandidateIndex(
-            regenerateProposals: true,
-            rebuildForMembershipChanges: true
-        )
-    }
-
     @discardableResult
     func updateWork(_ work: Work, title: String, author: String) -> Bool {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1336,9 +1322,11 @@ final class CatalogReconciliationService {
         isRefreshingCandidates = true
         candidateRefreshTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                candidateRefreshTask = nil
+                isRefreshingCandidates = false
+            }
             await scanLibrary()
-            candidateRefreshTask = nil
-            isRefreshingCandidates = false
         }
     }
 

@@ -238,36 +238,6 @@ nonisolated enum ReadingRecommendationService {
         }
     }
 
-    /// Keeps ranking meaningful while avoiding the same first card every time the sheet reopens.
-    /// Only near-equal top matches rotate; a weak match never jumps ahead of a strong one.
-    static func rotatingStrongMatches(
-        _ recommendations: [ReadingRecommendation],
-        after previousBookID: UUID?,
-        maximumPoolSize: Int = 5,
-        scoreWindow: Double = 20
-    ) -> [ReadingRecommendation] {
-        guard let previousBookID,
-              recommendations.count > 1,
-              maximumPoolSize > 1,
-              let topScore = recommendations.first?.score else {
-            return recommendations
-        }
-
-        let pool = Array(recommendations.prefix(maximumPoolSize).prefix { recommendation in
-            topScore - recommendation.score <= scoreWindow
-        })
-        guard pool.count > 1,
-              let previousIndex = pool.firstIndex(where: { $0.bookID == previousBookID }) else {
-            return recommendations
-        }
-
-        let startIndex = pool.index(after: previousIndex) == pool.endIndex
-            ? pool.startIndex
-            : pool.index(after: previousIndex)
-        let rotatedPool = Array(pool[startIndex...]) + Array(pool[..<startIndex])
-        return rotatedPool + recommendations.dropFirst(pool.count)
-    }
-
     /// Interleaves near-equal matches by author and series. Ranking still
     /// decides which books are strong matches; diversity only changes the
     /// order inside that strong group.

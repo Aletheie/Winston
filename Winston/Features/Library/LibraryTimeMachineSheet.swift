@@ -81,6 +81,7 @@ final class LibraryTimeMachineViewModel {
     @ObservationIgnored private var diffsByID: [UUID: LibraryTimeMachineBookDiff] = [:]
     @ObservationIgnored private var activeDiffBuildID: UUID?
     @ObservationIgnored private var visibleDiffTask: Task<Void, Never>?
+    @ObservationIgnored private var visibleDiffGeneration = 0
     @ObservationIgnored private var diffRevision = 0
     @ObservationIgnored private var snapshotLoadGeneration = 0
 
@@ -323,12 +324,10 @@ final class LibraryTimeMachineViewModel {
         restoreError = nil
     }
 
-    func reportCatalogLoadFailure(_ error: Error) {
-        phase = .failed(error.localizedDescription)
-    }
-
     private func scheduleVisibleDiffRecompute(immediately: Bool = false) {
         visibleDiffTask?.cancel()
+        visibleDiffGeneration &+= 1
+        let generation = visibleDiffGeneration
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let filter = filter
         let diffs = allDiffs
@@ -343,6 +342,7 @@ final class LibraryTimeMachineViewModel {
             }
             let visible = await Self.filterDiffs(diffs, filter: filter, query: query)
             guard !Task.isCancelled, let self,
+                  self.visibleDiffGeneration == generation,
                   self.diffRevision == revision,
                   self.filter == filter,
                   self.searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }

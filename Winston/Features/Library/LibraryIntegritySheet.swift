@@ -309,15 +309,14 @@ struct LibraryIntegritySheet: View {
     private func repair() async {
         guard let report, report.hasRepairableCatalogIssues else { return }
         isRepairing = true
+        defer { isRepairing = false }
         errorMessage = nil
         do {
             _ = try await viewModel.repairCatalogInvariants(from: report)
-            isRepairing = false
             await scan()
         } catch is CancellationError {
-            isRepairing = false
+            return
         } catch {
-            isRepairing = false
             errorMessage = String(
                 localized: "Repair stopped: \(error.localizedDescription). Rescan to see the durable result."
             )

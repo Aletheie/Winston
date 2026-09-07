@@ -22,6 +22,7 @@ struct BookDoctorSheet: View {
     @State private var reports: [BookDoctorReport] = []
     @State private var isInspecting = true
     @State private var completedInspectionCount = 0
+    @State private var inspectionGeneration = 0
     @State private var repairingIDs: Set<UUID> = []
     @State private var savedRepairNames: [UUID: String] = [:]
     @State private var repairError: String?
@@ -191,20 +192,27 @@ struct BookDoctorSheet: View {
     }
 
     private func inspect() async {
+        inspectionGeneration &+= 1
+        let generation = inspectionGeneration
         isInspecting = true
+        defer {
+            if generation == inspectionGeneration {
+                isInspecting = false
+            }
+        }
         completedInspectionCount = 0
         reports = []
         let sources = request.sources
         let results = await BookDoctorService.inspect(sources) { completed, report in
             await MainActor.run {
+                guard generation == inspectionGeneration else { return }
                 reports.append(report)
                 completedInspectionCount = completed
             }
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, generation == inspectionGeneration else { return }
         reports = results
         completedInspectionCount = results.count
-        isInspecting = false
     }
 
     private func repair(_ report: BookDoctorReport) {

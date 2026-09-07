@@ -14,6 +14,7 @@ struct SeriesView: View {
     @State private var displayedGroups: [SeriesGroup] = []
     @State private var isBuildingGroups = true
     @State private var groupRevision = 0
+    @State private var groupBuildGeneration = 0
     @State private var completionModel: SeriesCompletionViewModel
     @State private var retryGeneration = 0
 
@@ -146,7 +147,14 @@ struct SeriesView: View {
     }
 
     private func rebuildGroups() async {
+        groupBuildGeneration &+= 1
+        let generation = groupBuildGeneration
         isBuildingGroups = true
+        defer {
+            if generation == groupBuildGeneration {
+                isBuildingGroups = false
+            }
+        }
         var booksByID: [UUID: Book] = [:]
         booksByID.reserveCapacity(books.count)
         for (index, book) in books.enumerated() {
@@ -157,7 +165,7 @@ struct SeriesView: View {
         let sources = await SeriesLookupBuilder.sources(from: books)
         guard !Task.isCancelled else { return }
         let snapshots = await SeriesLookupBuilder.groups(from: sources)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, generation == groupBuildGeneration else { return }
         let groups = snapshots.map { snapshot in
             SeriesGroup(
                 id: snapshot.id,
@@ -171,7 +179,6 @@ struct SeriesView: View {
         } else {
             displayedGroups = groups
         }
-        isBuildingGroups = false
         groupRevision &+= 1
     }
 }

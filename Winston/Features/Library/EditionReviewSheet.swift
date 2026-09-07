@@ -204,8 +204,8 @@ struct EditionReviewSheet: View {
     private func scan() async {
         guard !isScanning else { return }
         isScanning = true
+        defer { isScanning = false }
         await service.scanLibrary()
-        isScanning = false
     }
 }
 
@@ -222,14 +222,6 @@ private struct ReconciliationScanningState: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-}
-
-private struct ReconciliationReviewRequest: Identifiable {
-    let proposal: EditionMatchProposal
-    let books: [Book]
-    let survivorUUID: UUID?
-
-    var id: String { proposal.pairKey }
 }
 
 private struct ReconciliationHeader: View {
@@ -747,27 +739,6 @@ private struct EditionVerdictHeader: View {
     }
 }
 
-private struct ReconciliationFooter: View {
-    let isScanning: Bool
-    let onRescan: () -> Void
-    let onDone: () -> Void
-
-    var body: some View {
-        HStack {
-            Text("No bulk merge is available; review each proposal before changing the catalog.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button("Rescan", action: onRescan)
-                .disabled(isScanning)
-            Button("Done", action: onDone)
-                .keyboardShortcut(.defaultAction)
-        }
-        .padding(12)
-        .themedChrome(role: .sheetAction)
-    }
-}
-
 private struct EditionProposalRow: View {
     let proposal: EditionMatchProposal
     let books: [Book]
@@ -868,63 +839,6 @@ private extension Set {
                 remove(element)
             }
         }
-    }
-}
-
-private struct ReconciliationReviewSheet: View {
-    let request: ReconciliationReviewRequest
-    let service: CatalogReconciliationService
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var applyController = ReconciliationApplyController()
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ReconciliationReviewHeader(proposal: request.proposal)
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    ReconciliationBookComparison(books: request.books)
-                    ReconciliationPlanView(
-                        proposal: request.proposal,
-                        books: request.books,
-                        survivorUUID: request.survivorUUID
-                    )
-                    if applyController.phase != .reviewing {
-                        ReconciliationApplyStatus(phase: applyController.phase)
-                    }
-                }
-                .padding(20)
-            }
-            Divider()
-            ReconciliationReviewActions(
-                proposal: request.proposal,
-                controller: applyController,
-                onClose: { dismiss() },
-                onCancelOperation: applyController.cancel,
-                onKeepSeparate: keepSeparate,
-                onApply: apply
-            )
-        }
-        .frame(minWidth: 620, idealWidth: 720, maxWidth: 900, minHeight: 520, idealHeight: 650)
-        .interactiveDismissDisabled(applyController.blocksDismissal)
-        .onChange(of: applyController.phase) { _, phase in
-            guard phase == .completed else { return }
-            dismiss()
-        }
-        .onDisappear {
-            applyController.cancelIfPossible()
-        }
-    }
-
-    private func keepSeparate() {
-        service.dismiss(request.proposal)
-        dismiss()
-    }
-
-    private func apply() {
-        guard request.proposal.canApply else { return }
-        applyController.start(proposal: request.proposal, service: service)
     }
 }
 
@@ -1035,33 +949,6 @@ private struct ReconciliationApplyStatus: View {
         case .cancelled, .reviewing: theme.textSecondary
         case .validating, .cancelling, .committing: theme.accent
         case .failed: theme.highlight
-        }
-    }
-}
-
-private struct ReconciliationReviewHeader: View {
-    let proposal: EditionMatchProposal
-
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Review Reconciliation")
-                .font(theme.body(size: 15, weight: .bold))
-            Text(summary)
-                .font(theme.label(size: 11))
-                .foregroundStyle(theme.textSecondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-    }
-
-    private var summary: LocalizedStringResource {
-        switch proposal.verdict {
-        case .duplicateFile: "The files have identical content hashes."
-        case .sameEditionOtherFormat: "Edition identifiers match, but the files are different."
-        case .sameWorkOtherEdition: "The books appear to be distinct editions of one work."
-        case .similarItem: "The available evidence is too weak to merge or group these books."
         }
     }
 }
@@ -1318,56 +1205,6 @@ private struct ReconciliationPreservationRow: View {
                     .font(theme.label(size: 10))
                     .foregroundStyle(theme.textSecondary)
             }
-        }
-    }
-}
-
-private struct ReconciliationReviewActions: View {
-    let proposal: EditionMatchProposal
-    let controller: ReconciliationApplyController
-    let onClose: () -> Void
-    let onCancelOperation: () -> Void
-    let onKeepSeparate: () -> Void
-    let onApply: () -> Void
-
-    var body: some View {
-        HStack {
-            if controller.phase == .committing {
-                Text("Finishing protected changes…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if controller.canCancel {
-                Button("Cancel Operation", action: onCancelOperation)
-            } else if controller.phase == .cancelling {
-                Button("Cancelling…", action: {})
-                    .disabled(true)
-            } else {
-                Button("Close", action: onClose)
-                    .disabled(controller.blocksDismissal)
-            }
-            if proposal.canApply {
-                Button(actionLabel, action: onApply)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!controller.canApply)
-            } else {
-                Button("Keep Separate", action: onKeepSeparate)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(controller.isRunning)
-            }
-        }
-        .padding(12)
-    }
-
-    private var actionLabel: LocalizedStringResource {
-        if case .failed = controller.phase { return "Try Again" }
-        if controller.phase == .cancelled { return "Try Again" }
-        return switch proposal.verdict {
-        case .duplicateFile: "Merge Identical Copies"
-        case .sameEditionOtherFormat: "Merge Edition Records"
-        case .sameWorkOtherEdition: "Group Editions"
-        case .similarItem: "Keep Separate"
         }
     }
 }

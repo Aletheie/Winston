@@ -141,6 +141,7 @@ final class ReadingRecommendationViewModel {
     @ObservationIgnored private var rotationAnchorID: UUID?
     @ObservationIgnored private var activePreparationID: UUID?
     @ObservationIgnored private var rankingTask: Task<Void, Never>?
+    @ObservationIgnored private var rankingGeneration = 0
     @ObservationIgnored private var seenRecommendationIDs: Set<UUID> = []
     @ObservationIgnored private var selectedIndex = 0
 
@@ -150,6 +151,7 @@ final class ReadingRecommendationViewModel {
 
     func prepare(books: [Book], after previousBookID: UUID?) async {
         let preparationID = UUID()
+        rankingGeneration &+= 1
         rankingTask?.cancel()
         rankingTask = nil
         activePreparationID = preparationID
@@ -225,6 +227,8 @@ final class ReadingRecommendationViewModel {
 
     private func scheduleRecompute(immediately: Bool = false) {
         rankingTask?.cancel()
+        rankingGeneration &+= 1
+        let generation = rankingGeneration
         let candidates = candidates
         let preferences = preferences
         let anchor = rotationAnchorID
@@ -243,6 +247,7 @@ final class ReadingRecommendationViewModel {
                 after: anchor
             )
             guard !Task.isCancelled, let self,
+                  self.rankingGeneration == generation,
                   self.preferences == preferences,
                   self.rotationAnchorID == anchor else { return }
             self.rankedRecommendations = ranked

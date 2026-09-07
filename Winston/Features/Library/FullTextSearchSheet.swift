@@ -169,6 +169,12 @@ final class FullTextSearchViewModel {
         results = []
         isSearching = true
         searchTask = Task { [weak self, service] in
+            defer {
+                if let self, generation == self.searchGeneration {
+                    self.searchTask = nil
+                    self.isSearching = false
+                }
+            }
             if !immediately {
                 do {
                     try await Task.sleep(for: .milliseconds(180))
@@ -187,7 +193,6 @@ final class FullTextSearchViewModel {
                       generation == self.searchGeneration else { return }
                 self.hits = []
                 self.results = []
-                self.isSearching = false
                 self.phase = .failed(String(localized: "The local search index couldn’t be searched."))
                 return
             }
@@ -196,7 +201,6 @@ final class FullTextSearchViewModel {
                   self.query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
             self.hits = found
             self.publishResults()
-            self.isSearching = false
         }
     }
 

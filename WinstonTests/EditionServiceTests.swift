@@ -470,7 +470,7 @@ struct EditionServiceTests {
             loadEditionCountsImmediately: false
         )
 
-        await service.refreshEditionCountsInChunks(chunkSize: 32)
+        await service.scanLibrary(chunkSize: 32)
 
         #expect(service.lastIndexSynchronizationFetchCount == 257)
         #expect(service.lastIndexPageCount == 9)
