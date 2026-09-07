@@ -6,6 +6,38 @@ import Testing
 @Suite("Physical books", .serialized)
 @MainActor
 struct PhysicalBookTests {
+    @Test(arguments: [false, true])
+    func unavailableDigitalFileRetainsItsFormat(hasPhysicalCopy: Bool) {
+        let book = Book(fileName: "legacy.epub", originalFileName: "Book.epub")
+        let asset = BookAsset(fileName: "selected.azw3", validationStatus: .missing, book: book)
+        book.assets = [asset]
+        book.primaryAssetUUID = asset.uuid
+        book.hasPhysicalCopy = hasPhysicalCopy
+
+        let record = LibraryBookRecord(book, sourceOrdinal: 0, includeCollections: false, includeHighlights: false)
+
+        #expect(!book.hasCatalogDigitalFile)
+        #expect(book.format == "AZW3")
+        #expect(record.format == book.format)
+        #expect(book.assetFormats == [book.format])
+    }
+
+    @Test func formatUsesStoredAssetMetadataWithoutAFileExtension() {
+        let book = Book(fileName: "managed-book", originalFileName: "Book.azw3")
+        let asset = BookAsset(fileName: "managed-book", format: "azw3", book: book)
+        book.assets = [asset]
+        book.primaryAssetUUID = asset.uuid
+
+        #expect(book.format == "AZW3")
+        #expect(LibraryBookRecord(book, sourceOrdinal: 0, includeCollections: false, includeHighlights: false).format == "AZW3")
+    }
+
+    @Test func legacyBookFormatDoesNotDependOnAssetBackfill() {
+        let book = Book(fileName: "legacy.azw3", originalFileName: "Book.azw3")
+        #expect(book.assets.isEmpty)
+        #expect(book.format == "AZW3")
+    }
+
     @Test func physicalOnlyBookHasNoManagedDigitalFile() {
         let first = Book(fileName: "", originalFileName: "Dune")
         let second = Book(fileName: "", originalFileName: "Dune Messiah")

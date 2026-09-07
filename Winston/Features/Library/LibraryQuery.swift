@@ -238,11 +238,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
     ) {
         let hasDigitalFile = book.hasCatalogDigitalFile
         let kindleSnapshot = KindleSendPreparation.snapshot(for: book)
-        let catalogFormat = Book.catalogFormat(
-            fileName: book.primaryAsset?.fileName ?? book.fileName,
-            hasDigitalFile: hasDigitalFile,
-            hasPhysicalCopy: book.hasPhysicalCopy
-        )
+        let catalogFormat = book.format
         let deviceMatchKeys: Set<String> = [
             Book.catalogDeviceMatchKey(
                 originalFileName: book.originalFileName,

@@ -208,19 +208,21 @@ final class Book {
     }()
 
     var format: String {
-        Self.catalogFormat(
+        let primaryAsset = primaryAsset
+        if let format = primaryAsset?.format, !format.isEmpty {
+            return format
+        }
+        return Self.catalogFormat(
             fileName: primaryAsset?.fileName ?? fileName,
-            hasDigitalFile: hasCatalogDigitalFile,
             hasPhysicalCopy: hasPhysicalCopy
         )
     }
 
     nonisolated static func catalogFormat(
         fileName: String,
-        hasDigitalFile: Bool,
         hasPhysicalCopy: Bool
     ) -> String {
-        if !hasDigitalFile { return hasPhysicalCopy ? "PRINT" : "" }
+        if fileName.isEmpty { return hasPhysicalCopy ? "PRINT" : "" }
         let key = fileName as NSString
         if let cached = Self.formats.object(forKey: key) { return cached as String }
         let value = key.pathExtension.uppercased()
