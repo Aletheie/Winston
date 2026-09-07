@@ -15,6 +15,7 @@ nonisolated enum KindleSyncReason: String, Sendable {
     case outdatedConversion
     case formatChanged
     case coverChanged
+    case legacyMTPEmbeddedCover
     case upToDate
     case onlyOnDevice
     case duplicateVariant
@@ -146,7 +147,12 @@ nonisolated struct KindleSyncPlan: Equatable, Sendable {
         self.profileID = profileID
         self.profileName = profileName
         self.items = items
-        self.selectedByDefaultIDs = Set(items.lazy.filter(\.selectedByDefault).map(\.id))
+        let legacyCoverRepairIDs = Set(items.lazy.filter {
+            $0.action == .repairCover && $0.reason == .legacyMTPEmbeddedCover
+        }.map(\.id))
+        self.selectedByDefaultIDs = legacyCoverRepairIDs.isEmpty
+            ? Set(items.lazy.filter(\.selectedByDefault).map(\.id))
+            : legacyCoverRepairIDs
         self.actionCounts = items.reduce(into: [:]) { counts, item in
             counts[item.action, default: 0] += 1
         }
@@ -165,7 +171,8 @@ nonisolated enum KindleSyncPlanner {
     static func makePlan(
         candidates: [KindleSyncCandidate],
         deviceBooks: [DeviceBook],
-        profile: KindleSyncProfile
+        profile: KindleSyncProfile,
+        deviceKind: DeviceConnectionKind = .massStorage
     ) -> KindleSyncPlan {
         let candidates = candidates.map { $0.allocatingDevicePath() }
         let receipts = Dictionary(
@@ -194,7 +201,10 @@ nonisolated enum KindleSyncPlanner {
                         && seenMatchIDs.insert(book.id).inserted
                 }
             guard !matches.isEmpty else {
-                items.append(missingItem(for: candidate))
+                // Missing books belong in this plan only if previously sent to this Kindle.
+                if receipts[candidate.id] != nil {
+                    items.append(missingItem(for: candidate))
+                }
                 continue
             }
 
@@ -206,7 +216,12 @@ nonisolated enum KindleSyncPlanner {
                 continue
             }
             let receipt = receipts[candidate.id]
-            let decision = decision(for: candidate, deviceBook: preferred, receipt: receipt)
+            let decision = decision(
+                for: candidate,
+                deviceBook: preferred,
+                receipt: receipt,
+                deviceKind: deviceKind
+            )
             items.append(item(for: candidate, deviceBook: preferred, decision: decision))
             consumedDeviceIDs.insert(preferred.id)
         }
@@ -267,7 +282,8 @@ nonisolated enum KindleSyncPlanner {
     private static func decision(
         for candidate: KindleSyncCandidate,
         deviceBook: DeviceBook,
-        receipt: KindleSyncReceipt?
+        receipt: KindleSyncReceipt?,
+        deviceKind: DeviceConnectionKind
     ) -> (action: KindleSyncAction, reason: KindleSyncReason) {
         if let blockReason = candidate.blockReason {
             return (.blocked, blockReason)
@@ -295,6 +311,15 @@ nonisolated enum KindleSyncPlanner {
             }
             if receipt.sentFileName.caseInsensitiveCompare(deviceBook.fileName) != .orderedSame {
                 return (.update, .formatChanged)
+            }
+            if deviceKind == .mtp,
+               ["azw", "azw3", "mobi"].contains(candidate.targetFormat.lowercased()),
+               receipt.coverVersion == nil {
+                // Pre-PDOC Winston builds could transfer the book to a modern
+                // Kindle but could not reach its hidden thumbnail directory.
+                // Replacing the payload is required even when the catalog has
+                // no separate cover file; the MOBI may carry its own cover.
+                return (.repairCover, .legacyMTPEmbeddedCover)
             }
             if candidate.hasCover,
                receipt.coverVersion != candidate.coverVersion

@@ -37,9 +37,12 @@ private final class JournalCheckpointFault: @unchecked Sendable {
 @Suite(.serialized)
 struct TransferQueueTests {
 
-    private func makeMonitor(_ fake: FakeKindleConnection) -> DeviceMonitor {
+    private func makeMonitor(
+        _ fake: FakeKindleConnection,
+        info: DeviceInfo = FakeKindleConnection.fakeInfo
+    ) -> DeviceMonitor {
         let monitor = DeviceMonitor()
-        monitor.adoptConnectionForTesting(fake, info: FakeKindleConnection.fakeInfo)
+        monitor.adoptConnectionForTesting(fake, info: info)
         return monitor
     }
 
@@ -168,6 +171,49 @@ struct TransferQueueTests {
         #expect(monitor.lastInventoryDelta.toGeneration == before + 2)
         #expect(monitor.lastInventoryDelta.removed.map(\.id) == [books[0].id])
         #expect(monitor.lastInventoryDelta.changedMatchKeys == ["first"])
+    }
+
+    @Test func staleInventoryCannotOverwriteAReplacementDevice() async {
+        let oldConnection = FakeKindleConnection()
+        let oldBook = DeviceBook(
+            path: "/documents/old.epub",
+            fileName: "old.epub",
+            sizeBytes: 10
+        )
+        await oldConnection.setBooks([oldBook])
+        await oldConnection.setBlockBookLists(true)
+        let monitor = makeMonitor(oldConnection)
+
+        let staleRefresh = Task { @MainActor in
+            await monitor.refreshBooks()
+        }
+        await oldConnection.waitUntilBookListStarts()
+
+        let newConnection = FakeKindleConnection()
+        let newBook = DeviceBook(
+            path: "/documents/new.epub",
+            fileName: "new.epub",
+            sizeBytes: 20
+        )
+        await newConnection.setBooks([newBook])
+        let replacementInfo = DeviceInfo(
+            name: "Replacement Kindle",
+            model: "Test",
+            kind: .massStorage,
+            totalBytes: 8_000_000_000,
+            freeBytes: 5_000_000_000
+        )
+        monitor.adoptConnectionForTesting(
+            newConnection,
+            info: replacementInfo
+        )
+        #expect(await monitor.refreshBooks())
+
+        await oldConnection.releaseBlockedBookList()
+        #expect(await staleRefresh.value == false)
+        #expect(monitor.info == replacementInfo)
+        #expect(monitor.books == [newBook])
+        #expect(monitor.deviceFileNames == ["new"])
     }
 
     @Test func verifiedTransferRemainsVisibleUntilTheDeviceListingCatchesUp() async throws {
@@ -348,6 +394,126 @@ struct TransferQueueTests {
         #expect(queue.failedCount == 0)
         #expect(queue.completedCount == 1)
         #expect(queue.overallProgress == 1)
+    }
+
+    @Test func sendsMOBIAsPersonalDocumentWithEmbeddedCoverToMTPKindle() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Colorsoft Book")
+        let fake = FakeKindleConnection()
+        await fake.setFailThumbnails(true)
+        let mtpInfo = DeviceInfo(
+            name: "Kindle Colorsoft",
+            model: "Kindle Colorsoft Signature Edition",
+            kind: .mtp,
+            totalBytes: 32_000_000_000,
+            freeBytes: 20_000_000_000,
+            identifier: "mtp:test-colorsoft"
+        )
+        let queue = TransferQueue(toasts: ToastCenter())
+
+        await queue.send(books: [book], via: makeMonitor(fake, info: mtpInfo))
+
+        let sent = try #require(await fake.sentFiles.first)
+        #expect(sent.cdeType == "PDOC")
+        #expect(sent.hasEmbeddedCover)
+        #expect(await fake.pushedThumbnails.isEmpty)
+        #expect(MOBIIdentifiers.read(from: book.fileURL).cdeType == "EBOK")
+        #expect(queue.items.allSatisfy { $0.stage == .done })
+        #expect(queue.failedCount == 0)
+    }
+
+    @Test func repairsExistingMTPBookByReplacingItWithPersonalDocument() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Colorsoft Repair")
+        let targetName = targetFileName(for: book, format: "mobi")
+        let deviceBook = DeviceBook(
+            mtpItemID: 42,
+            path: nil,
+            fileName: targetName,
+            sizeBytes: UInt64(try Data(contentsOf: book.fileURL).count)
+        )
+        let fake = FakeKindleConnection()
+        await fake.setBooks([deviceBook])
+        await fake.setFailThumbnails(true)
+        let mtpInfo = DeviceInfo(
+            name: "Kindle Colorsoft",
+            model: "Kindle Colorsoft Signature Edition",
+            kind: .mtp,
+            totalBytes: 32_000_000_000,
+            freeBytes: 20_000_000_000,
+            identifier: "mtp:test-colorsoft-repair"
+        )
+        let monitor = makeMonitor(fake, info: mtpInfo)
+        #expect(await monitor.refreshBooks())
+        var receipts: [KindleSyncTransferRecord] = []
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            onTransferCompleted: { receipts.append($0) }
+        )
+
+        let repaired = await queue.repairCover(
+            for: book,
+            deviceBook: deviceBook,
+            via: monitor
+        )
+
+        #expect(repaired)
+        let sent = try #require(await fake.sentFiles.first)
+        #expect(sent.fileName == targetName)
+        #expect(sent.cdeType == "PDOC")
+        #expect(sent.hasEmbeddedCover)
+        #expect(await fake.pushedThumbnails.isEmpty)
+        #expect(receipts.first?.coverVersion == book.coverVersion)
+        #expect(queue.items.map(\.stage) == [.done])
+    }
+
+    @Test func resumesLegacyCommittedMTPPayloadBySendingPersonalDocumentOnce() async throws {
+        let lib = try await TestLibrary()
+        let book = try makeMOBIBook(in: lib, title: "Legacy Colorsoft Resume")
+        let directory = makeJournalDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let mtpInfo = DeviceInfo(
+            name: "Kindle Colorsoft",
+            model: "Kindle Colorsoft Signature Edition",
+            kind: .mtp,
+            totalBytes: 32_000_000_000,
+            freeBytes: 20_000_000_000,
+            identifier: "mtp:test-colorsoft-legacy"
+        )
+        let targetName = targetFileName(for: book, format: "mobi")
+        var legacyItem = try durableItem(for: book, state: .payloadCommitted)
+        legacyItem.payload?.artifactFingerprint = String(repeating: "0", count: 64)
+        let store = TransferQueueJournalStore(directory: directory)
+        try store.save(DurableTransferJob(
+            schemaVersion: DurableTransferJob.currentSchemaVersion,
+            id: UUID(),
+            deviceIdentifier: mtpInfo.identifier,
+            resumePolicy: .sameDeviceAutomatically,
+            createdAt: .now,
+            updatedAt: .now,
+            items: [legacyItem]
+        ))
+        let fake = FakeKindleConnection()
+        await fake.setInfo(mtpInfo)
+        await fake.setBooks([DeviceBook(
+            mtpItemID: 7,
+            path: nil,
+            fileName: targetName,
+            sizeBytes: UInt64(try Data(contentsOf: book.fileURL).count)
+        )])
+        let queue = TransferQueue(
+            toasts: ToastCenter(),
+            journalDirectory: directory
+        )
+        let monitor = makeMonitor(fake, info: mtpInfo)
+
+        await queue.resumePending(via: monitor)
+        await queue.resumePending(via: monitor)
+
+        #expect(await fake.transferAttempts == 1)
+        #expect(await fake.sentFiles.first?.cdeType == "PDOC")
+        #expect(queue.pendingTransferCount == 0)
+        #expect(store.load().job == nil)
     }
 
     @Test func bulkSendAllocatesDistinctPathsForEqualBasenames() async throws {

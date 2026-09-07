@@ -110,6 +110,7 @@ final class DeviceMonitor {
 
     private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var deviceDeleteSession: BulkOperationSession?
+    @ObservationIgnored private var isScanning = false
     @ObservationIgnored private var verifiedTransfers: [String: DeviceBook] = [:]
     private var suspended = false
     private var manuallyDisconnected = false
@@ -155,6 +156,17 @@ final class DeviceMonitor {
 
     func suspendPolling() { suspended = true }
     func resumePolling() { suspended = false }
+
+    func retryConnection() async {
+        guard connection == nil, !isEjecting, !isScanning else { return }
+        manuallyDisconnected = false
+        lastError = nil
+        state = .connecting
+        await scanAndConnect()
+        if connection == nil, state == .connecting {
+            state = .disconnected
+        }
+    }
 
     func userDisconnect() async throws {
         guard let activeConnection = connection else {
@@ -215,6 +227,10 @@ final class DeviceMonitor {
     }
 
     private func scanAndConnect() async {
+        guard !isScanning else { return }
+        isScanning = true
+        defer { isScanning = false }
+
         let volume = await Task.detached(priority: .utility) {
             MassStorageDeviceConnection.detectKindleVolume()
         }.value
@@ -305,9 +321,10 @@ final class DeviceMonitor {
 
     @discardableResult
     func refreshBooks() async -> Bool {
-        guard let connection else { return false }
+        guard let activeConnection = connection else { return false }
         do {
-            let refreshed = try await connection.listBooks()
+            let refreshed = try await activeConnection.listBooks()
+            guard isCurrentConnection(activeConnection) else { return false }
             let refreshedMatchKeys = Set(refreshed.lazy.map(\.matchKey))
             verifiedTransfers = verifiedTransfers.filter {
                 !refreshedMatchKeys.contains($0.key)
@@ -325,6 +342,7 @@ final class DeviceMonitor {
             books = merged
             return true
         } catch {
+            guard isCurrentConnection(activeConnection) else { return false }
             lastError = error.localizedDescription
             return false
         }

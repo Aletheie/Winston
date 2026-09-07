@@ -196,6 +196,35 @@ final class KindleSyncProfileStore {
         )
     }
 
+    /// Prefer a unique name match when opening the sync sheet. An explicit
+    /// profile selection applies until the sheet is opened again.
+    @discardableResult
+    func ensureAutomaticProfile(for info: DeviceInfo, now: Date? = nil) -> KindleSyncProfile {
+        let now = now ?? self.now()
+        let normalizedDeviceName = Self.normalizedProfileName(info.name)
+        let nameMatches = profiles.indices.filter {
+            !normalizedDeviceName.isEmpty
+                && Self.normalizedProfileName(profiles[$0].name) == normalizedDeviceName
+        }
+
+        if nameMatches.count == 1, let targetIndex = nameMatches.first {
+            detach(info.identifier, persisting: false)
+            if !profiles[targetIndex].deviceIdentifiers.contains(info.identifier) {
+                profiles[targetIndex].deviceIdentifiers.append(info.identifier)
+                profiles[targetIndex].deviceIdentifiers.sort()
+            }
+            profiles[targetIndex].lastSeenAt = now
+            persist()
+            return profiles[targetIndex]
+        }
+
+        return ensureProfile(
+            deviceIdentifier: info.identifier,
+            deviceName: info.name,
+            now: now
+        )
+    }
+
     func profile(for info: DeviceInfo) -> KindleSyncProfile? {
         profiles.first { $0.deviceIdentifiers.contains(info.identifier) }
     }
@@ -281,28 +310,6 @@ final class KindleSyncProfileStore {
         persist()
     }
 
-    func recordCoverRepair(
-        bookID: UUID,
-        sourceFingerprint: String,
-        sentFileName: String,
-        coverVersion: Int,
-        coverIdentity: String? = nil,
-        on info: DeviceInfo,
-        now: Date? = nil
-    ) {
-        let now = now ?? self.now()
-        record(KindleSyncTransferRecord(
-            deviceIdentifier: info.identifier,
-            deviceName: info.name,
-            bookID: bookID,
-            sourceFingerprint: sourceFingerprint,
-            sentFileName: sentFileName,
-            coverVersion: coverVersion,
-            coverIdentity: coverIdentity,
-            completedAt: now
-        ))
-    }
-
     func recordRemoval(fileNames: Set<String>, from info: DeviceInfo) {
         guard !fileNames.isEmpty,
               let profileIndex = profiles.firstIndex(where: {
@@ -354,6 +361,11 @@ final class KindleSyncProfileStore {
         var suffix = 2
         while existing.contains("\(base) \(suffix)".lowercased()) { suffix += 1 }
         return "\(base) \(suffix)"
+    }
+
+    private static func normalizedProfileName(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
 
     private func persist() {

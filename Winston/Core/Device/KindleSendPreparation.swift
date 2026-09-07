@@ -101,9 +101,10 @@ nonisolated enum DevicePathAllocator {
             return baseName.lowercased()
         }
         let token = String(baseName[markerRange.upperBound...])
-        guard token.count == 32,
-              token.unicodeScalars.allSatisfy(hexadecimalScalars.contains)
-        else { return baseName.lowercased() }
+        guard token.count == 32 else { return baseName.lowercased() }
+        for scalar in token.unicodeScalars where !hexadecimalScalars.contains(scalar) {
+            return baseName.lowercased()
+        }
         return String(baseName[..<markerRange.lowerBound]).lowercased()
     }
 
@@ -178,11 +179,21 @@ nonisolated struct KindleSendDescriptor: Codable, Equatable, Sendable {
     let fileUnavailable: Bool
 }
 
+nonisolated enum KindleCoverDelivery: Equatable, Sendable {
+    /// Older USB-mass-storage Kindles expose `system/thumbnails`.
+    case sidecarThumbnail
+    /// 2024-and-newer MTP Kindles require a PDOC with an embedded cover.
+    case embeddedPersonalDocument
+    /// The transport exposes no supported library-thumbnail route for this format.
+    case unavailable
+}
+
 nonisolated struct TransferPlanItem: Sendable, Identifiable {
     let descriptor: KindleSendDescriptor
     let sourceFileGeneration: TransferFileGeneration
     let destination: DeviceTransferPath
     let existingDeviceBookID: DeviceBook.ID?
+    let coverDelivery: KindleCoverDelivery
 
     var id: UUID { descriptor.bookUUID }
     var displayName: String { descriptor.displayName }
@@ -262,7 +273,11 @@ nonisolated enum TransferPlanner {
                     descriptor: descriptor,
                     sourceFileGeneration: sourceFileGeneration,
                     destination: destination,
-                    existingDeviceBookID: existing?.id
+                    existingDeviceBookID: existing?.id,
+                    coverDelivery: coverDelivery(
+                        for: descriptor.targetFormat,
+                        deviceKind: inventory.info.kind
+                    )
                 ))
             } else {
                 conflicts.append(BulkOperationConflict(
@@ -278,6 +293,20 @@ nonisolated enum TransferPlanner {
             items: items,
             conflicts: conflicts
         )
+    }
+
+    private static func coverDelivery(
+        for format: String,
+        deviceKind: DeviceConnectionKind
+    ) -> KindleCoverDelivery {
+        switch deviceKind {
+        case .massStorage:
+            .sidecarThumbnail
+        case .mtp:
+            ["azw", "azw3", "mobi"].contains(format.lowercased())
+                ? .embeddedPersonalDocument
+                : .unavailable
+        }
     }
 }
 
@@ -298,6 +327,7 @@ nonisolated struct TransferArtifact: Sendable {
     let destination: DeviceTransferPath
     let coverOwner: CoverOwner
     let coverVersion: Int
+    let coverDelivery: KindleCoverDelivery
 
     var byteTransfer: DeviceByteTransfer {
         DeviceByteTransfer(
@@ -369,7 +399,7 @@ nonisolated enum TransferArtifactBuilder {
             throw TransferArtifactError.sourceChanged
         }
 
-        let payload: MaterializedFile
+        var payload: MaterializedFile
         if descriptor.requiresConversion {
             let converted = try await EbookConverter.convertForKindle(sourceFile.url)
             defer { try? FileManager.default.removeItem(at: converted) }
@@ -382,6 +412,10 @@ nonisolated enum TransferArtifactBuilder {
             )
         } else {
             payload = sourceFile
+        }
+
+        if item.coverDelivery == .embeddedPersonalDocument {
+            payload = try preparePersonalDocument(payload)
         }
 
         return TransferArtifact(
@@ -398,7 +432,31 @@ nonisolated enum TransferArtifactBuilder {
             byteCount: payload.byteCount,
             destination: item.destination,
             coverOwner: descriptor.coverOwner,
-            coverVersion: descriptor.coverVersion
+            coverVersion: descriptor.coverVersion,
+            coverDelivery: item.coverDelivery
+        )
+    }
+
+    private static func preparePersonalDocument(
+        _ file: MaterializedFile
+    ) throws -> MaterializedFile {
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: file.url.path(percentEncoded: false)
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o400],
+                ofItemAtPath: file.url.path(percentEncoded: false)
+            )
+        }
+
+        let preparation = try MOBIIdentifiers.markAsPersonalDocument(at: file.url)
+        guard preparation == .updated else { return file }
+        return MaterializedFile(
+            url: file.url,
+            fingerprint: try ContentHasher.sha256Cancellable(of: file.url),
+            byteCount: file.byteCount
         )
     }
 
@@ -581,7 +639,11 @@ enum KindleSendPreparation {
                   let primarySourceHash else { return false }
             return option.generatedFromContentHash == primarySourceHash
         }
-        let staleTarget = !generatedTargets.isEmpty && !hasCurrentTarget
+        // A generated Kindle file may be the only remaining source, leaving
+        // nothing to regenerate. Check staleness only when conversion is needed.
+        let staleTarget = requiresConversion
+            && !generatedTargets.isEmpty
+            && !hasCurrentTarget
         let catalogSourceURL = BookFileStore.catalogURL(for: chosen.fileName)
         let sourceURL = catalogSourceURL
             ?? AppPaths.booksDirectory.appending(path: ".invalid-managed-reference")

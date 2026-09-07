@@ -11,6 +11,8 @@ actor FakeKindleConnection: KindleDeviceConnection {
     struct SentFile: Sendable, Equatable {
         var fileName: String
         var byteCount: Int
+        var cdeType: String?
+        var hasEmbeddedCover: Bool
     }
 
     private(set) var sentFiles: [SentFile] = []
@@ -36,7 +38,12 @@ actor FakeKindleConnection: KindleDeviceConnection {
     private var sendStarted = false
     private var sendStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var blockedSend: CheckedContinuation<Void, Never>?
+    private var blockBookLists = false
+    private var bookListStarted = false
+    private var bookListStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var blockedBookList: CheckedContinuation<Void, Never>?
     private var books: [DeviceBook] = []
+    private var currentInfo = fakeInfo
 
     func setAlive(_ value: Bool) { alive = value }
     func setFailEject(_ value: Bool) { failEject = value }
@@ -50,7 +57,9 @@ actor FakeKindleConnection: KindleDeviceConnection {
     func setFailThumbnails(_ value: Bool) { failThumbnails = value }
     func setBlockSends(_ value: Bool) { blockSends = value }
     func setBlockSendsCooperatively(_ value: Bool) { blockSendsCooperatively = value }
+    func setBlockBookLists(_ value: Bool) { blockBookLists = value }
     func setBooks(_ value: [DeviceBook]) { books = value }
+    func setInfo(_ value: DeviceInfo) { currentInfo = value }
 
     func waitUntilSendStarts() async {
         if sendStarted { return }
@@ -60,6 +69,11 @@ actor FakeKindleConnection: KindleDeviceConnection {
     func waitUntilEjectStarts() async {
         if ejectStarted { return }
         await withCheckedContinuation { ejectStartWaiters.append($0) }
+    }
+
+    func waitUntilBookListStarts() async {
+        if bookListStarted { return }
+        await withCheckedContinuation { bookListStartWaiters.append($0) }
     }
 
     func releaseBlockedEject() {
@@ -74,14 +88,29 @@ actor FakeKindleConnection: KindleDeviceConnection {
         blockedSend = nil
     }
 
+    func releaseBlockedBookList() {
+        blockBookLists = false
+        blockedBookList?.resume()
+        blockedBookList = nil
+    }
+
     static let fakeInfo = DeviceInfo(name: "Fake Kindle", model: "Test", kind: .massStorage,
                                      totalBytes: 8_000_000_000, freeBytes: 6_000_000_000)
 
     // MARK: - KindleDeviceConnection
 
-    func info() async throws -> DeviceInfo { Self.fakeInfo }
+    func info() async throws -> DeviceInfo { currentInfo }
 
-    func listBooks() async throws -> [DeviceBook] { books }
+    func listBooks() async throws -> [DeviceBook] {
+        bookListStarted = true
+        let waiters = bookListStartWaiters
+        bookListStartWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        if blockBookLists {
+            await withCheckedContinuation { blockedBookList = $0 }
+        }
+        return books
+    }
 
     func transfer(
         _ request: DeviceByteTransfer,
@@ -113,7 +142,12 @@ actor FakeKindleConnection: KindleDeviceConnection {
             ))
             throw DeviceError.transferFailed(code: -6)
         }
-        sentFiles.append(SentFile(fileName: fileName, byteCount: bytes))
+        sentFiles.append(SentFile(
+            fileName: fileName,
+            byteCount: bytes,
+            cdeType: MOBIIdentifiers.read(from: request.sourceURL).cdeType,
+            hasEmbeddedCover: MOBICoverExtractor.coverData(from: request.sourceURL) != nil
+        ))
         books.append(DeviceBook(
             path: request.destination.relativePath,
             fileName: fileName,

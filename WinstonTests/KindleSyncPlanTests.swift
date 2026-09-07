@@ -52,8 +52,19 @@ struct KindleSyncPlanTests {
         )
     }
 
-    @Test func missingLibraryBookIsAddedWhileDeviceOnlyRemovalIsOptIn() {
+    @Test func previouslySyncedMissingLibraryBookIsRestoredWhileDeviceOnlyRemovalIsOptIn() {
         let local = candidate(title: "Dune", matchKey: "dune")
+        let localTarget = DevicePathAllocator.allocate(
+            proposedFileName: local.targetFileName,
+            ownerID: local.id
+        )
+        let receipt = KindleSyncReceipt(
+            bookID: local.id,
+            sourceFingerprint: local.sourceFingerprint,
+            sentFileName: localTarget,
+            coverVersion: local.coverVersion,
+            syncedAt: .now
+        )
         let deviceOnly = DeviceBook(
             path: "/documents/Foundation.azw3",
             fileName: "Foundation.azw3",
@@ -63,7 +74,7 @@ struct KindleSyncPlanTests {
         let plan = KindleSyncPlanner.makePlan(
             candidates: [local],
             deviceBooks: [deviceOnly],
-            profile: profile()
+            profile: profile(receipts: [receipt])
         )
 
         #expect(plan.items.first(where: { $0.bookID == local.id })?.action == .add)
@@ -72,6 +83,20 @@ struct KindleSyncPlanTests {
         #expect(removal?.reason == .onlyOnDevice)
         #expect(removal?.selectedByDefault == false)
         #expect(plan.selectedByDefault.count == 1)
+    }
+
+    @Test func neverSyncedLibraryBookIsNotAddedToThisKindleProfile() {
+        let unrelatedLibraryBook = candidate(title: "Realm Breaker", matchKey: "realm-breaker")
+
+        let plan = KindleSyncPlanner.makePlan(
+            candidates: [unrelatedLibraryBook],
+            deviceBooks: [],
+            profile: profile()
+        )
+
+        #expect(plan.items.isEmpty)
+        #expect(plan.selectedByDefault.isEmpty)
+        #expect(plan.count(for: .add) == 0)
     }
 
     @Test func modifiedEPUBWithOldAZW3IsRegeneratedAndReplacedNotDuplicated() {
@@ -140,6 +165,61 @@ struct KindleSyncPlanTests {
         #expect(candidate.hasStaleTargetConversion)
         #expect(plan.items.first?.action == .update)
         #expect(plan.items.first?.reason == .outdatedConversion)
+    }
+
+    @Test func generatedPrimaryMOBIWithoutConvertibleSourceIsNotPerpetuallyStale() async throws {
+        let library = try await TestLibrary()
+        let source = library.root.appending(path: "legacy-generated.mobi")
+        try Data("current mobi bytes".utf8).write(to: source)
+        let assetID = UUID()
+        let fileName = "\(assetID.uuidString).mobi"
+        try library.installBookFile(from: source, fileName: fileName)
+        let book = Book(fileName: fileName, originalFileName: "Realm Breaker.epub")
+        book.primaryAssetUUID = assetID
+        let asset = BookAsset(
+            uuid: assetID,
+            fileName: fileName,
+            origin: .generated,
+            contentHash: "current-mobi-hash",
+            generatedFromContentHash: "source-that-is-no-longer-in-the-catalog",
+            sizeBytes: 18,
+            validationStatus: .ok,
+            book: book
+        )
+        library.context.insert(book)
+        library.context.insert(asset)
+        try library.context.save()
+
+        let candidate = KindleSendPreparation.candidate(for: book)
+        let target = DevicePathAllocator.allocate(
+            proposedFileName: candidate.targetFileName,
+            ownerID: candidate.id
+        )
+        let receipt = KindleSyncReceipt(
+            bookID: candidate.id,
+            sourceFingerprint: candidate.sourceFingerprint,
+            sentFileName: target,
+            coverVersion: candidate.coverVersion,
+            coverIdentity: candidate.coverIdentity,
+            syncedAt: .now
+        )
+        let device = DeviceBook(
+            mtpItemID: 42,
+            path: nil,
+            fileName: target,
+            sizeBytes: 18
+        )
+        let plan = KindleSyncPlanner.makePlan(
+            candidates: [candidate],
+            deviceBooks: [device],
+            profile: profile(receipts: [receipt]),
+            deviceKind: .mtp
+        )
+
+        #expect(candidate.requiresConversion == false)
+        #expect(candidate.hasStaleTargetConversion == false)
+        #expect(plan.items.first?.action == .keep)
+        #expect(plan.items.first?.reason == .upToDate)
     }
 
     @Test func changedSourceFingerprintUpdatesExistingDeviceCopy() {
@@ -213,6 +293,140 @@ struct KindleSyncPlanTests {
 
         #expect(plan.items.first?.action == .repairCover)
         #expect(plan.items.first?.reason == .coverChanged)
+    }
+
+    @Test func legacyMTPReceiptRepairsEmbeddedCoverWithoutCatalogCover() {
+        let local = candidate(
+            sourceFormat: "MOBI",
+            targetFormat: "MOBI",
+            fingerprint: "same",
+            requiresConversion: false,
+            hasCover: false
+        )
+        let target = DevicePathAllocator.allocate(
+            proposedFileName: local.targetFileName,
+            ownerID: local.id
+        )
+        let receipt = KindleSyncReceipt(
+            bookID: local.id,
+            sourceFingerprint: "same",
+            sentFileName: target,
+            coverVersion: nil,
+            syncedAt: .now
+        )
+        let device = DeviceBook(
+            mtpItemID: 42,
+            path: nil,
+            fileName: target,
+            sizeBytes: 900
+        )
+
+        let plan = KindleSyncPlanner.makePlan(
+            candidates: [local],
+            deviceBooks: [device],
+            profile: profile(receipts: [receipt]),
+            deviceKind: .mtp
+        )
+
+        #expect(plan.items.first?.action == .repairCover)
+        #expect(plan.items.first?.reason == .legacyMTPEmbeddedCover)
+        #expect(plan.items.first?.selectedByDefault == true)
+    }
+
+    @Test func legacyMTPCoverRepairsSuppressUnrelatedLibraryAdditionsByDefault() throws {
+        let repair = candidate(
+            title: "Already on Kindle",
+            matchKey: "already-on-kindle",
+            sourceFormat: "MOBI",
+            targetFormat: "MOBI",
+            fingerprint: "same",
+            requiresConversion: false,
+            hasCover: false
+        )
+        let repairTarget = DevicePathAllocator.allocate(
+            proposedFileName: repair.targetFileName,
+            ownerID: repair.id
+        )
+        let receipt = KindleSyncReceipt(
+            bookID: repair.id,
+            sourceFingerprint: "same",
+            sentFileName: repairTarget,
+            coverVersion: nil,
+            syncedAt: .now
+        )
+        let device = DeviceBook(
+            mtpItemID: 42,
+            path: nil,
+            fileName: repairTarget,
+            sizeBytes: 900
+        )
+        let unsent = candidate(
+            title: "Library Only",
+            matchKey: "library-only"
+        )
+
+        let plan = KindleSyncPlanner.makePlan(
+            candidates: [repair, unsent],
+            deviceBooks: [device],
+            profile: profile(receipts: [receipt]),
+            deviceKind: .mtp
+        )
+
+        let repairItem = try #require(plan.items.first { $0.bookID == repair.id })
+        #expect(repairItem.action == .repairCover)
+        #expect(plan.items.contains { $0.bookID == unsent.id } == false)
+        #expect(plan.count(for: .add) == 0)
+        #expect(plan.selectedByDefault == Set([repairItem.id]))
+    }
+
+    @Test func ordinaryCoverRepairDoesNotSuppressLibraryAdditionsByDefault() {
+        let repair = candidate(
+            title: "Updated Cover",
+            matchKey: "updated-cover",
+            fingerprint: "same",
+            coverVersion: 2
+        )
+        let repairTarget = DevicePathAllocator.allocate(
+            proposedFileName: repair.targetFileName,
+            ownerID: repair.id
+        )
+        let receipt = KindleSyncReceipt(
+            bookID: repair.id,
+            sourceFingerprint: "same",
+            sentFileName: repairTarget,
+            coverVersion: 1,
+            syncedAt: .now
+        )
+        let device = DeviceBook(
+            path: "/documents/\(repairTarget)",
+            fileName: repairTarget,
+            sizeBytes: 900
+        )
+        let unsent = candidate(
+            title: "Library Only",
+            matchKey: "library-only"
+        )
+        let unsentTarget = DevicePathAllocator.allocate(
+            proposedFileName: unsent.targetFileName,
+            ownerID: unsent.id
+        )
+        let unsentReceipt = KindleSyncReceipt(
+            bookID: unsent.id,
+            sourceFingerprint: unsent.sourceFingerprint,
+            sentFileName: unsentTarget,
+            coverVersion: unsent.coverVersion,
+            syncedAt: .now
+        )
+
+        let plan = KindleSyncPlanner.makePlan(
+            candidates: [repair, unsent],
+            deviceBooks: [device],
+            profile: profile(receipts: [receipt, unsentReceipt])
+        )
+
+        #expect(plan.count(for: .repairCover) == 1)
+        #expect(plan.count(for: .add) == 1)
+        #expect(plan.selectedByDefault.count == 2)
     }
 
     @Test func matchingReceiptKeepsDeviceBookUntouched() {
@@ -351,6 +565,18 @@ struct KindleSyncPlanTests {
         let candidates = (0..<4_000).map { index in
             candidate(title: "Library \(index)", matchKey: "library-\(index)")
         }
+        let receipts = candidates.map { candidate in
+            KindleSyncReceipt(
+                bookID: candidate.id,
+                sourceFingerprint: candidate.sourceFingerprint,
+                sentFileName: DevicePathAllocator.allocate(
+                    proposedFileName: candidate.targetFileName,
+                    ownerID: candidate.id
+                ),
+                coverVersion: candidate.coverVersion,
+                syncedAt: .now
+            )
+        }
         let deviceBooks = (0..<4_000).map { index in
             DeviceBook(
                 path: "/documents/Device \(index).azw3",
@@ -364,7 +590,7 @@ struct KindleSyncPlanTests {
         let plan = KindleSyncPlanner.makePlan(
             candidates: candidates,
             deviceBooks: deviceBooks,
-            profile: profile()
+            profile: profile(receipts: receipts)
         )
         let elapsed = startedAt.duration(to: clock.now)
 
@@ -413,6 +639,41 @@ struct KindleSyncPlanTests {
         #expect(reloaded.profiles.count == 2)
         #expect(reloaded.receipts(for: firstProfile.id)[bookID] != nil)
         #expect(reloaded.receipts(for: secondProfile.id)[bookID] == nil)
+    }
+
+    @Test func connectedKindleAutomaticallyReclaimsItsNameMatchedProfile() throws {
+        let suiteName = "KindleSyncAutomaticProfile-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = KindleSyncProfileStore(defaults: defaults, storageKey: "profiles")
+        let oldKindle = DeviceInfo(
+            name: "Kindle",
+            model: "Paperwhite",
+            kind: .massStorage,
+            totalBytes: 8_000,
+            freeBytes: 4_000,
+            identifier: "volume:old-kindle"
+        )
+        let colorsoft = DeviceInfo(
+            name: "Kindle Colorsoft Signature Edition",
+            model: "Kindle Colorsoft Signature Edition",
+            kind: .mtp,
+            totalBytes: 27_071_250_432,
+            freeBytes: 20_000,
+            identifier: "mtp:colorsoft"
+        )
+        let oldProfile = store.ensureProfile(for: oldKindle)
+        let colorsoftProfile = store.ensureProfile(for: colorsoft)
+
+        // Simulate an accidental choice of the old profile for the connected device.
+        store.assign(profileID: oldProfile.id, to: colorsoft)
+        #expect(store.profile(for: colorsoft)?.id == oldProfile.id)
+
+        let automaticallySelected = store.ensureAutomaticProfile(for: colorsoft)
+
+        #expect(automaticallySelected.id == colorsoftProfile.id)
+        #expect(store.profile(for: colorsoft)?.id == colorsoftProfile.id)
+        #expect(store.profile(id: oldProfile.id)?.deviceIdentifiers.contains(colorsoft.identifier) == false)
     }
 
     @Test func legacyReceiptsDecodeWithUnknownArtifactMetadata() throws {
@@ -598,6 +859,45 @@ struct KindleSyncPlanTests {
         #expect(report.cancelledCount == 2)
         #expect(report.safeRetryPlanItemIDs == Set([selected[1].id, selected[2].id]))
         #expect(!report.needsMassStorageEjectGuidance)
+    }
+
+    @Test func resultPresentationOnlyInterruptsForAttentionOrSafeEjection() {
+        let item = executionPlanItem(
+            id: "add|success",
+            bookID: UUID(),
+            title: "Sent"
+        )
+        var mtpState = KindleSyncExecutionState(
+            selectedItems: [item],
+            deviceInfo: DeviceInfo(
+                name: "MTP Kindle",
+                model: "Scribe",
+                kind: .mtp,
+                totalBytes: 1,
+                freeBytes: 1,
+                identifier: "mtp:success"
+            )
+        )
+        mtpState.markSucceeded(item.id)
+        #expect(!mtpState.makeReport().needsResultPresentation)
+
+        var massStorageState = KindleSyncExecutionState(
+            selectedItems: [item],
+            deviceInfo: DeviceInfo(
+                name: "USB Kindle",
+                model: "Paperwhite",
+                kind: .massStorage,
+                totalBytes: 1,
+                freeBytes: 1,
+                identifier: "usb:success"
+            )
+        )
+        massStorageState.markSucceeded(item.id)
+        #expect(massStorageState.makeReport().needsResultPresentation)
+
+        var failedState = mtpState
+        failedState.markFailed(item.id, detail: "Disconnected")
+        #expect(failedState.makeReport().needsResultPresentation)
     }
 
     @Test func verifiedPayloadRecoveryIsNeverOfferedAsPlanRetry() {

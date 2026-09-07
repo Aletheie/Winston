@@ -3,6 +3,13 @@ import Foundation
 nonisolated enum MOBIIdentifiers {
     private static let maxEXTHRecordBytes = 1 * 1_024 * 1_024
 
+    enum PersonalDocumentPreparation: Equatable, Sendable {
+        case updated
+        case alreadyPersonalDocument
+        case missingContentType
+        case unsupportedContentType(String)
+    }
+
     struct Identifiers: Equatable, Sendable {
         var asin: String?
         var cdeType: String?
@@ -18,21 +25,14 @@ nonisolated enum MOBIIdentifiers {
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
               data.count > 132 else { return Identifiers() }
 
-        let numRecords = Int(data.readUInt16BE(at: 76))
-        guard numRecords > 0 else { return Identifiers() }
-
-        let r0 = Int(data.readUInt32BE(at: 78))
-        let mobiOff = r0 + 16
-        guard mobiOff + 8 <= data.count,
-              data[mobiOff] == 0x4D, data[mobiOff + 1] == 0x4F,
-              data[mobiOff + 2] == 0x42, data[mobiOff + 3] == 0x49
-        else { return Identifiers() }
-
-        let headerLen = Int(data.readUInt32BE(at: mobiOff + 4))
-        guard headerLen >= 84 else { return Identifiers() }
+        guard let layout = mobiLayout(in: data) else { return Identifiers() }
 
         var result = Identifiers()
-        forEachEXTHRecord(in: data, mobiOff: mobiOff, headerLen: headerLen) { type, value in
+        forEachEXTHRecord(
+            in: data,
+            mobiOff: layout.mobiOffset,
+            headerLen: layout.headerLength
+        ) { type, value in
             let string = String(data: value, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
             switch type {
             case EXTH.asin, EXTH.asin504:
@@ -46,6 +46,46 @@ nonisolated enum MOBIIdentifiers {
         return result
     }
 
+    /// Marks a staged MOBI/AZW payload as a personal document without changing
+    /// PalmDB offsets. Modern MTP Kindles hide `system/thumbnails`; PDOC makes
+    /// their indexer use the cover embedded in the book instead.
+    nonisolated static func markAsPersonalDocument(
+        at url: URL
+    ) throws -> PersonalDocumentPreparation {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard let layout = mobiLayout(in: data) else {
+            return .missingContentType
+        }
+
+        var valueRange: Range<Int>?
+        forEachEXTHRecordRange(
+            in: data,
+            mobiOff: layout.mobiOffset,
+            headerLen: layout.headerLength
+        ) { type, range in
+            if type == EXTH.cdeType { valueRange = range }
+        }
+        guard let valueRange else { return .missingContentType }
+
+        let value = String(data: data.subdata(in: valueRange), encoding: .ascii) ?? ""
+        switch value {
+        case "PDOC":
+            return .alreadyPersonalDocument
+        case "EBOK":
+            guard valueRange.count == 4 else {
+                return .unsupportedContentType(value)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seek(toOffset: UInt64(valueRange.lowerBound))
+            try handle.write(contentsOf: Data("PDOC".utf8))
+            try handle.synchronize()
+            return .updated
+        default:
+            return .unsupportedContentType(value)
+        }
+    }
+
     // Spec offset is +112; the +80 fallback matches files the older writer produced.
     nonisolated static func hasEXTH(in data: Data, mobiOff: Int) -> Bool {
         let spec = data.readUInt32BE(at: mobiOff + 112)
@@ -55,6 +95,45 @@ nonisolated enum MOBIIdentifiers {
 
     nonisolated static func forEachEXTHRecord(
         in data: Data, mobiOff: Int, headerLen: Int, _ body: (_ type: Int, _ value: Data) -> Void
+    ) {
+        forEachEXTHRecordRange(
+            in: data,
+            mobiOff: mobiOff,
+            headerLen: headerLen
+        ) { type, range in
+            body(type, data.subdata(in: range))
+        }
+    }
+
+    private struct MOBILayout {
+        let mobiOffset: Int
+        let headerLength: Int
+    }
+
+    private nonisolated static func mobiLayout(in data: Data) -> MOBILayout? {
+        let numRecords = Int(data.readUInt16BE(at: 76))
+        guard numRecords > 0 else { return nil }
+
+        let record0 = Int(data.readUInt32BE(at: 78))
+        let mobiOffset = record0 + 16
+        guard mobiOffset + 8 <= data.count,
+              data[mobiOffset] == 0x4D, data[mobiOffset + 1] == 0x4F,
+              data[mobiOffset + 2] == 0x42, data[mobiOffset + 3] == 0x49
+        else { return nil }
+
+        let headerLength = Int(data.readUInt32BE(at: mobiOffset + 4))
+        guard headerLength >= 84 else { return nil }
+        return MOBILayout(
+            mobiOffset: mobiOffset,
+            headerLength: headerLength
+        )
+    }
+
+    private nonisolated static func forEachEXTHRecordRange(
+        in data: Data,
+        mobiOff: Int,
+        headerLen: Int,
+        _ body: (_ type: Int, _ valueRange: Range<Int>) -> Void
     ) {
         guard hasEXTH(in: data, mobiOff: mobiOff) else { return }
 
@@ -77,7 +156,7 @@ nonisolated enum MOBIIdentifiers {
             guard length >= 8,
                   length <= maxEXTHRecordBytes,
                   offset + length <= data.count else { break }
-            body(type, data.subdata(in: (offset + 8) ..< (offset + length)))
+            body(type, (offset + 8) ..< (offset + length))
             offset += length
         }
     }

@@ -109,11 +109,11 @@ struct KindleSyncPlanSheet: View {
         .frame(minWidth: 760, idealWidth: 840, minHeight: 560, idealHeight: 680)
         .background(theme.background)
         .interactiveDismissDisabled(isApplying || isEjectingAfterSync)
-        .task { rebuildPlan(resetSelection: true) }
+        .task { rebuildPlanUsingAutomaticProfile() }
         .onChange(of: readModel.generation) { rebuildPlan(resetSelection: false) }
         .onChange(of: readModel.isReady) { rebuildPlan(resetSelection: false) }
         .onChange(of: monitor.booksRevision) { rebuildPlan(resetSelection: false) }
-        .onChange(of: monitor.info) { rebuildPlan(resetSelection: true) }
+        .onChange(of: monitor.info?.identifier) { rebuildPlanUsingAutomaticProfile() }
         .onDisappear { planBuildTask?.cancel() }
         .alert(profileEditorTitle, isPresented: $showsProfileEditor) {
             TextField("Profile Name", text: $profileName)
@@ -169,6 +169,13 @@ struct KindleSyncPlanSheet: View {
         profileEditorMode.isCreate ? "New Kindle Profile" : "Rename Kindle Profile"
     }
 
+    private func rebuildPlanUsingAutomaticProfile() {
+        if let info = monitor.info {
+            profileStore.ensureAutomaticProfile(for: info)
+        }
+        rebuildPlan(resetSelection: true)
+    }
+
     private func rebuildPlan(resetSelection: Bool) {
         planBuildTask?.cancel()
         planBuildGeneration &+= 1
@@ -202,7 +209,8 @@ struct KindleSyncPlanSheet: View {
                 newPlan = await Self.buildPlan(
                     candidates: candidates,
                     deviceBooks: deviceBooks,
-                    profile: profile
+                    profile: profile,
+                    deviceKind: info.kind
                 )
             } else {
                 var snapshots: [KindleSendBookSnapshot] = []
@@ -217,7 +225,8 @@ struct KindleSyncPlanSheet: View {
                 newPlan = await Self.buildPlan(
                     snapshots: snapshots,
                     deviceBooks: deviceBooks,
-                    profile: profile
+                    profile: profile,
+                    deviceKind: info.kind
                 )
             }
 
@@ -242,7 +251,8 @@ struct KindleSyncPlanSheet: View {
     private static func buildPlan(
         snapshots: [KindleSendBookSnapshot],
         deviceBooks: [DeviceBook],
-        profile: KindleSyncProfile
+        profile: KindleSyncProfile,
+        deviceKind: DeviceConnectionKind
     ) async -> KindleSyncPlan? {
         var candidates: [KindleSyncCandidate] = []
         candidates.reserveCapacity(snapshots.count)
@@ -254,7 +264,8 @@ struct KindleSyncPlanSheet: View {
         return KindleSyncPlanner.makePlan(
             candidates: candidates,
             deviceBooks: deviceBooks,
-            profile: profile
+            profile: profile,
+            deviceKind: deviceKind
         )
     }
 
@@ -262,13 +273,15 @@ struct KindleSyncPlanSheet: View {
     private static func buildPlan(
         candidates: [KindleSyncCandidate],
         deviceBooks: [DeviceBook],
-        profile: KindleSyncProfile
+        profile: KindleSyncProfile,
+        deviceKind: DeviceConnectionKind
     ) async -> KindleSyncPlan? {
         guard !Task.isCancelled else { return nil }
         return KindleSyncPlanner.makePlan(
             candidates: candidates,
             deviceBooks: deviceBooks,
-            profile: profile
+            profile: profile,
+            deviceKind: deviceKind
         )
     }
 
@@ -397,8 +410,8 @@ struct KindleSyncPlanSheet: View {
             )
         }
         guard let report = executionState?.makeReport() else { return }
-        executionReport = report
         operationReports.upsert(.kindle(report))
+        executionReport = report.needsResultPresentation ? report : nil
         rebuildPlan(resetSelection: true)
     }
 
@@ -562,6 +575,7 @@ private struct KindleSyncPlanHeader: View {
                     theme.styledText(terminal: "// kindle_sync_plan", native: "Kindle Sync Plan")
                         .font(theme.body(size: 17, weight: .bold))
                         .foregroundStyle(theme.textPrimary)
+                        .accessibilityIdentifier("kindleSyncPlan.title")
                     Text("Review exactly what will change on \(deviceName).")
                         .font(theme.label(size: 11, weight: .regular))
                         .foregroundStyle(theme.textSecondary)
@@ -1069,6 +1083,7 @@ private extension KindleSyncReason {
         case .outdatedConversion: "The Kindle conversion is older than its source file and will be regenerated."
         case .formatChanged: "A different Kindle format is now preferred; the old variant will be replaced."
         case .coverChanged: "The library cover changed since the last transfer."
+        case .legacyMTPEmbeddedCover: "Already on this Kindle; only its embedded cover will be repaired."
         case .upToDate: "Already matches this profile; it will be left untouched."
         case .onlyOnDevice: "Only on the Kindle. Removal is optional and off by default."
         case .duplicateVariant: "An extra format for the same title. Removal is optional and off by default."

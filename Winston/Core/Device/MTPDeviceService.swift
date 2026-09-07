@@ -71,7 +71,7 @@ actor MTPDeviceConnection: KindleDeviceConnection {
         }
 
         for i in 0 ..< Int(count) where Self.isKindle(rawDevices[i]) {
-            if let opened = LIBMTP_Open_Raw_Device(&rawDevices[i]) {
+            if let opened = LIBMTP_Open_Raw_Device_Uncached(&rawDevices[i]) {
                 device = opened
                 LIBMTP_Clear_Errorstack(opened)
                 loadStorageAndFolders()
@@ -221,6 +221,7 @@ actor MTPDeviceConnection: KindleDeviceConnection {
         guard size == request.expectedByteCount else {
             throw DeviceError.fileMissing
         }
+        let replacedObjectIDs = fileIDs(named: fileName)
         Log.device.info("Sending \(fileName, privacy: .public) (\(size) bytes) → documents (folder \(self.documentsFolderID), storage \(self.primaryStorageID))")
 
         guard let meta = LIBMTP_new_file_t() else { throw DeviceError.transferFailed(code: -1) }
@@ -247,6 +248,20 @@ actor MTPDeviceConnection: KindleDeviceConnection {
             LIBMTP_Dump_Errorstack(device)
             LIBMTP_Clear_Errorstack(device)
             throw DeviceError.transferFailed(code: result)
+        }
+        let newObjectID = meta.pointee.item_id
+        for objectID in replacedObjectIDs where objectID != newObjectID {
+            let deleteResult = LIBMTP_Delete_Object(device, objectID)
+            if deleteResult == 0 {
+                Log.device.info(
+                    "Replaced prior MTP object \(objectID) for \(fileName, privacy: .public)"
+                )
+            } else {
+                Log.device.error(
+                    "Could not remove prior MTP object \(objectID) for \(fileName, privacy: .public) (code \(deleteResult))"
+                )
+                LIBMTP_Clear_Errorstack(device)
+            }
         }
         return DeviceTransferResult(
             destination: request.destination,
@@ -341,15 +356,18 @@ actor MTPDeviceConnection: KindleDeviceConnection {
     }
 
     private func fileID(named name: String) -> UInt32? {
-        guard let device, documentsFolderID != 0 else { return nil }
-        var found: UInt32?
+        fileIDs(named: name).first
+    }
+
+    private func fileIDs(named name: String) -> [UInt32] {
+        guard let device, documentsFolderID != 0 else { return [] }
+        var found: [UInt32] = []
         var file = LIBMTP_Get_Files_And_Folders(device, primaryStorageID, documentsFolderID)
         while let node = file {
-            if found == nil,
-               node.pointee.filetype != LIBMTP_FILETYPE_FOLDER,
+            if node.pointee.filetype != LIBMTP_FILETYPE_FOLDER,
                let raw = node.pointee.filename,
                String(cString: raw).caseInsensitiveCompare(name) == .orderedSame {
-                found = node.pointee.item_id
+                found.append(node.pointee.item_id)
             }
             let next = node.pointee.next
             LIBMTP_destroy_file_t(node)

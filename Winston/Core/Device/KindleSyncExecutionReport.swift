@@ -255,6 +255,13 @@ nonisolated struct KindleSyncExecutionReport: Identifiable, Equatable, Sendable 
         connectionKind == .massStorage && successfulDeviceMutationCount > 0
     }
 
+    var needsResultPresentation: Bool {
+        failedCount > 0
+            || cancelledCount > 0
+            || deliveryUnknownCount > 0
+            || needsMassStorageEjectGuidance
+    }
+
     private func count(_ outcome: KindleSyncExecutionOutcome) -> Int {
         items.count { $0.outcome == outcome }
     }

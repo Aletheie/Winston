@@ -49,6 +49,22 @@ struct MOBIWriterTests {
         #expect(FileManager.default.fileExists(atPath: prepared.fileURL.path(percentEncoded: false)))
     }
 
+    @Test func personalDocumentPatchPreservesContainerAndEmbeddedCover() throws {
+        let epub = try EPUBFixture.make(title: "Colorsoft Title", author: "A")
+        defer { try? FileManager.default.removeItem(at: epub.deletingLastPathComponent()) }
+        let mobi = try MOBIWriter.write(epub: epub)
+        defer { try? FileManager.default.removeItem(at: mobi) }
+        let originalBytes = try Data(contentsOf: mobi)
+        let originalCover = try #require(MOBICoverExtractor.coverData(from: mobi))
+
+        #expect(MOBIIdentifiers.read(from: mobi).cdeType == "EBOK")
+        #expect(try MOBIIdentifiers.markAsPersonalDocument(at: mobi) == .updated)
+        #expect(MOBIIdentifiers.read(from: mobi).cdeType == "PDOC")
+        #expect(try Data(contentsOf: mobi).count == originalBytes.count)
+        #expect(MOBICoverExtractor.coverData(from: mobi) == originalCover)
+        #expect(try MOBIIdentifiers.markAsPersonalDocument(at: mobi) == .alreadyPersonalDocument)
+    }
+
     @Test func nativeMOBICarriesKindleTrailerRecords() throws {
         let epub = try EPUBFixture.make(title: "Trailer Title", author: "T")
         defer { try? FileManager.default.removeItem(at: epub.deletingLastPathComponent()) }
@@ -91,4 +107,3 @@ struct MOBIWriterTests {
         }
     }
 }
-

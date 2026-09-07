@@ -85,6 +85,7 @@ final class TransferQueue {
     private let now: @Sendable () -> Date
     private var sendTask: Task<Void, Never>?
     private var clearTask: Task<Void, Never>?
+    private var clearGeneration = 0
     @ObservationIgnored private var activeSession: BulkOperationSession?
     @ObservationIgnored private var itemIndexByID: [UUID: Int] = [:]
     @ObservationIgnored private var bookIDByItemID: [UUID: UUID] = [:]
@@ -501,7 +502,12 @@ final class TransferQueue {
 
             do {
                 let warning: BulkOperationWarning?
-                if self.durableState(for: planItem.id) == .payloadCommitted {
+                let replacesLegacyMTPPayload = try self.prepareCommittedPersonalDocumentRetry(
+                    for: planItem.id,
+                    artifact: artifact
+                )
+                if self.durableState(for: planItem.id) == .payloadCommitted,
+                   !replacesLegacyMTPPayload {
                     warning = try await self.resumePostProcessing(
                         planItem,
                         artifact: artifact,
@@ -720,9 +726,10 @@ final class TransferQueue {
             switch await pushThumbnailOutcome(
                 for: artifact.coverOwner,
                 sentFile: artifact.fileURL,
-                connection: connection
+                connection: connection,
+                delivery: artifact.coverDelivery
             ) {
-            case .pushed:
+            case .pushed, .embedded:
                 payload.coverProcessed = true
                 payload.coverPushed = true
                 try checkpointPayload(itemID, payload)
@@ -1009,12 +1016,15 @@ final class TransferQueue {
 
     private enum ThumbnailOutcome {
         case pushed
+        case embedded
         case unavailable
         case failed(String)
 
         var succeeded: Bool {
-            if case .pushed = self { return true }
-            return false
+            switch self {
+            case .pushed, .embedded: true
+            case .unavailable, .failed: false
+            }
         }
     }
 
@@ -1088,18 +1098,54 @@ final class TransferQueue {
             return false
         }
         setStage(.transferring, for: item.id)
-        let pushed = await pushThumbnail(
+        let coverReady = await pushThumbnail(
             for: artifact.coverOwner,
             sentFile: artifact.fileURL,
-            connection: connection
+            connection: connection,
+            delivery: artifact.coverDelivery
         )
-        guard pushed else {
+        guard coverReady else {
             lastError = "Cover thumbnail unavailable"
             markFailed(item.id)
             if announcesResult {
                 toasts.error(String(localized: "Couldn’t repair the Kindle cover for “\(book.displayTitle)”."))
             }
             return false
+        }
+
+        var transportIdentifier = deviceBook.mtpItemID.map(String.init)
+            ?? deviceBook.path
+        if artifact.coverDelivery == .embeddedPersonalDocument {
+            do {
+                Log.device.info(
+                    "Replacing \(deviceBook.fileName, privacy: .public) with a PDOC payload so the MTP Kindle can rebuild its cover"
+                )
+                let result = try await connection.transfer(
+                    artifact.byteTransfer,
+                    progress: { [weak self] fraction in
+                        Task { @MainActor [weak self] in
+                            self?.updateProgress(fraction, for: item.id)
+                        }
+                    }
+                )
+                guard result.destination == artifact.destination,
+                      result.bytesTransferred == artifact.byteCount else {
+                    throw TransferArtifactError.transportResultMismatch
+                }
+                transportIdentifier = result.transportIdentifier
+                monitor.recordVerifiedTransfer(
+                    result,
+                    deviceIdentifier: deviceInfo.identifier,
+                    modifiedDate: now()
+                )
+            } catch {
+                lastError = error.localizedDescription
+                markFailed(item.id)
+                if announcesResult {
+                    toasts.error(String(localized: "Couldn’t repair the Kindle cover for “\(book.displayTitle)”."))
+                }
+                return false
+            }
         }
         do {
             try await onTransferCompleted?(KindleSyncTransferRecord(
@@ -1114,8 +1160,7 @@ final class TransferQueue {
                 artifactSizeBytes: artifact.byteCount,
                 artifactFingerprint: artifact.fingerprint,
                 sentFileName: deviceBook.fileName,
-                transportIdentifier: deviceBook.mtpItemID.map(String.init)
-                    ?? deviceBook.path,
+                transportIdentifier: transportIdentifier,
                 coverVersion: artifact.coverVersion,
                 coverIdentity: artifact.coverOwner.generationKey,
                 completedAt: now()
@@ -1135,20 +1180,49 @@ final class TransferQueue {
     private func pushThumbnail(
         for owner: CoverOwner,
         sentFile: URL,
-        connection: any KindleDeviceConnection
+        connection: any KindleDeviceConnection,
+        delivery: KindleCoverDelivery
     ) async -> Bool {
         await pushThumbnailOutcome(
             for: owner,
             sentFile: sentFile,
-            connection: connection
+            connection: connection,
+            delivery: delivery
         ).succeeded
     }
 
     private func pushThumbnailOutcome(
         for owner: CoverOwner,
         sentFile: URL,
-        connection: any KindleDeviceConnection
+        connection: any KindleDeviceConnection,
+        delivery: KindleCoverDelivery
     ) async -> ThumbnailOutcome {
+        switch delivery {
+        case .embeddedPersonalDocument:
+            let isReady = await Task.detached(priority: .utility) {
+                let contentType = MOBIIdentifiers.read(from: sentFile).cdeType
+                return contentType != "EBOK"
+                    && MOBICoverExtractor.coverData(from: sentFile) != nil
+            }.value
+            if isReady {
+                Log.device.info(
+                    "Embedded personal-document cover ready for \(sentFile.lastPathComponent, privacy: .public)"
+                )
+                return .embedded
+            }
+            Log.device.info(
+                "No embedded personal-document cover for \(sentFile.lastPathComponent, privacy: .public)"
+            )
+            return .unavailable
+        case .unavailable:
+            Log.device.info(
+                "No supported Kindle library-cover route for \(sentFile.lastPathComponent, privacy: .public)"
+            )
+            return .unavailable
+        case .sidecarThumbnail:
+            break
+        }
+
         let thumbnail = await Task.detached(priority: .utility) {
             KindleCoverThumbnail.prepare(sentFile: sentFile, coverOwner: owner)
         }.value
@@ -1242,6 +1316,43 @@ final class TransferQueue {
         durableJob?.items.first {
             $0.descriptor.bookUUID == bookID
         }?.payload
+    }
+
+    /// Transfers committed by older Winston builds reached MTP Kindles as
+    /// `EBOK` files. If their cover follow-up is still pending, replace that
+    /// exact payload once with the newly prepared `PDOC`; merely resuming
+    /// post-processing cannot change the bytes already on the device.
+    private func prepareCommittedPersonalDocumentRetry(
+        for bookID: UUID,
+        artifact: TransferArtifact
+    ) throws -> Bool {
+        guard artifact.coverDelivery == .embeddedPersonalDocument,
+              durableState(for: bookID) == .payloadCommitted,
+              let payload = durablePayload(for: bookID),
+              !payload.coverProcessed,
+              payload.artifactFingerprint?.caseInsensitiveCompare(
+                  artifact.fingerprint
+              ) != .orderedSame else {
+            return false
+        }
+        do {
+            try mutateDurableItem(bookID: bookID) { item in
+                guard item.state == .payloadCommitted else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                item.state = .pending
+                item.detail = nil
+                item.payload = nil
+            }
+            Log.device.notice(
+                "Retrying a committed MTP payload as a personal document so Kindle can rebuild its cover"
+            )
+            return true
+        } catch {
+            throw DurableTransferBoundaryError.checkpointFailed(
+                error.localizedDescription
+            )
+        }
     }
 
     private func checkpointInFlight(
@@ -1594,9 +1705,13 @@ final class TransferQueue {
 
     private func scheduleClear() {
         clearTask?.cancel()
+        clearGeneration &+= 1
+        let generation = clearGeneration
         clearTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled, let self, !isTransferring else { return }
+            guard !Task.isCancelled, let self,
+                  generation == clearGeneration,
+                  !isTransferring else { return }
             replaceItems([])
             clearTask = nil
         }
