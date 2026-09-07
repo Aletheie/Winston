@@ -125,7 +125,11 @@ struct ContentView: View {
             LibraryStatusToasts(
                 viewModel: viewModel,
                 maintenance: viewModel.maintenance,
-                onResolveDigitalFile: resolveDigitalFile
+                onResolveDigitalFile: resolveDigitalFile,
+                onInspectLibraryFiles: {
+                    sidebarSelection = .all
+                    activeLibrarySheet = .libraryIntegrity
+                }
             )
         }
         .background {

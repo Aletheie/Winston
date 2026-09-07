@@ -301,6 +301,49 @@ struct MaintenanceSchedulerTests {
         #expect(mutations.analysisCoordinator.activeJobCount == 0)
     }
 
+    @Test(arguments: ["txt", "epub"])
+    func assetInspectionRevalidatesAFilePreviouslyMarkedMissing(format: String) async throws {
+        let library = try await TestLibrary()
+        let fileName = "returned.\(format)"
+        let book = Book(fileName: fileName, originalFileName: fileName)
+        let asset = BookAsset(
+            fileName: fileName,
+            contentHash: "previously-recorded-hash",
+            sizeBytes: 11,
+            drmProtected: false,
+            validationStatus: .missing,
+            book: book
+        )
+        book.primaryAssetUUID = asset.uuid
+        book.fileSizeBytes = asset.sizeBytes
+        library.context.insert(book)
+        library.context.insert(asset)
+        try library.context.save()
+        let mutations = CatalogMutationService(modelContext: library.context)
+
+        let absent = try await AssetInspectionMaintenance.processChunk(
+            context: library.context, mutations: mutations, offset: 0, limit: 10
+        )
+        #expect(absent.missing == 1)
+        #expect(!book.hasCatalogDigitalFile)
+        #expect(book.format == format.uppercased())
+
+        let source = library.root.appending(path: fileName)
+        try Data("Plain text.".utf8).write(to: source)
+        try library.installBookFile(from: source, fileName: fileName)
+
+        let recovered = try await AssetInspectionMaintenance.processChunk(
+            context: library.context, mutations: mutations, offset: 0, limit: 10
+        )
+
+        #expect(recovered.inspected == 1)
+        #expect(recovered.missing == 0)
+        #expect(recovered.failed == 0)
+        #expect(asset.validationStatus == (format == "txt" ? .ok : .corrupt))
+        #expect(asset.availability == .available)
+        #expect(book.hasCatalogDigitalFile)
+    }
+
     @Test func assetInspectionRepairsMissingBookSizeFromAnAlreadySizedAsset() async throws {
         let library = try await TestLibrary()
         let fileName = "missing-book-size.txt"

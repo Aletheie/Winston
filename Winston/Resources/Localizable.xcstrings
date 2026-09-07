@@ -8701,6 +8701,16 @@
         }
       }
     },
+    "Library check: %lld book files are unavailable. Review the file locations to reconnect them." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kontrola knihovny: %lld souborů knih není dostupných. Zkontrolujte jejich umístění a znovu je připojte."
+          }
+        }
+      }
+    },
     "Library data may be out of date." : {
       "localizations" : {
         "cs" : {
@@ -13745,6 +13755,16 @@
         }
       }
     },
+    "Review Files" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zkontrolovat soubory"
+          }
+        }
+      }
+    },
     "Review “%@” for %@." : {
       "localizations" : {
         "cs" : {
@@ -15372,16 +15392,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Chytré police se aktualizují automaticky."
-          }
-        }
-      }
-    },
-    "Some book files are missing (%lld)." : {
-      "localizations" : {
-        "cs" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Některé soubory knih chybí (%lld)."
           }
         }
       }

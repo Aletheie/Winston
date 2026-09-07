@@ -10,6 +10,7 @@ final class ToastCenter {
         enum Action: Equatable {
             case relinkBook(UUID)
             case attachDigitalFile(UUID)
+            case inspectLibraryFiles
         }
         let id = UUID()
         var text: String

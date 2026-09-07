@@ -152,7 +152,7 @@ nonisolated struct AssetInspectionInput: Equatable, Sendable {
             size: asset.sizeBytes <= 0 || (isPrimary && book.fileSizeBytes <= 0),
             hash: asset.contentHash == nil,
             drm: asset.drmProtected == nil,
-            validation: asset.validationStatus == nil
+            validation: asset.validationStatus == nil || asset.validationStatus == .missing
         )
     }
 
@@ -812,7 +812,7 @@ enum AssetInspectionMaintenance {
                         asset.contentHash = hash
                     }
                     if input.requirements.validation,
-                       asset.validationStatus == nil,
+                       asset.validationStatus == nil || asset.validationStatus == .missing,
                        let validation = output.validation {
                         asset.validationStatus = validation
                     }
@@ -868,7 +868,7 @@ final class MaintenanceScheduler {
 
     private static let catalogStructureVersion = 5
     private static let catalogCleanupVersion = 1
-    private static let assetInspectionVersion = 2
+    private static let assetInspectionVersion = 3
     private static let metadataExtractionVersion = 1
     private static let chunkSize = 64
 
@@ -1146,13 +1146,17 @@ final class MaintenanceScheduler {
             guard result.visited > 0 else { break }
             await Task.yield()
         }
-        if failed == 0 {
+        if failed == 0, missing == 0 {
             checkpoints.markCompleted(job, version: version)
         } else {
             checkpoints.reset(job, version: version)
         }
         if missing > 0 {
-            toasts.error(String(localized: "Some book files are missing (\(missing))."))
+            toasts.post(
+                String(localized: "Library check: \(missing) book files are unavailable. Review the file locations to reconnect them."),
+                style: .error,
+                action: .inspectLibraryFiles
+            )
         }
     }
 

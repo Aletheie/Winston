@@ -4,6 +4,7 @@ struct LibraryStatusToasts: View {
     let viewModel: LibraryViewModel
     let maintenance: MaintenanceScheduler
     let onResolveDigitalFile: (UUID) -> Void
+    let onInspectLibraryFiles: () -> Void
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -237,6 +238,8 @@ struct LibraryStatusToasts: View {
         switch action {
         case .relinkBook(let bookID), .attachDigitalFile(let bookID):
             onResolveDigitalFile(bookID)
+        case .inspectLibraryFiles:
+            onInspectLibraryFiles()
         }
         if let id = toast.messageID { toastCenter.dismiss(id) }
     }
@@ -323,6 +326,7 @@ private struct ToastCard: View {
         switch toast.action {
         case .relinkBook: "Relink"
         case .attachDigitalFile: "Attach"
+        case .inspectLibraryFiles: "Review Files"
         case nil: "Open"
         }
     }
