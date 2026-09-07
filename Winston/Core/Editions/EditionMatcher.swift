@@ -409,8 +409,6 @@ nonisolated struct EditionCandidateIndex: Sendable {
 }
 
 nonisolated enum EditionMatcher {
-    typealias CandidateIndex = EditionCandidateIndex
-
     static let maximumFuzzyBucketSize = 64
     static let maximumStrongBucketComparisons = 512
     static let maximumScanPairComparisons = 25_000

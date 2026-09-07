@@ -38,19 +38,6 @@ enum LegacyLibraryMigrator {
     }
 
     @MainActor
-    static func migrateIfNeeded(
-        context: ModelContext,
-        mutations: CatalogMutationService,
-        managedFiles: ManagedFileCoordinator
-    ) async -> Bool {
-        await migrateIncrementally(
-            context: context,
-            mutations: mutations,
-            managedFiles: managedFiles
-        ) == .completed
-    }
-
-    @MainActor
     static func migrateIncrementally(
         context: ModelContext,
         mutations: CatalogMutationService,

@@ -147,7 +147,7 @@ nonisolated struct AssetInspectionInput: Equatable, Sendable {
         self.primaryAssetID = primaryAsset?.uuid
         self.primaryFileName = primaryFileName
         primaryDRM = book.primaryDRMProtected
-        primarySize = primaryAsset?.sizeBytes ?? book.fileSizeBytes
+        primarySize = book.fileSizeBytes
         requirements = AssetInspectionRequirements(
             size: asset.sizeBytes <= 0 || (isPrimary && book.fileSizeBytes <= 0),
             hash: asset.contentHash == nil,
@@ -207,6 +207,9 @@ nonisolated struct AssetInspectionProposal: Sendable {
 
 nonisolated enum AssetInspectionPipeline {
     private static let readSize = 1_048_576
+    // mappedIfSafe may fall back to a heap allocation. Keep the shared-parser
+    // optimization bounded; large containers use a streaming hash and URL parser.
+    private static let maximumSharedFileBytes = 32 * 1_024 * 1_024
 
     @concurrent
     static func inspect(_ input: AssetInspectionInput) async -> AssetInspectionProposal? {
@@ -234,7 +237,8 @@ nonisolated enum AssetInspectionPipeline {
         let parsesContainer = ["epub", "pdf"].contains(format)
             && (input.requirements.drm || input.requirements.validation)
 
-        if input.requirements.hash, parsesContainer {
+        if input.requirements.hash, parsesContainer,
+           before.fileSize <= maximumSharedFileBytes {
             do {
                 let data = try Data(contentsOf: input.fileURL, options: .mappedIfSafe)
                 fileOpenCount += 1
@@ -608,13 +612,12 @@ enum CatalogStructureBackfill {
                 .maintenanceCleanup(workIDs: Array(workIDs)),
                 affectedWorkIDs: workIDs
             ) { writeContext in
-                for workID in workIDs {
-                    let matches = try writeContext.fetch(FetchDescriptor<Work>(
-                        predicate: #Predicate { $0.uuid == workID }
-                    ))
-                    guard let work = matches.first, work.editions.isEmpty else {
-                        continue
-                    }
+                let requestedIDs = Array(workIDs)
+                var descriptor = FetchDescriptor<Work>(
+                    predicate: #Predicate { requestedIDs.contains($0.uuid) }
+                )
+                descriptor.relationshipKeyPathsForPrefetching = [\Work.editions]
+                for work in try writeContext.fetch(descriptor) where work.editions.isEmpty {
                     writeContext.delete(work)
                     deleted += 1
                 }
@@ -740,6 +743,14 @@ enum AssetInspectionMaintenance {
         }
         try Task.checkCancellation()
 
+        let requestedBookIDs = Array(Set(proposals.map { $0.proposal.input.bookID }))
+        var bookDescriptor = FetchDescriptor<Book>(
+            predicate: #Predicate { requestedBookIDs.contains($0.uuid) }
+        )
+        bookDescriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
+        let booksByID = Dictionary(uniqueKeysWithValues:
+            try context.fetch(bookDescriptor).map { ($0.uuid, $0) }
+        )
         var valid: [(
             job: CatalogAnalysisJob<AssetInspectionProposal>,
             proposal: AssetInspectionProposal,
@@ -750,7 +761,7 @@ enum AssetInspectionMaintenance {
             let proposal = completed.proposal
             guard coordinator.isCurrent(completed.job.ticket),
                   proposal.sourceIsCurrent,
-                  let book = try? mutations.book(id: proposal.input.bookID),
+                  let book = booksByID[proposal.input.bookID],
                   completed.job.snapshot.matches(book),
                   let asset = book.assets.first(where: { $0.uuid == proposal.input.assetID }),
                   proposal.input.matches(book: book, asset: asset) else {
@@ -760,9 +771,10 @@ enum AssetInspectionMaintenance {
         }
 
         if !valid.isEmpty {
-            let bookPreimages = valid.map { CatalogBookMetadataPreimage($0.book) }
-            let assetPreimages = valid.map { CatalogBookAssetPreimage($0.asset) }
             let bookIDs = Set(valid.map { $0.proposal.input.bookID })
+            let bookPreimages = bookIDs.compactMap { booksByID[$0] }
+                .map(CatalogBookMetadataPreimage.init)
+            let assetPreimages = valid.map { CatalogBookAssetPreimage($0.asset) }
             try mutations.commit(
                 .applyAnalysisBatch(
                     bookIDs: Array(bookIDs),
@@ -774,17 +786,20 @@ enum AssetInspectionMaintenance {
                     assetPreimages.forEach { $0.restore() }
                 }
             ) {
-                for (job, proposal, _, _) in valid {
+                // Validate the entire batch before changing a primary asset:
+                // its hash is also part of every sibling asset's snapshot.
+                for (job, proposal, book, asset) in valid {
                     let input = proposal.input
-                    let output = proposal.output
-                    let book = try mutations.book(id: input.bookID)
                     guard coordinator.isCurrent(job.ticket),
                           job.snapshot.matches(book),
-                          let asset = book.assets.first(where: { $0.uuid == input.assetID }),
-                          input.sourceMatches(book: book, asset: asset),
+                          input.matches(book: book, asset: asset),
                           proposal.sourceIsCurrent else {
                         throw CatalogMutationError.staleAnalysis
                     }
+                }
+                for (_, proposal, book, asset) in valid {
+                    let input = proposal.input
+                    let output = proposal.output
                     if input.requirements.size, output.sizeBytes > 0 {
                         if asset.sizeBytes <= 0 { asset.sizeBytes = output.sizeBytes }
                         if input.isPrimary, book.fileSizeBytes <= 0 {
@@ -846,6 +861,11 @@ enum MaintenanceSchedulerError: Error, LocalizedError {
 @MainActor
 @Observable
 final class MaintenanceScheduler {
+    private enum RunScope {
+        case maintenanceAndBackup
+        case backupOnly
+    }
+
     private static let catalogStructureVersion = 5
     private static let catalogCleanupVersion = 1
     private static let assetInspectionVersion = 2
@@ -911,20 +931,29 @@ final class MaintenanceScheduler {
             return
         }
         guard runTask == nil else { return }
+        let scope: RunScope
         switch phase {
         case .idle, .failed:
-            break
-        case .running, .paused, .completed:
+            scope = .maintenanceAndBackup
+        case .completed:
+            guard automaticBackupDestinationIfDue() != nil else {
+                return
+            }
+            scope = .backupOnly
+        case .running, .paused:
             return
         }
         runGeneration &+= 1
         let generation = runGeneration
         runTask = Task { [weak self] in
-            await self?.run(generation: generation)
+            await self?.run(generation: generation, scope: scope)
         }
     }
 
-    private func run(generation: Int) async {
+    private func run(
+        generation: Int,
+        scope: RunScope
+    ) async {
         let signposter = Log.persistenceSignposter
         let interval = signposter.beginInterval(
             "DeferredStartupMaintenance",
@@ -938,13 +967,15 @@ final class MaintenanceScheduler {
         }
 
         do {
-            try await Task.sleep(for: .milliseconds(750))
-            try await runLegacyMigration()
-            try await runCatalogStructureBackfill()
-            try await runCatalogCleanup()
-            try await runAssetInspection()
-            try await runMetadataExtraction()
-            try await runEditionDiscovery()
+            if case .maintenanceAndBackup = scope {
+                try await Task.sleep(for: .milliseconds(750))
+                try await runLegacyMigration()
+                try await runCatalogStructureBackfill()
+                try await runCatalogCleanup()
+                try await runAssetInspection()
+                try await runMetadataExtraction()
+                try await runEditionDiscovery()
+            }
             try await runAutomaticBackup()
             guard !Task.isCancelled, generation == runGeneration else { return }
             phase = .completed
@@ -1067,8 +1098,6 @@ final class MaintenanceScheduler {
         var offset = min(checkpoints.offset(for: job, version: version), total)
         var deleted = 0
         while true {
-            let remainingCount = try context.fetchCount(FetchDescriptor<Work>())
-            guard offset < remainingCount else { break }
             let completed = min(total, offset + deleted)
             let progress = MaintenanceProgress(job: job, completed: completed, total: total)
             try await waitUntilRunnable(progress)
@@ -1086,7 +1115,7 @@ final class MaintenanceScheduler {
                 completed: min(total, offset + deleted),
                 total: total
             ))
-            guard result.visited > 0 else { break }
+            guard result.visited == Self.chunkSize else { break }
             await Task.yield()
         }
         checkpoints.markCompleted(job, version: version)
@@ -1171,19 +1200,20 @@ final class MaintenanceScheduler {
     }
 
     private func runAutomaticBackup() async throws {
-        let progress = MaintenanceProgress(job: .automaticBackup, completed: 0, total: 1)
+        guard let destination = automaticBackupDestinationIfDue() else {
+            return
+        }
+        let progress = MaintenanceProgress(
+            job: .automaticBackup,
+            completed: 0,
+            total: 1
+        )
         try await waitUntilRunnable(progress)
-        guard settings.autoBackupEnabled,
-              let path = settings.backupFolderPath,
-              !isBackupInProgress else { return }
-        let due = settings.lastBackupAt.map {
-            Date.now.timeIntervalSince($0) > 24 * 3600
-        } ?? true
-        guard due else { return }
+        guard automaticBackupDestinationIfDue() == destination else { return }
         isBackupInProgress = true
         defer { isBackupInProgress = false }
         do {
-            _ = try await createBackup(in: URL(fileURLWithPath: path))
+            _ = try await createBackup(in: destination)
             settings.lastBackupAt = .now
             toasts.info(String(localized: "Library backed up."))
         } catch {
@@ -1196,13 +1226,35 @@ final class MaintenanceScheduler {
         ))
     }
 
+    private func automaticBackupDestinationIfDue(
+        now: Date = .now
+    ) -> URL? {
+        guard settings.autoBackupEnabled,
+              let path = settings.backupFolderPath,
+              !isBackupInProgress,
+              Self.isAutomaticBackupDue(
+                  lastBackupAt: settings.lastBackupAt,
+                  now: now
+              ) else {
+            return nil
+        }
+        return URL(fileURLWithPath: path)
+    }
+
+    private static func isAutomaticBackupDue(
+        lastBackupAt: Date?,
+        now: Date
+    ) -> Bool {
+        guard let lastBackupAt else { return true }
+        return now.timeIntervalSince(lastBackupAt) > 24 * 3_600
+    }
+
     @discardableResult
     func backUpNow() async -> Bool {
         guard !isBackupInProgress else { return false }
         guard let path = settings.backupFolderPath else {
             let message = String(localized: "Choose a backup folder first.")
             manualBackupPhase = .failed(message)
-            toasts.error(message)
             return false
         }
 
@@ -1213,14 +1265,12 @@ final class MaintenanceScheduler {
             let backup = try await createBackup(in: URL(fileURLWithPath: path))
             settings.lastBackupAt = .now
             manualBackupPhase = .succeeded(backup)
-            toasts.info(String(localized: "Library backed up."))
             return true
         } catch {
             let message = String(
                 localized: "Backup failed: \(error.localizedDescription)"
             )
             manualBackupPhase = .failed(message)
-            toasts.error(message)
             return false
         }
     }

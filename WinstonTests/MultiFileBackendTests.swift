@@ -866,7 +866,14 @@ struct MultiFileBackendTests {
 
         await editions.scanLibrary()
         #expect(editions.pendingProposals.isEmpty)
-        #expect(try await BookAssetMaintenance.backfillMissingHashes(context: library.context) == 2)
+        let mutations = CatalogMutationService(modelContext: library.context)
+        let inspection = try await AssetInspectionMaintenance.processChunk(
+            context: library.context,
+            mutations: mutations,
+            offset: 0,
+            limit: 10
+        )
+        #expect(inspection.inspected == 2)
         await editions.scanLibrary()
 
         #expect(editions.pendingProposals.contains(where: { $0.verdict == .duplicateFile }))
@@ -968,32 +975,6 @@ struct MultiFileBackendTests {
         #expect(book.drmProtected == false)
     }
 
-    @Test func hashBackfillDiscardsAResultForAReplacedAsset() async throws {
-        let library = try await TestLibrary()
-        let book = Book(fileName: "race.epub", originalFileName: "Race.epub")
-        let asset = BookAsset(uuid: book.uuid, fileName: book.fileName, book: book)
-        let source = library.root.appending(path: "hash-race-source.epub")
-        try Data("hash race".utf8).write(to: source)
-        try library.installBookFile(from: source, fileName: book.fileName)
-        library.context.insert(book)
-        library.context.insert(asset)
-        try library.context.save()
-        let gate = AssetHashGate()
-        let task = Task { @MainActor in
-            try await BookAssetMaintenance.backfillMissingHashes(
-                context: library.context,
-                hashFile: { url in await gate.hash(url) }
-            )
-        }
-        await gate.waitUntilStarted()
-
-        asset.dateAdded = asset.dateAdded.addingTimeInterval(1)
-        await gate.resume()
-
-        #expect(try await task.value == 0)
-        #expect(asset.contentHash == nil)
-    }
-
     @Test func hashBackfillSaveFailureDoesNotLeakAHashIntoALaterSave() async throws {
         struct InjectedFailure: Error {}
 
@@ -1011,10 +992,14 @@ struct MultiFileBackendTests {
             saveAdapter: CatalogSaveAdapter { _ in throw InjectedFailure() }
         )
 
-        #expect(try await BookAssetMaintenance.backfillMissingHashes(
-            context: library.context,
-            mutations: mutations
-        ) == 0)
+        await #expect(throws: CatalogMutationError.self) {
+            try await AssetInspectionMaintenance.processChunk(
+                context: library.context,
+                mutations: mutations,
+                offset: 0,
+                limit: 10
+            )
+        }
         #expect(asset.contentHash == nil)
         #expect(!library.context.hasChanges)
 
@@ -1045,31 +1030,6 @@ private actor MaintenanceValueGate<Value: Sendable> {
 
     func resume(with value: Value) {
         continuation?.resume(returning: value)
-        continuation = nil
-    }
-}
-
-private actor AssetHashGate {
-    private var continuation: CheckedContinuation<String?, Never>?
-    private var started = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func hash(_ url: URL) async -> String? {
-        await withCheckedContinuation { continuation in
-            self.continuation = continuation
-            started = true
-            waiters.forEach { $0.resume() }
-            waiters.removeAll()
-        }
-    }
-
-    func waitUntilStarted() async {
-        if started { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-
-    func resume() {
-        continuation?.resume(returning: "hash-from-old-file")
         continuation = nil
     }
 }

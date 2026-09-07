@@ -37,8 +37,12 @@ struct PublicReleaseMigrationTests {
         #expect(try context.fetchCount(FetchDescriptor<BookAsset>()) == 0)
         #expect(try context.fetchCount(FetchDescriptor<ReadingSession>()) == 0)
 
-        #expect(try EditionsBackfill.run(context: context) > 0)
-        #expect(try ReadingHistoryBackfill.run(context: context) == 2)
+        let firstPass = try CatalogStructureBackfill.processChunk(
+            context: context,
+            offset: 0,
+            limit: 100
+        )
+        #expect(firstPass.changedBooks == 2)
 
         var descriptor = FetchDescriptor<Book>(sortBy: [SortDescriptor(\Book.uuid)])
         descriptor.relationshipKeyPathsForPrefetching = [
@@ -74,6 +78,11 @@ struct PublicReleaseMigrationTests {
         #expect(leftHand.highlights.map(\.text) == [
             "The only thing that makes life possible is permanent, intolerable uncertainty."
         ])
+        let migratedHighlight = try #require(leftHand.highlights.first)
+        #expect(!migratedHighlight.isFavorite)
+        #expect(migratedHighlight.userTags.isEmpty)
+        #expect(migratedHighlight.reflection == nil)
+        #expect(migratedHighlight.lastReviewedAt == nil)
         #expect(leftHand.work?.title == leftHand.title)
         #expect(leftHand.work?.preferredEditionUUID == leftHand.uuid)
         #expect(leftHand.assets.count == 1)
@@ -98,7 +107,11 @@ struct PublicReleaseMigrationTests {
         #expect(try context.fetchCount(FetchDescriptor<Work>()) == 2)
         #expect(try context.fetchCount(FetchDescriptor<BookAsset>()) == 2)
         #expect(try context.fetchCount(FetchDescriptor<ReadingSession>()) == 2)
-        #expect(try EditionsBackfill.run(context: context) == 0)
-        #expect(try ReadingHistoryBackfill.run(context: context) == 0)
+        let secondPass = try CatalogStructureBackfill.processChunk(
+            context: context,
+            offset: 0,
+            limit: 100
+        )
+        #expect(secondPass.changedBooks == 0)
     }
 }

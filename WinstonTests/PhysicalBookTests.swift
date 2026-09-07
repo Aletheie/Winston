@@ -67,7 +67,11 @@ struct PhysicalBookTests {
         #expect(stored.readingStatus == .reading)
         #expect(stored.assets.isEmpty)
         #expect(stored.work?.preferredEditionUUID == stored.uuid)
-        #expect(try EditionsBackfill.run(context: library.context) == 0)
+        #expect(try CatalogStructureBackfill.processChunk(
+            context: library.context,
+            offset: 0,
+            limit: 10
+        ).changedBooks == 0)
         #expect(await viewModel.scanForMissingFiles() == 0)
         #expect(!viewModel.isMissing(stored))
         #expect(toasts.messages.last?.style == .success)

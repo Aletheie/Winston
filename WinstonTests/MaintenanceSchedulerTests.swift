@@ -265,6 +265,97 @@ struct MaintenanceSchedulerTests {
         #expect(asset.availability == .available)
     }
 
+    @Test func inspectingPrimaryAndSiblingAssetsDoesNotInvalidateItsOwnBatch() async throws {
+        let library = try await TestLibrary()
+        let book = Book(fileName: "primary.txt", originalFileName: "Primary.txt")
+        library.context.insert(book)
+        let assets = try ["primary.txt", "secondary.txt"].enumerated().map { index, fileName in
+            let source = library.root.appending(path: fileName)
+            try Data("Contents of \(fileName)".utf8).write(to: source)
+            try library.installBookFile(from: source, fileName: fileName)
+            let asset = BookAsset(
+                uuid: try #require(UUID(uuidString:
+                    "00000000-0000-0000-0000-00000000000\(index + 1)"
+                )),
+                fileName: fileName,
+                book: book
+            )
+            library.context.insert(asset)
+            return asset
+        }
+        book.primaryAssetUUID = assets[0].uuid
+        try library.context.save()
+        let mutations = CatalogMutationService(modelContext: library.context)
+
+        let result = try await AssetInspectionMaintenance.processChunk(
+            context: library.context,
+            mutations: mutations,
+            offset: 0,
+            limit: 10
+        )
+
+        #expect(result.inspected == 2)
+        #expect(result.failed == 0)
+        #expect(assets.allSatisfy { $0.contentHash != nil && $0.validationStatus == .ok })
+        #expect(book.fileSizeBytes == assets[0].sizeBytes)
+        #expect(mutations.analysisCoordinator.activeJobCount == 0)
+    }
+
+    @Test func assetInspectionRepairsMissingBookSizeFromAnAlreadySizedAsset() async throws {
+        let library = try await TestLibrary()
+        let fileName = "missing-book-size.txt"
+        let source = library.root.appending(path: fileName)
+        let bytes = Data("The asset already knows its size".utf8)
+        try bytes.write(to: source)
+        try library.installBookFile(from: source, fileName: fileName)
+        let book = Book(fileName: fileName, originalFileName: fileName)
+        let asset = BookAsset(
+            uuid: book.uuid,
+            fileName: fileName,
+            sizeBytes: Int64(bytes.count),
+            book: book
+        )
+        library.context.insert(book)
+        library.context.insert(asset)
+        book.primaryAssetUUID = asset.uuid
+        try library.context.save()
+
+        let result = try await AssetInspectionMaintenance.processChunk(
+            context: library.context,
+            mutations: CatalogMutationService(modelContext: library.context),
+            offset: 0,
+            limit: 10
+        )
+
+        #expect(result.inspected == 1)
+        #expect(result.failed == 0)
+        #expect(book.fileSizeBytes == Int64(bytes.count))
+    }
+
+    @Test func largeContainerInspectionStreamsHashWithoutMappingTheWholeFile() async throws {
+        let library = try await TestLibrary()
+        let fileName = "large.epub"
+        let source = library.root.appending(path: fileName)
+        try Data().write(to: source)
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.truncate(atOffset: 32 * 1_024 * 1_024 + 1)
+        try handle.close()
+        try library.installBookFile(from: source, fileName: fileName)
+        let book = Book(fileName: fileName, originalFileName: fileName)
+        let asset = BookAsset(uuid: book.uuid, fileName: fileName, book: book)
+        library.context.insert(book)
+        library.context.insert(asset)
+        try library.context.save()
+        let input = try #require(AssetInspectionInput(asset: asset, book: book))
+
+        let proposal = try #require(await AssetInspectionPipeline.inspect(input))
+
+        #expect(proposal.output.fileOpenCount == 2)
+        #expect(proposal.output.sizeBytes == 32 * 1_024 * 1_024 + 1)
+        #expect(proposal.output.contentHash == (try ContentHasher.sha256(of: source)))
+        #expect(proposal.output.validation == .corrupt)
+    }
+
     @Test func assetChangedDuringInspectionIsRejectedAndScheduledForRetry() async throws {
         let library = try await TestLibrary()
         let source = library.root.appending(path: "changing.txt")
@@ -280,17 +371,24 @@ struct MaintenanceSchedulerTests {
         let gate = AssetInspectionGate()
 
         let inspection = Task { @MainActor in
-            try await AssetInspectionMaintenance.processChunk(
-                context: library.context,
-                mutations: mutations,
-                offset: 0,
-                limit: 10,
-                inspect: { input in
-                    await gate.inspect(input)
-                }
-            )
+            do {
+                let result = try await AssetInspectionMaintenance.processChunk(
+                    context: library.context,
+                    mutations: mutations,
+                    offset: 0,
+                    limit: 10,
+                    inspect: { input in
+                        await gate.inspect(input)
+                    }
+                )
+                await gate.finish()
+                return result
+            } catch {
+                await gate.finish()
+                throw error
+            }
         }
-        await gate.waitUntilStarted()
+        try #require(await gate.waitUntilStarted(), "Maintenance completed without starting inspection")
         asset.dateAdded = asset.dateAdded.addingTimeInterval(1)
         try library.context.save()
         await gate.resume()
@@ -308,19 +406,27 @@ struct MaintenanceSchedulerTests {
 
 private actor AssetInspectionGate {
     private var started = false
-    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finished = false
+    private var startWaiters: [CheckedContinuation<Bool, Never>] = []
     private var resumeContinuation: CheckedContinuation<Void, Never>?
 
-    func waitUntilStarted() async {
-        guard !started else { return }
-        await withCheckedContinuation { continuation in
+    func waitUntilStarted() async -> Bool {
+        if started { return true }
+        if finished { return false }
+        return await withCheckedContinuation { continuation in
             startWaiters.append(continuation)
         }
     }
 
+    func finish() {
+        finished = true
+        startWaiters.forEach { $0.resume(returning: started) }
+        startWaiters.removeAll()
+    }
+
     func inspect(_ input: AssetInspectionInput) async -> AssetInspectionProposal? {
         started = true
-        startWaiters.forEach { $0.resume() }
+        startWaiters.forEach { $0.resume(returning: true) }
         startWaiters.removeAll()
         await withCheckedContinuation { continuation in
             resumeContinuation = continuation

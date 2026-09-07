@@ -135,8 +135,16 @@ struct ReadingHistoryTests {
         context.insert(book)
         try context.save()
 
-        #expect(try ReadingHistoryBackfill.run(context: context) == 1)
-        #expect(try ReadingHistoryBackfill.run(context: context) == 0)
+        #expect(try CatalogStructureBackfill.processChunk(
+            context: context,
+            offset: 0,
+            limit: 10
+        ).changedBooks == 1)
+        #expect(try CatalogStructureBackfill.processChunk(
+            context: context,
+            offset: 0,
+            limit: 10
+        ).changedBooks == 0)
         let cycle = try #require(book.readingSessions.first)
         #expect(cycle.status == .finished)
         #expect(cycle.startedAt == date(100))
