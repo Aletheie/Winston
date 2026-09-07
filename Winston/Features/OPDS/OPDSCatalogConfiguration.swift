@@ -16,7 +16,7 @@ nonisolated enum OPDSAuthenticationMode: String, Codable, Sendable, CaseIterable
     case basic
 }
 
-nonisolated struct OPDSBasicCredential: Codable, Equatable, Sendable {
+nonisolated struct OPDSBasicCredential: Codable, Hashable, Sendable {
     let username: String
     let password: String
 
@@ -156,7 +156,7 @@ nonisolated struct OPDSOrigin: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-nonisolated struct OPDSCatalogAccess: Sendable {
+nonisolated struct OPDSCatalogAccess: Hashable, Sendable {
     let configuration: OPDSCatalogConfiguration
     let credential: OPDSBasicCredential?
 

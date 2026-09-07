@@ -304,6 +304,68 @@ struct DiscoveryTests {
         #expect(DiscoveryURLProtocol.requestCount == 1)
     }
 
+    @Test func imageLoaderCancelsAChunkedBodyAtItsByteLimit() async {
+        StreamingImageURLProtocol.prepare()
+        let loader = DiscoveryImageLoader(
+            configuration: StreamingImageURLProtocol.configuration,
+            maximumResponseBytes: 1_024
+        )
+
+        let image = await loader.image(
+            for: URL(string: "https://images.example/never-ending.jpg")!
+        )
+
+        #expect(image == nil)
+        #expect(StreamingImageURLProtocol.didStart)
+        #expect(StreamingImageURLProtocol.didStop)
+        #expect(StreamingImageURLProtocol.deliveredChunkCount == 2)
+    }
+
+    @Test func opdsImageLoaderAppliesCatalogCredentialsAndTransportPolicy() async {
+        PolicyImageURLProtocol.prepare()
+        let loader = DiscoveryImageLoader(
+            configuration: PolicyImageURLProtocol.configuration,
+            maximumResponseBytes: 2_048
+        )
+        let configuration = OPDSCatalogConfiguration(
+            id: "protected-covers",
+            name: "Protected Covers",
+            rootURL: URL(string: "https://catalog.example/opds")!,
+            authenticationMode: .basic,
+            credentialKey: "protected-covers-credential"
+        )
+        let access = OPDSCatalogAccess(
+            configuration: configuration,
+            credential: OPDSBasicCredential(
+                username: "reader",
+                password: "secret"
+            )
+        )
+
+        _ = await loader.image(
+            for: URL(string: "https://catalog.example/cover.jpg")!,
+            access: access
+        )
+        _ = await loader.image(
+            for: URL(string: "https://cdn.example/cover.jpg")!,
+            access: access
+        )
+        _ = await loader.image(
+            for: URL(string: "http://catalog.example/insecure.jpg")!,
+            access: access
+        )
+
+        let requests = PolicyImageURLProtocol.requests
+        #expect(requests.count == 2)
+        #expect(
+            requests[0].value(forHTTPHeaderField: "Authorization")
+                == "Basic cmVhZGVyOnNlY3JldA=="
+        )
+        #expect(
+            requests[1].value(forHTTPHeaderField: "Authorization") == nil
+        )
+    }
+
     @Test func releaseDateRejectsInvalidCalendarDays() {
         #expect(DiscoveryReleaseDate(iso8601: "2025-02-30") == nil)
     }
@@ -388,6 +450,148 @@ private final class DiscoveryURLProtocol: URLProtocol, @unchecked Sendable {
         """
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+private final class StreamingImageURLProtocol:
+    URLProtocol,
+    @unchecked Sendable
+{
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var started = false
+    nonisolated(unsafe) private static var stopped = false
+    nonisolated(unsafe) private static var chunkCount = 0
+    private var secondChunkWorkItem: DispatchWorkItem?
+    private var finishWorkItem: DispatchWorkItem?
+
+    static var configuration: URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StreamingImageURLProtocol.self]
+        return configuration
+    }
+
+    static var didStart: Bool { lock.withLock { started } }
+    static var didStop: Bool { lock.withLock { stopped } }
+    static var deliveredChunkCount: Int { lock.withLock { chunkCount } }
+
+    static func prepare() {
+        lock.withLock {
+            started = false
+            stopped = false
+            chunkCount = 0
+        }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(
+        for request: URLRequest
+    ) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.withLock { Self.started = true }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "image/jpeg"]
+        )!
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        Self.lock.withLock { Self.chunkCount += 1 }
+        client?.urlProtocol(
+            self,
+            didLoad: Data(repeating: 0x41, count: 800)
+        )
+
+        let secondChunk = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            Self.lock.withLock { Self.chunkCount += 1 }
+            self.client?.urlProtocol(
+                self,
+                didLoad: Data(repeating: 0x42, count: 800)
+            )
+            let finish = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.client?.urlProtocolDidFinishLoading(self)
+            }
+            self.finishWorkItem = finish
+            DispatchQueue.global().asyncAfter(
+                deadline: .now() + 0.2,
+                execute: finish
+            )
+        }
+        secondChunkWorkItem = secondChunk
+        DispatchQueue.global().asyncAfter(
+            deadline: .now() + 0.02,
+            execute: secondChunk
+        )
+    }
+
+    override func stopLoading() {
+        secondChunkWorkItem?.cancel()
+        finishWorkItem?.cancel()
+        Self.lock.withLock { Self.stopped = true }
+    }
+}
+
+private final class PolicyImageURLProtocol:
+    URLProtocol,
+    @unchecked Sendable
+{
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var storedRequests: [URLRequest] = []
+
+    static var configuration: URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PolicyImageURLProtocol.self]
+        return configuration
+    }
+
+    static var requests: [URLRequest] {
+        lock.withLock { storedRequests }
+    }
+
+    static func prepare() {
+        lock.withLock { storedRequests = [] }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(
+        for request: URLRequest
+    ) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.withLock { Self.storedRequests.append(request) }
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: [
+                "Content-Type": "image/jpeg",
+                "Content-Length": "1201",
+            ]
+        )!
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocol(
+            self,
+            didLoad: Data(repeating: 0x43, count: 1_201)
+        )
         client?.urlProtocolDidFinishLoading(self)
     }
 
@@ -566,7 +770,8 @@ struct WishlistTests {
             modelContext: library.context,
             settings: AppSettings(),
             toasts: toasts,
-            online: WishlistOfflineMetadataClient()
+            online: WishlistOfflineMetadataClient(),
+            managedFiles: library.managedFiles
         )
         viewModel.wishlist.add(discoveryBook(
             id: "epub-1",
@@ -578,11 +783,14 @@ struct WishlistTests {
         defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
         viewModel.addBooks(from: [source])
 
-        for _ in 0..<200 where viewModel.wishlist.count > 0 {
+        let deadline = Date.now.addingTimeInterval(5)
+        while (viewModel.wishlist.count > 0 || viewModel.importer.isExtracting),
+              Date.now < deadline {
             try await Task.sleep(for: .milliseconds(25))
         }
 
         #expect(viewModel.wishlist.items.isEmpty)
+        #expect(!viewModel.importer.isExtracting)
         #expect(try library.context.fetchCount(FetchDescriptor<Book>()) == 1)
         #expect(toasts.messages.contains { $0.style == .success })
     }

@@ -49,10 +49,10 @@ final class DiscoveryViewModel {
     func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
+        defer { isRefreshing = false }
         refreshFailed = false
         let preserveContent = phase == .loaded
         await requestCatalog(forceRefresh: true, preserveContent: preserveContent)
-        isRefreshing = false
     }
 
     func retry() async {

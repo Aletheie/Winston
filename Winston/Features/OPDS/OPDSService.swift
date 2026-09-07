@@ -96,75 +96,6 @@ nonisolated struct OPDSCatalogTestResult: Equatable, Sendable {
     let usesSecureTransport: Bool
 }
 
-nonisolated struct OPDSRequestPolicy: Sendable {
-    let access: OPDSCatalogAccess
-
-    func request(
-        for url: URL,
-        accept: String? = nil
-    ) throws -> URLRequest {
-        try validateTransport(for: url)
-        var request = URLRequest(url: url)
-        if let accept {
-            request.setValue(accept, forHTTPHeaderField: "Accept")
-        }
-        applyAuthorization(to: &request)
-        return request
-    }
-
-    func redirectedRequest(
-        from sourceURL: URL,
-        proposedRequest: URLRequest
-    ) throws -> URLRequest {
-        guard let targetURL = proposedRequest.url else {
-            throw OPDSServiceError.invalidURL
-        }
-        if sourceURL.scheme?.lowercased() == "https",
-           targetURL.scheme?.lowercased() == "http" {
-            throw OPDSServiceError.insecureRedirect
-        }
-        try validateTransport(for: targetURL)
-        var request = proposedRequest
-        request.setValue(nil, forHTTPHeaderField: "Authorization")
-        applyAuthorization(to: &request)
-        return request
-    }
-
-    func hasCredentialAccess(to url: URL) -> Bool {
-        guard let credentialOrigin = access.credentialOrigin,
-              let targetOrigin = OPDSOrigin(url: url) else {
-            return false
-        }
-        return credentialOrigin == targetOrigin
-    }
-
-    private func validateTransport(for url: URL) throws {
-        guard url.isOPDSHTTPURL else {
-            throw OPDSServiceError.invalidURL
-        }
-        guard url.scheme?.lowercased() == "http" else { return }
-        guard access.configuration.allowsInsecureHTTP,
-              access.configuration.authenticationMode == .none else {
-            throw OPDSServiceError.insecureTransport
-        }
-    }
-
-    private func applyAuthorization(to request: inout URLRequest) {
-        guard let url = request.url,
-              hasCredentialAccess(to: url),
-              let credential = access.credential else {
-            return
-        }
-        let value = Data(
-            "\(credential.username):\(credential.password)".utf8
-        ).base64EncodedString()
-        request.setValue(
-            "Basic \(value)",
-            forHTTPHeaderField: "Authorization"
-        )
-    }
-}
-
 actor OPDSService: OPDSFetching {
     nonisolated static let maximumFeedBytes = 8 * 1024 * 1024
     nonisolated static let maximumDownloadBytes: Int64 = 250 * 1024 * 1024
@@ -174,13 +105,16 @@ actor OPDSService: OPDSFetching {
 
     private let session: URLSession
     private let importSourceLeases: ImportSourceLeaseStore
+    private let maximumDownloadBytes: Int64
 
     init(
         session: URLSession? = nil,
-        importSourceLeases: ImportSourceLeaseStore = ImportSourceLeaseStore()
+        importSourceLeases: ImportSourceLeaseStore = ImportSourceLeaseStore(),
+        maximumDownloadBytes: Int64 = OPDSService.maximumDownloadBytes
     ) {
         self.session = session ?? Self.makeSession()
         self.importSourceLeases = importSourceLeases
+        self.maximumDownloadBytes = max(1, maximumDownloadBytes)
     }
 
     func feed(at url: URL) async throws -> OPDSFeed {
@@ -428,36 +362,18 @@ actor OPDSService: OPDSFetching {
                 forHTTPHeaderField: "Accept"
             )
         }
-        let redirectDelegate = OPDSRedirectDelegate(policy: policy)
-
-        let sourceURL: URL
-        let response: URLResponse
-        do {
-            (sourceURL, response) = try await session.download(
-                for: request,
-                delegate: redirectDelegate
-            )
-            if let error = redirectDelegate.rejection {
-                throw error
-            }
-        } catch let error as OPDSServiceError {
-            throw error
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            if let rejection = redirectDelegate.rejection {
-                throw rejection
-            }
-            throw OPDSServiceError.network
+        let download = try await BoundedDownload.perform(
+            using: session,
+            request: request,
+            policy: policy,
+            maximumBytes: maximumDownloadBytes
+        )
+        defer { try? FileManager.default.removeItem(at: download.fileURL) }
+        _ = try validate(download.response, policy: policy)
+        guard download.byteCount > 0 else {
+            throw OPDSServiceError.invalidDownload
         }
-        _ = try validate(response, policy: policy)
-
-        let values = try? sourceURL.resourceValues(forKeys: [.fileSizeKey])
-        let size = Int64(values?.fileSize ?? 0)
-        guard size > 0 else { throw OPDSServiceError.invalidDownload }
-        guard size <= Self.maximumDownloadBytes else {
-            throw OPDSServiceError.downloadTooLarge
-        }
+        let sourceURL = download.fileURL
 
         let fileName = "\(Self.safeFileStem(title)).\(acquisition.fileExtension)"
         guard let leaf = ManagedLeafName(rawValue: fileName) else {
@@ -710,47 +626,5 @@ actor OPDSService: OPDSFetching {
                 "Winston/0.2 (macOS OPDS reader; +https://github.com/)",
         ]
         return URLSession(configuration: configuration)
-    }
-}
-
-private nonisolated final class OPDSRedirectDelegate:
-    NSObject,
-    URLSessionTaskDelegate,
-    @unchecked Sendable
-{
-    private let policy: OPDSRequestPolicy
-    private let lock = NSLock()
-    private var storedRejection: OPDSServiceError?
-
-    init(policy: OPDSRequestPolicy) {
-        self.policy = policy
-    }
-
-    var rejection: OPDSServiceError? {
-        lock.withLock { storedRejection }
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping @Sendable (URLRequest?) -> Void
-    ) {
-        do {
-            completionHandler(try policy.redirectedRequest(
-                from: response.url ?? task.currentRequest?.url
-                    ?? policy.access.configuration.rootURL,
-                proposedRequest: request
-            ))
-        } catch let error as OPDSServiceError {
-            lock.withLock { storedRejection = error }
-            completionHandler(nil)
-        } catch {
-            lock.withLock {
-                storedRejection = .network
-            }
-            completionHandler(nil)
-        }
     }
 }
