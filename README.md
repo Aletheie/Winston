@@ -10,12 +10,12 @@
 
 <sub>Native macOS · offline by default · one cable to Kindle</sub>
 
-[Download](https://github.com/Aletheie/Winston/releases) · [What's new in 0.2.1](docs/releases/v0.2.1.md) · [What it does](#what-it-does) · [Build it](#build-from-source)
+[Download](https://github.com/Aletheie/Winston/releases) · [What's new in 0.2.2](docs/releases/v0.2.2.md) · [What it does](#what-it-does) · [Build it](#build-from-source)
 
 <p>
 <img alt="macOS 26.4+" src="https://img.shields.io/badge/macOS-26.4%2B-000000?style=flat-square&logo=apple">
 <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-arm64-333333?style=flat-square">
-<img alt="early access" src="https://img.shields.io/badge/status-early%20access%200.2.1-e8590c?style=flat-square">
+<img alt="early access" src="https://img.shields.io/badge/status-early%20access%200.2.2-e8590c?style=flat-square">
 <img alt="MIT" src="https://img.shields.io/badge/license-MIT-4c9a2a?style=flat-square">
 </p>
 
