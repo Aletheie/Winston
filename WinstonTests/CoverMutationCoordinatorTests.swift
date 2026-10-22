@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftData
 import Testing
@@ -252,6 +253,146 @@ struct CoverMutationCoordinatorTests {
             CoverStore.loadData(for: .work(work.uuid))
                 == Data("work cover".utf8)
         )
+    }
+
+    @Test(arguments: [false, true])
+    func customCoverAcceptsDataAndFileURL(fromURL: Bool) async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library)
+        let files = makeManagedFiles()
+        let service = CoverService(modelContext: library.context, managedFiles: files)
+        let data = EPUBFixture.jpegData()
+        let url = library.root.appending(path: "custom.jpg")
+        try data.write(to: url)
+
+        let task = try #require(fromURL
+            ? service.setCustomCover(for: book, from: url)
+            : service.setCustomCover(for: book, from: data))
+        await task.value
+
+        let saved = try #require(CoverStore.loadData(for: .edition(book.uuid)))
+        #expect(NSImage(data: saved) != nil)
+        #expect(book.coverReference == CoverReference(owner: .edition(book.uuid), version: 1))
+        #expect(await files.pendingTransactions().isEmpty)
+    }
+
+    @Test
+    func invalidCustomCoverPreservesExistingCover() async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library)
+        let original = EPUBFixture.jpegData()
+        #expect(CoverStore.restore(original, for: .edition(book.uuid)))
+        let service = CoverService(modelContext: library.context, managedFiles: makeManagedFiles())
+
+        let task = try #require(service.setCustomCover(for: book, from: Data("invalid image".utf8)))
+        await task.value
+
+        #expect(book.coverVersion == 0)
+        #expect(CoverStore.loadData(for: .edition(book.uuid)) == original)
+    }
+
+    @Test(arguments: [false, true])
+    func resetCoverRestoresEmbeddedImageOrRemovesCustomCover(hasEmbeddedCover: Bool) async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library)
+        if hasEmbeddedCover {
+            let source = try EPUBFixture.make(title: "Covered", author: "Author")
+            defer { try? FileManager.default.removeItem(at: source.deletingLastPathComponent()) }
+            try library.installBookFile(from: source, fileName: book.fileName)
+        }
+        let original = EPUBFixture.jpegData(width: 80, height: 100)
+        #expect(CoverStore.restore(original, for: .edition(book.uuid)))
+        let files = makeManagedFiles()
+        let service = CoverService(modelContext: library.context, managedFiles: files)
+
+        let task = try #require(service.resetCover(for: book))
+        await task.value
+
+        let saved = CoverStore.loadData(for: .edition(book.uuid))
+        #expect(book.coverVersion == 1)
+        if hasEmbeddedCover {
+            let data = try #require(saved)
+            let image = try #require(NSBitmapImageRep(data: data))
+            let expected = try #require(NSBitmapImageRep(data: EPUBFixture.jpegData()))
+            #expect(image.pixelsWide == expected.pixelsWide)
+            #expect(image.pixelsHigh == expected.pixelsHigh)
+        } else {
+            #expect(saved == nil)
+        }
+        #expect(await files.pendingTransactions().isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func pendingCoverCannotOverwriteCancellationOrReplacement(cancel: Bool) async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library)
+        let original = EPUBFixture.jpegData()
+        #expect(CoverStore.restore(original, for: .edition(book.uuid)))
+        let files = makeManagedFiles()
+        let service = CoverService(modelContext: library.context, managedFiles: files)
+        let replacement = EPUBFixture.jpegData(width: 80, height: 100)
+        let older = try #require(service.setCustomCover(for: book, from: original))
+        if cancel {
+            service.cancelPending(for: book.uuid)
+        } else {
+            let newer = try #require(service.setCustomCover(
+                for: book, from: replacement
+            ))
+            await newer.value
+        }
+        await older.value
+
+        let saved = try #require(CoverStore.loadData(for: .edition(book.uuid)))
+        if cancel {
+            #expect(saved == original)
+            #expect(book.coverVersion == 0)
+        } else {
+            let image = try #require(NSBitmapImageRep(data: saved))
+            let expected = try #require(NSBitmapImageRep(data: replacement))
+            #expect(image.pixelsWide == expected.pixelsWide)
+            #expect(image.pixelsHigh == expected.pixelsHigh)
+            #expect(book.coverVersion == 1)
+        }
+        #expect(await files.pendingTransactions().isEmpty)
+    }
+
+    @Test
+    func changedBookRejectsPendingCustomCover() async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library)
+        let service = CoverService(modelContext: library.context, managedFiles: makeManagedFiles())
+        let task = try #require(service.setCustomCover(for: book, from: EPUBFixture.jpegData()))
+        book.title = "Changed while extracting"
+        try library.context.save()
+        await task.value
+
+        #expect(book.coverVersion == 0)
+        #expect(!CoverStore.exists(for: .edition(book.uuid)))
+    }
+
+    @Test
+    func customCoverSaveFailurePreservesOriginalAndAbortsStaging() async throws {
+        let library = try await TestLibrary()
+        let book = try seedBook(in: library)
+        let original = EPUBFixture.jpegData()
+        #expect(CoverStore.restore(original, for: .edition(book.uuid)))
+        let files = makeManagedFiles()
+        let mutations = CatalogMutationService(
+            modelContext: library.context,
+            saveAdapter: CatalogSaveAdapter { _ in throw InjectedFailure() },
+            managedFiles: files
+        )
+        let service = CoverService(modelContext: library.context, mutations: mutations)
+
+        let task = try #require(service.setCustomCover(
+            for: book, from: EPUBFixture.jpegData(width: 80, height: 100)
+        ))
+        await task.value
+
+        #expect(book.coverVersion == 0)
+        #expect(CoverStore.loadData(for: .edition(book.uuid)) == original)
+        #expect(await files.pendingTransactions().isEmpty)
+        #expect(!library.context.hasChanges)
     }
 
     private func makeManagedFiles(

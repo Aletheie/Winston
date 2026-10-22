@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import OSLog
 import SQLite3
@@ -62,15 +61,7 @@ nonisolated struct StoreRecoveryFileSystem: Sendable {
         copyItem: { try FileManager.default.copyItem(at: $0, to: $1) },
         moveItem: { try FileManager.default.moveItem(at: $0, to: $1) },
         removeItem: { try FileManager.default.removeItem(at: $0) },
-        checksum: { url in
-            let handle = try FileHandle(forReadingFrom: url)
-            defer { try? handle.close() }
-            var hasher = SHA256()
-            while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
-                hasher.update(data: data)
-            }
-            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        },
+        checksum: { try ContentHasher.sha256(of: $0) },
         writeManifest: { manifest, url in
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

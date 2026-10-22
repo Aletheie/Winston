@@ -5,6 +5,58 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct OPDSCatalogConfigurationTests {
+    @Test func `Settings read and persist only their injected preference domain`() {
+        let fixture = SettingsFixture()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        fixture.defaults.set(37, forKey: "readingGoal")
+        fixture.defaults.set(true, forKey: "onlineMetadataEnabled")
+        fixture.defaults.set("czech", forKey: "appLanguage")
+        fixture.defaults.set(["sample-plugin"], forKey: "enabledPluginIDs")
+        fixture.defaults.set(["sample-plugin": ["library.read"]], forKey: "pluginGrants")
+
+        let settings = AppSettings(secretStore: fixture.secrets, defaults: fixture.defaults)
+        #expect(settings.readingGoal == 37)
+        #expect(settings.onlineMetadataEnabled)
+        #expect(settings.appLanguage == .czech)
+        #expect(settings.enabledPluginIDs == ["sample-plugin"])
+        #expect(settings.pluginGrants == ["sample-plugin": ["library.read"]])
+
+        let backupDate = Date(timeIntervalSince1970: 123_456)
+        settings.readingGoal = 41
+        settings.onlineMetadataEnabled = false
+        settings.gridZoom = 0.75
+        settings.lastBackupAt = backupDate
+        settings.lastReleaseCheckAt = backupDate
+        settings.appLanguage = .czech
+        settings.enabledPluginIDs = []
+        settings.pluginGrants = [:]
+
+        let reloaded = AppSettings(secretStore: fixture.secrets, defaults: fixture.defaults)
+        #expect(fixture.defaults.integer(forKey: "readingGoal") == 41)
+        #expect(!fixture.defaults.bool(forKey: "onlineMetadataEnabled"))
+        #expect(fixture.defaults.stringArray(forKey: "AppleLanguages") == ["cs"])
+        #expect(reloaded.readingGoal == 41)
+        #expect(!reloaded.onlineMetadataEnabled)
+        #expect(reloaded.gridZoom == 0.75)
+        #expect(reloaded.lastBackupAt == backupDate)
+        #expect(reloaded.lastReleaseCheckAt == backupDate)
+        #expect(reloaded.appLanguage == .czech)
+        #expect(reloaded.enabledPluginIDs.isEmpty)
+        #expect(reloaded.pluginGrants.isEmpty)
+    }
+
+    @Test func `Legacy token migration uses the injected preference domain`() {
+        let fixture = SettingsFixture()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        fixture.defaults.set("legacy-test-token", forKey: "hardcoverToken")
+
+        let settings = AppSettings(secretStore: fixture.secrets, defaults: fixture.defaults)
+
+        #expect(settings.hardcoverToken == "legacy-test-token")
+        #expect(fixture.secrets.string(for: AppSettings.hardcoverTokenAccount) == "legacy-test-token")
+        #expect(fixture.defaults.object(forKey: "hardcoverToken") == nil)
+    }
+
     @Test func `Fresh settings seed stable built-in catalogs`() {
         let fixture = SettingsFixture()
 

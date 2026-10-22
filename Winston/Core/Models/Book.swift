@@ -519,11 +519,6 @@ final class Book {
 
     // Fills only empty fields so a re-scan never clobbers user edits.
     func apply(_ metadata: BookMetadata) {
-        func fill(_ current: String?, _ new: String?) -> String? {
-            if let current, !current.isEmpty { return current }
-            guard let new = new?.trimmingCharacters(in: .whitespacesAndNewlines), !new.isEmpty else { return current }
-            return new
-        }
         title = fill(title, metadata.title)
         author = fill(author, metadata.author)
         publisher = fill(publisher, metadata.publisher)
@@ -546,11 +541,6 @@ final class Book {
     }
 
     func applyOnline(_ fetched: FetchedMetadata) {
-        func fill(_ current: String?, _ new: String?) -> String? {
-            if let current, !current.isEmpty { return current }
-            guard let new = new?.trimmingCharacters(in: .whitespacesAndNewlines), !new.isEmpty else { return current }
-            return new
-        }
         title = fill(title, fetched.title)
         if author == nil || author?.isEmpty == true, !fetched.authors.isEmpty {
             author = fetched.authors.joined(separator: ", ")
@@ -564,6 +554,12 @@ final class Book {
             communityRatingCount = fetched.ratingsCount
             communityRatingSource = fetched.ratingsSource
         }
+    }
+
+    private func fill(_ current: String?, _ new: String?) -> String? {
+        if let current, !current.isEmpty { return current }
+        guard let new = new?.trimmingCharacters(in: .whitespacesAndNewlines), !new.isEmpty else { return current }
+        return new
     }
 
     nonisolated private static let cleaningPatterns: [NSRegularExpression] = {

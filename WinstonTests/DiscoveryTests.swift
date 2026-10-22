@@ -366,6 +366,31 @@ struct DiscoveryTests {
         )
     }
 
+    @Test func imageLoaderRetriesFailedRequestsAndCachesSmallValidImages() async throws {
+        let url = try #require(URL(string: "https://images.example/retry.png"))
+        let png = try #require(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1kAAAAASUVORK5CYII="
+        ))
+        #expect(png.count < 1_000)
+        PolicyImageURLProtocol.prepare(statusCode: 503)
+        let loader = DiscoveryImageLoader(
+            configuration: PolicyImageURLProtocol.configuration
+        )
+
+        #expect(await loader.image(for: url) == nil)
+        #expect(PolicyImageURLProtocol.requests.count == 1)
+
+        PolicyImageURLProtocol.prepare(body: png)
+        let image = await loader.image(for: url)
+        #expect(image != nil)
+        #expect(image?.size.width == 1)
+        #expect(image?.size.height == 1)
+        #expect(PolicyImageURLProtocol.requests.count == 1)
+
+        #expect(await loader.image(for: url) != nil)
+        #expect(PolicyImageURLProtocol.requests.count == 1)
+    }
+
     @Test func releaseDateRejectsInvalidCalendarDays() {
         #expect(DiscoveryReleaseDate(iso8601: "2025-02-30") == nil)
     }
@@ -549,6 +574,8 @@ private final class PolicyImageURLProtocol:
 {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var storedRequests: [URLRequest] = []
+    nonisolated(unsafe) private static var statusCode = 200
+    nonisolated(unsafe) private static var responseBody = Data()
 
     static var configuration: URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
@@ -560,8 +587,15 @@ private final class PolicyImageURLProtocol:
         lock.withLock { storedRequests }
     }
 
-    static func prepare() {
-        lock.withLock { storedRequests = [] }
+    static func prepare(
+        statusCode: Int = 200,
+        body: Data = Data(repeating: 0x43, count: 1_201)
+    ) {
+        lock.withLock {
+            storedRequests = []
+            Self.statusCode = statusCode
+            responseBody = body
+        }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -573,14 +607,17 @@ private final class PolicyImageURLProtocol:
     }
 
     override func startLoading() {
-        Self.lock.withLock { Self.storedRequests.append(request) }
+        let (statusCode, body) = Self.lock.withLock {
+            Self.storedRequests.append(request)
+            return (Self.statusCode, Self.responseBody)
+        }
         let response = HTTPURLResponse(
             url: request.url!,
-            statusCode: 200,
+            statusCode: statusCode,
             httpVersion: nil,
             headerFields: [
                 "Content-Type": "image/jpeg",
-                "Content-Length": "1201",
+                "Content-Length": String(body.count),
             ]
         )!
         client?.urlProtocol(
@@ -590,7 +627,7 @@ private final class PolicyImageURLProtocol:
         )
         client?.urlProtocol(
             self,
-            didLoad: Data(repeating: 0x43, count: 1_201)
+            didLoad: body
         )
         client?.urlProtocolDidFinishLoading(self)
     }

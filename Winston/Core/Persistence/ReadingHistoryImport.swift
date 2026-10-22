@@ -600,8 +600,7 @@ nonisolated struct ReadingHistoryCatalogProjectionSnapshot: Equatable, Sendable 
 
 private nonisolated struct ReadingHistoryCatalogProjectionPage: Sendable {
     let books: [ReadingHistoryBookProjection]
-    let lastDateAdded: Date?
-    let trailingLastDateCount: Int
+    let nextCursor: BookPageCursor
 }
 
 /// Reads catalog values in bounded pages on a dedicated SwiftData executor.
@@ -611,30 +610,20 @@ actor ReadingHistoryCatalogProjectionLoader {
     func loadAll(pageSize: Int = 256) throws -> ReadingHistoryCatalogProjectionSnapshot {
         let limit = max(1, pageSize)
         var projections: [ReadingHistoryBookProjection] = []
-        var cursorDate: Date?
-        var skippedAtCursor = 0
+        var cursor = BookPageCursor()
         var pageCount = 0
 
         while true {
             try Task.checkCancellation()
             let page = try loadPage(
-                startingAt: cursorDate,
-                skippingAtCursor: skippedAtCursor,
+                cursor: cursor,
                 limit: limit
             )
             pageCount += 1
             projections.append(contentsOf: page.books)
 
-            guard page.books.count == limit,
-                  let lastDateAdded = page.lastDateAdded else {
-                break
-            }
-            if cursorDate == lastDateAdded {
-                skippedAtCursor += page.trailingLastDateCount
-            } else {
-                cursorDate = lastDateAdded
-                skippedAtCursor = page.trailingLastDateCount
-            }
+            guard page.books.count == limit else { break }
+            cursor = page.nextCursor
         }
 
         return ReadingHistoryCatalogProjectionSnapshot(
@@ -655,39 +644,15 @@ actor ReadingHistoryCatalogProjectionLoader {
     }
 
     private func loadPage(
-        startingAt cursorDate: Date?,
-        skippingAtCursor: Int,
+        cursor: BookPageCursor,
         limit: Int
     ) throws -> ReadingHistoryCatalogProjectionPage {
-        var descriptor: FetchDescriptor<Book>
-        if let cursorDate {
-            descriptor = FetchDescriptor<Book>(
-                predicate: #Predicate { $0.dateAdded >= cursorDate },
-                sortBy: [
-                    SortDescriptor(\Book.dateAdded),
-                    SortDescriptor(\Book.uuid),
-                ]
-            )
-            descriptor.fetchOffset = skippingAtCursor
-        } else {
-            descriptor = FetchDescriptor<Book>(
-                sortBy: [
-                    SortDescriptor(\Book.dateAdded),
-                    SortDescriptor(\Book.uuid),
-                ]
-            )
-        }
-        descriptor.fetchLimit = limit
+        var descriptor = cursor.descriptor(limit: limit)
         descriptor.relationshipKeyPathsForPrefetching = [\Book.readingSessions]
         let books = try modelContext.fetch(descriptor)
-        let lastDateAdded = books.last?.dateAdded
-        let trailingLastDateCount = lastDateAdded.map { date in
-            books.reversed().prefix { $0.dateAdded == date }.count
-        } ?? 0
         return ReadingHistoryCatalogProjectionPage(
             books: books.map(Self.projection),
-            lastDateAdded: lastDateAdded,
-            trailingLastDateCount: trailingLastDateCount
+            nextCursor: cursor.advancing(past: books)
         )
     }
 

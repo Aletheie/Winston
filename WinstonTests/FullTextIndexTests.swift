@@ -1,6 +1,7 @@
 import AppKit
 import CoreText
 import Foundation
+import SQLite3
 import Testing
 @testable import Winston
 
@@ -46,6 +47,15 @@ struct FullTextIndexTests {
         )
 
         let first = try await service.synchronize([snapshot])
+        let databaseURL = directory.appending(path: "fulltext.sqlite3")
+        try withSQLite(databaseURL) { database in
+            try executeSQL("""
+                CREATE TABLE document_updates(count INTEGER NOT NULL);
+                INSERT INTO document_updates VALUES (0);
+                CREATE TRIGGER audit_document_update AFTER UPDATE ON documents
+                BEGIN UPDATE document_updates SET count = count + 1; END;
+                """, database: database)
+        }
         let second = try await service.synchronize([snapshot])
 
         #expect(first.indexedBooks == 1)
@@ -53,6 +63,124 @@ struct FullTextIndexTests {
         #expect(second.indexedBooks == 0)
         #expect(second.reusedBooks == 1)
         #expect(try await service.search("cached sentence").count == 1)
+        try withSQLite(databaseURL) { database in
+            let updates = try scalarSQL("SELECT count FROM document_updates", database: database)
+            #expect(updates == 0)
+        }
+    }
+
+    @Test func sectionLookupSurvivesReuseReplacementRemovalAndForcedRebuild() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let indexDirectory = directory.appending(path: "index", directoryHint: .isDirectory)
+        let databaseURL = indexDirectory.appending(path: "fulltext.sqlite3")
+        let firstURL = directory.appending(path: "first.html")
+        let secondURL = directory.appending(path: "second.html")
+        try Data("<h1>First</h1><p>firsttoken</p><h1>Second</h1><p>firsttoken</p>".utf8)
+            .write(to: firstURL)
+        try Data("<h1>Other</h1><p>othertoken</p>".utf8).write(to: secondURL)
+        let first = snapshot(url: firstURL)
+        let second = snapshot(url: secondURL)
+        let service = FullTextIndexService(indexDirectory: indexDirectory)
+        _ = try await service.synchronize([first, second])
+        try expectSectionLookup(databaseURL, count: 3)
+
+        let relinked = FullTextBookSnapshot(
+            bookID: first.bookID,
+            source: source(firstURL, contentHash: nil)
+        )
+        #expect(try await service.applyChanges([relinked], removing: []).reusedBooks == 1)
+        try expectSectionLookup(databaseURL, count: 3)
+        try withSQLite(databaseURL) { database in
+            let staleSections = try scalarSQL("""
+                SELECT COUNT(*) FROM sections JOIN documents USING(book_id)
+                WHERE sections.asset_id != documents.asset_id
+                    OR sections.asset_generation != documents.asset_generation
+                """, database: database)
+            #expect(staleSections == 0)
+        }
+
+        try Data("<h1>Replacement</h1><p>replacementtoken</p>".utf8)
+            .write(to: firstURL, options: .atomic)
+        let replacement = FullTextBookSnapshot(
+            bookID: first.bookID,
+            source: source(firstURL, contentHash: nil)
+        )
+        try withSQLite(databaseURL) { database in
+            try executeSQL("""
+                CREATE TRIGGER fail_section_lookup BEFORE INSERT ON section_rows
+                BEGIN SELECT RAISE(ABORT, 'injected lookup failure'); END;
+                """, database: database)
+        }
+        await #expect(throws: (any Error).self) {
+            _ = try await service.applyChanges([replacement], removing: [])
+        }
+        try expectSectionLookup(databaseURL, count: 3)
+        #expect(try await service.search("firsttoken").map(\.bookID) == [first.bookID])
+        #expect(try await service.search("replacementtoken").isEmpty)
+        try withSQLite(databaseURL) { database in
+            try executeSQL("DROP TRIGGER fail_section_lookup", database: database)
+        }
+        _ = try await service.applyChanges([replacement], removing: [])
+        try expectSectionLookup(databaseURL, count: 2)
+        #expect(try await service.search("firsttoken").isEmpty)
+        #expect(try await service.search("replacementtoken").map(\.bookID) == [first.bookID])
+        #expect(try await service.search("othertoken").map(\.bookID) == [second.bookID])
+
+        _ = try await service.applyChanges([], removing: [first.bookID])
+        try expectSectionLookup(databaseURL, count: 1)
+        #expect(try await service.search("replacementtoken").isEmpty)
+        #expect(try await service.search("othertoken").map(\.bookID) == [second.bookID])
+
+        _ = try await service.synchronize([replacement], forceReindex: true)
+        try expectSectionLookup(databaseURL, count: 1)
+        #expect(try await service.search("othertoken").isEmpty)
+        #expect(try await service.search("replacementtoken").map(\.bookID) == [first.bookID])
+    }
+
+    @Test func versionTwoIndexMigratesWithoutLosingSearchableText() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appending(path: "fulltext.sqlite3")
+        let bookID = UUID()
+        try withSQLite(databaseURL) { database in
+            try executeSQL("""
+                CREATE TABLE documents(
+                    book_id TEXT PRIMARY KEY NOT NULL, asset_id TEXT NOT NULL,
+                    asset_generation TEXT NOT NULL, format TEXT NOT NULL,
+                    source_path TEXT NOT NULL, source_hash TEXT NOT NULL,
+                    source_resource_id TEXT, source_modified REAL, source_size INTEGER NOT NULL
+                );
+                CREATE VIRTUAL TABLE sections USING fts5(
+                    book_id UNINDEXED, asset_id UNINDEXED, asset_generation UNINDEXED,
+                    section_id UNINDEXED, section_title, section_kind UNINDEXED,
+                    section_ordinal UNINDEXED, body,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                );
+                INSERT INTO documents VALUES(
+                    '\(bookID.uuidString.lowercased())', '\(UUID().uuidString.lowercased())',
+                    'legacy', 'txt', '/missing/legacy.txt', 'legacy', NULL, NULL, 0
+                );
+                INSERT INTO sections
+                SELECT book_id, asset_id, asset_generation, 'chapter-1', 'Legacy', 'chapter', 1,
+                    'migrationtoken stays searchable without its source file' FROM documents;
+                PRAGMA user_version = 2;
+                """, database: database)
+        }
+
+        let service = FullTextIndexService(indexDirectory: directory)
+        #expect(try await service.search("migrationtoken").map(\.bookID) == [bookID])
+        try expectSectionLookup(databaseURL, count: 1)
+        try withSQLite(databaseURL) { database in
+            let version = try scalarSQL("PRAGMA user_version", database: database)
+            #expect(version == 3)
+        }
+        let reopened = FullTextIndexService(indexDirectory: directory)
+        #expect(try await reopened.search("migrationtoken").map(\.bookID) == [bookID])
+        try expectSectionLookup(databaseURL, count: 1)
+        _ = try await reopened.applyChanges([], removing: [bookID])
+        try expectSectionLookup(databaseURL, count: 0)
+        #expect(try await service.search("migrationtoken").isEmpty)
     }
 
     @Test func changedContentHashReplacesStaleSearchText() async throws {
@@ -440,6 +568,44 @@ struct FullTextIndexTests {
             bookID: UUID(),
             source: source(url, contentHash: try? ContentHasher.sha256(of: url))
         )
+    }
+
+    private func expectSectionLookup(_ url: URL, count: Int) throws {
+        try withSQLite(url) { database in
+            let sections = try scalarSQL("SELECT COUNT(*) FROM sections", database: database)
+            let lookups = try scalarSQL("SELECT COUNT(*) FROM section_rows", database: database)
+            let mismatches = try scalarSQL("""
+                SELECT COUNT(*) FROM section_rows
+                LEFT JOIN sections ON sections.rowid = section_rows.section_rowid
+                WHERE sections.rowid IS NULL OR sections.book_id != section_rows.book_id
+                """, database: database)
+            #expect(sections == count)
+            #expect(lookups == count)
+            #expect(mismatches == 0)
+        }
+    }
+
+    private func withSQLite<T>(_ url: URL, body: (OpaquePointer) throws -> T) throws -> T {
+        var handle: OpaquePointer?
+        let result = sqlite3_open(url.path(percentEncoded: false), &handle)
+        defer { if let handle { sqlite3_close(handle) } }
+        #expect(result == SQLITE_OK)
+        let database = try #require(handle)
+        return try body(database)
+    }
+
+    private func executeSQL(_ sql: String, database: OpaquePointer) throws {
+        try #require(sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK,
+                     "\(String(cString: sqlite3_errmsg(database)))")
+    }
+
+    private func scalarSQL(_ sql: String, database: OpaquePointer) throws -> Int {
+        var handle: OpaquePointer?
+        try #require(sqlite3_prepare_v2(database, sql, -1, &handle, nil) == SQLITE_OK)
+        let statement = try #require(handle)
+        defer { sqlite3_finalize(statement) }
+        try #require(sqlite3_step(statement) == SQLITE_ROW)
+        return Int(sqlite3_column_int64(statement, 0))
     }
 
     private func source(

@@ -1444,13 +1444,7 @@ nonisolated enum LibrarySnapshotCoordinator {
         guard values.isRegularFile == true, values.isSymbolicLink != true else {
             throw SnapshotError.unsafeEntry(file.path(percentEncoded: false))
         }
-        let handle = try FileHandle(forReadingFrom: file)
-        defer { try? handle.close() }
-        var hasher = SHA256()
-        while let data = try handle.read(upToCount: 1_024 * 1_024), !data.isEmpty {
-            hasher.update(data: data)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return try ContentHasher.sha256(of: file)
     }
 
     private static func fileTreeByteCount(at url: URL) throws -> Int64 {

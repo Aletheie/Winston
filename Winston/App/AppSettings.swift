@@ -222,7 +222,7 @@ final class AppSettings {
 
     // Never reassign inside didSet — @Observable turns stored properties into accessors and the setter recurses (clamping lives in adjustGridZoom).
     var gridZoom: Double {
-        didSet { UserDefaults.standard.set(gridZoom, forKey: Keys.gridZoom) }
+        didSet { defaults.set(gridZoom, forKey: Keys.gridZoom) }
     }
 
     func adjustGridZoom(by delta: Double) {
@@ -230,29 +230,29 @@ final class AppSettings {
     }
 
     var onlineMetadataEnabled: Bool {
-        didSet { UserDefaults.standard.set(onlineMetadataEnabled, forKey: Keys.onlineMetadata) }
+        didSet { defaults.set(onlineMetadataEnabled, forKey: Keys.onlineMetadata) }
     }
 
     var watchFolderEnabled: Bool {
-        didSet { UserDefaults.standard.set(watchFolderEnabled, forKey: Keys.watchEnabled) }
+        didSet { defaults.set(watchFolderEnabled, forKey: Keys.watchEnabled) }
     }
 
     var watchFolderPath: String? {
-        didSet { UserDefaults.standard.set(watchFolderPath, forKey: Keys.watchPath) }
+        didSet { defaults.set(watchFolderPath, forKey: Keys.watchPath) }
     }
 
     var hardcoverToken: String {
         didSet {
             let value = hardcoverToken.isEmpty ? nil : hardcoverToken
             if secretStore.set(value, for: Self.hardcoverTokenAccount) {
-                UserDefaults.standard.removeObject(forKey: Keys.hardcoverToken)
+                defaults.removeObject(forKey: Keys.hardcoverToken)
             }
         }
     }
 
     var externalBookWebsiteURL: String {
         didSet {
-            UserDefaults.standard.set(
+            defaults.set(
                 externalBookWebsiteURL,
                 forKey: Keys.externalBookWebsiteURL
             )
@@ -260,50 +260,50 @@ final class AppSettings {
     }
 
     var autoBackupEnabled: Bool {
-        didSet { UserDefaults.standard.set(autoBackupEnabled, forKey: Keys.autoBackupEnabled) }
+        didSet { defaults.set(autoBackupEnabled, forKey: Keys.autoBackupEnabled) }
     }
 
     var backupFolderPath: String? {
-        didSet { UserDefaults.standard.set(backupFolderPath, forKey: Keys.backupPath) }
+        didSet { defaults.set(backupFolderPath, forKey: Keys.backupPath) }
     }
 
     var lastBackupAt: Date? {
-        get { UserDefaults.standard.object(forKey: Keys.lastBackupAt) as? Date }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.lastBackupAt) }
+        get { defaults.object(forKey: Keys.lastBackupAt) as? Date }
+        set { defaults.set(newValue, forKey: Keys.lastBackupAt) }
     }
 
     var releaseCheckEnabled: Bool {
-        didSet { UserDefaults.standard.set(releaseCheckEnabled, forKey: Keys.releaseCheckEnabled) }
+        didSet { defaults.set(releaseCheckEnabled, forKey: Keys.releaseCheckEnabled) }
     }
 
     var lastReleaseCheckAt: Date? {
-        get { UserDefaults.standard.object(forKey: Keys.lastReleaseCheckAt) as? Date }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.lastReleaseCheckAt) }
+        get { defaults.object(forKey: Keys.lastReleaseCheckAt) as? Date }
+        set { defaults.set(newValue, forKey: Keys.lastReleaseCheckAt) }
     }
 
     var readingGoal: Int {
-        didSet { UserDefaults.standard.set(readingGoal, forKey: Keys.readingGoal) }
+        didSet { defaults.set(readingGoal, forKey: Keys.readingGoal) }
     }
 
     var showDiscoverInSidebar: Bool {
-        didSet { UserDefaults.standard.set(showDiscoverInSidebar, forKey: Keys.showDiscoverInSidebar) }
+        didSet { defaults.set(showDiscoverInSidebar, forKey: Keys.showDiscoverInSidebar) }
     }
 
     var showCatalogsInSidebar: Bool {
-        didSet { UserDefaults.standard.set(showCatalogsInSidebar, forKey: Keys.showCatalogsInSidebar) }
+        didSet { defaults.set(showCatalogsInSidebar, forKey: Keys.showCatalogsInSidebar) }
     }
 
     var showUpdatesInSidebar: Bool {
-        didSet { UserDefaults.standard.set(showUpdatesInSidebar, forKey: Keys.showUpdatesInSidebar) }
+        didSet { defaults.set(showUpdatesInSidebar, forKey: Keys.showUpdatesInSidebar) }
     }
 
     var showOperationsInSidebar: Bool {
-        didSet { UserDefaults.standard.set(showOperationsInSidebar, forKey: Keys.showOperationsInSidebar) }
+        didSet { defaults.set(showOperationsInSidebar, forKey: Keys.showOperationsInSidebar) }
     }
 
     var inspectBeforeKindleTransfer: Bool {
         didSet {
-            UserDefaults.standard.set(
+            defaults.set(
                 inspectBeforeKindleTransfer,
                 forKey: Keys.inspectBeforeKindleTransfer
             )
@@ -317,20 +317,20 @@ final class AppSettings {
     }
 
     var enabledPluginIDs: Set<String> {
-        didSet { UserDefaults.standard.set(Array(enabledPluginIDs).sorted(), forKey: Keys.enabledPlugins) }
+        didSet { defaults.set(Array(enabledPluginIDs).sorted(), forKey: Keys.enabledPlugins) }
     }
 
     var pluginGrants: [String: [String]] {
-        didSet { UserDefaults.standard.set(pluginGrants, forKey: Keys.pluginGrants) }
+        didSet { defaults.set(pluginGrants, forKey: Keys.pluginGrants) }
     }
 
     var appLanguage: AppLanguage {
         didSet {
-            UserDefaults.standard.set(appLanguage.rawValue, forKey: Keys.appLanguage)
+            defaults.set(appLanguage.rawValue, forKey: Keys.appLanguage)
             if let codes = appLanguage.localeCodes {
-                UserDefaults.standard.set(codes, forKey: "AppleLanguages")
+                defaults.set(codes, forKey: "AppleLanguages")
             } else {
-                UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+                defaults.removeObject(forKey: "AppleLanguages")
             }
             guard oldValue != appLanguage else { return }
             catalogConfigurations = Self.normalizedCatalogs(
@@ -347,25 +347,25 @@ final class AppSettings {
         self.secretStore = secretStore
         self.defaults = defaults
         let storedToken = secretStore.string(for: Self.hardcoverTokenAccount)
-        let legacyToken = UserDefaults.standard.string(forKey: Keys.hardcoverToken)
-        let resolvedAppLanguage = UserDefaults.standard.string(
+        let legacyToken = defaults.string(forKey: Keys.hardcoverToken)
+        let resolvedAppLanguage = defaults.string(
             forKey: Keys.appLanguage
         ).flatMap(AppLanguage.init(rawValue:)) ?? .system
-        onlineMetadataEnabled = UserDefaults.standard.bool(forKey: Keys.onlineMetadata)
-        watchFolderEnabled = UserDefaults.standard.bool(forKey: Keys.watchEnabled)
-        watchFolderPath = UserDefaults.standard.string(forKey: Keys.watchPath)
-        autoBackupEnabled = UserDefaults.standard.bool(forKey: Keys.autoBackupEnabled)
-        backupFolderPath = UserDefaults.standard.string(forKey: Keys.backupPath)
-        releaseCheckEnabled = UserDefaults.standard.object(forKey: Keys.releaseCheckEnabled) as? Bool ?? true
-        let goal = UserDefaults.standard.integer(forKey: Keys.readingGoal)
+        onlineMetadataEnabled = defaults.bool(forKey: Keys.onlineMetadata)
+        watchFolderEnabled = defaults.bool(forKey: Keys.watchEnabled)
+        watchFolderPath = defaults.string(forKey: Keys.watchPath)
+        autoBackupEnabled = defaults.bool(forKey: Keys.autoBackupEnabled)
+        backupFolderPath = defaults.string(forKey: Keys.backupPath)
+        releaseCheckEnabled = defaults.object(forKey: Keys.releaseCheckEnabled) as? Bool ?? true
+        let goal = defaults.integer(forKey: Keys.readingGoal)
         readingGoal = goal > 0 ? goal : 12
-        let storedZoom = UserDefaults.standard.object(forKey: Keys.gridZoom) as? Double ?? Self.defaultGridZoom
+        let storedZoom = defaults.object(forKey: Keys.gridZoom) as? Double ?? Self.defaultGridZoom
         gridZoom = min(1, max(0, storedZoom))
-        showDiscoverInSidebar = UserDefaults.standard.object(forKey: Keys.showDiscoverInSidebar) as? Bool ?? true
-        showCatalogsInSidebar = UserDefaults.standard.object(forKey: Keys.showCatalogsInSidebar) as? Bool ?? true
-        showUpdatesInSidebar = UserDefaults.standard.object(forKey: Keys.showUpdatesInSidebar) as? Bool ?? true
-        showOperationsInSidebar = UserDefaults.standard.object(forKey: Keys.showOperationsInSidebar) as? Bool ?? true
-        inspectBeforeKindleTransfer = UserDefaults.standard.object(
+        showDiscoverInSidebar = defaults.object(forKey: Keys.showDiscoverInSidebar) as? Bool ?? true
+        showCatalogsInSidebar = defaults.object(forKey: Keys.showCatalogsInSidebar) as? Bool ?? true
+        showUpdatesInSidebar = defaults.object(forKey: Keys.showUpdatesInSidebar) as? Bool ?? true
+        showOperationsInSidebar = defaults.object(forKey: Keys.showOperationsInSidebar) as? Bool ?? true
+        inspectBeforeKindleTransfer = defaults.object(
             forKey: Keys.inspectBeforeKindleTransfer
         ) as? Bool ?? false
         appLanguage = resolvedAppLanguage
@@ -376,19 +376,19 @@ final class AppSettings {
                 preferredLocalizations: Bundle.main.preferredLocalizations
             )
         )
-        enabledPluginIDs = Set(UserDefaults.standard.stringArray(forKey: Keys.enabledPlugins) ?? [])
-        pluginGrants = (UserDefaults.standard.dictionary(forKey: Keys.pluginGrants) as? [String: [String]]) ?? [:]
+        enabledPluginIDs = Set(defaults.stringArray(forKey: Keys.enabledPlugins) ?? [])
+        pluginGrants = (defaults.dictionary(forKey: Keys.pluginGrants) as? [String: [String]]) ?? [:]
         hardcoverToken = storedToken ?? legacyToken ?? ""
-        externalBookWebsiteURL = UserDefaults.standard.string(
+        externalBookWebsiteURL = defaults.string(
             forKey: Keys.externalBookWebsiteURL
-        ) ?? UserDefaults.standard.string(
+        ) ?? defaults.string(
             forKey: Keys.legacyExternalBookSearchURLTemplate
         ) ?? ""
         if storedToken != nil {
-            UserDefaults.standard.removeObject(forKey: Keys.hardcoverToken)
+            defaults.removeObject(forKey: Keys.hardcoverToken)
         } else if let legacyToken,
                   secretStore.set(legacyToken, for: Self.hardcoverTokenAccount) {
-            UserDefaults.standard.removeObject(forKey: Keys.hardcoverToken)
+            defaults.removeObject(forKey: Keys.hardcoverToken)
         }
     }
 

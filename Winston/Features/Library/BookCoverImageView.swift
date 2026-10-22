@@ -92,17 +92,14 @@ struct BookCoverImageView: View {
                 maxDimension: maxDimension,
                 validatingManagedDirectory: sourceURL.deletingLastPathComponent()
             ), !Task.isCancelled else { return nil }
-            if await CoverWorkScheduler.shared.installDerived(
+            _ = await CoverWorkScheduler.shared.installDerived(
                 prepared.data,
                 for: derivedKey
-            ) {
-                return prepared.image
-            }
-            guard !Task.isCancelled else { return nil }
-            return await CoverWorkScheduler.shared.storedDerivedCover(
-                for: derivedKey,
-                maxPixel: maxPixel
             )
+            guard !Task.isCancelled else { return nil }
+            // Disk persistence is best effort: a full or read-only cache
+            // must not hide a cover that has already decoded successfully.
+            return prepared.image
         }
         return await lease.image()
     }

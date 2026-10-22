@@ -1,13 +1,14 @@
-#if DEBUG
+#if DEBUG || WINSTON_UI_TESTING
 import SwiftUI
 import SwiftData
 
 /// Deterministic launch fixtures used only by the UI-test host. The XCTest
-/// environment guard keeps these paths unreachable in ordinary debug runs.
+/// environment guard keeps these paths unreachable in ordinary launches.
 struct UITestScenarioView: View {
     let viewModel: LibraryViewModel
 
     @Environment(DeviceMonitor.self) private var deviceMonitor
+    @Environment(AppSettings.self) private var settings
     @Environment(\.modelContext) private var modelContext
     @State private var didRun = false
 
@@ -15,6 +16,7 @@ struct UITestScenarioView: View {
         Color.clear
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
+            .background { UITestWindowGeometry() }
             .task {
                 guard !didRun else { return }
                 didRun = true
@@ -42,6 +44,7 @@ struct UITestScenarioView: View {
         }
 
         if environment["WINSTON_UI_TEST_BROWSING"] == "1" {
+            settings.gridZoom = 0
             await installBrowsingFixture()
         }
 
@@ -150,6 +153,7 @@ struct UITestScenarioView: View {
             let book = Book(uuid: id, fileName: "", originalFileName: "Paper")
             book.title = String(format: "Browsing Book %05d", index)
             book.author = "Browsing Author"
+            book.hasPhysicalCopy = true
             book.dateAdded = Date(timeIntervalSince1970: Double(1_000 - index))
             modelContext.insert(book)
         }
@@ -162,6 +166,22 @@ struct UITestScenarioView: View {
             )
         } catch {
             modelContext.rollback()
+        }
+    }
+}
+
+private struct UITestWindowGeometry: NSViewRepresentable {
+    func makeNSView(context: Context) -> GeometryView { GeometryView() }
+    func updateNSView(_ nsView: GeometryView, context: Context) {}
+
+    final class GeometryView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            let environment = ProcessInfo.processInfo.environment
+            guard environment["XCTestConfigurationFilePath"] != nil,
+                  environment["WINSTON_UI_TEST_BROWSING"] == "1",
+                  let window else { return }
+            window.setFrame(NSRect(x: 80, y: 80, width: 1280, height: 800), display: true)
         }
     }
 }

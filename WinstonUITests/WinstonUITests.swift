@@ -1,4 +1,5 @@
 
+import AppKit
 import XCTest
 
 final class WinstonUITests: XCTestCase {
@@ -406,8 +407,9 @@ final class WinstonUITests: XCTestCase {
         }
         app.launchArguments = [
             "-ApplePersistenceIgnoreState", "YES", "-AppleLanguages", "(en)",
+            "-appTheme", "black",
             "-autoBackupEnabled", "NO", "-onlineMetadataEnabled", "NO",
-            "-watchFolderEnabled", "NO", "-gridZoom", "0",
+            "-watchFolderEnabled", "NO",
             "-LogForEachSlowPath", "YES",
         ]
         app.launchEnvironment["XCTestConfigurationFilePath"] = root.path
@@ -422,6 +424,11 @@ final class WinstonUITests: XCTestCase {
             "library.book.00000000-0000-4000-8000-000000000000"
         ].firstMatch
         XCTAssertTrue(first.waitForExistence(timeout: 10))
+        let window = app.windows.firstMatch
+        XCTAssertEqual(window.frame.width, 1280, accuracy: 1)
+        XCTAssertEqual(window.frame.height, 800, accuracy: 1)
+        XCTAssertLessThanOrEqual(first.frame.width, 220, "The fixture must use the compact cover size.")
+        XCTAssertTrue(waitForBrowsingCover(first), "The fixture JPEG must be visible before measuring.")
         first.click()
         // Single-click recognition can wait for the system double-click
         // interval. Do not send keyboard input into the pending click.
@@ -445,6 +452,7 @@ final class WinstonUITests: XCTestCase {
         }
         XCTAssertTrue(first.waitForExistence(timeout: 10))
         XCTAssertTrue(first.isHittable)
+        XCTAssertTrue(waitForBrowsingCover(first), "Scrolling back must restore the decoded JPEG cover.")
         XCTAssertTrue(second.isSelected, "Scrolling must preserve the selected book.")
         first.click()
         XCTAssertTrue(first.wait(for: \.isSelected, toEqual: true, timeout: 5))
@@ -452,5 +460,29 @@ final class WinstonUITests: XCTestCase {
         screenshot.name = "Large library after scrolling back to decoded covers"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    @MainActor
+    private func waitForBrowsingCover(_ card: XCUIElement) -> Bool {
+        let deadline = Date().addingTimeInterval(10)
+        repeat {
+            if let bitmap = NSBitmapImageRep(data: card.screenshot().pngRepresentation) {
+                // The fixture is a uniform 120/255 gray JPEG. Sample inside
+                // the cover, away from the selection badge, text, and border.
+                let loaded = [(0.35, 0.25), (0.65, 0.25), (0.35, 0.5), (0.65, 0.5)]
+                    .allSatisfy { x, y in
+                        guard let color = bitmap.colorAt(
+                            x: Int(Double(bitmap.pixelsWide) * x),
+                            y: Int(Double(bitmap.pixelsHigh) * y)
+                        )?.usingColorSpace(.deviceRGB) else { return false }
+                        let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                        return channels.allSatisfy { (0.35...0.65).contains($0) }
+                            && channels.max()! - channels.min()! < 0.03
+                    }
+                if loaded { return true }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        } while Date() < deadline
+        return false
     }
 }

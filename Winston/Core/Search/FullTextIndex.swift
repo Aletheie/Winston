@@ -205,7 +205,7 @@ actor FullTextSearchIndex {
     nonisolated static let shared = FullTextSearchIndex()
     nonisolated static let supportedFormats: Set<String> = ["epub", "pdf", "txt", "html", "htm"]
 
-    private static let schemaVersion: Int32 = 2
+    private static let schemaVersion: Int32 = 3
     private static let maximumBookResults = 80
     private static let maximumExcerpts = 240
 
@@ -391,14 +391,6 @@ actor FullTextSearchIndex {
            cached.format == source.format,
            cached.sourcePath == path,
            cached.sourceFileGeneration == initialFileGeneration {
-            try upsertDocument(
-                snapshot,
-                source: source,
-                sourcePath: path,
-                sourceHash: cached.sourceHash,
-                sourceFileGeneration: initialFileGeneration,
-                database: database
-            )
             return .reused
         }
 
@@ -621,6 +613,17 @@ actor FullTextSearchIndex {
                 database: database
             )
             defer { sqlite3_finalize(statement) }
+            let lookupStatement = try prepare(
+                "INSERT INTO section_rows(book_id, section_rowid) VALUES (?, ?)",
+                database: database
+            )
+            defer { sqlite3_finalize(lookupStatement) }
+            try bind(
+                snapshot.bookID.uuidString.lowercased(),
+                at: 1,
+                statement: lookupStatement,
+                database: database
+            )
 
             for section in sections {
                 try Task.checkCancellation()
@@ -641,6 +644,20 @@ actor FullTextSearchIndex {
                 }
                 try bind(section.text, at: 8, statement: statement, database: database)
                 try stepToCompletion(statement, operation: "Insert full-text section", database: database)
+                let rowID = sqlite3_last_insert_rowid(database)
+                sqlite3_reset(lookupStatement)
+                guard sqlite3_bind_int64(lookupStatement, 2, rowID) == SQLITE_OK else {
+                    throw sqliteError(
+                        sqlite3_errcode(database),
+                        operation: "Bind full-text section row",
+                        database: database
+                    )
+                }
+                try stepToCompletion(
+                    lookupStatement,
+                    operation: "Insert full-text section lookup",
+                    database: database
+                )
             }
             try upsertDocument(
                 snapshot,
@@ -663,7 +680,10 @@ actor FullTextSearchIndex {
     ) throws {
         try transaction(database) {
             let statement = try prepare(
-                "UPDATE sections SET asset_id = ?, asset_generation = ? WHERE book_id = ?",
+                """
+                UPDATE sections SET asset_id = ?, asset_generation = ?
+                WHERE rowid IN (SELECT section_rowid FROM section_rows WHERE book_id = ?)
+                """,
                 database: database
             )
             defer { sqlite3_finalize(statement) }
@@ -779,13 +799,20 @@ actor FullTextSearchIndex {
     }
 
     private func deleteSections(for bookID: UUID, database: OpaquePointer) throws {
-        let statement = try prepare(
-            "DELETE FROM sections WHERE book_id = ?",
-            database: database
-        )
-        defer { sqlite3_finalize(statement) }
-        try bind(bookID.uuidString.lowercased(), at: 1, statement: statement, database: database)
-        try stepToCompletion(statement, operation: "Delete indexed sections", database: database)
+        // FTS5 cannot index equality comparisons on its UNINDEXED book_id column.
+        // Resolve rowids through an ordinary index to keep edits local to one book.
+        for sql in [
+            """
+            DELETE FROM sections
+            WHERE rowid IN (SELECT section_rowid FROM section_rows WHERE book_id = ?)
+            """,
+            "DELETE FROM section_rows WHERE book_id = ?",
+        ] {
+            let statement = try prepare(sql, database: database)
+            defer { sqlite3_finalize(statement) }
+            try bind(bookID.uuidString.lowercased(), at: 1, statement: statement, database: database)
+            try stepToCompletion(statement, operation: "Delete indexed sections", database: database)
+        }
     }
 
     private func searchableBookCount(_ database: OpaquePointer) throws -> Int {
@@ -799,7 +826,7 @@ actor FullTextSearchIndex {
     }
 
     private func resolvedHash(for source: FullTextBookSnapshot.Source) throws -> String {
-        let actual = try ContentHasher.sha256(of: source.fileURL)
+        let actual = try ContentHasher.sha256Cancellable(of: source.fileURL)
         if let catalog = source.contentHash?.trimmingCharacters(in: .whitespacesAndNewlines),
            !catalog.isEmpty,
            catalog.caseInsensitiveCompare(actual) != .orderedSame {
@@ -862,7 +889,16 @@ actor FullTextSearchIndex {
                 database: opened
             )
             let version = try userVersion(opened)
-            if version != Self.schemaVersion {
+            if version == 2 {
+                try transaction(opened) {
+                    try createSectionLookup(opened)
+                    try execute(
+                        "INSERT INTO section_rows(book_id, section_rowid) SELECT book_id, rowid FROM sections",
+                        database: opened
+                    )
+                    try execute("PRAGMA user_version = \(Self.schemaVersion)", database: opened)
+                }
+            } else if version != Self.schemaVersion {
                 try rebuildSchema(opened)
             }
             return opened
@@ -873,35 +909,50 @@ actor FullTextSearchIndex {
     }
 
     private func rebuildSchema(_ database: OpaquePointer) throws {
+        try transaction(database) {
+            try execute(
+                """
+                DROP TABLE IF EXISTS section_rows;
+                DROP TABLE IF EXISTS sections;
+                DROP TABLE IF EXISTS documents;
+                CREATE TABLE documents(
+                    book_id TEXT PRIMARY KEY NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    asset_generation TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    source_resource_id TEXT,
+                    source_modified REAL,
+                    source_size INTEGER NOT NULL
+                );
+                CREATE VIRTUAL TABLE sections USING fts5(
+                    book_id UNINDEXED,
+                    asset_id UNINDEXED,
+                    asset_generation UNINDEXED,
+                    section_id UNINDEXED,
+                    section_title,
+                    section_kind UNINDEXED,
+                    section_ordinal UNINDEXED,
+                    body,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                );
+                PRAGMA user_version = \(Self.schemaVersion);
+                """,
+                database: database
+            )
+            try createSectionLookup(database)
+        }
+    }
+
+    private func createSectionLookup(_ database: OpaquePointer) throws {
         try execute(
             """
-            BEGIN IMMEDIATE;
-            DROP TABLE IF EXISTS sections;
-            DROP TABLE IF EXISTS documents;
-            CREATE TABLE documents(
-                book_id TEXT PRIMARY KEY NOT NULL,
-                asset_id TEXT NOT NULL,
-                asset_generation TEXT NOT NULL,
-                format TEXT NOT NULL,
-                source_path TEXT NOT NULL,
-                source_hash TEXT NOT NULL,
-                source_resource_id TEXT,
-                source_modified REAL,
-                source_size INTEGER NOT NULL
+            CREATE TABLE section_rows(
+                section_rowid INTEGER PRIMARY KEY,
+                book_id TEXT NOT NULL
             );
-            CREATE VIRTUAL TABLE sections USING fts5(
-                book_id UNINDEXED,
-                asset_id UNINDEXED,
-                asset_generation UNINDEXED,
-                section_id UNINDEXED,
-                section_title,
-                section_kind UNINDEXED,
-                section_ordinal UNINDEXED,
-                body,
-                tokenize = 'unicode61 remove_diacritics 2'
-            );
-            PRAGMA user_version = \(Self.schemaVersion);
-            COMMIT;
+            CREATE INDEX section_rows_book_id ON section_rows(book_id);
             """,
             database: database
         )
@@ -909,7 +960,10 @@ actor FullTextSearchIndex {
 
     private func clearIndex(_ database: OpaquePointer) throws {
         try transaction(database) {
-            try execute("DELETE FROM sections; DELETE FROM documents;", database: database)
+            try execute(
+                "DELETE FROM sections; DELETE FROM section_rows; DELETE FROM documents;",
+                database: database
+            )
         }
     }
 

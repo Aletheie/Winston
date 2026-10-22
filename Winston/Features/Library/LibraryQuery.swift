@@ -524,14 +524,6 @@ enum LibraryQuery {
         )
     }
 
-    nonisolated static func displayMatches(
-        _ book: LibraryBookRecord,
-        query: LibraryQuerySpec,
-        now: Date = .now
-    ) -> Bool {
-        Matcher(query, now: now).matches(book)
-    }
-
     nonisolated static func displayOrderingChanged(
         from old: LibraryBookRecord,
         to new: LibraryBookRecord,

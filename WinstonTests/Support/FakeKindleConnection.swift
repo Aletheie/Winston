@@ -1,7 +1,7 @@
 import Foundation
 @testable import Winston
 
-actor FakeKindleConnection: KindleDeviceConnection {
+actor FakeKindleConnection {
     enum UncertainTransferMode: Sendable, Equatable {
         case none
         case committedThenThrows
@@ -207,3 +207,6 @@ actor FakeKindleConnection: KindleDeviceConnection {
 
     func removeAppleDoubleSidecars() async throws -> Int { 0 }
 }
+
+// Separate conformance avoids Swift 6.4 WMO misapplying nonisolated to this actor.
+extension FakeKindleConnection: KindleDeviceConnection {}

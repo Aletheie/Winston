@@ -171,7 +171,8 @@ struct ReadingHistoryImportApplicationTests {
         #expect(elapsed < .seconds(1))
     }
 
-    @Test func catalogProjectionUsesKeysetPagesAcrossEqualDates() async throws {
+    @Test(arguments: [false, true])
+    func catalogProjectionUsesKeysetPagesAcrossEqualDates(multipleDates: Bool) async throws {
         let container = PersistenceController.inMemory()
         let context = container.mainContext
         let sharedDate = day(2026, 7, 27)
@@ -180,7 +181,7 @@ struct ReadingHistoryImportApplicationTests {
             let book = Book(
                 fileName: "projection-\(index).epub",
                 originalFileName: "Projection \(index).epub",
-                dateAdded: sharedDate
+                dateAdded: sharedDate.addingTimeInterval(multipleDates ? Double(index / 17) : 0)
             )
             book.title = "Projection \(index)"
             context.insert(book)

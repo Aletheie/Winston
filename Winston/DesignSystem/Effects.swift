@@ -92,7 +92,6 @@ private struct BookTileSurfaceModifier: ViewModifier {
     let isFocused: Bool
 
     @Environment(\.theme) private var theme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
 
     func body(content: Content) -> some View {
@@ -102,15 +101,7 @@ private struct BookTileSurfaceModifier: ViewModifier {
         )
 
         content
-            .background(
-                reduceTransparency
-                    ? AnyShapeStyle(theme.surface)
-                    : AnyShapeStyle(.ultraThinMaterial),
-                in: shape
-            )
-            .background(
-                shape.fill(theme.surfaceGlass.opacity(0.6))
-            )
+            .background(theme.surface, in: shape)
             .overlay {
                 shape.stroke(borderColor, lineWidth: borderWidth)
             }

@@ -352,7 +352,9 @@ actor CoverWorkScheduler {
         maxPixel: Int
     ) async -> NSImage? {
         let url = await DerivedCoverStore.shared.fileURL(for: key)
-        return await storedImage(at: url, maxPixel: maxPixel)
+        let image = await storedImage(at: url, maxPixel: maxPixel)
+        if image != nil { await DerivedCoverStore.shared.didAccess(key) }
+        return image
     }
 
     func storedImage(at url: URL, maxPixel: Int) async -> NSImage? {

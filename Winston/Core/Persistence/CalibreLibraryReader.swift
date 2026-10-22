@@ -55,7 +55,6 @@ nonisolated enum CalibreImportError: Error, Equatable {
 }
 
 nonisolated enum CalibreLibraryReader {
-    static let metadataDBName = "metadata.db"
     private nonisolated static let dateFormatterLock = NSLock()
     private nonisolated static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()

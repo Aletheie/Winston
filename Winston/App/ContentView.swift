@@ -142,7 +142,7 @@ struct ContentView: View {
                 notices: viewModel.notices,
                 readModel: libraryReadModel
             )
-#if DEBUG
+#if DEBUG || WINSTON_UI_TESTING
             UITestScenarioView(viewModel: viewModel)
 #endif
         }

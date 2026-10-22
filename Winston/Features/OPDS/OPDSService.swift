@@ -412,10 +412,12 @@ actor OPDSService: OPDSFetching {
     ) async throws -> (Data, HTTPURLResponse) {
         let redirectDelegate = OPDSRedirectDelegate(policy: policy)
         do {
+            try Task.checkCancellation()
             let (bytes, response) = try await session.bytes(
                 for: request,
                 delegate: redirectDelegate
             )
+            defer { bytes.task.cancel() }
             if let error = redirectDelegate.rejection {
                 throw error
             }
@@ -439,6 +441,7 @@ actor OPDSService: OPDSFetching {
                     try Task.checkCancellation()
                 }
             }
+            try Task.checkCancellation()
             return (data, http)
         } catch let error as OPDSServiceError {
             throw error
@@ -447,6 +450,9 @@ actor OPDSService: OPDSFetching {
         } catch {
             if let rejection = redirectDelegate.rejection {
                 throw rejection
+            }
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                throw CancellationError()
             }
             throw OPDSServiceError.network
         }

@@ -1783,6 +1783,7 @@ final class CatalogMutationService {
     @discardableResult
     func commit(
         _ command: CatalogMutationCommand,
+        operationID: UUID = UUID(),
         affectedBookIDs: Set<UUID> = [],
         affectedWorkIDs: Set<UUID> = [],
         affectedAssetIDs: Set<UUID>? = nil,
@@ -1792,6 +1793,7 @@ final class CatalogMutationService {
         applying mutation: () throws -> Void
     ) throws -> CatalogChangeSet {
         let receipt = try writeCoordinator.commit(
+            operationID: operationID,
             command: command,
             affectedBookIDs: affectedBookIDs,
             affectedWorkIDs: affectedWorkIDs,
@@ -1824,25 +1826,17 @@ final class CatalogMutationService {
         revertingOnFailure rollbackMutation: () -> Void = {},
         applying mutation: (ModelContext) throws -> Void
     ) throws -> CatalogChangeSet {
-        let receipt = try writeCoordinator.commit(
-            command: command,
+        try commit(
+            command,
             affectedBookIDs: affectedBookIDs,
             affectedWorkIDs: affectedWorkIDs,
             affectedAssetIDs: affectedAssetIDs,
             affectedCollectionIDs: affectedCollectionIDs,
-            revertingOnFailure: rollbackMutation,
-            repairingInvariants: {
-                try self.repairInvariants(
-                    for: command,
-                    affectedBookIDs: affectedBookIDs,
-                    affectedWorkIDs: affectedWorkIDs
-                )
-            },
-            applying: {
-                try mutation(self.modelContext)
-            }
-        )
-        return publish(receipt.changeSet, catalogChanged: catalogChanged)
+            catalogChanged: catalogChanged,
+            revertingOnFailure: rollbackMutation
+        ) {
+            try mutation(self.modelContext)
+        }
     }
 
     /// Commits the SwiftData half of a managed-file transaction, then publishes
@@ -1860,24 +1854,18 @@ final class CatalogMutationService {
         revertingOnFailure rollbackMutation: () -> Void = {},
         applying mutation: () throws -> Void
     ) async throws -> CatalogFileCommitResult {
-        let receipt: CatalogCommitReceipt
+        let changeSet: CatalogChangeSet
         do {
             try await managedFiles.willCommitCatalog(transaction)
-            receipt = try writeCoordinator.commit(
+            changeSet = try commit(
+                command,
                 operationID: transaction.id,
-                command: command,
                 affectedBookIDs: affectedBookIDs,
                 affectedWorkIDs: affectedWorkIDs,
                 affectedAssetIDs: affectedAssetIDs,
                 affectedCollectionIDs: affectedCollectionIDs,
+                catalogChanged: catalogChanged,
                 revertingOnFailure: rollbackMutation,
-                repairingInvariants: {
-                    try self.repairInvariants(
-                        for: command,
-                        affectedBookIDs: affectedBookIDs,
-                        affectedWorkIDs: affectedWorkIDs
-                    )
-                },
                 applying: mutation
             )
         } catch let error as CatalogMutationError {
@@ -1891,7 +1879,6 @@ final class CatalogMutationService {
             throw CatalogMutationError.fileTransactionFailed(error.localizedDescription)
         }
 
-        let changeSet = publish(receipt.changeSet, catalogChanged: catalogChanged)
         let pending = await finalizeCommittedTransactions(
             [transaction],
             progress: progress
@@ -1914,27 +1901,21 @@ final class CatalogMutationService {
         applying mutation: () throws -> Void
     ) async throws -> CatalogFileCommitResult {
         let operationID = transactions.first?.id ?? UUID()
-        let receipt: CatalogCommitReceipt
+        let changeSet: CatalogChangeSet
         do {
             for transaction in transactions {
                 try await managedFiles.willCommitCatalog(transaction)
             }
             try Task.checkCancellation()
-            receipt = try writeCoordinator.commit(
+            changeSet = try commit(
+                command,
                 operationID: operationID,
-                command: command,
                 affectedBookIDs: affectedBookIDs,
                 affectedWorkIDs: affectedWorkIDs,
                 affectedAssetIDs: affectedAssetIDs,
                 affectedCollectionIDs: affectedCollectionIDs,
+                catalogChanged: catalogChanged,
                 revertingOnFailure: rollbackMutation,
-                repairingInvariants: {
-                    try self.repairInvariants(
-                        for: command,
-                        affectedBookIDs: affectedBookIDs,
-                        affectedWorkIDs: affectedWorkIDs
-                    )
-                },
                 applying: mutation
             )
         } catch let error as CatalogMutationError {
@@ -1952,7 +1933,6 @@ final class CatalogMutationService {
             throw CatalogMutationError.fileTransactionFailed(error.localizedDescription)
         }
 
-        let changeSet = publish(receipt.changeSet, catalogChanged: catalogChanged)
         let pending = await finalizeCommittedTransactions(transactions)
         return CatalogFileCommitResult(changeSet: changeSet, pendingTransactionIDs: pending)
     }

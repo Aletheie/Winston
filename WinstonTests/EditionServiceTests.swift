@@ -452,7 +452,8 @@ struct EditionServiceTests {
         #expect(!service.pendingProposals.contains { $0.pairKey == stalePair })
     }
 
-    @Test func asynchronousCandidateIndexUsesKeysetPagesAcrossEqualDates() async throws {
+    @Test(arguments: [false, true])
+    func asynchronousCandidateIndexUsesKeysetPagesAcrossEqualDates(multipleDates: Bool) async throws {
         let library = try await TestLibrary()
         let sharedDate = Date(timeIntervalSince1970: 1_900_000_000)
         for index in 0..<257 {
@@ -462,7 +463,7 @@ struct EditionServiceTests {
                 title: "Unique \(index)",
                 author: "Author \(index)"
             )
-            book.dateAdded = sharedDate
+            book.dateAdded = sharedDate.addingTimeInterval(multipleDates ? Double(index / 17) : 0)
         }
         try library.context.save()
         let service = CatalogReconciliationService(

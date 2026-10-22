@@ -24,52 +24,27 @@ typealias ReconciliationApprovalPhaseReporter = @MainActor @Sendable (
 
 private nonisolated struct EditionCandidatePage: Sendable {
     let candidates: [EditionCandidate]
-    let lastDateAdded: Date?
-    let trailingLastDateCount: Int
+    let nextCursor: BookPageCursor
 }
 
 @ModelActor
 private actor EditionCandidatePageLoader {
-    func loadPage(
-        startingAt cursorDate: Date?,
-        skippingAtCursor: Int,
-        limit: Int
-    ) throws -> EditionCandidatePage {
-        var descriptor: FetchDescriptor<Book>
-        if let cursorDate {
-            descriptor = FetchDescriptor<Book>(
-                predicate: #Predicate { $0.dateAdded >= cursorDate },
-                sortBy: [
-                    SortDescriptor(\Book.dateAdded),
-                    SortDescriptor(\Book.uuid),
-                ]
-            )
-            descriptor.fetchOffset = skippingAtCursor
-        } else {
-            descriptor = FetchDescriptor<Book>(
-                sortBy: [
-                    SortDescriptor(\Book.dateAdded),
-                    SortDescriptor(\Book.uuid),
-                ]
-            )
-        }
-        descriptor.fetchLimit = max(1, limit)
+    func loadPage(cursor: BookPageCursor, limit: Int) throws -> EditionCandidatePage {
+        var descriptor = cursor.descriptor(limit: limit)
         descriptor.relationshipKeyPathsForPrefetching = [\Book.assets, \Book.work]
         let books = try modelContext.fetch(descriptor)
-        let lastDateAdded = books.last?.dateAdded
-        let trailingLastDateCount = lastDateAdded.map { date in
-            books.reversed().prefix { $0.dateAdded == date }.count
-        } ?? 0
         return EditionCandidatePage(
-            candidates: books.map(Self.candidate),
-            lastDateAdded: lastDateAdded,
-            trailingLastDateCount: trailingLastDateCount
+            candidates: books.map(EditionCandidate.init),
+            nextCursor: cursor.advancing(past: books)
         )
     }
+}
 
-    private static func candidate(_ book: Book) -> EditionCandidate {
+private extension EditionCandidate {
+    /// Capture on the executor that owns the book; only the result crosses actors.
+    nonisolated init(_ book: Book) {
         let primaryAsset = book.primaryAsset
-        return EditionCandidate(
+        self.init(
             uuid: book.uuid,
             workUUID: book.work?.uuid,
             title: book.displayTitle,
@@ -400,28 +375,7 @@ final class CatalogReconciliationService {
     }
 
     func evaluate(_ book: Book) {
-        guard book.modelContext != nil else { return }
-        guard ensureCandidateIndex() else {
-            scheduleCandidateIndexRefresh()
-            return
-        }
-        synchronizeCandidateIndex()
-        guard candidateIndexIsComplete else { return }
-        let candidate = Self.candidate(book)
-        let previousCandidate = candidateIndex.candidate(id: candidate.uuid)
-        apply(candidateIndex.update(candidate))
-        invalidateProposals(
-            affectedIDs: [candidate.uuid],
-            previousCandidates: [previousCandidate].compactMap { $0 },
-            updatedCandidates: [candidate]
-        )
-        let lookup = evaluate(candidate)
-        logEvaluation(
-            changedCandidateCount: 1,
-            bucketCandidateCount: lookup.bucketCandidateCount,
-            comparisonCount: lookup.matches.count,
-            truncatedBucketCount: lookup.truncatedBucketCount
-        )
+        evaluate([book])
     }
 
     func evaluate(_ books: [Book]) {
@@ -433,7 +387,7 @@ final class CatalogReconciliationService {
         }
         synchronizeCandidateIndex()
         guard candidateIndexIsComplete else { return }
-        let candidates = books.map(Self.candidate)
+        let candidates = books.map(EditionCandidate.init)
         let previousCandidates = candidates.compactMap {
             candidateIndex.candidate(id: $0.uuid)
         }
@@ -443,24 +397,7 @@ final class CatalogReconciliationService {
             previousCandidates: previousCandidates,
             updatedCandidates: candidates
         )
-        var bucketCandidateCount = 0
-        var comparisonCount = 0
-        var truncatedBucketCount = 0
-        for candidate in candidates {
-            let lookup = evaluate(candidate)
-            bucketCandidateCount += lookup.bucketCandidateCount
-            comparisonCount += lookup.matches.count
-            truncatedBucketCount += lookup.truncatedBucketCount
-        }
-        lastEvaluationCandidateCount = bucketCandidateCount
-        lastEvaluationComparisonCount = comparisonCount
-        lastEvaluationTruncatedBucketCount = truncatedBucketCount
-        logEvaluation(
-            changedCandidateCount: candidates.count,
-            bucketCandidateCount: bucketCandidateCount,
-            comparisonCount: comparisonCount,
-            truncatedBucketCount: truncatedBucketCount
-        )
+        evaluateAndLog(candidates)
     }
 
     @discardableResult
@@ -1292,7 +1229,7 @@ final class CatalogReconciliationService {
         of book: Book
     ) -> ReconciliationBookGenerationToken {
         ReconciliationBookGenerationToken(
-            candidate: candidate(book),
+            candidate: EditionCandidate(book),
             fileName: book.fileName,
             fileSizeBytes: book.fileSizeBytes,
             coverOwner: book.coverReference.owner,
@@ -1363,7 +1300,7 @@ final class CatalogReconciliationService {
             lastIndexError = nil
             lastIndexSynchronizationFetchCount = books.count
             installCandidateIndex(
-                books.map(Self.candidate),
+                books.map(EditionCandidate.init),
                 catalogRevision: mutationLog.catalogRevision
             )
         } catch {
@@ -1380,8 +1317,7 @@ final class CatalogReconciliationService {
     ) async -> CandidateIndexSnapshot? {
         let catalogRevision = mutationLog.catalogRevision
         var candidates: [EditionCandidate] = []
-        var cursorDate: Date?
-        var skippedAtCursor = 0
+        var cursor = BookPageCursor()
         var pageCount = 0
         let limit = max(1, chunkSize)
         while true {
@@ -1394,8 +1330,7 @@ final class CatalogReconciliationService {
             let page: EditionCandidatePage
             do {
                 page = try await candidatePageLoader.loadPage(
-                    startingAt: cursorDate,
-                    skippingAtCursor: skippedAtCursor,
+                    cursor: cursor,
                     limit: limit
                 )
             } catch {
@@ -1409,16 +1344,8 @@ final class CatalogReconciliationService {
             signposter.endInterval("EditionCandidateFetchPage", interval)
             pageCount += 1
             candidates.append(contentsOf: page.candidates)
-            guard page.candidates.count == limit,
-                  let lastDateAdded = page.lastDateAdded else {
-                break
-            }
-            if cursorDate == lastDateAdded {
-                skippedAtCursor += page.trailingLastDateCount
-            } else {
-                cursorDate = lastDateAdded
-                skippedAtCursor = page.trailingLastDateCount
-            }
+            guard page.candidates.count == limit else { break }
+            cursor = page.nextCursor
         }
         lastIndexSynchronizationFetchCount = candidates.count
         let index = await Self.buildCandidateIndex(candidates)
@@ -1504,7 +1431,7 @@ final class CatalogReconciliationService {
             do {
                 let book = try mutations.book(id: id)
                 lastIndexSynchronizationFetchCount += 1
-                updatedCandidates.append(Self.candidate(book))
+                updatedCandidates.append(EditionCandidate(book))
             } catch CatalogMutationError.modelNotFound {
                 removedIDs.insert(id)
             } catch {
@@ -1604,8 +1531,8 @@ final class CatalogReconciliationService {
     private func revalidatedProposal(between books: [Book]) -> EditionMatchProposal? {
         guard books.count == 2 else { return nil }
         return EditionMatcher.proposals(
-            for: Self.candidate(books[0]),
-            against: [Self.candidate(books[1])]
+            for: EditionCandidate(books[0]),
+            against: [EditionCandidate(books[1])]
         ).first
     }
 
@@ -1649,30 +1576,10 @@ final class CatalogReconciliationService {
         }
     }
 
-    private static func candidate(_ book: Book) -> EditionCandidate {
-        let primaryAsset = book.primaryAsset
-        return EditionCandidate(
-            uuid: book.uuid,
-            workUUID: book.work?.uuid,
-            title: book.displayTitle,
-            author: book.author,
-            language: book.language,
-            translator: book.translator,
-            isbn: book.isbn,
-            publisher: book.publisher,
-            year: book.year,
-            format: book.format,
-            sizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
-            contentHashes: Set(book.assets.compactMap(\.contentHash)),
-            openLibraryWorkKey: book.work?.openLibraryWorkKey,
-            workMatchKey: book.work?.expectedMatchKey
-        )
-    }
-
     private static func generation(of book: Book) -> BookGeneration {
         let primaryAsset = book.primaryAsset
         return BookGeneration(
-            candidate: candidate(book),
+            candidate: EditionCandidate(book),
             fileName: primaryAsset?.fileName ?? book.fileName,
             fileSizeBytes: primaryAsset?.sizeBytes ?? book.fileSizeBytes,
             coverOwner: book.coverReference.owner,

@@ -493,6 +493,53 @@ struct OPDSServiceTests {
         #expect(OPDSDiscoveryURLProtocol.requestCount == 1)
     }
 
+    @Test func `Cancelling a catalog feed preserves cancellation instead of a network failure`() async throws {
+        SlowOPDSDownloadURLProtocol.prepare()
+        let session = URLSession(
+            configuration: SlowOPDSDownloadURLProtocol.configuration
+        )
+        defer { session.invalidateAndCancel() }
+        let service = OPDSService(session: session)
+        let task = Task {
+            try await service.feed(
+                at: URL(string: "https://catalog.example/slow-feed")!
+            )
+        }
+        let deadline = Date.now.addingTimeInterval(2)
+        while !SlowOPDSDownloadURLProtocol.didStart, Date.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(SlowOPDSDownloadURLProtocol.didStart)
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+        #expect(SlowOPDSDownloadURLProtocol.didStop)
+    }
+
+    @Test func `Oversized feed response stops its underlying transfer`() async throws {
+        SlowOPDSDownloadURLProtocol.prepare(
+            contentLength: Int64(OPDSService.maximumFeedBytes) + 1
+        )
+        let session = URLSession(
+            configuration: SlowOPDSDownloadURLProtocol.configuration
+        )
+        defer { session.invalidateAndCancel() }
+        let service = OPDSService(session: session)
+
+        await #expect(throws: OPDSServiceError.feedTooLarge) {
+            try await service.feed(
+                at: URL(string: "https://catalog.example/oversized-feed")!
+            )
+        }
+        let deadline = Date.now.addingTimeInterval(2)
+        while !SlowOPDSDownloadURLProtocol.didStop, Date.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(SlowOPDSDownloadURLProtocol.didStop)
+    }
+
     @Test func `Cancelling a catalog download leaves no managed temporary data`() async throws {
         let root = FileManager.default.temporaryDirectory.appending(
             path: "WinstonCatalogDownloadCancellation-\(UUID().uuidString)",
@@ -803,6 +850,62 @@ struct OPDSViewModelTests {
         #expect(library.lastImportSummary == nil)
     }
 
+    @Test(arguments: [false, true])
+    func `Cancelled download completion cannot clear an immediate retry`(
+        cancelledError: Bool
+    ) async throws {
+        let testLibrary = try await TestLibrary()
+        let settings = AppSettings()
+        let oldValue = settings.onlineMetadataEnabled
+        settings.onlineMetadataEnabled = true
+        defer { settings.onlineMetadataEnabled = oldValue }
+        let acquisition = try #require(OPDSAcquisition.make(
+            url: URL(string: "https://example.com/retry.epub")!,
+            mediaType: "application/epub+zip",
+            title: "EPUB"
+        ))
+        let publication = OPDSPublication(
+            id: "retry", title: "Retry", authors: [], summary: nil,
+            language: nil, coverURL: nil, acquisitions: [acquisition]
+        )
+        let catalogID = OPDSBuiltInCatalog.projectGutenberg.stableID
+        let client = DeferredOPDSDownloadClient()
+        let toasts = ToastCenter()
+        let library = LibraryViewModel(
+            modelContext: testLibrary.context,
+            settings: settings,
+            toasts: toasts,
+            online: OfflineMetadataClient()
+        )
+        let viewModel = OPDSViewModel(
+            settings: settings, toasts: toasts, service: client
+        )
+        viewModel.addToLibrary(
+            publication, acquisition: acquisition,
+            catalogID: catalogID, library: library
+        )
+        try await client.waitForDownloads(1)
+        viewModel.cancelDownload(publication, catalogID: catalogID)
+        viewModel.addToLibrary(
+            publication, acquisition: acquisition,
+            catalogID: catalogID, library: library
+        )
+        try await client.waitForDownloads(2)
+
+        await client.failDownload(0, cancelled: cancelledError)
+        try await client.waitForCancellation(0)
+        // The first task must reach its catch block while the retry is suspended.
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(viewModel.isDownloading(publication, catalogID: catalogID))
+        #expect(toasts.messages.isEmpty)
+
+        viewModel.cancelDownload(publication, catalogID: catalogID)
+        await client.failDownload(1, cancelled: true)
+        try await client.waitForCancellation(1)
+        #expect(!viewModel.isDownloading(publication, catalogID: catalogID))
+        #expect(testLibrary.context.allBooks().isEmpty)
+    }
+
     @Test func `Cancelled search cannot publish obsolete results`() async throws {
         let suiteName = "OPDSViewModelCancellation.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -864,6 +967,49 @@ private actor FakeOPDSClient: OPDSFetching {
         downloadCalls += 1
         guard let downloadURL else { throw OPDSServiceError.network }
         return downloadURL
+    }
+}
+
+private actor DeferredOPDSDownloadClient: OPDSFetching {
+    private var downloads: [CheckedContinuation<URL, any Error>?] = []
+    private(set) var cancelledDownloads: Set<Int> = []
+
+    func feed(at url: URL) async throws -> OPDSFeed {
+        throw OPDSServiceError.network
+    }
+
+    func download(_ acquisition: OPDSAcquisition, title: String) async throws -> URL {
+        let index = downloads.count
+        do {
+            return try await withCheckedThrowingContinuation { continuation in
+                downloads.append(continuation)
+            }
+        } catch {
+            if Task.isCancelled { cancelledDownloads.insert(index) }
+            throw error
+        }
+    }
+
+    func waitForDownloads(_ count: Int) async throws {
+        let deadline = Date.now.addingTimeInterval(2)
+        while downloads.count < count, Date.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(downloads.count >= count)
+    }
+
+    func waitForCancellation(_ index: Int) async throws {
+        let deadline = Date.now.addingTimeInterval(2)
+        while !cancelledDownloads.contains(index), Date.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(cancelledDownloads.contains(index))
+    }
+
+    func failDownload(_ index: Int, cancelled: Bool) {
+        let error: any Error = cancelled ? CancellationError() : OPDSServiceError.network
+        downloads[index]?.resume(throwing: error)
+        downloads[index] = nil
     }
 }
 

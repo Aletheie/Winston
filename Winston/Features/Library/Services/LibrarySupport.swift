@@ -18,6 +18,37 @@ extension ModelContext {
 
 }
 
+/// Cursor for bounded catalog scans ordered by date and UUID. The offset only
+/// skips books at the boundary date, including when that date spans many pages.
+nonisolated struct BookPageCursor: Sendable {
+    private var dateAdded: Date?
+    private var offset = 0
+
+    init() {}
+
+    func descriptor(limit: Int) -> FetchDescriptor<Book> {
+        var descriptor = FetchDescriptor<Book>(
+            sortBy: [SortDescriptor(\Book.dateAdded), SortDescriptor(\Book.uuid)]
+        )
+        if let dateAdded {
+            descriptor.predicate = #Predicate { $0.dateAdded >= dateAdded }
+            descriptor.fetchOffset = offset
+        }
+        descriptor.fetchLimit = max(1, limit)
+        return descriptor
+    }
+
+    /// Call synchronously on the executor that fetched these models.
+    func advancing(past books: [Book]) -> Self {
+        guard let lastDate = books.last?.dateAdded else { return self }
+        let trailingCount = books.reversed().prefix { $0.dateAdded == lastDate }.count
+        var next = self
+        next.dateAdded = lastDate
+        next.offset = dateAdded == lastDate ? offset + trailingCount : trailingCount
+        return next
+    }
+}
+
 nonisolated let libraryEbookExtensions: Set<String> = ["epub", "mobi", "azw", "azw3", "pdf", "txt", "html", "htm"]
 
 nonisolated enum FileNaming {

@@ -26,9 +26,9 @@ private nonisolated final class DiscoveryImageCacheKey: NSObject {
 }
 
 private nonisolated final class DiscoveryImageBox {
-    let image: NSImage?
+    let image: NSImage
 
-    init(_ image: NSImage?) {
+    init(_ image: NSImage) {
         self.image = image
     }
 }
@@ -98,9 +98,8 @@ actor DiscoveryImageLoader {
         inFlight[key] = request
         let image = await request.value
         inFlight[key] = nil
-        let cost = image.map {
-            Int($0.size.width * $0.size.height * 4)
-        } ?? 16
+        guard let image else { return nil }
+        let cost = Int(image.size.width * image.size.height * 4)
         cache.setObject(
             DiscoveryImageBox(image),
             forKey: cacheKey,
@@ -190,7 +189,7 @@ actor DiscoveryImageLoader {
         from fileURL: URL,
         byteCount: Int64
     ) -> Data? {
-        guard byteCount > 1_000,
+        guard byteCount > 0,
               let data = try? Data(
                   contentsOf: fileURL,
                   options: .mappedIfSafe

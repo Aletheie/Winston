@@ -188,21 +188,24 @@ struct CoverServiceTests {
         ))
     }
 
+    private func loadDroppedCover(from provider: NSItemProvider) async throws -> DroppedCoverImage {
+        try await withCheckedThrowingContinuation { continuation in
+            _ = provider.loadTransferable(type: DroppedCoverImage.self) { result in
+                continuation.resume(with: result)
+            }
+        }
+    }
+}
+
+// MARK: - Derived cover disk budget
+
+struct DerivedCoverStoreTests {
     @Test func concurrentDerivedCoverInstallNeverReplacesPublishedData() async throws {
-        let library = try await TestLibrary()
-        let derivedDirectory = library.root.appending(
-            path: "derived-cover-race",
-            directoryHint: .isDirectory
-        )
-        let key = DerivedCoverKey(
-            assetID: UUID(),
-            contentHash: String(repeating: "b", count: 64),
-            fileName: "race.epub",
-            sizeBytes: 84,
-            maxPixel: 160
-        )
-        let firstStore = DerivedCoverStore(directory: derivedDirectory)
-        let secondStore = DerivedCoverStore(directory: derivedDirectory)
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let key = makeKey()
+        let firstStore = DerivedCoverStore(directory: directory)
+        let secondStore = DerivedCoverStore(directory: directory)
         let firstPayload = Data("first".utf8)
         let secondPayload = Data("second".utf8)
 
@@ -217,12 +220,116 @@ struct CoverServiceTests {
         #expect(await firstStore.loadData(for: key) == published)
     }
 
-    private func loadDroppedCover(from provider: NSItemProvider) async throws -> DroppedCoverImage {
-        try await withCheckedThrowingContinuation { continuation in
-            _ = provider.loadTransferable(type: DroppedCoverImage.self) { result in
-                continuation.resume(with: result)
-            }
+    @Test func startupPrunesOldPreviewsAndPreservesOtherFiles() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let oldest = makeKey()
+        let newest = makeKey()
+        try seed(oldest, bytes: 6, age: 300, in: directory)
+        try seed(newest, bytes: 6, age: 100, in: directory)
+        let custom = directory.appending(path: "custom-cover.jpg")
+        try Data("authoritative".utf8).write(to: custom)
+        let nested = directory.appending(path: makeKey().storageFileName)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: false)
+        let linked = directory.appending(path: makeKey().storageFileName)
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: custom)
+
+        let store = DerivedCoverStore(directory: directory, byteLimit: 8)
+        #expect(await store.loadData(for: newest)?.count == 6)
+        #expect(await store.loadData(for: oldest) == nil)
+        #expect(try Data(contentsOf: custom) == Data("authoritative".utf8))
+        #expect(FileManager.default.fileExists(atPath: nested.path))
+        #expect(try linked.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+    }
+
+    @Test func diskHitsProtectRecentlyUsedPreviewsAcrossRestart() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recentlyRead = makeKey()
+        let unused = makeKey()
+        let added = makeKey()
+        try seed(recentlyRead, bytes: 4, age: 300, in: directory)
+        try seed(unused, bytes: 4, age: 100, in: directory)
+        let firstStore = DerivedCoverStore(directory: directory, byteLimit: 8)
+        #expect(await firstStore.loadData(for: recentlyRead)?.count == 4)
+
+        let restartedStore = DerivedCoverStore(directory: directory, byteLimit: 8)
+        #expect(await restartedStore.installIfMissing(Data(repeating: 2, count: 4), for: added))
+        #expect(await restartedStore.loadData(for: recentlyRead)?.count == 4)
+        #expect(await restartedStore.loadData(for: unused) == nil)
+        #expect(await restartedStore.loadData(for: added) == Data(repeating: 2, count: 4))
+    }
+
+    @Test func repeatedDiskHitsDoNotRewriteAccessMetadata() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let key = makeKey()
+        try seed(key, bytes: 4, age: 300, in: directory)
+        let store = DerivedCoverStore(directory: directory)
+        let url = await store.fileURL(for: key)
+        let original = try modificationDate(at: url)
+        #expect(await store.loadData(for: key)?.count == 4)
+        let firstAccess = try modificationDate(at: url)
+        #expect(firstAccess > original)
+        #expect(await store.loadData(for: key)?.count == 4)
+        #expect(try modificationDate(at: url) == firstAccess)
+    }
+
+    @Test func oversizedPreviewDoesNotDisplaceFittingCacheEntries() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DerivedCoverStore(directory: directory, byteLimit: 8)
+        let existing = makeKey()
+        let oversized = makeKey()
+        let payload = Data(repeating: 1, count: 4)
+        #expect(await store.installIfMissing(payload, for: existing))
+        #expect(await store.installIfMissing(Data(repeating: 2, count: 9), for: oversized) == false)
+        #expect(await store.loadData(for: existing) == payload)
+        #expect(await store.loadData(for: oversized) == nil)
+    }
+
+    @Test func entryLimitBoundsTinyPreviewsAndDisabledCacheRejectsWrites() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DerivedCoverStore(directory: directory, byteLimit: 100, countLimit: 3)
+        for _ in 0..<20 {
+            #expect(await store.installIfMissing(Data([1]), for: makeKey()))
         }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 3)
+
+        let disabled = DerivedCoverStore(directory: directory, countLimit: 0)
+        #expect(await disabled.installIfMissing(Data([1]), for: makeKey()) == false)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+    }
+
+    private func makeKey() -> DerivedCoverKey {
+        DerivedCoverKey(
+            assetID: UUID(), contentHash: "generation", fileName: "book.epub",
+            sizeBytes: 4, maxPixel: 160
+        )
+    }
+
+    private func makeDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "WinstonDerivedCoverTests-\(UUID().uuidString)", directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private func seed(_ key: DerivedCoverKey, bytes: Int, age: TimeInterval, in directory: URL) throws {
+        let url = directory.appending(path: key.storageFileName)
+        try Data(repeating: 1, count: bytes).write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date.now.addingTimeInterval(-age)], ofItemAtPath: url.path
+        )
+    }
+
+    private func modificationDate(at url: URL) throws -> Date {
+        // Fresh URL resource values avoid returning prefetched metadata from
+        // an earlier directory enumeration.
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return try #require(attributes[.modificationDate] as? Date)
     }
 }
 

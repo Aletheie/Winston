@@ -90,6 +90,7 @@ final class OPDSViewModel {
     private var searchGeneration = 0
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var downloadTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var downloadGenerations: [String: UUID] = [:]
     @ObservationIgnored private var ownershipIndex = OPDSLocalOwnershipIndex(
         records: []
     )
@@ -507,6 +508,7 @@ final class OPDSViewModel {
         let id = downloadID(publication, catalogID: catalogID)
         downloadTasks[id]?.cancel()
         downloadTasks[id] = nil
+        downloadGenerations[id] = nil
         downloadingPublicationIDs.remove(id)
     }
 
@@ -541,6 +543,8 @@ final class OPDSViewModel {
             return
         }
         let access = settings.catalogAccess(for: catalog)
+        let generation = UUID()
+        downloadGenerations[id] = generation
 
         let task = Task { [weak self] in
             guard let self else { return }
@@ -553,6 +557,10 @@ final class OPDSViewModel {
                 )
                 downloadedSource = source
                 try Task.checkCancellation()
+                guard self.downloadGenerations[id] == generation else {
+                    Self.cleanupUnclaimedSource(source)
+                    return
+                }
                 library.addCatalogBook(
                     from: source,
                     context: CatalogImportContext(
@@ -570,9 +578,8 @@ final class OPDSViewModel {
                         acquisitionRelation: acquisition.relation
                     )
                 ) { [weak self] imported in
-                    guard let self else { return }
-                    self.downloadingPublicationIDs.remove(id)
-                    self.downloadTasks[id] = nil
+                    guard let self,
+                          self.finishDownload(id, generation: generation) else { return }
                     guard !imported.isEmpty else { return }
                     onSuccessfulImport?(imported)
                 }
@@ -580,15 +587,23 @@ final class OPDSViewModel {
                 if let downloadedSource {
                     Self.cleanupUnclaimedSource(downloadedSource)
                 }
-                self.downloadingPublicationIDs.remove(id)
-                self.downloadTasks[id] = nil
+                self.finishDownload(id, generation: generation)
             } catch {
-                self.downloadingPublicationIDs.remove(id)
-                self.downloadTasks[id] = nil
+                guard self.finishDownload(id, generation: generation),
+                      !Task.isCancelled else { return }
                 self.toasts.error(Self.downloadErrorMessage(error))
             }
         }
         downloadTasks[id] = task
+    }
+
+    @discardableResult
+    private func finishDownload(_ id: String, generation: UUID) -> Bool {
+        guard downloadGenerations[id] == generation else { return false }
+        downloadGenerations[id] = nil
+        downloadTasks[id] = nil
+        downloadingPublicationIDs.remove(id)
+        return true
     }
 
     nonisolated private static func cleanupUnclaimedSource(
