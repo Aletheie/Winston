@@ -13,6 +13,7 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
     var seriesKeys: [String] = []
     var tagKeys: [String] = []
     var rated = 0
+    var elevenReader = 0
     var statusCounts: [ReadingStatus: Int] = [:]
     var recent = 0
     var smartCounts: [UUID: Int] = [:]
@@ -179,6 +180,9 @@ nonisolated struct LibraryFacetSnapshot: Equatable, Sendable {
         }
         if record.rating > 0, other?.rating ?? 0 <= 0 {
             rated = max(0, rated + delta)
+        }
+        if record.elevenReaderReady, other?.elevenReaderReady != true {
+            elevenReader = max(0, elevenReader + delta)
         }
         if record.readingStatus != other?.readingStatus {
             Self.adjust(&statusCounts, key: record.readingStatus, by: delta)
@@ -397,6 +401,7 @@ private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
     var tags: [String: Set<UUID>] = [:]
     var deviceKeys: [String: Set<UUID>] = [:]
     var rated: Set<UUID> = []
+    var elevenReader: Set<UUID> = []
 
     mutating func add(_ record: LibraryBookRecord) {
         all.insert(record.id)
@@ -426,6 +431,7 @@ private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
             Self.insert(record.id, for: key, into: &deviceKeys)
         }
         if record.rating > 0 { rated.insert(record.id) }
+        if record.elevenReaderReady { elevenReader.insert(record.id) }
     }
 
     mutating func remove(_ record: LibraryBookRecord) {
@@ -456,6 +462,7 @@ private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
             Self.remove(record.id, for: key, from: &deviceKeys)
         }
         rated.remove(record.id)
+        elevenReader.remove(record.id)
     }
 
     func candidates(for filter: LibraryFilter) -> Set<UUID> {
@@ -476,6 +483,8 @@ private nonisolated struct LibraryMetadataFacetIndexes: Sendable {
             tags[MetadataNormalizer.tagComparisonKey(tag)] ?? []
         case .rated:
             rated
+        case .elevenReader:
+            elevenReader
         }
     }
 

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import Winston
 
+@MainActor
 struct ElevenReaderHandoffTests {
     private func candidate(
         _ format: String,
@@ -58,5 +59,78 @@ struct ElevenReaderHandoffTests {
 
     @Test func webLibraryIsTheElevenReaderReaderLibrary() {
         #expect(ElevenReaderHandoff.libraryURL.absoluteString == "https://elevenreader.io/reader/library")
+    }
+
+    private func record(_ id: UUID, ready: Bool) -> LibraryBookRecord {
+        LibraryBookRecord(
+            id: id,
+            sourceOrdinal: 0,
+            displayTitle: id.uuidString,
+            displayAuthor: "Author",
+            dateAdded: .now,
+            rating: 0,
+            readingStatus: .unread,
+            format: "EPUB",
+            tags: [],
+            series: nil,
+            seriesIndex: 0,
+            collectionIDs: [],
+            elevenReaderReady: ready
+        )
+    }
+
+    @Test func recordCaptureMatchesTheHandoffChoice() {
+        let mobiWithEPUB = Book(fileName: "primary.mobi", originalFileName: "Book.mobi")
+        _ = BookAsset(uuid: mobiWithEPUB.uuid, fileName: "primary.mobi", book: mobiWithEPUB)
+        _ = BookAsset(fileName: "sibling.epub", book: mobiWithEPUB)
+
+        let lockedEPUB = Book(fileName: "locked.epub", originalFileName: "Locked.epub")
+        _ = BookAsset(uuid: lockedEPUB.uuid, fileName: "locked.epub", drmProtected: true, book: lockedEPUB)
+
+        let paper = Book(fileName: "", originalFileName: "Paper")
+        paper.hasPhysicalCopy = true
+
+        func ready(_ book: Book) -> Bool {
+            LibraryBookRecord(book, sourceOrdinal: 0, includeCollections: false, includeHighlights: false)
+                .elevenReaderReady
+        }
+        #expect(ready(mobiWithEPUB))
+        #expect(ElevenReaderHandoff.file(for: mobiWithEPUB)?.fileName == "sibling.epub")
+        #expect(!ready(lockedEPUB))
+        #expect(!ready(paper))
+    }
+
+    @Test func filterAndFacetIncludeOnlyReadyBooks() async {
+        let ready = UUID()
+        let notReady = UUID()
+        let records = [record(ready, ready: true), record(notReady, ready: false)]
+        let engine = LibraryMetadataQueryEngine(now: { .now })
+        await engine.rebuild(records: records, sourceOrder: records.map(\.id), generation: 1)
+        let spec = LibraryQuerySpec(
+            filter: .elevenReader,
+            searchText: "",
+            sort: .sourceOrder,
+            savedSearch: nil,
+            smartShelf: nil,
+            deviceFileNames: [],
+            deviceIsConnected: false,
+            kindlePresenceFilter: .all
+        )
+        #expect(await engine.query(spec).ids == [ready])
+
+        var facets = LibraryFacetSnapshot.build(
+            records: records, smartCollections: [], deviceFileNames: [], deviceIsConnected: false
+        )
+        #expect(facets.elevenReader == 1)
+        facets.apply(
+            [LibraryReadModelRecordChange(id: notReady, old: records[1], new: record(notReady, ready: true))],
+            smartCollections: [], deviceFileNames: [], deviceIsConnected: false
+        )
+        #expect(facets.elevenReader == 2)
+        facets.apply(
+            [LibraryReadModelRecordChange(id: ready, old: records[0], new: nil)],
+            smartCollections: [], deviceFileNames: [], deviceIsConnected: false
+        )
+        #expect(facets.elevenReader == 1)
     }
 }

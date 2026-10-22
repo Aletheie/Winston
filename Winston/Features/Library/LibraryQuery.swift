@@ -149,6 +149,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
     let normalized: LibraryNormalizedStrings
     let hasHighlights: Bool
     let drmProtected: Bool
+    let elevenReaderReady: Bool
     let deviceMatchKeys: Set<String>
     let hasMissingMetadata: Bool
     let pluginBook: PluginBookDTO?
@@ -179,6 +180,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
         normalized: LibraryNormalizedStrings? = nil,
         hasHighlights: Bool = false,
         drmProtected: Bool = false,
+        elevenReaderReady: Bool = false,
         deviceMatchKeys: Set<String> = [],
         hasMissingMetadata: Bool = false,
         pluginBook: PluginBookDTO? = nil,
@@ -223,6 +225,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
         )
         self.hasHighlights = hasHighlights
         self.drmProtected = drmProtected
+        self.elevenReaderReady = elevenReaderReady
         self.deviceMatchKeys = deviceMatchKeys
         self.hasMissingMetadata = hasMissingMetadata
         self.pluginBook = pluginBook
@@ -294,6 +297,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
         )
         hasHighlights = includeHighlights && !book.highlights.isEmpty
         drmProtected = book.primaryDRMProtected == true
+        elevenReaderReady = ElevenReaderHandoff.file(for: book) != nil
         self.deviceMatchKeys = deviceMatchKeys
         hasMissingMetadata = Self.isBlank(book.title)
             || Self.isBlank(book.author)
@@ -338,6 +342,7 @@ nonisolated struct LibraryBookRecord: Equatable, Sendable {
             && lhs.normalized == rhs.normalized
             && lhs.hasHighlights == rhs.hasHighlights
             && lhs.drmProtected == rhs.drmProtected
+            && lhs.elevenReaderReady == rhs.elevenReaderReady
             && lhs.deviceMatchKeys == rhs.deviceMatchKeys
             && lhs.hasMissingMetadata == rhs.hasMissingMetadata
             && lhs.pluginBook == rhs.pluginBook
@@ -390,6 +395,7 @@ enum LibraryQuery {
                 case .series(let series): book.series == series
                 case .tag: book.normalized.tags.contains { $0 == facetKey }
                 case .rated: book.rating > 0
+                case .elevenReader: book.elevenReaderReady
                 }
             }
             return belongs

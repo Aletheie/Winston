@@ -10,6 +10,7 @@ nonisolated enum LibraryFilter: Hashable, Sendable {
     case series(String)
     case tag(String)
     case rated
+    case elevenReader
 }
 
 nonisolated enum KindlePresenceFilter: String, CaseIterable, Hashable, Identifiable, Sendable {

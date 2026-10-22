@@ -7,6 +7,7 @@ enum SidebarItem: Hashable, RawRepresentable {
     case status(ReadingStatus)
     case collection(UUID)
     case rated
+    case elevenReader
     case format(String)
     case author(String)
     case series(String)
@@ -24,6 +25,7 @@ enum SidebarItem: Hashable, RawRepresentable {
         case "all": self = .all
         case "recentlyAdded": self = .recentlyAdded
         case "rated": self = .rated
+        case "elevenReader": self = .elevenReader
         case "device": self = .device
         case "discover": self = .discover
         case "catalogs": self = .catalogs
@@ -48,6 +50,7 @@ enum SidebarItem: Hashable, RawRepresentable {
         case .all: "all"
         case .recentlyAdded: "recentlyAdded"
         case .rated: "rated"
+        case .elevenReader: "elevenReader"
         case .device: "device"
         case .discover: "discover"
         case .catalogs: "catalogs"
@@ -69,6 +72,7 @@ enum SidebarItem: Hashable, RawRepresentable {
         case .status(let s):   .status(s)
         case .collection(let id): .collection(id)
         case .rated:           .rated
+        case .elevenReader:    .elevenReader
         case .format(let f):   .format(f)
         case .author(let a):   .author(a)
         case .series(let s):   .series(s)
@@ -185,6 +189,13 @@ struct SidebarView: View {
                     SidebarRow(title: theme.styledText(terminal: "RATED", native: "Rated"),
                                systemImage: "star", count: facets.rated)
                         .tag(SidebarItem.rated)
+                }
+                if facets.elevenReader > 0 {
+                    SidebarRow(title: theme.styledText(terminal: "ELEVENREADER", native: "ElevenReader"),
+                               systemImage: "headphones", count: facets.elevenReader)
+                        .tag(SidebarItem.elevenReader)
+                        .help("Books with a DRM-free file ElevenReader can import")
+                        .accessibilityIdentifier("sidebar.elevenReader")
                 }
             } header: {
                 header(terminal: "LIBRARY", native: "Library")

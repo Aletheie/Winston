@@ -3263,6 +3263,16 @@
         }
       }
     },
+    "Books with a DRM-free file ElevenReader can import" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Knihy se souborem bez DRM, který ElevenReader umí importovat"
+          }
+        }
+      }
+    },
     "Books with a series (and a series number) appear here in reading order." : {
       "localizations" : {
         "cs" : {
@@ -6350,6 +6360,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Kindle se vysouvá"
+          }
+        }
+      }
+    },
+    "ElevenReader" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ElevenReader"
           }
         }
       }
