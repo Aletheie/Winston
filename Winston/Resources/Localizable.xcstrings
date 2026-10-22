@@ -5982,6 +5982,16 @@
         }
       }
     },
+    "Drag “%@” from Finder into your ElevenReader library." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Přetáhněte „%@“ z Finderu do své knihovny v ElevenReaderu."
+          }
+        }
+      }
+    },
     "DRM" : {
       "localizations" : {
         "cs" : {
@@ -6340,6 +6350,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Kindle se vysouvá"
+          }
+        }
+      }
+    },
+    "ElevenReader cannot import DRM-protected files." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ElevenReader neumí importovat soubory chráněné DRM."
+          }
+        }
+      }
+    },
+    "ElevenReader imports EPUB, PDF, DOCX, HTML, and TXT files. Convert this book to EPUB first." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ElevenReader importuje soubory EPUB, PDF, DOCX, HTML a TXT. Nejprve knihu převeďte do EPUB."
           }
         }
       }
@@ -7337,6 +7367,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Seskupit vydání"
+          }
+        }
+      }
+    },
+    "Hand a DRM-free copy of this book to ElevenReader to listen to it." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Předá kopii knihy bez DRM do ElevenReaderu k poslechu."
           }
         }
       }
@@ -8889,6 +8929,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Zobrazení seznamu"
+          }
+        }
+      }
+    },
+    "Listen in ElevenReader" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Poslouchat v ElevenReaderu"
           }
         }
       }
@@ -14848,6 +14898,16 @@
         }
       }
     },
+    "Send to iPhone with AirDrop…" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Poslat do iPhonu přes AirDrop…"
+          }
+        }
+      }
+    },
     "Send to Kindle" : {
       "localizations" : {
         "cs" : {
@@ -16992,6 +17052,16 @@
         }
       }
     },
+    "This book has no available digital file." : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tato kniha nemá dostupný digitální soubor."
+          }
+        }
+      }
+    },
     "This book is already in your library." : {
       "localizations" : {
         "cs" : {
@@ -18175,6 +18245,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Aktualizuji návrhy ke sjednocení…"
+          }
+        }
+      }
+    },
+    "Upload on ElevenReader Web" : {
+      "localizations" : {
+        "cs" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nahrát na web ElevenReaderu"
           }
         }
       }

@@ -655,6 +655,10 @@ private struct DetailMoreActionsMenu: View {
             }
             .accessibilityIdentifier("bookDetail.readingHistory")
 
+            if book.hasCatalogDigitalFile {
+                ElevenReaderMenu(book: book, actions: actions)
+            }
+
             if offersKindleConversion {
                 Button {
                     actions.convert(book)

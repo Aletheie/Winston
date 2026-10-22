@@ -15,6 +15,7 @@ enum LibraryCommand: Equatable {
     case openInReader
     case quickLook
     case showInFinder
+    case sendToElevenReader(ElevenReaderHandoff.Destination)
     case editMetadata
     case deleteSelected
     case selectAll
@@ -279,6 +280,14 @@ struct AppCommands: Commands {
 
             Button("Show in Finder") { library?.perform(.showInFinder) }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(library?.availability.canUsePrimaryFile != true)
+
+            Menu("Listen in ElevenReader") {
+                Button("Upload on ElevenReader Web") { library?.perform(.sendToElevenReader(.web)) }
+                Button("Send to iPhone with AirDrop\u{2026}") {
+                    library?.perform(.sendToElevenReader(.airDrop))
+                }
+            }
                 .disabled(library?.availability.canUsePrimaryFile != true)
 
             Button(

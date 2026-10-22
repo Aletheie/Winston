@@ -8,6 +8,7 @@ struct BookActions {
     var quickLook: (Book) -> Void
     var showInFinder: (Book) -> Void
     var share: (Book) -> Void
+    var sendToElevenReader: (Book, ElevenReaderHandoff.Destination) -> Void
     var edit: (Book) -> Void
     var editSelection: () -> Void
     var fetchMetadata: (Book) -> Void
@@ -75,6 +76,7 @@ struct BookContextMenu: View {
                 Button { actions.share(book) } label: {
                     Label("Share\u{2026}", systemImage: "square.and.arrow.up")
                 }
+                ElevenReaderMenu(book: book, actions: actions)
                 Button { actions.relink(book) } label: {
                     Label("Replace File\u{2026}", systemImage: "arrow.triangle.2.circlepath.doc.on.clipboard")
                 }
@@ -222,5 +224,29 @@ struct BookContextMenu: View {
                 calibreAvailable: availability.calibreAvailable
             )
         }
+    }
+}
+
+struct ElevenReaderMenu: View {
+    let book: Book
+    let actions: BookActions
+
+    var body: some View {
+        let unavailability = ElevenReaderHandoff.unavailability(for: book)
+        Menu {
+            Button { actions.sendToElevenReader(book, .web) } label: {
+                Label("Upload on ElevenReader Web", systemImage: "globe")
+            }
+            Button { actions.sendToElevenReader(book, .airDrop) } label: {
+                Label("Send to iPhone with AirDrop\u{2026}", systemImage: "iphone")
+            }
+        } label: {
+            Label("Listen in ElevenReader", systemImage: "headphones")
+        }
+        .disabled(unavailability != nil)
+        .help(
+            unavailability.map(ElevenReaderHandoff.unavailabilityReason)
+                ?? String(localized: "Hand a DRM-free copy of this book to ElevenReader to listen to it.")
+        )
     }
 }

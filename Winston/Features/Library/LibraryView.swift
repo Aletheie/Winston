@@ -204,6 +204,9 @@ struct LibraryView: View {
                 guard let url = validatedPrimaryURL(for: book) else { return }
                 LibraryExternalActions.share(url)
             },
+            sendToElevenReader: { book, destination in
+                ElevenReaderHandoff.send(book, to: destination, toasts: toasts)
+            },
             edit: { activeSheet = .edit($0) },
             editSelection: {
                 activeSheet = .bulkEdit(Set(selectedBooks.map(\.uuid)))
@@ -721,6 +724,10 @@ struct LibraryView: View {
             if let book = primarySelectedBook,
                let url = validatedPrimaryURL(for: book) {
                 LibraryExternalActions.showInFinder(url)
+            }
+        case .sendToElevenReader(let destination):
+            if let book = primarySelectedBook {
+                ElevenReaderHandoff.send(book, to: destination, toasts: toasts)
             }
         case .editMetadata:
             if selection.count > 1 {
